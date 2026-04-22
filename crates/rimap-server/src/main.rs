@@ -162,13 +162,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
 /// Resolve the config file path from `--config` or the
 /// `RUSTY_IMAP_MCP_CONFIG` environment variable, erroring if neither is set.
-fn resolve_cli_config_path(cli: &Cli) -> anyhow::Result<PathBuf> {
-    cli.config
-        .clone()
-        .or_else(|| resolve_config_path(None))
-        .ok_or_else(|| {
-            anyhow::anyhow!("no config path (pass --config or set RUSTY_IMAP_MCP_CONFIG)")
-        })
+/// Resolve config path from optional override or default location.
+fn resolve_config_or_default(config_override: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    config_override
+        .or_else(|| rimap_config::loader::resolve_config_path(None))
+        .ok_or_else(|| anyhow::anyhow!("no config path"))
+}
+
+
+    resolve_config_or_default(cli.config.clone())
 }
 
 /// Build the account registry from a validated multi-account config.
