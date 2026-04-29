@@ -29,10 +29,10 @@ anyhow = "1.0"
 
 # Serde / config
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 # Paths
-directories = "5.0"
+directories = "6.0"
 
 # Credentials
 keyring = { version = "3.6", features = ["apple-native", "linux-native-sync-persistent"] }
@@ -65,13 +65,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Audit log
-fs4 = { version = "0.13", default-features = false, features = ["sync"] }
+fs4 = { version = "1.0", default-features = false, features = ["sync"] }
 libc = "0.2"
 rustix = { version = "1.1", default-features = false, features = ["process", "fs"] }
 serde_json = "1.0"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde", "serde-well-known"] }
 ulid = { version = "1.2", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 subtle = "2"
 # strum 0.26 pulls strum_macros (a proc-macro executing at build time).
@@ -79,8 +79,8 @@ subtle = "2"
 # Glotfelty / Michael Bryan, top-100 download count, no RUSTSEC advisories,
 # no build.rs, standard proc-macro2/quote/syn/heck stack, no network or
 # suspicious env access. Re-audit on any version bump. (SC-PROC-01)
-strum = { version = "0.26", features = ["derive"] }
-rand = "0.9"
+strum = { version = "0.28", features = ["derive"] }
+rand = "0.10"
 
 # Content pipeline (Sprint 4a)
 # mail-parser 0.11 transitively pulls hashify (proc-macro), executing
@@ -114,7 +114,7 @@ unicode-properties = "0.1.4"
 scraper = { version = "0.26.0", default-features = false }
 # ammonia MSRV 1.80, MIT OR Apache-2.0
 ammonia = "4.1.2"
-linkify = "0.10.0"
+linkify = "0.11.0"
 # First url/idna entry in the workspace. idna 1.x replaced in-crate
 # Unicode tables with the ICU4X provider stack, pulling ~20 new
 # transitive crates (icu_collections, icu_locale_core, icu_normalizer,
