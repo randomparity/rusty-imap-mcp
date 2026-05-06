@@ -83,7 +83,7 @@ subtle = "2"
 # 0.26 → 0.28 bump: same maintainer, same proc-macro stack, no new
 # transitive proc-macros, no new build.rs, no fresh RUSTSEC advisories.
 strum = { version = "0.28", features = ["derive"] }
-rand = "0.9"
+rand = "0.10"
 
 # Content pipeline (Sprint 4a)
 # mail-parser 0.11 transitively pulls hashify (proc-macro), executing
