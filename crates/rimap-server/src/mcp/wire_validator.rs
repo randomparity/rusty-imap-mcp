@@ -260,6 +260,48 @@ where
     }
 }
 
+/// Outbound bridge task. Reads newline-framed frames from rmcp's
+/// outbound duplex (rmcp's `FramedWrite` terminates each envelope
+/// with `\n`) and writes each frame through the shared stdout mutex.
+///
+/// Returns `Ok(())` when rmcp drops its outbound duplex end (EOF).
+/// Returns `Err(io::Error)` if writing to real stdout fails —
+/// typically `BrokenPipe`, which surfaces to `main.rs::run` via the
+/// supervisor so `process_end.reason: Error` is recorded.
+///
+/// # Cancellation
+///
+/// Same caveat as `validate_inbound`: an abort between `write_all`
+/// and `flush` may leave a partial frame on stdout. The supervisor's
+/// `shutdown_after_failure` (Task 2.3) uses abort only on failure
+/// paths where stdout integrity is already suspect.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by stdio_with_validation entry point in Task 2.4"
+    )
+)]
+pub(crate) async fn passthrough_outbound(
+    from_rmcp: DuplexStream,
+    stdout: Arc<Mutex<Stdout>>,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(from_rmcp);
+    let mut buf = Vec::with_capacity(BUF_SIZE);
+
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf).await?;
+        if n == 0 {
+            return Ok(()); // rmcp dropped outbound — clean shutdown.
+        }
+        let mut sout = stdout.lock().await;
+        sout.write_all(&buf).await?;
+        sout.flush().await?;
+        // Lock released; loop.
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
@@ -543,5 +585,17 @@ mod tests {
             forwarded.is_empty(),
             "non-UTF-8 line should not be forwarded to rmcp, got {forwarded:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn passthrough_outbound_drops_on_eof() {
+        let (rmcp_end, our_end) = tokio::io::duplex(BUF_SIZE);
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+        // Drop the rmcp side immediately — passthrough should see EOF
+        // and return Ok cleanly.
+        drop(rmcp_end);
+        let result = passthrough_outbound(our_end, stdout).await;
+        assert!(result.is_ok(), "expected Ok on EOF, got {result:?}");
     }
 }
