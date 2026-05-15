@@ -197,13 +197,6 @@ pub(crate) fn synthesize_error_line(env: &ErrorEnvelope) -> String {
 /// (rejection) fails — `BrokenPipe` on stdout is the most common
 /// failure mode and surfaces to `main.rs::run` via the supervisor so
 /// `process_end.reason: Error` is recorded.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by stdio_with_validation entry point in Task 2.4"
-    )
-)]
 pub(crate) async fn validate_inbound<R>(
     stdin: R,
     mut to_rmcp: DuplexStream,
@@ -271,13 +264,6 @@ where
 /// and `flush` may leave a partial frame on stdout. The supervisor's
 /// `shutdown_after_failure` (Task 2.3) uses abort only on failure
 /// paths where stdout integrity is already suspect.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by stdio_with_validation entry point in Task 2.4"
-    )
-)]
 pub(crate) async fn passthrough_outbound(
     from_rmcp: DuplexStream,
     stdout: Arc<Mutex<Stdout>>,
@@ -370,6 +356,38 @@ impl ValidatorSupervisor {
             Err(je) if je.is_cancelled() => Ok(()),
             Err(je) => Err(std::io::Error::other(format!("bridge task panic: {je}"))),
         }
+    }
+}
+
+/// Build the validated stdio transport. The two bridge tasks are
+/// spawned immediately; their lifecycle is exposed via `supervisor`.
+/// The returned `transport` plugs into `rmcp::serve_server(server,
+/// validated.transport)` and the returned `stdout` is the shared
+/// writer that `main.rs::run`'s pre-init error emitter must also
+/// lock so all stdout writes (validator rejections, passthrough
+/// frames, pre-init envelopes) serialize through a single mutex.
+///
+/// Drop the returned `transport` ends to signal EOF to rmcp; drop
+/// the supervisor (via `drain`/`shutdown_after_failure`) to await
+/// the bridge tasks' final exits.
+#[must_use]
+pub fn stdio_with_validation() -> ValidatedStdio {
+    let (inbound_our_end, inbound_rmcp_end) = tokio::io::duplex(BUF_SIZE);
+    let (outbound_rmcp_end, outbound_our_end) = tokio::io::duplex(BUF_SIZE);
+
+    let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+    let inbound = tokio::spawn(validate_inbound(
+        tokio::io::stdin(),
+        inbound_our_end,
+        Arc::clone(&stdout),
+    ));
+    let outbound = tokio::spawn(passthrough_outbound(outbound_our_end, Arc::clone(&stdout)));
+
+    ValidatedStdio {
+        transport: (inbound_rmcp_end, outbound_rmcp_end),
+        stdout,
+        supervisor: ValidatorSupervisor { inbound, outbound },
     }
 }
 
@@ -745,5 +763,23 @@ mod tests {
         .await
         .expect("watch_for_error must return promptly when both bridges have finished");
         assert!(r.is_ok(), "expected Ok, got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn stdio_with_validation_constructs_cleanly() {
+        let validated = stdio_with_validation();
+        // Verify the supervisor is present and we can drop everything.
+        drop(validated.transport);
+        // After dropping the duplex ends, both bridges should exit cleanly
+        // (stdin EOF or read 0 bytes from a dropped duplex).
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            validated.supervisor.drain(),
+        )
+        .await;
+        // Either Ok (drained cleanly) OR Err (stdin returned an error
+        // on the test runner) is acceptable — we mainly want to confirm
+        // no panic and no hang.
+        assert!(r.is_ok(), "drain hung after dropping transport");
     }
 }
