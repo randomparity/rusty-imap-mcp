@@ -183,6 +183,19 @@ pub(crate) fn synthesize_error_line(env: &ErrorEnvelope) -> String {
 /// (preserving the trailing `\n`), validates each line, and forwards
 /// or rejects.
 ///
+/// # Cancellation
+///
+/// This function is intended to be `tokio::spawn`'d and managed by
+/// `ValidatorSupervisor`. If `JoinHandle::abort()` lands between
+/// `write_all` and `flush` on the rejection path, a partial line
+/// may reach real stdout — breaking the stdout serialization
+/// invariant. The supervisor's `shutdown_after_failure` (Task 2.3)
+/// uses abort only on failure paths where stdout integrity is
+/// already lost (e.g. `BrokenPipe`). Cooperative cancellation via
+/// `tokio_util::sync::CancellationToken` could close this gap if
+/// stronger guarantees become necessary; deferred per Task 2.3
+/// design.
+///
 /// Returns `Ok(())` on stdin EOF. Returns `Err(io::Error)` if a write
 /// to either the inbound duplex (forwarding) or shared stdout
 /// (rejection) fails — `BrokenPipe` on stdout is the most common
@@ -223,9 +236,9 @@ where
             Some(&b'\r') => &trimmed[..trimmed.len() - 1],
             _ => trimmed,
         };
-        let line_for_validation = std::str::from_utf8(trimmed).unwrap_or("");
+        let line_for_validation = String::from_utf8_lossy(trimmed);
 
-        match validate(line_for_validation) {
+        match validate(&line_for_validation) {
             ValidationOutcome::Skip => {}
             ValidationOutcome::Forward => {
                 // Forward the buffer including its trailing \n so
@@ -504,5 +517,31 @@ mod tests {
 
         let s = std::str::from_utf8(&forwarded).unwrap();
         assert_eq!(s.lines().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn validate_inbound_non_utf8_returns_parse_error() {
+        // Pass invalid UTF-8 bytes (\xFF is not valid UTF-8) followed
+        // by EOF. The validator should see lossy-decoded U+FFFD which
+        // serde_json rejects → validator emits -32700 to stdout (not
+        // observable from the test) AND does not forward to rmcp.
+        let stdin = std::io::Cursor::new(vec![0xFF, 0xFE, b'\n']);
+        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+        let consumer = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            rmcp_end.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+        validate_inbound(stdin, our_end, stdout).await.unwrap();
+        let forwarded = consumer.await.unwrap();
+
+        // Nothing reaches rmcp (the invalid-UTF-8 line was rejected
+        // and the rejection went to stdout, not the duplex).
+        assert!(
+            forwarded.is_empty(),
+            "non-UTF-8 line should not be forwarded to rmcp, got {forwarded:?}"
+        );
     }
 }
