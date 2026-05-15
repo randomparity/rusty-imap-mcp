@@ -13,6 +13,7 @@ pub mod server;
 // `dispatch` and `server` and do not import this module directly.
 pub mod tool_catalog;
 pub(crate) mod tool_name;
+pub mod wire_validator;
 
 /// Render a `tokio::task::JoinError` from `spawn_blocking` as
 /// `RimapError::InternalSourced`. Shared by every `mcp/*` async wrapper so
