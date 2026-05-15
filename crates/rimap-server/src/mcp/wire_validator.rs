@@ -11,17 +11,13 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::io::{DuplexStream, Stdout};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, DuplexStream, Stdout};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 /// Bridge-task duplex buffer. Large enough that one well-formed
 /// envelope fits in a single write; both directions are independent
 /// tasks so inbound stalls cannot cause outbound deadlock.
-#[expect(
-    dead_code,
-    reason = "consumed by validate_inbound/passthrough_outbound in Tasks 2.1/2.2"
-)]
 const BUF_SIZE: usize = 64 * 1024;
 
 /// What the validator decides for a given line.
@@ -116,13 +112,6 @@ pub(crate) fn invalid_request(id: Value) -> ErrorEnvelope {
 }
 
 /// Validate one line of input and decide what to do with it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by validate_inbound bridge task in Task 2.1"
-    )
-)]
 pub(crate) fn validate(line: &str) -> ValidationOutcome {
     if line.trim().is_empty() {
         return ValidationOutcome::Skip;
@@ -175,13 +164,6 @@ pub(crate) fn validate(line: &str) -> ValidationOutcome {
 /// Serialize a rejection envelope to a single wire line, terminated
 /// with `\n`. The shape matches JSON-RPC §5: `{jsonrpc, id, error}`
 /// with `error.{code, message}` and no `data`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by validate_inbound bridge task in Task 2.1"
-    )
-)]
 pub(crate) fn synthesize_error_line(env: &ErrorEnvelope) -> String {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -195,6 +177,74 @@ pub(crate) fn synthesize_error_line(env: &ErrorEnvelope) -> String {
     let mut line = body.to_string();
     line.push('\n');
     line
+}
+
+/// Inbound bridge task. Reads from real stdin one line at a time
+/// (preserving the trailing `\n`), validates each line, and forwards
+/// or rejects.
+///
+/// Returns `Ok(())` on stdin EOF. Returns `Err(io::Error)` if a write
+/// to either the inbound duplex (forwarding) or shared stdout
+/// (rejection) fails — `BrokenPipe` on stdout is the most common
+/// failure mode and surfaces to `main.rs::run` via the supervisor so
+/// `process_end.reason: Error` is recorded.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by stdio_with_validation entry point in Task 2.4"
+    )
+)]
+pub(crate) async fn validate_inbound<R>(
+    stdin: R,
+    mut to_rmcp: DuplexStream,
+    stdout: Arc<Mutex<Stdout>>,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = BufReader::new(stdin);
+    let mut buf = Vec::with_capacity(BUF_SIZE);
+
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf).await?;
+        if n == 0 {
+            return Ok(()); // stdin EOF — clean shutdown.
+        }
+
+        // Strip trailing \n and optional \r for the validation view.
+        // rmcp's codec also strips \r; matching its grammar.
+        let trimmed: &[u8] = match buf.last() {
+            Some(&b'\n') => &buf[..buf.len() - 1],
+            _ => &buf[..],
+        };
+        let trimmed: &[u8] = match trimmed.last() {
+            Some(&b'\r') => &trimmed[..trimmed.len() - 1],
+            _ => trimmed,
+        };
+        let line_for_validation = std::str::from_utf8(trimmed).unwrap_or("");
+
+        match validate(line_for_validation) {
+            ValidationOutcome::Skip => {}
+            ValidationOutcome::Forward => {
+                // Forward the buffer including its trailing \n so
+                // rmcp's framed reader sees the complete envelope.
+                if buf.last() != Some(&b'\n') {
+                    buf.push(b'\n');
+                }
+                to_rmcp.write_all(&buf).await?;
+                to_rmcp.flush().await?;
+            }
+            ValidationOutcome::Reject(env) => {
+                let line = synthesize_error_line(&env);
+                let mut sout = stdout.lock().await;
+                sout.write_all(line.as_bytes()).await?;
+                sout.flush().await?;
+                // Lock released here; loop continues.
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -408,5 +458,51 @@ mod tests {
         let line = synthesize_error_line(&env);
         let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(parsed["id"], "abc");
+    }
+
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn validate_inbound_forwards_valid_envelope() {
+        let stdin = std::io::Cursor::new(
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"id\":1}\n".to_vec(),
+        );
+        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+        // Spawn the validator and consume rmcp's side concurrently.
+        let consumer = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            rmcp_end.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+        validate_inbound(stdin, our_end, stdout).await.unwrap();
+        let forwarded = consumer.await.unwrap();
+
+        let s = std::str::from_utf8(&forwarded).unwrap();
+        assert!(
+            s.contains("\"method\":\"tools/list\""),
+            "expected forwarded line, got {s:?}",
+        );
+        assert!(s.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn validate_inbound_skips_empty_lines() {
+        let stdin =
+            std::io::Cursor::new(b"\n\n{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"id\":1}\n".to_vec());
+        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+        let consumer = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            rmcp_end.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+        validate_inbound(stdin, our_end, stdout).await.unwrap();
+        let forwarded = consumer.await.unwrap();
+
+        let s = std::str::from_utf8(&forwarded).unwrap();
+        assert_eq!(s.lines().count(), 1);
     }
 }
