@@ -141,7 +141,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         let service = match Box::pin(rmcp::serve_server(mcp_server, transport)).await {
             Ok(svc) => svc,
             Err(ServerInitializeError::ExpectedInitializeRequest(Some(msg))) => {
-                emit_pre_init_error_envelope(&msg).await?;
+                // TODO Task 3.2: replace this temporary local with validated.stdout
+                // once the transport swap to wire_validator::stdio_with_validation lands.
+                let stdout_for_preinit =
+                    std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
+                emit_pre_init_error_envelope(&msg, &stdout_for_preinit).await?;
                 return Ok(());
             }
             Err(ServerInitializeError::InitializeFailed(error_data)) => {
@@ -196,13 +200,20 @@ fn emit_process_end(audit: &rimap_audit::AuditWriter, mcp_result: &anyhow::Resul
 /// Error variants synthesize no envelope (per JSON-RPC §4.1) and this
 /// helper is a no-op. Write failures (broken pipe, closed reader) are
 /// propagated via `?` so the caller records `process_end.reason: Error`.
+///
+/// Holds the shared stdout mutex for the duration of the write+flush so
+/// it serializes against the validator and passthrough bridge tasks
+/// added in #277 (see `mcp::wire_validator`). Callers MUST pass the
+/// same `Arc<Mutex<Stdout>>` that `wire_validator::stdio_with_validation`
+/// returned in `ValidatedStdio.stdout`.
 async fn emit_pre_init_error_envelope(
     msg: &rmcp::model::ClientJsonRpcMessage,
+    stdout: &std::sync::Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
 ) -> anyhow::Result<()> {
     let Some(line) = rimap_server::mcp::preinit::synthesize_pre_init_error_envelope(msg) else {
         return Ok(());
     };
-    let mut out = tokio::io::stdout();
+    let mut out = stdout.lock().await;
     out.write_all(line.as_bytes())
         .await
         .context("writing pre-init error envelope to stdout")?;
