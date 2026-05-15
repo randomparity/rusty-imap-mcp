@@ -322,6 +322,7 @@ impl ValidatorSupervisor {
                         Err(e) => return Err(e),
                     }
                 }
+                else => return Ok(()),
             }
         }
     }
@@ -373,7 +374,7 @@ impl ValidatorSupervisor {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -725,5 +726,24 @@ mod tests {
         let inner = r.unwrap();
         assert!(inner.is_err());
         assert!(inner.unwrap_err().to_string().contains("inbound failed"));
+    }
+
+    #[tokio::test]
+    async fn watch_for_error_returns_ok_when_both_bridges_finish() {
+        // Both bridges exit Ok cleanly. watch_for_error must return
+        // Ok(()) without panicking, even if both `is_finished()`
+        // guards evaluate to false in the same select! iteration.
+        let inbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        // Give the runtime a tick so both handles transition to finished.
+        tokio::task::yield_now().await;
+        let mut supervisor = ValidatorSupervisor { inbound, outbound };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            supervisor.watch_for_error(),
+        )
+        .await
+        .expect("watch_for_error must return promptly when both bridges have finished");
+        assert!(r.is_ok(), "expected Ok, got {r:?}");
     }
 }
