@@ -54,10 +54,6 @@ pub struct ValidatedStdio {
 /// `passthrough_outbound`). See the spec for the three-method lifecycle
 /// contract: race-phase fail-fast (`watch_for_error`), success-path
 /// drain (`drain`), and failure-path abort+drain (`shutdown_after_failure`).
-#[expect(
-    dead_code,
-    reason = "inbound/outbound are read by watch_for_error/drain/shutdown_after_failure in Task 2.4"
-)]
 pub struct ValidatorSupervisor {
     pub(crate) inbound: JoinHandle<std::io::Result<()>>,
     pub(crate) outbound: JoinHandle<std::io::Result<()>>,
@@ -299,6 +295,80 @@ pub(crate) async fn passthrough_outbound(
         sout.write_all(&buf).await?;
         sout.flush().await?;
         // Lock released; loop.
+    }
+}
+
+impl ValidatorSupervisor {
+    /// Non-consuming. Resolves with the first bridge-task error
+    /// encountered, OR `Ok(())` once both bridges exit `Ok` cleanly
+    /// (exotic mid-service condition — usually one side stays alive
+    /// until the service ends). Used for fail-fast during the
+    /// `service.waiting()` / `serve_server` race in `main.rs::run`.
+    pub async fn watch_for_error(&mut self) -> std::io::Result<()> {
+        loop {
+            tokio::select! {
+                biased;
+                r = &mut self.inbound, if !self.inbound.is_finished() => {
+                    match Self::flatten(r) {
+                        Ok(()) if self.outbound.is_finished() => return Ok(()),
+                        Ok(()) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                r = &mut self.outbound, if !self.outbound.is_finished() => {
+                    match Self::flatten(r) {
+                        Ok(()) if self.inbound.is_finished() => return Ok(()),
+                        Ok(()) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Success-path shutdown. Awaits both bridge tasks; returns the
+    /// first error encountered, else `Ok(())`. Use when
+    /// `service.waiting()` resolved `Ok` (which implies rmcp saw EOF
+    /// on its read, which implies inbound already exited — drain is
+    /// then essentially instant on inbound and bounded on outbound).
+    ///
+    /// **Do not call on failure paths** — the inbound bridge only
+    /// exits on real stdin EOF, but a client may legitimately keep
+    /// stdin open while waiting for the error response, causing this
+    /// to hang. Use `shutdown_after_failure` instead.
+    pub async fn drain(self) -> std::io::Result<()> {
+        let (in_r, out_r) = tokio::join!(self.inbound, self.outbound);
+        let in_r = Self::flatten(in_r);
+        let out_r = Self::flatten(out_r);
+        in_r.and(out_r)
+    }
+
+    /// Failure-path shutdown. Aborts the inbound bridge (the client
+    /// may keep stdin open while waiting for an error response;
+    /// without abort, we'd block forever in `read_until` on real
+    /// stdin), then awaits the outbound bridge to drain rmcp's
+    /// queued error envelope plus any validator-synthesized
+    /// rejections. Returns the first error from the outbound path;
+    /// inbound cancellation is expected and ignored.
+    ///
+    /// Used on EVERY failure path — pre-init `ExpectedInitializeRequest`,
+    /// `InitializeFailed`, post-init bridge race error, and post-init
+    /// `service.waiting()` error.
+    pub async fn shutdown_after_failure(self) -> std::io::Result<()> {
+        self.inbound.abort();
+        // Either it raced to EOF (Ok) or got aborted (JoinError). We
+        // don't care about the inbound result on this path — the
+        // outbound may still have queued frames to flush.
+        let _ = self.inbound.await;
+        Self::flatten(self.outbound.await)
+    }
+
+    fn flatten(r: Result<std::io::Result<()>, tokio::task::JoinError>) -> std::io::Result<()> {
+        match r {
+            Ok(inner) => inner,
+            Err(je) if je.is_cancelled() => Ok(()),
+            Err(je) => Err(std::io::Error::other(format!("bridge task panic: {je}"))),
+        }
     }
 }
 
@@ -597,5 +667,63 @@ mod tests {
         drop(rmcp_end);
         let result = passthrough_outbound(our_end, stdout).await;
         assert!(result.is_ok(), "expected Ok on EOF, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn drain_returns_ok_when_both_bridges_exit_ok() {
+        let inbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        let supervisor = ValidatorSupervisor { inbound, outbound };
+        assert!(supervisor.drain().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn drain_surfaces_first_error() {
+        let inbound = tokio::spawn(async {
+            Err::<(), std::io::Error>(std::io::Error::other("inbound boom"))
+        });
+        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        let supervisor = ValidatorSupervisor { inbound, outbound };
+        let r = supervisor.drain().await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("inbound boom"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_failure_aborts_inbound() {
+        // Inbound never completes on its own — simulates a client
+        // holding stdin open.
+        let inbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        let supervisor = ValidatorSupervisor { inbound, outbound };
+
+        // Should return promptly (within a few ms) thanks to abort.
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            supervisor.shutdown_after_failure(),
+        )
+        .await;
+        assert!(r.is_ok(), "shutdown_after_failure did not abort inbound");
+        assert!(r.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn watch_for_error_returns_on_first_error() {
+        let inbound = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            Err::<(), std::io::Error>(std::io::Error::other("inbound failed"))
+        });
+        let outbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        let mut supervisor = ValidatorSupervisor { inbound, outbound };
+
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            supervisor.watch_for_error(),
+        )
+        .await;
+        assert!(r.is_ok());
+        let inner = r.unwrap();
+        assert!(inner.is_err());
+        assert!(inner.unwrap_err().to_string().contains("inbound failed"));
     }
 }
