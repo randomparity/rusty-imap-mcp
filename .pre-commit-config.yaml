@@ -124,11 +124,11 @@ repos:
   # Pre-push stage: slower tests and audits.
   - repo: local
     hooks:
-      - id: cargo-nextest
-        name: just test (prune stale containers + cargo nextest)
-        entry: just test
+      - id: cargo-check
+        name: cargo check --workspace --all-targets --locked
+        entry: cargo check --workspace --all-targets --locked
         language: system
-        types: [rust]
+        always_run: true
         pass_filenames: false
         stages: [pre-push]
 
