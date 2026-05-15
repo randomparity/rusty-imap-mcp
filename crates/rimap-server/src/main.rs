@@ -137,14 +137,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         let drainer_handle = rimap_audit::spawn_drainer(cancellation_rx, audit.clone());
 
         let mcp_server = server::ImapMcpServer::new(registry, audit, cancellation_tx);
-        let transport = rmcp::transport::io::stdio();
+        let validated = rimap_server::mcp::wire_validator::stdio_with_validation();
+        let stdout_for_preinit = std::sync::Arc::clone(&validated.stdout);
+        let transport = validated.transport;
         let service = match Box::pin(rmcp::serve_server(mcp_server, transport)).await {
             Ok(svc) => svc,
             Err(ServerInitializeError::ExpectedInitializeRequest(Some(msg))) => {
-                // TODO Task 3.2: replace this temporary local with validated.stdout
-                // once the transport swap to wire_validator::stdio_with_validation lands.
-                let stdout_for_preinit =
-                    std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
                 emit_pre_init_error_envelope(&msg, &stdout_for_preinit).await?;
                 return Ok(());
             }
