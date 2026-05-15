@@ -172,7 +172,33 @@ pub(crate) fn validate(line: &str) -> ValidationOutcome {
     }
 }
 
+/// Serialize a rejection envelope to a single wire line, terminated
+/// with `\n`. The shape matches JSON-RPC §5: `{jsonrpc, id, error}`
+/// with `error.{code, message}` and no `data`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by validate_inbound bridge task in Task 2.1"
+    )
+)]
+pub(crate) fn synthesize_error_line(env: &ErrorEnvelope) -> String {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": env.id,
+        "error": {
+            "code": env.code,
+            "message": env.message,
+        },
+    });
+    // Use to_string (not pretty) so it's exactly one line.
+    let mut line = body.to_string();
+    line.push('\n');
+    line
+}
+
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -263,6 +289,10 @@ mod tests {
             validate(r#"{"jsonrpc":"2.0","method":"x","id":{"k":"v"}}"#),
             reject(-32600, Value::Null)
         );
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":true}"#),
+            reject(-32600, Value::Null)
+        );
     }
 
     #[test]
@@ -336,5 +366,47 @@ mod tests {
             validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"result":{}}"#),
             reject(-32600, json!(1))
         );
+    }
+
+    #[test]
+    fn synthesize_invalid_request_with_null_id() {
+        let env = ErrorEnvelope {
+            code: -32600,
+            message: "Invalid Request",
+            id: Value::Null,
+        };
+        let line = synthesize_error_line(&env);
+        assert!(line.ends_with('\n'));
+        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], Value::Null);
+        assert_eq!(parsed["error"]["code"], -32600);
+        assert_eq!(parsed["error"]["message"], "Invalid Request");
+        // No data field.
+        assert!(parsed["error"].get("data").is_none());
+    }
+
+    #[test]
+    fn synthesize_parse_error_has_correct_code() {
+        let line = synthesize_error_line(&parse_error());
+        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["error"]["code"], -32700);
+        assert_eq!(parsed["error"]["message"], "Parse error");
+    }
+
+    #[test]
+    fn synthesize_echoes_numeric_id() {
+        let env = invalid_request(json!(42));
+        let line = synthesize_error_line(&env);
+        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["id"], 42);
+    }
+
+    #[test]
+    fn synthesize_echoes_string_id() {
+        let env = invalid_request(json!("abc"));
+        let line = synthesize_error_line(&env);
+        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["id"], "abc");
     }
 }
