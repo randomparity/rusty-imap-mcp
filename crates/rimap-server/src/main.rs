@@ -206,6 +206,19 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     emit_process_end(&audit_for_shutdown, &mcp_result);
 
+    // Shut down the runtime without waiting for blocking tasks. The
+    // validator's `validate_inbound` bridge owns a `tokio::io::stdin()`
+    // handle whose underlying blocking read of real stdin is
+    // uncancelable (per tokio docs, `spawn_blocking` tasks cannot be
+    // aborted). The implicit `Runtime::drop` would otherwise block
+    // forever waiting for that read to return on a client that
+    // legitimately keeps stdin open after the server has decided to
+    // shut down — the regression observed when the #277 envelope
+    // validator wraps stdio. Using `shutdown_background` makes the
+    // process exit promptly; pending blocking reads are abandoned and
+    // the OS reaps the threads when the process terminates.
+    rt.shutdown_background();
+
     mcp_result
 }
 
