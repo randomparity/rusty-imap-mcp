@@ -55,6 +55,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// Disambiguates the failure source of the init-phase `tokio::select!`
+/// in `run`: either a validator bridge errored before init completed,
+/// or rmcp's `serve_server` returned an init failure. `Rmcp` is boxed
+/// because `ServerInitializeError` is significantly larger than the
+/// `io::Result<()>` variant (`clippy::large_enum_variant`).
+enum InitOutcome {
+    Bridge(std::io::Result<()>),
+    Rmcp(Box<ServerInitializeError>),
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Server mode setup + init-phase select! race against \
+              validator bridges (#277). Splitting further would obscure \
+              the lifecycle ordering that's the whole point."
+)]
 fn run(cli: Cli) -> anyhow::Result<()> {
     if let Some(Command::Login {
         account,
@@ -137,19 +153,40 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         let drainer_handle = rimap_audit::spawn_drainer(cancellation_rx, audit.clone());
 
         let mcp_server = server::ImapMcpServer::new(registry, audit, cancellation_tx);
-        let validated = rimap_server::mcp::wire_validator::stdio_with_validation();
-        let stdout_for_preinit = std::sync::Arc::clone(&validated.stdout);
-        let transport = validated.transport;
-        let service = match Box::pin(rmcp::serve_server(mcp_server, transport)).await {
+        // Wrap stdio with #277 envelope validator: rejects malformed frames
+        // before rmcp sees them. Destructure so `supervisor` is its own
+        // binding (its methods take `&mut self` / consume `self`).
+        let rimap_server::mcp::wire_validator::ValidatedStdio {
+            transport,
+            stdout,
+            mut supervisor,
+        } = rimap_server::mcp::wire_validator::stdio_with_validation();
+        let stdout_for_preinit = std::sync::Arc::clone(&stdout);
+
+        let mut init_fut = Box::pin(rmcp::serve_server(mcp_server, transport));
+        let init_result: Result<_, InitOutcome> = tokio::select! {
+            biased;
+            bridge = supervisor.watch_for_error() => Err(InitOutcome::Bridge(bridge)),
+            result = &mut init_fut => match result {
+                Ok(svc) => Ok(svc),
+                Err(e) => Err(InitOutcome::Rmcp(Box::new(e))),
+            },
+        };
+        drop(init_fut);
+
+        let service = match init_result {
             Ok(svc) => svc,
-            Err(ServerInitializeError::ExpectedInitializeRequest(Some(msg))) => {
-                emit_pre_init_error_envelope(&msg, &stdout_for_preinit).await?;
-                return Ok(());
+            Err(InitOutcome::Bridge(bridge_result)) => {
+                let primary = bridge_result.err().map_or_else(
+                    || anyhow::anyhow!("validator bridges exited before init completed"),
+                    |e| anyhow::anyhow!("validator bridge during init: {e}"),
+                );
+                let _ = supervisor.shutdown_after_failure().await;
+                return Err(primary);
             }
-            Err(ServerInitializeError::InitializeFailed(error_data)) => {
-                return handle_initialize_failed(&error_data);
+            Err(InitOutcome::Rmcp(boxed)) => {
+                return handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
             }
-            Err(other) => return Err(anyhow::anyhow!("MCP server init: {other}")),
         };
         // waiting() takes ownership of service, consuming it and dropping the
         // ImapMcpServer (including all cancellation sender clones) when it
@@ -220,6 +257,39 @@ async fn emit_pre_init_error_envelope(
         .context("flushing pre-init error envelope")?;
     tracing::info!("rejected pre-initialize request with -32002 envelope");
     Ok(())
+}
+
+/// Dispatch an `rmcp::serve_server` init failure: emit the pre-init
+/// envelope (when applicable), classify `InitializeFailed`, then shut
+/// down the validator supervisor. Every failure path runs
+/// `shutdown_after_failure` so the bridge tasks are awaited (or
+/// aborted) before the runtime drops; otherwise inbound's blocking
+/// stdin read can prevent the process from exiting promptly.
+async fn handle_init_failure(
+    error: ServerInitializeError,
+    stdout_for_preinit: &std::sync::Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
+    supervisor: rimap_server::mcp::wire_validator::ValidatorSupervisor,
+) -> anyhow::Result<()> {
+    match error {
+        ServerInitializeError::ExpectedInitializeRequest(Some(msg)) => {
+            emit_pre_init_error_envelope(&msg, stdout_for_preinit).await?;
+            match supervisor.shutdown_after_failure().await {
+                Ok(()) => Ok(()),
+                Err(e) => Err(anyhow::anyhow!("validator bridge after pre-init: {e}")),
+            }
+        }
+        ServerInitializeError::InitializeFailed(error_data) => {
+            let handled = handle_initialize_failed(&error_data);
+            match supervisor.shutdown_after_failure().await {
+                Ok(()) => handled,
+                Err(e) => Err(anyhow::anyhow!("validator bridge after init failure: {e}")),
+            }
+        }
+        other => {
+            let _ = supervisor.shutdown_after_failure().await;
+            Err(anyhow::anyhow!("MCP server init: {other}"))
+        }
+    }
 }
 
 /// Classify a `ServerInitializeError::InitializeFailed` outcome by its
