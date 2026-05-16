@@ -191,17 +191,56 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         // waiting() takes ownership of service, consuming it and dropping the
         // ImapMcpServer (including all cancellation sender clones) when it
         // returns. The drainer task exits once all senders have dropped.
-        service
-            .waiting()
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))?;
+        //
+        // Phase 1: race service against bridge errors so a validator
+        // BrokenPipe (e.g. closed stdout) during normal operation
+        // surfaces as a non-zero exit rather than silently leaving rmcp
+        // wedged on an unwritable transport.
+        let mut service_fut = Box::pin(service.waiting());
+        let service_outcome: anyhow::Result<()> = tokio::select! {
+            biased;
+            bridge = supervisor.watch_for_error() => match bridge {
+                Err(e) => Err(anyhow::anyhow!("validator bridge: {e}")),
+                Ok(()) => {
+                    // Both bridges exited cleanly while service is still
+                    // running (exotic). Let service finish — it'll see EOF.
+                    (&mut service_fut)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
+                }
+            },
+            result = &mut service_fut =>
+                result.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
+        };
+
+        // Phase 2: drop service future to release rmcp's transport ends,
+        // then shut down the supervisor. On success, `drain()` awaits
+        // both bridges (inbound already saw EOF via rmcp); on failure,
+        // `shutdown_after_failure()` aborts inbound first because the
+        // client may keep stdin open while waiting for the error
+        // response.
+        drop(service_fut);
+        let shutdown_outcome = match &service_outcome {
+            Ok(()) => supervisor.drain().await,
+            Err(_) => supervisor.shutdown_after_failure().await,
+        }
+        .map_err(|e| anyhow::anyhow!("validator bridge shutdown: {e}"));
+
+        let mcp_result: anyhow::Result<()> = match (service_outcome, shutdown_outcome) {
+            // Race-phase failure dominates; otherwise shutdown-phase
+            // surfaces. The `|` arm collapses both Err shapes because
+            // the resulting `Err(e)` has identical type.
+            (Err(e), _) | (Ok(()), Err(e)) => Err(e),
+            (Ok(()), Ok(())) => Ok(()),
+        };
 
         // All senders dropped above. Wait for the drainer to flush any
         // remaining queued cancellation records before the runtime exits.
         if let Err(e) = drainer_handle.await {
             tracing::error!(error = %e, "cancellation drainer join error");
         }
-        Ok(())
+        mcp_result
     });
 
     emit_process_end(&audit_for_shutdown, &mcp_result);

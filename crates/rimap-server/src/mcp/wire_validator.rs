@@ -54,9 +54,22 @@ pub struct ValidatedStdio {
 /// `passthrough_outbound`). See the spec for the three-method lifecycle
 /// contract: race-phase fail-fast (`watch_for_error`), success-path
 /// drain (`drain`), and failure-path abort+drain (`shutdown_after_failure`).
+///
+/// **`JoinHandle` lifecycle.** `watch_for_error` may poll either or
+/// both `JoinHandle`s to completion. Once a `JoinHandle` has been
+/// polled to completion, re-polling panics (tokio invariant: see
+/// `tokio::runtime::task::core` line 422 — "`JoinHandle` polled after
+/// completion"). The `_consumed` flags track this so the success-path
+/// `drain` and failure-path `shutdown_after_failure` can skip the
+/// re-await on already-consumed handles. The skipped result is treated
+/// as `Ok(())` per the invariant that `drain` is only called after
+/// `watch_for_error` returned `Ok` (both bridges exited cleanly) and
+/// `shutdown_after_failure` always aborts before awaiting.
 pub struct ValidatorSupervisor {
     pub(crate) inbound: JoinHandle<std::io::Result<()>>,
     pub(crate) outbound: JoinHandle<std::io::Result<()>>,
+    pub(crate) inbound_consumed: bool,
+    pub(crate) outbound_consumed: bool,
 }
 
 // ============================================================
@@ -304,25 +317,38 @@ pub(crate) async fn passthrough_outbound(
 }
 
 impl ValidatorSupervisor {
-    /// Non-consuming. Resolves with the first bridge-task error
-    /// encountered, OR `Ok(())` once both bridges exit `Ok` cleanly
-    /// (exotic mid-service condition — usually one side stays alive
-    /// until the service ends). Used for fail-fast during the
-    /// `service.waiting()` / `serve_server` race in `main.rs::run`.
+    /// Polls each bridge `JoinHandle` in turn. Resolves with the
+    /// first bridge-task error encountered, OR `Ok(())` once both
+    /// bridges exit `Ok` cleanly (exotic mid-service condition —
+    /// usually one side stays alive until the service ends). Used for
+    /// fail-fast during the `service.waiting()` / `serve_server` race
+    /// in `main.rs::run`.
+    ///
+    /// **Side effect.** When an arm fires, the corresponding
+    /// `JoinHandle` has been polled to completion and its value
+    /// consumed; the `*_consumed` flag is set so the success-path
+    /// `drain` and failure-path `shutdown_after_failure` skip the
+    /// already-polled handle (tokio panics on re-poll of a completed
+    /// `JoinHandle`). The skipped result is treated as `Ok(())` per
+    /// the invariant that this method only returns `Ok` when both
+    /// bridges exited `Ok` (the `Err` arms return early and `drain`
+    /// is not called on the error path).
     pub async fn watch_for_error(&mut self) -> std::io::Result<()> {
         loop {
             tokio::select! {
                 biased;
-                r = &mut self.inbound, if !self.inbound.is_finished() => {
+                r = &mut self.inbound, if !self.inbound_consumed => {
+                    self.inbound_consumed = true;
                     match Self::flatten(r) {
-                        Ok(()) if self.outbound.is_finished() => return Ok(()),
+                        Ok(()) if self.outbound_consumed => return Ok(()),
                         Ok(()) => {}
                         Err(e) => return Err(e),
                     }
                 }
-                r = &mut self.outbound, if !self.outbound.is_finished() => {
+                r = &mut self.outbound, if !self.outbound_consumed => {
+                    self.outbound_consumed = true;
                     match Self::flatten(r) {
-                        Ok(()) if self.inbound.is_finished() => return Ok(()),
+                        Ok(()) if self.inbound_consumed => return Ok(()),
                         Ok(()) => {}
                         Err(e) => return Err(e),
                     }
@@ -342,10 +368,14 @@ impl ValidatorSupervisor {
     /// exits on real stdin EOF, but a client may legitimately keep
     /// stdin open while waiting for the error response, causing this
     /// to hang. Use `shutdown_after_failure` instead.
-    pub async fn drain(self) -> std::io::Result<()> {
-        let (in_r, out_r) = tokio::join!(self.inbound, self.outbound);
-        let in_r = Self::flatten(in_r);
-        let out_r = Self::flatten(out_r);
+    ///
+    /// **Already-consumed handles are skipped.** If `watch_for_error`
+    /// previously polled a `JoinHandle` to completion, its `_consumed`
+    /// flag is set and the await is skipped (re-polling panics).
+    /// The invariant guarantees the skipped result was `Ok`.
+    pub async fn drain(mut self) -> std::io::Result<()> {
+        let in_r = Self::take_or_await(&mut self.inbound, &mut self.inbound_consumed).await;
+        let out_r = Self::take_or_await(&mut self.outbound, &mut self.outbound_consumed).await;
         in_r.and(out_r)
     }
 
@@ -360,13 +390,34 @@ impl ValidatorSupervisor {
     /// Used on EVERY failure path — pre-init `ExpectedInitializeRequest`,
     /// `InitializeFailed`, post-init bridge race error, and post-init
     /// `service.waiting()` error.
-    pub async fn shutdown_after_failure(self) -> std::io::Result<()> {
+    ///
+    /// **Already-consumed handles are skipped.** Same contract as
+    /// `drain` — re-polling a completed `JoinHandle` panics, so the
+    /// `_consumed` flags gate the awaits.
+    pub async fn shutdown_after_failure(mut self) -> std::io::Result<()> {
+        // `abort` is always safe (no-op on a finished task); it does
+        // not poll the `JoinHandle` so the consumed flag is irrelevant.
         self.inbound.abort();
-        // Either it raced to EOF (Ok) or got aborted (JoinError). We
-        // don't care about the inbound result on this path — the
-        // outbound may still have queued frames to flush.
-        let _ = self.inbound.await;
-        Self::flatten(self.outbound.await)
+        // Either it raced to EOF (Ok), got aborted (JoinError), or
+        // was already consumed by `watch_for_error`. We don't care
+        // about the inbound result on this path — the outbound may
+        // still have queued frames to flush.
+        let _ = Self::take_or_await(&mut self.inbound, &mut self.inbound_consumed).await;
+        Self::take_or_await(&mut self.outbound, &mut self.outbound_consumed).await
+    }
+
+    /// Await `handle` if its `consumed` flag is `false`, then mark it
+    /// consumed. Returns `Ok(())` if already consumed — guarded by
+    /// the invariant documented on `drain` and `shutdown_after_failure`.
+    async fn take_or_await(
+        handle: &mut JoinHandle<std::io::Result<()>>,
+        consumed: &mut bool,
+    ) -> std::io::Result<()> {
+        if *consumed {
+            return Ok(());
+        }
+        *consumed = true;
+        Self::flatten(handle.await)
     }
 
     fn flatten(r: Result<std::io::Result<()>, tokio::task::JoinError>) -> std::io::Result<()> {
@@ -406,7 +457,12 @@ pub fn stdio_with_validation() -> ValidatedStdio {
     ValidatedStdio {
         transport: (inbound_rmcp_end, outbound_rmcp_end),
         stdout,
-        supervisor: ValidatorSupervisor { inbound, outbound },
+        supervisor: ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        },
     }
 }
 
@@ -722,7 +778,12 @@ mod tests {
     async fn drain_returns_ok_when_both_bridges_exit_ok() {
         let inbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
         let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let supervisor = ValidatorSupervisor { inbound, outbound };
+        let supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
         assert!(supervisor.drain().await.is_ok());
     }
 
@@ -732,7 +793,12 @@ mod tests {
             Err::<(), std::io::Error>(std::io::Error::other("inbound boom"))
         });
         let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let supervisor = ValidatorSupervisor { inbound, outbound };
+        let supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
         let r = supervisor.drain().await;
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("inbound boom"));
@@ -744,7 +810,12 @@ mod tests {
         // holding stdin open.
         let inbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
         let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let supervisor = ValidatorSupervisor { inbound, outbound };
+        let supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
 
         // Should return promptly (within a few ms) thanks to abort.
         let r = tokio::time::timeout(
@@ -763,7 +834,12 @@ mod tests {
             Err::<(), std::io::Error>(std::io::Error::other("inbound failed"))
         });
         let outbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
-        let mut supervisor = ValidatorSupervisor { inbound, outbound };
+        let mut supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
 
         let r = tokio::time::timeout(
             std::time::Duration::from_millis(500),
@@ -785,7 +861,12 @@ mod tests {
         let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
         // Give the runtime a tick so both handles transition to finished.
         tokio::task::yield_now().await;
-        let mut supervisor = ValidatorSupervisor { inbound, outbound };
+        let mut supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
         let r = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             supervisor.watch_for_error(),
