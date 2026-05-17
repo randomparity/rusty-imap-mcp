@@ -89,13 +89,21 @@ pub(crate) fn is_forwardable_id(v: &Value) -> bool {
 }
 
 /// `params` accepted on JSON-RPC requests and notifications. JSON-RPC §4
-/// requires a Structured value (Array or Object) when present; Null is
-/// also accepted because rmcp tolerates it as "no parameters" and
-/// rejecting it would over-strict legitimate clients. Number, String,
-/// and Boolean shapes are silently dropped by rmcp's codec and cause
-/// the server to appear hung.
+/// nominally allows a Structured value (Array OR Object) when present,
+/// but rmcp's `CustomRequest` / `CustomNotification` deserializers
+/// route `params` through `serde(flatten)` over a `WithMeta { _meta,
+/// _rest }` wrapper, which can only deserialize from a map shape —
+/// so an `Array` body produces "data did not match any variant of
+/// untagged enum `JsonRpcMessage`" and rmcp silently drops the line
+/// (server appears hung). The cargo-fuzz oracle (#266) caught
+/// `{"jsonrpc":"2.0","method":"x","id":1,"params":[1,2,3]}` on the
+/// seed corpus.
+///
+/// `Null` is accepted because rmcp tolerates it as "no parameters"
+/// and rejecting it would over-strict legitimate clients. Number,
+/// String, and Boolean shapes are likewise silently dropped by rmcp.
 pub(crate) fn is_valid_params(v: &Value) -> bool {
-    v.is_object() || v.is_array() || v.is_null()
+    v.is_object() || v.is_null()
 }
 
 /// `error` body matches JSON-RPC §5.1: an object with i32-representable
@@ -719,10 +727,18 @@ mod tests {
     }
 
     #[test]
-    fn params_as_array_forwards() {
+    fn params_as_array_rejects() {
+        // Cargo-fuzz oracle (#266) caught this seed-corpus input:
+        // `is_valid_params` originally accepted arrays (JSON-RPC §4.2
+        // nominally allows them), but rmcp's `CustomRequest` /
+        // `CustomNotification` deserialize through a `WithMeta`
+        // wrapper using `serde(flatten)`, which fails on non-map
+        // shapes — so an array body causes rmcp to silently drop the
+        // line. Reject in the validator instead. See is_valid_params
+        // docstring for the full chain.
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":[1,2,3]}"#),
-            ValidationOutcome::Forward
+            reject(-32600, json!(1))
         );
     }
 
