@@ -88,6 +88,17 @@ pub(crate) fn is_forwardable_id(v: &Value) -> bool {
     v.as_i64().is_some()
 }
 
+/// `params` accepted on JSON-RPC requests and notifications. JSON-RPC §4
+/// requires a Structured value (Array or Object) when present; we also
+/// accept Null because some clients send it as "no parameters" and rmcp
+/// tolerates it. Number, String, and Boolean shapes get dropped silently
+/// by rmcp's codec and cause the server to appear hung — found via
+/// `prop_envelope_never_panics` on
+/// `{"id":0,"jsonrpc":"2.0","method":"tools/list","params":0}`.
+pub(crate) fn is_valid_params(v: &Value) -> bool {
+    v.is_object() || v.is_array() || v.is_null()
+}
+
 /// `error` body matches JSON-RPC §5.1: an object with i32-representable
 /// `code` and string `message`. `data` is optional. rmcp 1.5's
 /// `ErrorCode = i32`, so fractional values and numbers outside i32
@@ -159,14 +170,15 @@ pub(crate) fn validate(line: &str) -> ValidationOutcome {
     let method = obj.get("method");
     let result = obj.get("result");
     let error = obj.get("error");
+    let params_ok = obj.get("params").is_none_or(is_valid_params);
 
     match (method, result, error) {
-        // Request: method+id, no result, no error
-        (Some(m), None, None) if m.is_string() && id_present_and_valid => {
+        // Request: method+id, no result, no error, valid params shape
+        (Some(m), None, None) if m.is_string() && id_present_and_valid && params_ok => {
             ValidationOutcome::Forward
         }
-        // Notification: method, no id, no result, no error
-        (Some(m), None, None) if m.is_string() && !id_present_and_valid => {
+        // Notification: method, no id, no result, no error, valid params shape
+        (Some(m), None, None) if m.is_string() && !id_present_and_valid && params_ok => {
             ValidationOutcome::Forward
         }
         // Response: id+result, no method, no error
@@ -177,7 +189,7 @@ pub(crate) fn validate(line: &str) -> ValidationOutcome {
         }
         // Catch-all: non-string method, empty object, response/error without
         // id, malformed error, both result+error, method mixed with
-        // result/error.
+        // result/error, request/notification with non-structured params.
         _ => ValidationOutcome::Reject(invalid_request(extract_id(obj))),
     }
 }
@@ -679,6 +691,63 @@ mod tests {
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":2147483648,"message":"x"}}"#),
             reject(-32600, json!(1))
+        );
+    }
+
+    #[test]
+    fn params_as_number_rejects() {
+        // Regression for the prop_envelope_never_panics shrunk case
+        // `{"id":0,"jsonrpc":"2.0","method":"tools/list","params":0}`:
+        // rmcp's codec silently drops non-structured params and the
+        // server appears to hang.
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"tools/list","id":0,"params":0}"#),
+            reject(-32600, json!(0))
+        );
+    }
+
+    #[test]
+    fn params_as_string_rejects() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":"foo"}"#),
+            reject(-32600, json!(1))
+        );
+    }
+
+    #[test]
+    fn params_as_bool_rejects() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":true}"#),
+            reject(-32600, json!(1))
+        );
+    }
+
+    #[test]
+    fn params_as_array_forwards() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":[1,2,3]}"#),
+            ValidationOutcome::Forward
+        );
+    }
+
+    #[test]
+    fn params_as_null_forwards() {
+        // rmcp tolerates `params: null` as "no parameters"; matching
+        // that grammar avoids over-rejecting legitimate clients.
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":null}"#),
+            ValidationOutcome::Forward
+        );
+    }
+
+    #[test]
+    fn notification_with_bad_params_rejects() {
+        // §4.1 notifications get the same params shape constraint as
+        // requests. Notifications have no id, so the rejection echoes
+        // null (no id to echo).
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"notifications/x","params":0}"#),
+            reject(-32600, Value::Null)
         );
     }
 
