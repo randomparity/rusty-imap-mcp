@@ -250,6 +250,17 @@ fn arb_envelope() -> impl Strategy<Value = Value> {
             }
             Value::Object(obj)
         })
+        .prop_filter(
+            "exclude spec-legal notifications (jsonrpc==\"2.0\" + missing id + present method) — \
+             their silent-ignore is JSON-RPC §4.1 compliant and covered separately by \
+             valid_notification_does_not_hang_session",
+            |env| {
+                let is_notification = env.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0")
+                    && env.get("id").is_none()
+                    && env.get("method").and_then(|v| v.as_str()).is_some();
+                !is_notification
+            },
+        )
 }
 
 // Property 3: `use_account` with arbitrary argument shapes. With
