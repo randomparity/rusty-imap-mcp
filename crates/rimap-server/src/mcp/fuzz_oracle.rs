@@ -72,8 +72,7 @@ fn error_envelope_validator() -> &'static jsonschema::Validator {
         // `include_bytes!` resolves relative to this source file. From
         // `src/mcp/fuzz_oracle.rs` the schema lives at
         // `../../tests/fixtures/mcp-spec/2025-11-25/schema.json`.
-        let schema_bytes =
-            include_bytes!("../../tests/fixtures/mcp-spec/2025-11-25/schema.json");
+        let schema_bytes = include_bytes!("../../tests/fixtures/mcp-spec/2025-11-25/schema.json");
         let schema: Value = serde_json::from_slice(schema_bytes).expect("MCP schema is valid JSON");
         // The MCP schema uses Draft 2020-12's `$defs`, not the older
         // `definitions` keyword.
@@ -164,7 +163,8 @@ mod tests {
 
     #[test]
     fn error_envelope_schema_accepts_canonical_minus_32600() {
-        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}"#;
+        let line =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}"#;
         assert!(
             check_error_envelope_valid(line).is_ok(),
             "got: {:?}",
