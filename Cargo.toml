@@ -37,7 +37,7 @@ directories = "6"
 
 # Credentials
 keyring = { version = "3.6", features = ["apple-native", "linux-native-sync-persistent"] }
-rpassword = "7.3"
+rpassword = "7.5"
 secrecy = "0.10"
 
 # Authorization primitives
@@ -59,7 +59,7 @@ arc-swap = "1"
 # (SC-PROC-01).
 
 # Async runtime
-tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 
 # IMAP / TLS (Sprint 3)
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
@@ -190,7 +190,7 @@ lettre = { version = "0.11.21", default-features = false, features = ["tokio1-ru
 # Apache-2.0 OR MIT, standard proc-macro2/quote/syn stack, no build.rs,
 # no network/fs/process access in macro source. Re-audit on minor bump.
 # (SC-PROC-01)
-rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.6", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 infer = "0.19"
 
