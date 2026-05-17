@@ -15,6 +15,12 @@ pub mod tool_catalog;
 pub(crate) mod tool_name;
 pub mod wire_validator;
 
+// Feature-gated: see `crates/rimap-server/Cargo.toml` `fuzzing` and
+// `crates/rimap-server/src/mcp/fuzz_oracle.rs` for the contract.
+// Production builds (default features) do not see this module.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_oracle;
+
 /// Render a `tokio::task::JoinError` from `spawn_blocking` as
 /// `RimapError::InternalSourced`. Shared by every `mcp/*` async wrapper so
 /// panics in the blocking threadpool always surface with the same code
