@@ -88,14 +88,20 @@ pub(crate) fn is_forwardable_id(v: &Value) -> bool {
     v.as_i64().is_some()
 }
 
-/// `error` body matches JSON-RPC §5.1: an object with numeric
-/// `code` and string `message`. `data` is optional.
+/// `error` body matches JSON-RPC §5.1: an object with i32-representable
+/// `code` and string `message`. `data` is optional. rmcp 1.5's
+/// `ErrorCode = i32`, so fractional values and numbers outside i32
+/// range fail rmcp's deserialization and are rejected here.
 pub(crate) fn is_well_formed_error(v: &Value) -> bool {
     let Some(obj) = v.as_object() else {
         return false;
     };
-    obj.get("code").is_some_and(Value::is_number)
-        && obj.get("message").is_some_and(Value::is_string)
+    let code_ok = obj
+        .get("code")
+        .and_then(Value::as_i64)
+        .is_some_and(|n| i32::try_from(n).is_ok());
+    let message_ok = obj.get("message").is_some_and(Value::is_string);
+    code_ok && message_ok
 }
 
 /// Read the top-level `id` field for echo on a rejection envelope.
@@ -656,6 +662,22 @@ mod tests {
         );
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","id":1,"error":"not even an object"}"#),
+            reject(-32600, json!(1))
+        );
+    }
+
+    #[test]
+    fn fractional_error_code_rejects() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":1.5,"message":"x"}}"#),
+            reject(-32600, json!(1))
+        );
+    }
+
+    #[test]
+    fn out_of_i32_range_error_code_rejects() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":2147483648,"message":"x"}}"#),
             reject(-32600, json!(1))
         );
     }
