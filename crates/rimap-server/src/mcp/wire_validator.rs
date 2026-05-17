@@ -500,20 +500,6 @@ pub fn stdio_with_validation() -> ValidatedStdio {
     }
 }
 
-/// Forwarding entry point for the cargo-fuzz target at
-/// `crates/rimap-server/fuzz/`. Production builds (no `--features
-/// fuzzing`) do not see this symbol; `cargo doc` hides it via
-/// `doc(hidden)`. The feature MUST NOT be enabled from any other
-/// workspace member. Returns `()` rather than `ValidationOutcome`
-/// because the latter is `pub(crate)` (a `pub use` re-export would
-/// fail E0364) and the fuzz target discards the result anyway —
-/// libFuzzer treats panics/aborts/sanitizer reports as findings.
-#[cfg(feature = "fuzzing")]
-#[doc(hidden)]
-pub fn __fuzz_validate(line: &str) {
-    let _ = validate(line);
-}
-
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
