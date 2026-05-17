@@ -161,92 +161,181 @@ pub(crate) fn invalid_request(id: Value) -> ErrorEnvelope {
     }
 }
 
-/// Returns `true` iff `line` parses as a JSON object that contains the
-/// same top-level key more than once. `serde_json::from_str::<Value>`
-/// silently collapses duplicates (last wins), but rmcp's
-/// `serde(untagged)` + `serde(flatten)` machinery on
-/// `JsonRpcMessage` rejects duplicate keys ("data did not match any
-/// variant of untagged enum `JsonRpcMessage`"), so a line that looks
-/// valid after dedup gets silently dropped by rmcp. Detected with a
-/// streaming visitor on the raw input before any parse-to-`Value`
-/// step so the dedup never happens.
+/// Detects duplicates in one map level and drains all keys/values
+/// without recursing. For non-map shapes returns `false` —
+/// duplicates are a map-level concept. Module-private helper for
+/// [`has_duplicate_keys_in_rmcp_strict_positions`].
+struct OneLevelDupCheck;
+
+impl<'de> serde::de::Visitor<'de> for OneLevelDupCheck {
+    type Value = bool;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dup = false;
+        while let Some(key) = map.next_key::<String>()? {
+            let _: serde::de::IgnoredAny = map.next_value()?;
+            if !seen.insert(key) {
+                dup = true;
+            }
+        }
+        Ok(dup)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(false)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_string<E>(self, _: String) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_none<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+}
+
+/// Newtype with a `Deserialize` impl that defers to
+/// [`OneLevelDupCheck`]. Lets the outer visitor invoke
+/// `map.next_value::<DupCheckOneLevel>()?` to recurse exactly once
+/// into the `error` subtree.
+struct DupCheckOneLevel(bool);
+
+impl<'de> serde::de::Deserialize<'de> for DupCheckOneLevel {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        d.deserialize_any(OneLevelDupCheck).map(DupCheckOneLevel)
+    }
+}
+
+/// Detects duplicates at the top level AND inside the `error`
+/// subtree (one level deep), but does not recurse further. Module-
+/// private helper for
+/// [`has_duplicate_keys_in_rmcp_strict_positions`].
+struct TopAndErrorDupCheck;
+
+impl<'de> serde::de::Visitor<'de> for TopAndErrorDupCheck {
+    type Value = bool;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        // Drain ALL keys before returning; early-return would leave
+        // the streaming deserializer's input position mid-map and
+        // `deserialize_any` would propagate a trailing-data error,
+        // surfacing as `Ok(false)` here via the outer
+        // `unwrap_or(false)`. Accumulate the dup flag instead.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dup = false;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "error" {
+                // Recurse one level into `error`'s value, since
+                // rmcp's `ErrorData` is a strict struct deserialize.
+                let nested: DupCheckOneLevel = map.next_value()?;
+                if nested.0 {
+                    dup = true;
+                }
+            } else {
+                let _: serde::de::IgnoredAny = map.next_value()?;
+            }
+            if !seen.insert(key) {
+                dup = true;
+            }
+        }
+        Ok(dup)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(false)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_string<E>(self, _: String) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_none<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+}
+
+/// Returns `true` iff `line` contains duplicate JSON keys in any
+/// position rmcp deserializes via a strict `#[derive(Deserialize)]`
+/// struct.
+///
+/// `serde_json::from_str::<Value>` silently collapses duplicates
+/// (last wins), but rmcp's `serde(untagged)` + `serde(flatten)`
+/// machinery on `JsonRpcMessage` rejects duplicate keys at strict-
+/// struct positions, so a line that looks valid after dedup gets
+/// silently dropped by rmcp. Detected with a streaming visitor on
+/// the raw input before any parse-to-`Value` step so the dedup
+/// never happens.
+///
+/// **Positions checked:**
+/// - The top-level envelope object (`jsonrpc`, `id`, `method`,
+///   `params`, `result`, `error`).
+/// - The `error` body if present (`code`, `message`, `data`) —
+///   rmcp's `ErrorData` is a strict `#[derive(Deserialize)]` struct.
+///
+/// **Positions NOT checked** (rmcp uses lenient `Value` /
+/// `JsonObject` here, so duplicates collapse last-wins and don't
+/// cause rejection): `params`, `result`, `error.data`, and any
+/// further-nested subtrees.
 ///
 /// Non-object roots and unparsable input return `false` — those
 /// shapes are caught by the existing parse-error / non-object
-/// branches in `validate`. Nested objects are NOT checked: rmcp
-/// only deserializes the top-level envelope shape; what happens
-/// inside `params` / `result` / `error.data` is the handler's
-/// problem.
+/// branches in `validate`.
 ///
-/// Cargo-fuzz oracle (#266) caught
-/// `{"jsonrpc":"2.0","id":99,"res":"2.0","id":99,"result":{"x":1}}`.
-fn has_duplicate_top_level_keys(line: &str) -> bool {
-    use std::collections::HashSet;
-    use std::fmt;
-
+/// Cargo-fuzz oracle (#266) findings caught by this helper:
+/// - Top level: `{"jsonrpc":"2.0","id":99,"res":"2.0","id":99,"result":{"x":1}}`.
+/// - `error` body: `{"jsonrpc":"2.0","id":1,"error":{"code":175,"message":75,"message":"x"}}`.
+fn has_duplicate_keys_in_rmcp_strict_positions(line: &str) -> bool {
     use serde::Deserializer as _;
-    use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-
-    struct DupCheck;
-
-    impl<'de> Visitor<'de> for DupCheck {
-        type Value = bool;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("any JSON value")
-        }
-
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
-            // Drain ALL keys before returning; early-return would
-            // leave the streaming deserializer's input position
-            // mid-map and `deserialize_any` would propagate a
-            // trailing-data error, surfacing as `Ok(false)` here
-            // via the outer `unwrap_or(false)`. Accumulate the dup
-            // flag instead.
-            let mut seen: HashSet<String> = HashSet::new();
-            let mut dup = false;
-            while let Some(key) = map.next_key::<String>()? {
-                let _: IgnoredAny = map.next_value()?;
-                if !seen.insert(key) {
-                    dup = true;
-                }
-            }
-            Ok(dup)
-        }
-
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
-            while seq.next_element::<IgnoredAny>()?.is_some() {}
-            Ok(false)
-        }
-
-        fn visit_bool<E>(self, _: bool) -> Result<bool, E> {
-            Ok(false)
-        }
-        fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
-            Ok(false)
-        }
-        fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
-            Ok(false)
-        }
-        fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
-            Ok(false)
-        }
-        fn visit_str<E>(self, _: &str) -> Result<bool, E> {
-            Ok(false)
-        }
-        fn visit_string<E>(self, _: String) -> Result<bool, E> {
-            Ok(false)
-        }
-        fn visit_unit<E>(self) -> Result<bool, E> {
-            Ok(false)
-        }
-        fn visit_none<E>(self) -> Result<bool, E> {
-            Ok(false)
-        }
-    }
-
     let mut de = serde_json::Deserializer::from_str(line);
-    de.deserialize_any(DupCheck).unwrap_or(false)
+    de.deserialize_any(TopAndErrorDupCheck).unwrap_or(false)
 }
 
 /// Validate one line of input and decide what to do with it.
@@ -254,12 +343,14 @@ pub(crate) fn validate(line: &str) -> ValidationOutcome {
     if line.trim().is_empty() {
         return ValidationOutcome::Skip;
     }
-    // Detect duplicate top-level keys on the raw bytes BEFORE parsing
-    // into `Value`, since `Value` collapses duplicates silently and
-    // rmcp rejects them. See `has_duplicate_top_level_keys` docstring.
+    // Detect duplicate keys in any rmcp strict-struct position
+    // (top-level envelope OR `error` body) on the raw bytes BEFORE
+    // parsing into `Value`, since `Value` collapses duplicates
+    // silently and rmcp rejects them. See
+    // `has_duplicate_keys_in_rmcp_strict_positions` docstring.
     // Echo `Null` for the id — with duplicates, no single id value is
     // safely echoable.
-    if has_duplicate_top_level_keys(line) {
+    if has_duplicate_keys_in_rmcp_strict_positions(line) {
         return ValidationOutcome::Reject(invalid_request(Value::Null));
     }
     let parsed: Value = match serde_json::from_str(line) {
@@ -676,8 +767,8 @@ mod tests {
         // rejects duplicates ("data did not match any variant of
         // untagged enum JsonRpcMessage"), so the line was silently
         // dropped — the exact failure mode the validator exists to
-        // prevent. `has_duplicate_top_level_keys` short-circuits
-        // before the dedup happens.
+        // prevent. `has_duplicate_keys_in_rmcp_strict_positions`
+        // short-circuits before the dedup happens.
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","id":99,"res":"2.0","id":99,"result":{"x":1}}"#),
             reject(-32600, Value::Null)
@@ -685,13 +776,45 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_keys_inside_error_body_reject() {
+        // Cargo-fuzz oracle (#266) caught a libfuzzer-mutated input
+        // containing duplicate `message` keys inside the `error`
+        // body. rmcp's `ErrorData` is a strict
+        // `#[derive(Deserialize)]` struct that rejects duplicate
+        // fields, so the envelope failed all four variants of
+        // `JsonRpcMessage` and was silently dropped — even though
+        // the top-level keys were unique. The duplicate-key check
+        // recurses one level into `error` to mirror rmcp's strict
+        // deserialize at that position.
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":175,"message":75,"message":"x"}}"#),
+            reject(-32600, Value::Null)
+        );
+    }
+
+    #[test]
     fn duplicate_keys_inside_params_still_forwards() {
-        // Only top-level duplicates are checked; what happens inside
-        // `params` / `result` / `error.data` is the handler's
-        // concern, and rmcp's deserializers for those subtrees use
-        // serde_json::Value semantics that match the validator.
+        // Duplicates inside `params` / `result` / `error.data` are
+        // lenient: rmcp deserializes those positions into
+        // `serde_json::Value` (or the equivalent), which preserves
+        // last-wins semantics that match `serde_json::from_str`.
+        // Only top-level keys AND the immediate children of `error`
+        // are checked (rmcp's `ErrorData` struct).
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":{"k":1,"k":2}}"#),
+            ValidationOutcome::Forward
+        );
+    }
+
+    #[test]
+    fn duplicate_keys_inside_error_data_still_forwards() {
+        // Positive control for the recurse-into-error policy:
+        // duplicates inside `error.data` are fine because rmcp's
+        // `ErrorData::data` is `Option<Value>` (lenient).
+        assert_eq!(
+            validate(
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"x","data":{"k":1,"k":2}}}"#
+            ),
             ValidationOutcome::Forward
         );
     }
