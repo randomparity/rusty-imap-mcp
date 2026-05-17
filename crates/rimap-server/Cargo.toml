@@ -13,6 +13,13 @@ workspace = true
 
 [features]
 default = []
+
+# Exposes `mcp::wire_validator::__fuzz_validate` for the cargo-fuzz
+# target at `crates/rimap-server/fuzz/`. NEVER enable from another
+# workspace member — the fuzz subcrate is the only legitimate
+# consumer. See docs/superpowers/specs/2026-05-17-cargo-fuzz-validator-design.md.
+fuzzing = []
+
 # Gated entry points for integration tests that need to exercise the
 # full dispatch pipeline (posture → breaker → rate → audit envelope →
 # handler) without re-implementing the composition in each test.
