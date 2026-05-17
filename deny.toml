@@ -40,6 +40,15 @@ allow = [
     # and permissive (no copyleft, no attribution beyond license text).
     # Accepted for the governor 0.10 upgrade.
     "Zlib",
+    # `borrow-or-share` 0.2.4 (transitive via `jsonschema` → `referencing`
+    # → `fluent-uri` → `borrow-or-share`) is MIT-0. MIT-0 ("MIT No
+    # Attribution") is OSI-approved and strictly more permissive than
+    # MIT — no attribution clause, no other obligations. Surfaced when
+    # `--features fuzzing` (#266) promoted `jsonschema` from a dev-dep
+    # to a feature-gated regular dep; CI runs `cargo deny check` with
+    # `--all-features`, which activates `fuzzing` and pulls the subtree
+    # into the non-dev graph for the first time.
+    "MIT-0",
 ]
 confidence-threshold = 0.93
 

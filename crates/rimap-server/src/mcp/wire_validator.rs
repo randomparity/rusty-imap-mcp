@@ -89,13 +89,21 @@ pub(crate) fn is_forwardable_id(v: &Value) -> bool {
 }
 
 /// `params` accepted on JSON-RPC requests and notifications. JSON-RPC §4
-/// requires a Structured value (Array or Object) when present; Null is
-/// also accepted because rmcp tolerates it as "no parameters" and
-/// rejecting it would over-strict legitimate clients. Number, String,
-/// and Boolean shapes are silently dropped by rmcp's codec and cause
-/// the server to appear hung.
+/// nominally allows a Structured value (Array OR Object) when present,
+/// but rmcp's `CustomRequest` / `CustomNotification` deserializers
+/// route `params` through `serde(flatten)` over a `WithMeta { _meta,
+/// _rest }` wrapper, which can only deserialize from a map shape —
+/// so an `Array` body produces "data did not match any variant of
+/// untagged enum `JsonRpcMessage`" and rmcp silently drops the line
+/// (server appears hung). The cargo-fuzz oracle (#266) caught
+/// `{"jsonrpc":"2.0","method":"x","id":1,"params":[1,2,3]}` on the
+/// seed corpus.
+///
+/// `Null` is accepted because rmcp tolerates it as "no parameters"
+/// and rejecting it would over-strict legitimate clients. Number,
+/// String, and Boolean shapes are likewise silently dropped by rmcp.
 pub(crate) fn is_valid_params(v: &Value) -> bool {
-    v.is_object() || v.is_array() || v.is_null()
+    v.is_object() || v.is_null()
 }
 
 /// `error` body matches JSON-RPC §5.1: an object with i32-representable
@@ -115,13 +123,24 @@ pub(crate) fn is_well_formed_error(v: &Value) -> bool {
 }
 
 /// Read the top-level `id` field for echo on a rejection envelope.
-/// Returns `Value::Null` if `id` is missing or of a disallowed type;
-/// otherwise echoes the original value verbatim. JSON-RPC §5 says
-/// the id on a synthesized error response MUST be null when the
-/// original could not be detected.
+/// Returns `Value::Null` if `id` is missing, present-but-null, or of a
+/// disallowed type; otherwise echoes the original value verbatim.
+/// JSON-RPC §5 says the id on a synthesized error response MUST be
+/// null when the original could not be detected.
+///
+/// **`is_forwardable_id` symmetry.** Only id shapes that would have
+/// been forwardable (string OR i64-representable number) are echoed.
+/// Fractional numbers, oversized numbers, arrays, objects, and
+/// booleans fall through to `Null`. This matches MCP's `RequestId =
+/// integer | string` schema, which the synthesized error envelope
+/// must satisfy. Cargo-fuzz oracle (#266) caught `{".sonrpc":"2.0",
+/// "id":2.5}`: typo'd `jsonrpc` reaches `extract_id` before the
+/// id-validity branch, the lax echo emitted `id: 2.5`, and the MCP
+/// schema rejected the resulting envelope ("2.5 is not of types
+/// integer, string").
 pub(crate) fn extract_id(obj: &serde_json::Map<String, Value>) -> Value {
     match obj.get("id") {
-        Some(v) if v.is_string() || v.is_number() || v.is_null() => v.clone(),
+        Some(v) if is_forwardable_id(v) => v.clone(),
         _ => Value::Null,
     }
 }
@@ -142,10 +161,197 @@ pub(crate) fn invalid_request(id: Value) -> ErrorEnvelope {
     }
 }
 
+/// Detects duplicates in one map level and drains all keys/values
+/// without recursing. For non-map shapes returns `false` —
+/// duplicates are a map-level concept. Module-private helper for
+/// [`has_duplicate_keys_in_rmcp_strict_positions`].
+struct OneLevelDupCheck;
+
+impl<'de> serde::de::Visitor<'de> for OneLevelDupCheck {
+    type Value = bool;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dup = false;
+        while let Some(key) = map.next_key::<String>()? {
+            let _: serde::de::IgnoredAny = map.next_value()?;
+            if !seen.insert(key) {
+                dup = true;
+            }
+        }
+        Ok(dup)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(false)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_string<E>(self, _: String) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_none<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+}
+
+/// Newtype with a `Deserialize` impl that defers to
+/// [`OneLevelDupCheck`]. Lets the outer visitor invoke
+/// `map.next_value::<DupCheckOneLevel>()?` to recurse exactly once
+/// into the `error` subtree.
+struct DupCheckOneLevel(bool);
+
+impl<'de> serde::de::Deserialize<'de> for DupCheckOneLevel {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        d.deserialize_any(OneLevelDupCheck).map(DupCheckOneLevel)
+    }
+}
+
+/// Detects duplicates at the top level AND inside the `error`
+/// subtree (one level deep), but does not recurse further. Module-
+/// private helper for
+/// [`has_duplicate_keys_in_rmcp_strict_positions`].
+struct TopAndErrorDupCheck;
+
+impl<'de> serde::de::Visitor<'de> for TopAndErrorDupCheck {
+    type Value = bool;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        // Drain ALL keys before returning; early-return would leave
+        // the streaming deserializer's input position mid-map and
+        // `deserialize_any` would propagate a trailing-data error,
+        // surfacing as `Ok(false)` here via the outer
+        // `unwrap_or(false)`. Accumulate the dup flag instead.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dup = false;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "error" {
+                // Recurse one level into `error`'s value, since
+                // rmcp's `ErrorData` is a strict struct deserialize.
+                let nested: DupCheckOneLevel = map.next_value()?;
+                if nested.0 {
+                    dup = true;
+                }
+            } else {
+                let _: serde::de::IgnoredAny = map.next_value()?;
+            }
+            if !seen.insert(key) {
+                dup = true;
+            }
+        }
+        Ok(dup)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(false)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_string<E>(self, _: String) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_unit<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_none<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+}
+
+/// Returns `true` iff `line` contains duplicate JSON keys in any
+/// position rmcp deserializes via a strict `#[derive(Deserialize)]`
+/// struct.
+///
+/// `serde_json::from_str::<Value>` silently collapses duplicates
+/// (last wins), but rmcp's `serde(untagged)` + `serde(flatten)`
+/// machinery on `JsonRpcMessage` rejects duplicate keys at strict-
+/// struct positions, so a line that looks valid after dedup gets
+/// silently dropped by rmcp. Detected with a streaming visitor on
+/// the raw input before any parse-to-`Value` step so the dedup
+/// never happens.
+///
+/// **Positions checked:**
+/// - The top-level envelope object (`jsonrpc`, `id`, `method`,
+///   `params`, `result`, `error`).
+/// - The `error` body if present (`code`, `message`, `data`) —
+///   rmcp's `ErrorData` is a strict `#[derive(Deserialize)]` struct.
+///
+/// **Positions NOT checked** (rmcp uses lenient `Value` /
+/// `JsonObject` here, so duplicates collapse last-wins and don't
+/// cause rejection): `params`, `result`, `error.data`, and any
+/// further-nested subtrees.
+///
+/// Non-object roots and unparsable input return `false` — those
+/// shapes are caught by the existing parse-error / non-object
+/// branches in `validate`.
+///
+/// Cargo-fuzz oracle (#266) findings caught by this helper:
+/// - Top level: `{"jsonrpc":"2.0","id":99,"res":"2.0","id":99,"result":{"x":1}}`.
+/// - `error` body: `{"jsonrpc":"2.0","id":1,"error":{"code":175,"message":75,"message":"x"}}`.
+fn has_duplicate_keys_in_rmcp_strict_positions(line: &str) -> bool {
+    use serde::Deserializer as _;
+    let mut de = serde_json::Deserializer::from_str(line);
+    de.deserialize_any(TopAndErrorDupCheck).unwrap_or(false)
+}
+
 /// Validate one line of input and decide what to do with it.
 pub(crate) fn validate(line: &str) -> ValidationOutcome {
     if line.trim().is_empty() {
         return ValidationOutcome::Skip;
+    }
+    // Detect duplicate keys in any rmcp strict-struct position
+    // (top-level envelope OR `error` body) on the raw bytes BEFORE
+    // parsing into `Value`, since `Value` collapses duplicates
+    // silently and rmcp rejects them. See
+    // `has_duplicate_keys_in_rmcp_strict_positions` docstring.
+    // Echo `Null` for the id — with duplicates, no single id value is
+    // safely echoable.
+    if has_duplicate_keys_in_rmcp_strict_positions(line) {
+        return ValidationOutcome::Reject(invalid_request(Value::Null));
     }
     let parsed: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -552,6 +758,85 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_top_level_keys_reject() {
+        // Cargo-fuzz oracle (#266) caught this libfuzzer-mutated
+        // input. `serde_json::from_str::<Value>` silently collapses
+        // duplicate keys (last wins), so the validator's previous
+        // logic saw a valid Response envelope and forwarded.
+        // rmcp's `serde(untagged)` + `serde(flatten)` machinery
+        // rejects duplicates ("data did not match any variant of
+        // untagged enum JsonRpcMessage"), so the line was silently
+        // dropped — the exact failure mode the validator exists to
+        // prevent. `has_duplicate_keys_in_rmcp_strict_positions`
+        // short-circuits before the dedup happens.
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","id":99,"res":"2.0","id":99,"result":{"x":1}}"#),
+            reject(-32600, Value::Null)
+        );
+    }
+
+    #[test]
+    fn duplicate_keys_inside_error_body_reject() {
+        // Cargo-fuzz oracle (#266) caught a libfuzzer-mutated input
+        // containing duplicate `message` keys inside the `error`
+        // body. rmcp's `ErrorData` is a strict
+        // `#[derive(Deserialize)]` struct that rejects duplicate
+        // fields, so the envelope failed all four variants of
+        // `JsonRpcMessage` and was silently dropped — even though
+        // the top-level keys were unique. The duplicate-key check
+        // recurses one level into `error` to mirror rmcp's strict
+        // deserialize at that position.
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":175,"message":75,"message":"x"}}"#),
+            reject(-32600, Value::Null)
+        );
+    }
+
+    #[test]
+    fn duplicate_keys_inside_params_still_forwards() {
+        // Duplicates inside `params` / `result` / `error.data` are
+        // lenient: rmcp deserializes those positions into
+        // `serde_json::Value` (or the equivalent), which preserves
+        // last-wins semantics that match `serde_json::from_str`.
+        // Only top-level keys AND the immediate children of `error`
+        // are checked (rmcp's `ErrorData` struct).
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":{"k":1,"k":2}}"#),
+            ValidationOutcome::Forward
+        );
+    }
+
+    #[test]
+    fn duplicate_keys_inside_error_data_still_forwards() {
+        // Positive control for the recurse-into-error policy:
+        // duplicates inside `error.data` are fine because rmcp's
+        // `ErrorData::data` is `Option<Value>` (lenient).
+        assert_eq!(
+            validate(
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"x","data":{"k":1,"k":2}}}"#
+            ),
+            ValidationOutcome::Forward
+        );
+    }
+
+    #[test]
+    fn typoed_jsonrpc_with_fractional_id_does_not_echo_id() {
+        // Cargo-fuzz oracle (#266) caught this seed input. The
+        // typo'd `.sonrpc` key fails the `jsonrpc == "2.0"` check,
+        // so we route to `extract_id` BEFORE the id-validity branch.
+        // The lax `extract_id` previously echoed `id: 2.5` into the
+        // synthesized envelope, which then failed MCP's `RequestId =
+        // integer | string` schema. `extract_id` is now symmetric
+        // with `is_forwardable_id` so fractional numbers fall
+        // through to Null (and `synthesize_error_line` omits the
+        // id field on Null).
+        assert_eq!(
+            validate(r#"{".sonrpc":"2.0","id":2.5}"#),
+            reject(-32600, Value::Null)
+        );
+    }
+
+    #[test]
     fn valid_request_forwards() {
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#),
@@ -719,10 +1004,18 @@ mod tests {
     }
 
     #[test]
-    fn params_as_array_forwards() {
+    fn params_as_array_rejects() {
+        // Cargo-fuzz oracle (#266) caught this seed-corpus input:
+        // `is_valid_params` originally accepted arrays (JSON-RPC §4.2
+        // nominally allows them), but rmcp's `CustomRequest` /
+        // `CustomNotification` deserialize through a `WithMeta`
+        // wrapper using `serde(flatten)`, which fails on non-map
+        // shapes — so an array body causes rmcp to silently drop the
+        // line. Reject in the validator instead. See is_valid_params
+        // docstring for the full chain.
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":[1,2,3]}"#),
-            ValidationOutcome::Forward
+            reject(-32600, json!(1))
         );
     }
 

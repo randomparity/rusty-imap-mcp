@@ -12,15 +12,17 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^(tests/injection-corpus/|fuzz/corpus/|crates/rimap-content/data/confusables\.txt$|crates/rimap-server/tests/fixtures/mcp-spec/)
+        exclude: ^(tests/injection-corpus/|fuzz/corpus/|crates/rimap-server/fuzz/corpus/|crates/rimap-content/data/confusables\.txt$|crates/rimap-server/tests/fixtures/mcp-spec/)
       - id: end-of-file-fixer
         # Email fixtures are byte-exact; auto-appending a final newline
         # (or stripping a trailing CRLF pair) corrupts them. The vendored
         # Unicode 16 confusables.txt is byte-identical to the upstream
         # file and must not be mangled. The vendored MCP spec schemas
         # under tests/fixtures/mcp-spec/ are byte-for-byte verbatim
-        # copies of upstream and feed the weekly drift check.
-        exclude: ^(tests/injection-corpus/|fuzz/corpus/|crates/rimap-content/data/confusables\.txt$|crates/rimap-server/tests/fixtures/mcp-spec/)
+        # copies of upstream and feed the weekly drift check. The
+        # rimap-server validator fuzz corpus is byte-exact: each seed is
+        # a JSON-RPC envelope as validate() receives it (no trailing LF).
+        exclude: ^(tests/injection-corpus/|fuzz/corpus/|crates/rimap-server/fuzz/corpus/|crates/rimap-content/data/confusables\.txt$|crates/rimap-server/tests/fixtures/mcp-spec/)
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
@@ -31,14 +33,14 @@ repos:
         # and its insta snapshot captures the same ~1 MiB body. The
         # vendored Unicode 16 confusables.txt is ~700 KB. The fuzz corpus
         # mirrors these fixtures so has the same large-file exemption.
-        exclude: ^(tests/injection-corpus/|fuzz/corpus/|crates/rimap-content/tests/snapshots/|crates/rimap-content/data/confusables\.txt$)
+        exclude: ^(tests/injection-corpus/|fuzz/corpus/|crates/rimap-server/fuzz/corpus/|crates/rimap-content/tests/snapshots/|crates/rimap-content/data/confusables\.txt$)
       - id: mixed-line-ending
         args: ["--fix=lf"]
         # RFC 5322 email messages require CRLF line endings; the
         # adversarial corpus depends on CRLF to exercise header parsing
         # and the pre-parse scrub. The auto-fixer would silently
         # destroy the fixtures. The fuzz corpus mirrors these fixtures.
-        exclude: ^(tests/injection-corpus/|fuzz/corpus/)
+        exclude: ^(tests/injection-corpus/|fuzz/corpus/|crates/rimap-server/fuzz/corpus/)
 
   # Rust formatting and linting (pre-commit stage).
   - repo: local

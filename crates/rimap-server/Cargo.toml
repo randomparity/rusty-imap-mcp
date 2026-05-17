@@ -13,6 +13,15 @@ workspace = true
 
 [features]
 default = []
+
+# Exposes `mcp::fuzz_oracle` for the cargo-fuzz target at
+# `crates/rimap-server/fuzz/`. NEVER enable from another workspace
+# member — the fuzz subcrate is the only legitimate consumer. Pulls in
+# `jsonschema` (otherwise dev-only) so the oracle can schema-validate
+# synthesized error envelopes. See
+# docs/superpowers/specs/2026-05-17-cargo-fuzz-validator-design.md.
+fuzzing = ["dep:jsonschema"]
+
 # Gated entry points for integration tests that need to exercise the
 # full dispatch pipeline (posture → breaker → rate → audit envelope →
 # handler) without re-implementing the composition in each test.
@@ -78,6 +87,12 @@ tracing-subscriber = { workspace = true }
 governor = { workspace = true }
 arc-swap = { workspace = true }
 tempfile = { workspace = true }
+# Optional, gated by the `fuzzing` feature. The fuzz oracle
+# schema-validates synthesized error envelopes against the vendored
+# MCP `JSONRPCErrorResponse` fragment. Production builds (default
+# features) do not pull this in. The `dev-dependencies` entry below
+# remains for integration-test consumers; cargo dedupes the version.
+jsonschema = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
