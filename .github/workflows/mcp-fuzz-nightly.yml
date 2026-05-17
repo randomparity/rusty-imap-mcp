@@ -1,0 +1,91 @@
+name: MCP Fuzz Nightly
+
+on:
+  schedule:
+    # 03:17 UTC daily — off-peak relative to other scheduled jobs.
+    - cron: '17 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: proptest 100k cases
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PROPTEST_CASES: '100000'
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          shared-key: mcp-fuzz-nightly
+
+      - name: Run proptest binary at 100k cases
+        id: proptest
+        run: |
+          set -euo pipefail
+          # --test (singular) selects the integration-test binary by name.
+          # --tests (plural) is a "run all integration tests" flag that would
+          # turn 'mcp_wire_proptest' into a name filter and silently run zero
+          # property functions (which are named prop_*). Phase 4 §6.1.
+          OUTPUT=$(cargo test -p rimap-server --test mcp_wire_proptest -- --nocapture 2>&1 | tee /dev/stderr)
+          echo "$OUTPUT" > proptest-output.log
+
+          # Per-property assertion: every expected property must have
+          # appeared in the output as "test <name> ... ok". Counting the
+          # global "running N tests" line is insufficient because a
+          # property marked #[ignore] (e.g. one blocked on an open
+          # server-side bug) is reported as "ignored, ..." and would
+          # not fire its proptest cases — the nightly fuzz claim would
+          # be vacuous. Phase 4 Codex review finding #3.
+          #
+          # EXPECTED_PROPERTIES is the source of truth for which
+          # property functions must run cases in the nightly job. Add
+          # to this list when a new prop_* test lands; remove only when
+          # the property is intentionally retired (with a comment).
+          EXPECTED_PROPERTIES=(
+            "prop_tools_call_unknown_tool"
+            "prop_tools_call_use_account_argument_shape"
+            "prop_envelope_never_panics"
+          )
+          MISSING=()
+          for prop in "${EXPECTED_PROPERTIES[@]}"; do
+            if ! echo "$OUTPUT" | grep -qE "^test ${prop} \\.\\.\\. ok"; then
+              MISSING+=("$prop")
+            fi
+          done
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::Nightly fuzz did not run the following expected properties (each must report 'test <name> ... ok'): ${MISSING[*]}. A property marked #[ignore] or filtered out by the --test selector silently fails this guard. Phase 4 §6.1, Codex finding #3."
+            exit 1
+          fi
+
+          # Defense-in-depth: also require a non-zero total test count.
+          TESTS_RUN=$(echo "$OUTPUT" | grep -oE 'running [0-9]+ tests?' | awk '{s+=$2} END {print s+0}')
+          echo "tests_run=$TESTS_RUN" >> "$GITHUB_OUTPUT"
+          if [ "$TESTS_RUN" -eq 0 ]; then
+            echo "::error::Zero tests reported as executed. The --test selector likely missed the binary."
+            exit 1
+          fi
+          echo "Total tests executed: $TESTS_RUN"
+          echo "All ${#EXPECTED_PROPERTIES[@]} expected properties ran successfully."
+
+      - name: Upload proptest output on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: proptest-output
+          path: proptest-output.log
+          retention-days: 7

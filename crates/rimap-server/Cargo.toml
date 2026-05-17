@@ -30,7 +30,19 @@ default = []
 # binary's wire shape rather than the production binary's, silently
 # voiding its regression nets. See:
 #   docs/superpowers/specs/2026-05-12-mcp-conformance-node-design.md §4.7
-test-support = ["rimap-config/test-support", "rimap-content/test-support"]
+test-support = [
+    "rimap-config/test-support",
+    "rimap-content/test-support",
+    # `rimap-audit/test-injection` exposes `AuditWriter::force_next_write_failure`,
+    # which `main.rs`'s `maybe_arm_audit_write_failure` calls when
+    # `RIMAP_TEST_FORCE_NEXT_AUDIT_WRITE_FAILURE=1` is set. Without this
+    # flag, `cargo check -p rimap-server --features test-support
+    # --bin rusty-imap-mcp` fails (Phase 4 #266, Codex review finding #2).
+    # Adding it does not change the wire shape — the method only mutates
+    # an internal failure-injection flag — so it complies with the
+    # test-support wire-shape invariant above.
+    "rimap-audit/test-injection",
+]
 
 [lib]
 name = "rimap_server"
@@ -82,3 +94,4 @@ rimap-server = { path = ".", version = "0.1.0", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util"] }
 tempfile = { workspace = true }
 base64 = { workspace = true }
+proptest = { workspace = true }

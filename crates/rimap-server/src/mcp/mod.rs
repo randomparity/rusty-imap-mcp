@@ -4,6 +4,7 @@ pub(crate) mod audit_envelope;
 pub mod content;
 pub(crate) mod dispatch;
 pub mod error;
+pub mod preinit;
 pub mod response;
 pub mod server;
 // `tool_catalog` is `pub` (doc-hidden via the parent `#[doc(hidden)] pub mod
@@ -12,6 +13,7 @@ pub mod server;
 // `dispatch` and `server` and do not import this module directly.
 pub mod tool_catalog;
 pub(crate) mod tool_name;
+pub mod wire_validator;
 
 /// Render a `tokio::task::JoinError` from `spawn_blocking` as
 /// `RimapError::InternalSourced`. Shared by every `mcp/*` async wrapper so

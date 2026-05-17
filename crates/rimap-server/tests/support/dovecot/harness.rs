@@ -95,6 +95,26 @@ fn container_name(project: &str) -> String {
     format!("{project}-dovecot")
 }
 
+/// Mint a unique-on-host identifier for compose project naming.
+/// Combines `SystemTime` nanos with `process::id()` and a process-
+/// local `AtomicU64` counter so no two calls on the same host can
+/// produce the same string — even when two parallel threads call
+/// within the same coarse `SystemTime` tick (macOS resolution is
+/// not nanosecond), or when consecutive nextest binaries land on
+/// the same nanos value. Mirrors `rimap-imap::uuid_like` (PR #273).
+fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}-{pid:x}-{n:x}")
+}
+
 pub struct DovecotHarness {
     project: String,
     compose_dir: PathBuf,
@@ -117,13 +137,14 @@ impl DovecotHarness {
             .join("integration")
             .join("dovecot");
 
-        let project = format!(
-            "rimap-e2e-{:x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
+        // Compose project name must be unique across (a) parallel
+        // threads within one cargo-test process and (b) consecutive
+        // nextest binary invocations on the same host. SystemTime
+        // nanos alone is insufficient — macOS resolution is not
+        // nanosecond and we have observed collisions in the wild
+        // (e.g. wire_e2e_readonly_posture_denial on parallel run).
+        // Same pattern as rimap-imap::uuid_like (PR #273, 422f564).
+        let project = format!("rimap-e2e-{}", uuid_like());
 
         let mut host_port = ReservedPort::acquire()
             .ok_or_else(|| HarnessError::PortReservationFailed("acquire returned None".into()))?;

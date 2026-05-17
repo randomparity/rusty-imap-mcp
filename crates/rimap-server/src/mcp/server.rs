@@ -18,9 +18,9 @@ use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ErrorCode as McpCode, ErrorData, Implementation,
-    ListResourcesResult, ListToolsResult, PaginatedRequestParams, RawResource,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-    ServerInfo, Tool,
+    InitializeRequestParams, InitializeResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, RawResource, ReadResourceRequestParams,
+    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 
@@ -103,6 +103,35 @@ impl ImapMcpServer {
             result
         })
         .await
+    }
+}
+
+/// In-crate unit-test constructor. Compiled only under `cfg(test)` so it
+/// never ships in the released binary. Builds an `ImapMcpServer` with an
+/// empty `AccountRegistry` and the caller-supplied audit writer +
+/// cancellation sender — the minimum surface needed to drive
+/// [`ImapMcpServer::run_with_audit_envelope`] (which reads only `audit`,
+/// `redaction_salt`, and `cancellation_sender`) without the heavyweight
+/// boot machinery that real `ImapMcpServer::new` requires.
+#[cfg(test)]
+impl ImapMcpServer {
+    /// Minimal test constructor — only fields touched by
+    /// `run_with_audit_envelope` (and its inner callees `redact_tool_args`,
+    /// `emit_tool_start`, `emit_tool_end`) get caller-supplied values.
+    /// The `AccountRegistry` is empty; tool dispatch through this server
+    /// will fail at account resolution, which is fine because the
+    /// wrapper-level test injects its own body closure and never reaches
+    /// dispatch.
+    pub(crate) fn new_for_tests(
+        audit: AuditWriter,
+        cancellation_sender: CancelledToolEndSender,
+    ) -> Self {
+        Self {
+            registry: AccountRegistry::new(std::collections::BTreeMap::new()),
+            audit,
+            cancellation_sender,
+            redaction_salt: Arc::new(RedactionSalt::new_random()),
+        }
     }
 }
 
@@ -241,6 +270,29 @@ impl ServerHandler for ImapMcpServer {
             "rusty-imap-mcp",
             rimap_core::version::version(),
         ))
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        // LATEST-only acceptance per spec §"Why LATEST-only" (#276):
+        // rmcp 1.5 emits LATEST wire shapes regardless of negotiated
+        // version, so accepting older known versions would echo the
+        // peer's version string while serving 2025-11-25 capabilities.
+        // The exact-equality check is the only honest option.
+        if request.protocol_version != ProtocolVersion::LATEST {
+            return Err(unsupported_protocol_version_error(
+                &request.protocol_version,
+            ));
+        }
+        // Preserve the default-impl behavior for the happy path so the
+        // peer's ClientInfo is captured for subsequent dispatch.
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        Ok(self.get_info())
     }
 
     async fn list_tools(
@@ -459,5 +511,107 @@ impl ServerHandler for ImapMcpServer {
 
         self.dispatch_account_scoped(account, tool_name, &args)
             .await
+    }
+}
+
+/// Build the `ErrorData` payload returned by `ImapMcpServer::initialize`
+/// when the peer's `protocolVersion` is not exactly
+/// `ProtocolVersion::LATEST`. The envelope's `data` field carries
+/// `supported_versions` as a single-element array so clients have a
+/// machine-readable retry hint, and the message echoes the offending
+/// version in single quotes for log readability. (#276)
+fn unsupported_protocol_version_error(peer_version: &ProtocolVersion) -> ErrorData {
+    let supported = [ProtocolVersion::LATEST.as_str()];
+    let message = format!(
+        "Unsupported protocol version: '{}'. Server supports: {}.",
+        peer_version.as_str(),
+        supported.join(", "),
+    );
+    let data = serde_json::json!({ "supported_versions": supported });
+    ErrorData::invalid_params(message, Some(data))
+}
+
+#[cfg(test)]
+mod protocol_version_tests {
+    #![expect(clippy::expect_used, reason = "tests")]
+
+    use rmcp::model::{ErrorCode as McpCode, ProtocolVersion};
+    use serde_json::json;
+
+    use super::unsupported_protocol_version_error;
+
+    /// Build a `ProtocolVersion` carrying an arbitrary version string.
+    /// The rmcp deserializer accepts any string and produces a
+    /// `ProtocolVersion(Cow::Owned(s))` for unknown values, so this is
+    /// the cleanest way to construct one for tests.
+    fn version_from_str(s: &str) -> ProtocolVersion {
+        serde_json::from_value(json!(s)).expect("deserialize ProtocolVersion")
+    }
+
+    #[test]
+    fn shape_matches_spec() {
+        let v = version_from_str("1999-01-01");
+        let err = unsupported_protocol_version_error(&v);
+
+        assert_eq!(err.code, McpCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("1999-01-01"),
+            "message must echo the peer version, got {:?}",
+            err.message,
+        );
+        assert!(
+            err.message.contains("2025-11-25"),
+            "message must include the supported version, got {:?}",
+            err.message,
+        );
+
+        let data = err.data.as_ref().expect("data field present");
+        assert_eq!(
+            data["supported_versions"],
+            json!(["2025-11-25"]),
+            "supported_versions must be a single-element array of LATEST, got {data}",
+        );
+    }
+
+    #[test]
+    fn uses_runtime_latest() {
+        // Pins the contract that `supported_versions[0]` is built from
+        // `ProtocolVersion::LATEST.as_str()` at runtime, not a hard-
+        // coded literal. If a future rmcp bump shifts LATEST, this
+        // test stays green; the literal-pinning `shape_matches_spec`
+        // test will then surface the change visibly.
+        let v = version_from_str("anything-goes");
+        let err = unsupported_protocol_version_error(&v);
+        let data = err.data.as_ref().expect("data field present");
+        let arr = data["supported_versions"]
+            .as_array()
+            .expect("supported_versions is an array");
+        assert_eq!(arr.len(), 1, "single-element array");
+        assert_eq!(
+            arr[0].as_str().expect("string"),
+            ProtocolVersion::LATEST.as_str(),
+        );
+    }
+
+    #[test]
+    fn empty_peer_version_still_produces_envelope() {
+        let v = version_from_str("");
+        let err = unsupported_protocol_version_error(&v);
+        assert_eq!(err.code, McpCode::INVALID_PARAMS);
+        // Single-quoted empty string in the message: "...'%s'..."
+        assert!(
+            err.message.contains("''"),
+            "empty peer version should appear as '' in message, got {:?}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn data_field_is_present() {
+        // Guards against accidentally constructing the error without
+        // the data payload (would break machine-readable retry).
+        let v = version_from_str("1999-01-01");
+        let err = unsupported_protocol_version_error(&v);
+        assert!(err.data.is_some(), "data field must be present");
     }
 }

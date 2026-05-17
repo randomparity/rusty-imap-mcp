@@ -3,6 +3,7 @@
 //! Custom error codes in the JSON-RPC "server error" range
 //! (-32000 to -32099):
 //! - -32001: posture denied
+//! - -32002: server not initialized (pre-initialize request)
 //! - -32003: rate limited
 //! - -32004: circuit breaker open
 //! - -32005: attachment too large
@@ -21,6 +22,12 @@ pub const CIRCUIT_OPEN: McpCode = McpCode(-32004);
 
 /// Attachment exceeded size cap.
 pub const ATTACHMENT_TOO_LARGE: McpCode = McpCode(-32005);
+
+/// Server has not yet received the MCP `initialize` request. The first
+/// message a client sends MUST be `initialize` (or `ping`). Any other
+/// pre-initialize request is rejected with this code and a clean
+/// session shutdown.
+pub const NOT_INITIALIZED: McpCode = McpCode(-32002);
 
 /// Convert a `RimapError` into an rmcp `ErrorData`.
 ///
@@ -109,6 +116,11 @@ mod tests {
         let err = authz_error(ErrorCode::RateLimited, "slow down");
         let mcp = to_mcp_error(&err);
         assert!(mcp.message.contains("slow down"));
+    }
+
+    #[test]
+    fn not_initialized_code_value() {
+        assert_eq!(super::NOT_INITIALIZED, McpCode(-32002));
     }
 
     #[test]
