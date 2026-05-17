@@ -317,8 +317,6 @@ proptest! {
     ))]
 
     #[test]
-    #[ignore = "blocked on #277: server hangs on unknown-method envelopes missing \
-                jsonrpc/id fields; re-enable once rmcp responds or closes cleanly"]
     fn prop_envelope_never_panics(envelope in arb_envelope()) {
         runtime().block_on(async move {
             let mut harness = HARNESS.lock().expect("HARNESS lock").take();
