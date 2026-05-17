@@ -123,13 +123,24 @@ pub(crate) fn is_well_formed_error(v: &Value) -> bool {
 }
 
 /// Read the top-level `id` field for echo on a rejection envelope.
-/// Returns `Value::Null` if `id` is missing or of a disallowed type;
-/// otherwise echoes the original value verbatim. JSON-RPC §5 says
-/// the id on a synthesized error response MUST be null when the
-/// original could not be detected.
+/// Returns `Value::Null` if `id` is missing, present-but-null, or of a
+/// disallowed type; otherwise echoes the original value verbatim.
+/// JSON-RPC §5 says the id on a synthesized error response MUST be
+/// null when the original could not be detected.
+///
+/// **`is_forwardable_id` symmetry.** Only id shapes that would have
+/// been forwardable (string OR i64-representable number) are echoed.
+/// Fractional numbers, oversized numbers, arrays, objects, and
+/// booleans fall through to `Null`. This matches MCP's `RequestId =
+/// integer | string` schema, which the synthesized error envelope
+/// must satisfy. Cargo-fuzz oracle (#266) caught `{".sonrpc":"2.0",
+/// "id":2.5}`: typo'd `jsonrpc` reaches `extract_id` before the
+/// id-validity branch, the lax echo emitted `id: 2.5`, and the MCP
+/// schema rejected the resulting envelope ("2.5 is not of types
+/// integer, string").
 pub(crate) fn extract_id(obj: &serde_json::Map<String, Value>) -> Value {
     match obj.get("id") {
-        Some(v) if v.is_string() || v.is_number() || v.is_null() => v.clone(),
+        Some(v) if is_forwardable_id(v) => v.clone(),
         _ => Value::Null,
     }
 }
@@ -556,6 +567,23 @@ mod tests {
         assert_eq!(
             validate(r#"{"jsonrpc":"1.0","method":"x","id":1}"#),
             reject(-32600, json!(1))
+        );
+    }
+
+    #[test]
+    fn typoed_jsonrpc_with_fractional_id_does_not_echo_id() {
+        // Cargo-fuzz oracle (#266) caught this seed input. The
+        // typo'd `.sonrpc` key fails the `jsonrpc == "2.0"` check,
+        // so we route to `extract_id` BEFORE the id-validity branch.
+        // The lax `extract_id` previously echoed `id: 2.5` into the
+        // synthesized envelope, which then failed MCP's `RequestId =
+        // integer | string` schema. `extract_id` is now symmetric
+        // with `is_forwardable_id` so fractional numbers fall
+        // through to Null (and `synthesize_error_line` omits the
+        // id field on Null).
+        assert_eq!(
+            validate(r#"{".sonrpc":"2.0","id":2.5}"#),
+            reject(-32600, Value::Null)
         );
     }
 
