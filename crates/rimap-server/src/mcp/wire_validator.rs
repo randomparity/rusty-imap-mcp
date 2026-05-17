@@ -89,12 +89,11 @@ pub(crate) fn is_forwardable_id(v: &Value) -> bool {
 }
 
 /// `params` accepted on JSON-RPC requests and notifications. JSON-RPC §4
-/// requires a Structured value (Array or Object) when present; we also
-/// accept Null because some clients send it as "no parameters" and rmcp
-/// tolerates it. Number, String, and Boolean shapes get dropped silently
-/// by rmcp's codec and cause the server to appear hung — found via
-/// `prop_envelope_never_panics` on
-/// `{"id":0,"jsonrpc":"2.0","method":"tools/list","params":0}`.
+/// requires a Structured value (Array or Object) when present; Null is
+/// also accepted because rmcp tolerates it as "no parameters" and
+/// rejecting it would over-strict legitimate clients. Number, String,
+/// and Boolean shapes are silently dropped by rmcp's codec and cause
+/// the server to appear hung.
 pub(crate) fn is_valid_params(v: &Value) -> bool {
     v.is_object() || v.is_array() || v.is_null()
 }
@@ -282,11 +281,10 @@ where
             _ => trimmed,
         };
 
-        // Non-UTF-8 bytes never reach rmcp. Synthesize -32700 and
-        // continue reading the next line. JSON-RPC §4.2 / §5.1. A
-        // lossy-decode-then-validate path would let invalid bytes
-        // inside a syntactically valid JSON string slip through to
-        // rmcp (Codex review 2026-05-16).
+        // Non-UTF-8 bytes never reach rmcp. A lossy-decode-then-validate
+        // path would let invalid bytes inside a syntactically valid JSON
+        // string slip through (U+FFFD makes the string parseable), so
+        // the strict check happens before any parsing. JSON-RPC §4.2 / §5.1.
         let Ok(line_for_validation) = std::str::from_utf8(trimmed) else {
             let line = synthesize_error_line(&parse_error());
             let mut sout = stdout.lock().await;
@@ -696,10 +694,8 @@ mod tests {
 
     #[test]
     fn params_as_number_rejects() {
-        // Regression for the prop_envelope_never_panics shrunk case
-        // `{"id":0,"jsonrpc":"2.0","method":"tools/list","params":0}`:
-        // rmcp's codec silently drops non-structured params and the
-        // server appears to hang.
+        // rmcp's codec silently drops non-structured params, making the
+        // server appear to hang; the validator rejects before forwarding.
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","method":"tools/list","id":0,"params":0}"#),
             reject(-32600, json!(0))
@@ -743,8 +739,7 @@ mod tests {
     #[test]
     fn notification_with_bad_params_rejects() {
         // §4.1 notifications get the same params shape constraint as
-        // requests. Notifications have no id, so the rejection echoes
-        // null (no id to echo).
+        // requests.
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","method":"notifications/x","params":0}"#),
             reject(-32600, Value::Null)
@@ -865,11 +860,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_inbound_non_utf8_returns_parse_error() {
-        // Pass invalid UTF-8 bytes (\xFF is not valid UTF-8) followed
-        // by EOF. The strict `std::str::from_utf8` check returns Err
-        // first, so serde_json never sees the input — validator emits
-        // -32700 to stdout (not observable from the test) AND does not
-        // forward to rmcp.
+        // Bare non-UTF-8 bytes: the rejection goes to stdout (not
+        // observable from this test) and nothing reaches rmcp.
         let stdin = std::io::Cursor::new(vec![0xFF, 0xFE, b'\n']);
         let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
         let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
@@ -892,10 +884,10 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_utf8_inside_valid_json_string_returns_parse_error() {
-        // Lossy-decode would have produced parseable JSON (U+FFFD inside
-        // the string literal), so the pre-fix forwarding path would have
-        // shipped the raw \xFF byte to rmcp. The strict from_utf8 check
-        // catches it first. Codex review finding #2 (2026-05-16).
+        // Bad UTF-8 inside an otherwise-parseable JSON string literal:
+        // lossy decoding would replace the byte with U+FFFD and pass
+        // validation, leaving the raw byte to reach rmcp. The strict
+        // check rejects before parsing.
         let mut line: Vec<u8> = br#"{"jsonrpc":"2.0","id":1,"method":"x","params":{"k":""#.to_vec();
         line.push(0xFF);
         line.extend_from_slice(br#""}}"#);
