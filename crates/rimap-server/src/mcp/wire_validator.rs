@@ -76,10 +76,16 @@ pub struct ValidatorSupervisor {
 // Pure validator (no I/O — unit-testable in isolation).
 // ============================================================
 
-/// `id` accepted by rmcp's `RxJsonRpcMessage`. Null is excluded
-/// because rmcp 1.5's `RequestId = NumberOrString` rejects null.
+/// `id` accepted by rmcp's `RxJsonRpcMessage`. rmcp 1.5's
+/// `RequestId = NumberOrString` rejects null; strings are unrestricted;
+/// numbers must be i64-representable (rejects fractional values and
+/// numbers outside i64 range — `serde_json` parses very large ints as
+/// f64 which `as_i64` also rejects).
 pub(crate) fn is_forwardable_id(v: &Value) -> bool {
-    v.is_string() || v.is_number()
+    if v.is_string() {
+        return true;
+    }
+    v.as_i64().is_some()
 }
 
 /// `error` body matches JSON-RPC §5.1: an object with numeric
@@ -581,6 +587,24 @@ mod tests {
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","method":42,"id":1}"#),
             reject(-32600, json!(1))
+        );
+    }
+
+    #[test]
+    fn fractional_id_rejects() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":1.5}"#),
+            reject(-32600, Value::Null)
+        );
+    }
+
+    #[test]
+    fn out_of_i64_range_id_rejects() {
+        // serde_json may parse very large integers as f64; either way
+        // as_i64() returns None and we reject.
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":9223372036854775808}"#),
+            reject(-32600, Value::Null)
         );
     }
 
