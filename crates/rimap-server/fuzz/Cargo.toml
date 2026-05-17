@@ -1,0 +1,35 @@
+[package]
+# `cargo fuzz init` (0.13.x) infers the package name from the first
+# listed path-dependency in the parent's Cargo.toml, NOT the parent
+# crate's own name. Run from `crates/rimap-server`, it produces
+# `rimap-core-fuzz`; this is hand-corrected to `rimap-server-fuzz`.
+# Do not regenerate without re-applying this rename.
+name = "rimap-server-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rimap-server]
+path = ".."
+features = ["fuzzing"]
+
+# Required: the root workspace's `exclude = ["fuzz"]` is a bare
+# path that only matches `./fuzz/`, not this nested location, so
+# without an explicit inner workspace cargo walks upward and
+# re-attaches this crate to the root — which then fails because the
+# root's feature unification doesn't know about `fuzzing`.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "validate"
+path = "fuzz_targets/validate.rs"
+test = false
+doc = false
+bench = false
