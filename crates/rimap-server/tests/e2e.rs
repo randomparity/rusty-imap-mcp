@@ -1,8 +1,8 @@
 //! Dovecot e2e smoke test: exercises the full MCP tool chain against
 //! a real Dovecot IMAP server running in a container.
 //!
-//! Skips silently when no container runtime is available or the host
-//! architecture is not `x86_64` (dovecot image is amd64-only).
+//! Skips silently when no container runtime is available. Set
+//! `RIMAP_REQUIRE_DOCKER=1` to fail loudly instead.
 //!
 //! # Scope and structure
 //!

@@ -66,27 +66,19 @@ there, not in ad-hoc scripts.
 
 ### Container runtime for integration tests
 
-The rimap-imap Dovecot integration harness autodetects `docker` first, then
-falls back to `podman` (via `podman compose` / `podman-compose`). Both
-runtimes work on macOS, Ubuntu CI, and Fedora. Override with
-`RIMAP_CONTAINER_TOOL=docker` or `RIMAP_CONTAINER_TOOL=podman` if you need
-to force a specific one. Set `RIMAP_REQUIRE_DOCKER=1` to fail loudly
-instead of silently skipping when no runtime is installed (the env var
-name is historical — it gates both docker and podman).
+The Dovecot integration harness autodetects `docker` first, then falls
+back to `podman` (via `podman compose` / `podman-compose`). Both
+runtimes work on macOS (Apple Silicon and Intel), Ubuntu CI, and Fedora.
+Override with `RIMAP_CONTAINER_TOOL=docker` or
+`RIMAP_CONTAINER_TOOL=podman` if you need to force a specific one. Set
+`RIMAP_REQUIRE_DOCKER=1` to fail loudly instead of silently skipping
+when no runtime is installed.
 
-**Apple Silicon (arm64 macOS):** Docker Desktop *can* run x86_64 images via
-Rosetta emulation in general, **but the pinned `dovecot/dovecot:2.3.21`
-image fails under Rosetta** — the container starts and the IMAPS port
-binds, but dovecot's child processes (`anvil`, `log`, `auth`) die with
-`rosetta error: unable to mmap ExecutableHeap: 12` (ENOMEM emulating an
-executable heap) and `userdb lookup ... Disconnected unexpectedly`. The
-`dovecot/dovecot:2.4.x` line is multi-arch but has breaking config-format
-changes deferred out of scope (see commit `ae1bf8b` and
-`crates/rimap-imap/tests/integration/dovecot/docker-compose.yml`). For
-that reason the harness `std::env::consts::ARCH != "x86_64"` check in
-`crates/rimap-server/tests/support/dovecot/harness.rs` silently skips on
-arm64 hosts — the gate exists for this specific fixture incompatibility,
-not as a blanket assumption about Docker emulation.
+The fixture image is `docker.io/dovecot/dovecot:2.4.4-root` (rootful
+flavor, multi-arch `linux/amd64` + `linux/arm64`). It listens on
+container ports 143 (IMAP+STARTTLS) and 993 (IMAPS); the Rust harness
+maps host ports dynamically. There is no arch gate — every supported
+developer host can run the suite.
 
 ### Wire-driven Dovecot e2e (Phase 3, #265)
 
@@ -98,17 +90,14 @@ schemas + per-tool schemas under
 `crates/rimap-server/tests/fixtures/rimap-tool-schemas/`, and asserts
 audit-log pairing + namespace attribution.
 
-- Wall time: silent-skip path is sub-second (measured locally at ~0.019s
-  on macOS arm64 without Docker); with Docker on linux/x86_64 expected
-  ~10–25s on a warm machine (Dovecot bring-up dominates). Recorded in
-  CI logs.
+- Wall time: silent-skip path is sub-second when no container runtime
+  is available; with Docker on either linux/amd64 or macOS arm64,
+  expect ~10–60s on a warm machine (Dovecot bring-up dominates).
 - Gating: silent-skip ONLY when the host genuinely cannot run the
-  fixture — missing docker/podman, or an arm64 host where dovecot
-  2.3.21 amd64 crashes under Rosetta (see the Apple Silicon note
-  above). `RIMAP_REQUIRE_DOCKER=1` flips every other failure mode
-  (compose-up, readiness timeout, port reservation, fingerprint read)
-  to a panic with diagnostic context. Same convention as the legacy
-  in-process `e2e_full_session`.
+  fixture — missing docker/podman. `RIMAP_REQUIRE_DOCKER=1` flips
+  every failure mode (compose-up, readiness timeout, port reservation,
+  fingerprint read) to a panic with diagnostic context. Same
+  convention as the legacy in-process `e2e_full_session`.
 - Schema regen: when changing any `<Tool>Meta` or `<Tool>Untrusted`
   struct in `crates/rimap-server/src/tools/`, run
   `just regen-tool-schemas` and commit the diff. CI fails on a

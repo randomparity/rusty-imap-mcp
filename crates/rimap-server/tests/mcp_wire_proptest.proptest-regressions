@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e6e6f11c123dd9d50f094d49679036594530158355116c207c4d7c383115bf4b # shrinks to envelope = Object {"id": Number(0), "jsonrpc": String("2.0"), "method": String("tools/list"), "params": Number(0)}
+cc bcb9e70682863c34c8b32fada7bce9c0f1f8d3f6027bc3664a72860ac71674ac # issue #277 shrunk to {"method":"a"} — server hung on unknown-method envelopes missing jsonrpc/id

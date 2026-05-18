@@ -330,9 +330,11 @@ mod tests {
 
         let contents = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<_> = contents.lines().collect();
-        assert!(
-            lines.len() >= 2,
-            "expected >= 2 records (tool_start + cancellation tool_end), got: {contents}",
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected exactly 2 records (tool_start + cancellation tool_end), got {} records:\n{contents}",
+            lines.len(),
         );
         let last = lines.last().unwrap();
         assert!(
@@ -346,6 +348,101 @@ mod tests {
         assert!(
             last.contains(&format!(r#""start_seq":{start_seq}"#)),
             "last record should reference primed tool_start seq {start_seq}: {last}",
+        );
+    }
+
+    /// Wrapper-level test: drive `run_with_audit_envelope` end-to-end with a
+    /// body future that never completes, then abort the outer task. The
+    /// abort drops the wrapper future between `emit_tool_start` and the
+    /// normal `emit_tool_end`, so the only `tool_end` written must come
+    /// from `AuditEnvelopeGuard::drop`. Expectation: exactly two records
+    /// — one `tool_start` and one `tool_end {status: cancelled}` — in
+    /// order. This catches regressions where guard construction is
+    /// reordered relative to `tool_start` emission or where the disarm
+    /// call is moved/removed on the normal path. The guard-level tests
+    /// above would not catch those (they construct `AuditEnvelopeGuard`
+    /// directly). Codex review finding #4.
+    ///
+    /// `spawn` + `abort` is used (rather than `pin!` + `timeout` + drop)
+    /// to match the proven cancellation pattern from
+    /// `tests/dispatch_ticket.rs::drop_during_body_enqueues_cancellation_tool_end`.
+    /// The multi-thread flavor lets the aborted task and the drainer
+    /// task make progress concurrently with the test driver.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_run_with_audit_envelope_emits_exactly_one_cancellation() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use rimap_core::tool::ToolName;
+
+        use crate::mcp::dispatch::PostureContext;
+        use crate::mcp::server::ImapMcpServer;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let writer = test_writer(path.clone());
+
+        let (tx, rx) = cancellation_channel();
+        let drainer = spawn_drainer(rx, writer.clone());
+
+        let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx.clone()));
+
+        // Spawn `run_with_audit_envelope` with a body that pends forever.
+        // After `emit_tool_start` has had time to fire, `abort()` the
+        // task; the wrapper future is dropped between `tool_start` and
+        // `emit_tool_end`, exercising the guard's `Drop` path.
+        let server_clone = Arc::clone(&server);
+        let task = tokio::spawn(async move {
+            let args = serde_json::Map::new();
+            server_clone
+                .run_with_audit_envelope(
+                    ToolName::ListAccounts,
+                    None,
+                    PostureContext::Infrastructure,
+                    &args,
+                    |_ticket| {
+                        std::future::pending::<Result<serde_json::Value, rimap_core::RimapError>>()
+                    },
+                )
+                .await
+        });
+
+        // Give the envelope time to emit `tool_start` and enter the
+        // body's pending await before aborting. 50ms matches the
+        // headroom used by `dispatch_ticket::drop_during_body_*`.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
+        let _ = task.await; // wait for the abort to settle
+
+        // Give the drainer time to flush the queued cancellation record.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Drop the last sender so the drainer task can exit.
+        drop(tx);
+        drop(server);
+        drainer.await.unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected exactly 2 records (tool_start + cancellation tool_end), got {} records:\n{contents}",
+            lines.len(),
+        );
+        assert!(
+            lines[0].contains(r#""tool_start""#),
+            "first record must be tool_start: {}",
+            lines[0],
+        );
+        assert!(
+            lines[1].contains(r#""status":"cancelled""#),
+            "second record must be cancellation tool_end: {}",
+            lines[1],
+        );
+        assert!(
+            lines[1].contains(r#""error_code":"ERR_CANCELLED""#),
+            "second record must carry ERR_CANCELLED: {}",
+            lines[1],
         );
     }
 
