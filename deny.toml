@@ -92,16 +92,30 @@ skip = [
     #   - 0.2 via `ring 0.17` (rustls transitive). `ring` pins getrandom 0.2
     #     and has no 0.3-compatible release as of this writing. Replacing
     #     `ring`/`rustls` is out of scope.
-    #   - 0.3 via `rand 0.9` (our direct dep, also proptest transitive).
-    #     This is the version the workspace consolidates on.
-    #   - 0.4 via `tempfile 3.x` (dev-dep; also proptest/insta transitive).
-    #     `tempfile` follows the `rustix` ecosystem release cadence and
-    #     currently pins getrandom 0.4.
+    #   - 0.3 via `rand 0.9` (governor + proptest transitive — see the
+    #     `rand`/`rand_core` skips below).
+    #   - 0.4 via `rand 0.10` (our direct dep, replacing `rand_chacha` with
+    #     RustCrypto `chacha20`) and `tempfile 3.x` (dev-dep; also
+    #     proptest/insta transitive).
     # None of these can be unified without forking. Revisit when `ring`
     # publishes a release using getrandom >= 0.3.
     { name = "getrandom", version = "0.2" },
     { name = "getrandom", version = "0.3" },
     { name = "getrandom", version = "0.4" },
+
+    # `rand 0.9` and `rand_core 0.9` are pulled in by three upstream
+    # crates that pin `rand = "0.9"` at a caret range excluding 0.10:
+    #   - `governor 0.10.4` (regular dep via the `jitter` feature, used
+    #     by `rimap-authz`).
+    #   - `ulid 1.2.1` (regular dep via the default `std` feature, used
+    #     by `rimap-audit` for ULID generation).
+    #   - `proptest 1.11.0` (dev-dep across multiple crates).
+    # All three are at their latest crates.io release. The workspace
+    # itself uses `rand 0.10` for `RedactionSalt` in `rimap-audit`.
+    # Forking governor, ulid, or proptest is out of scope. Revisit when
+    # all three upstreams publish `rand 0.10`–compatible releases.
+    { name = "rand", version = "0.9" },
+    { name = "rand_core", version = "0.9" },
 
     # `hashbrown` 0.16 enters via `governor 0.10` (latest), while 0.17
     # comes in via `indexmap 2.14` (transitive of `toml`/`mail-parser`).
