@@ -103,21 +103,17 @@ fn kind_of(payload: &Payload) -> &'static str {
 /// Parse a single JSONL line into an [`AuditRecord`].
 ///
 /// Thin wrapper around `serde_json::from_slice` that maps any decode
-/// failure to [`AuditError::Read`] with `line: None` (callers track line
-/// numbers when they have them — `parse_line` itself does not). Empty
-/// input is treated as malformed and returns `Err`; callers that want
-/// the trailing-empty-line tolerance enforced by `stream_records` should
-/// use that function instead.
+/// failure to [`AuditError::Parse`]. Callers that have file path / line
+/// context (like `stream_records`) rewrap the error as
+/// [`AuditError::Read`] before propagating. Empty input is treated as
+/// malformed and returns `Err`; callers that want the trailing-empty-line
+/// tolerance enforced by `stream_records` should use that function instead.
 ///
 /// # Errors
-/// [`AuditError::Read`] when the bytes do not deserialize to a valid
+/// [`AuditError::Parse`] when the bytes do not deserialize to a valid
 /// [`AuditRecord`].
 pub fn parse_line(raw: &[u8]) -> Result<AuditRecord, AuditError> {
-    serde_json::from_slice::<AuditRecord>(raw).map_err(|err| AuditError::Read {
-        path: std::path::PathBuf::new(),
-        line: None,
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
-    })
+    serde_json::from_slice::<AuditRecord>(raw).map_err(AuditError::Parse)
 }
 
 /// Open the audit file with a shared lock.
@@ -231,7 +227,7 @@ where
             }
             Ok(())
         }
-        Err(AuditError::Read { source, .. }) if is_trailing => {
+        Err(AuditError::Parse(source)) if is_trailing => {
             tracing::warn!(
                 path = %path.display(),
                 line = line_no,
@@ -240,10 +236,10 @@ where
             );
             Ok(())
         }
-        Err(AuditError::Read { source, .. }) => Err(AuditError::Read {
+        Err(AuditError::Parse(source)) => Err(AuditError::Read {
             path: path.to_path_buf(),
             line: Some(line_no),
-            source,
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
         }),
         Err(other) => Err(other),
     }
@@ -479,15 +475,37 @@ mod tests {
     #[test]
     #[expect(clippy::expect_used, reason = "tests use expect for assertions")]
     #[expect(clippy::panic, reason = "tests assert variant shapes via panic")]
-    fn parse_line_returns_invalid_data_on_malformed_json() {
+    fn parse_line_returns_parse_variant_on_malformed_json() {
         let err = super::parse_line(b"{not json").expect_err("malformed JSON must error");
         match err {
-            crate::AuditError::Read { line, source, .. } => {
-                assert!(line.is_none(), "parse_line has no line context");
-                assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+            crate::AuditError::Parse(source) => {
+                assert_eq!(source.classify(), serde_json::error::Category::Syntax);
             }
             other => panic!("unexpected error kind: {other:?}"),
         }
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "tests use expect for assertions")]
+    fn parse_line_display_is_human_readable_without_empty_backticks() {
+        // Regression test for issue #255: the previous implementation reused
+        // `AuditError::Read` with an empty `PathBuf`, rendering the message
+        // as ``failed to read audit file `` `` ... ``. The `Parse` variant
+        // must produce a clean, path-less message.
+        let err = super::parse_line(b"{not json").expect_err("malformed JSON must error");
+        let display = err.to_string();
+        assert!(
+            display.starts_with("failed to parse audit record:"),
+            "Display must lead with the parse-failure framing; got: {display}",
+        );
+        assert!(
+            !display.contains("``"),
+            "Display must not contain empty backticks; got: {display}",
+        );
+        assert!(
+            !display.contains("audit file"),
+            "path-less parse failure must not claim a file path; got: {display}",
+        );
     }
 
     #[test]

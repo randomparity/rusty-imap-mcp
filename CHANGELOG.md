@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boots in infrastructure-only mode (only `list_accounts` /
   `use_account` are functionally useful). Unblocks the wire-conformance
   harness. Removes `ConfigError::NoAccounts`.
+- `rimap_audit::reader::parse_line` now returns
+  `AuditError::Parse(serde_json::Error)` instead of `AuditError::Read`
+  with an empty path and a synthesized `io::Error`. The previous
+  Display rendered with empty backticks (``failed to read audit file
+  `` `` ``); the new variant renders as `failed to parse audit
+  record: ...`. The `Read` variant remains in use for `stream_records`,
+  which still has the real path and line number. `AuditError` is
+  `#[non_exhaustive]` so adding the variant is source-compatible for
+  downstream wildcard matches. Issue #255.
 
 ### Fixed
 
