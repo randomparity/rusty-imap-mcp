@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use rand::{RngCore, rng};
+use rand::{Rng, rng};
 use rimap_core::tool::ToolName;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};

@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which still has the real path and line number. `AuditError` is
   `#[non_exhaustive]` so adding the variant is source-compatible for
   downstream wildcard matches. Issue #255.
+- Bumped workspace `rand` from `0.9` to `0.10`. `rand 0.10` renames
+  the core trait `RngCore` → `Rng`; the only direct caller is
+  `rimap-audit`'s `RedactionSalt::new_random` (`crates/rimap-audit/src/redact/mod.rs:18`).
+  `governor 0.10`, `ulid 1.2`, and `proptest 1.11` still pin
+  `rand = "0.9"` at their latest releases, so `deny.toml` carries a
+  time-boxed `bans.skip` entry for `rand 0.9` / `rand_core 0.9` until
+  those upstreams publish `rand 0.10`–compatible versions. Issue #256.
 
 ### Fixed
 
