@@ -41,6 +41,12 @@ pub enum AuditError {
     /// A record could not be serialized to JSON.
     #[error("failed to serialize audit record: {0}")]
     Serialize(#[source] serde_json::Error),
+    /// A record could not be deserialized from JSON when no file path /
+    /// line number is available (e.g. `parse_line` called by an external
+    /// consumer or a fuzz harness). `stream_records` rewraps these as
+    /// [`AuditError::Read`] with the real path and line.
+    #[error("failed to parse audit record: {0}")]
+    Parse(#[source] serde_json::Error),
     /// A record could not be written to disk.
     #[error("failed to write audit record to `{path}`: {source}")]
     Write {
@@ -97,6 +103,7 @@ impl AuditError {
         match self {
             Self::Open { .. } | Self::ParentDir { .. } | Self::Locked { .. } => ErrorCode::Config,
             Self::Serialize(_)
+            | Self::Parse(_)
             | Self::Write { .. }
             | Self::Fsync { .. }
             | Self::Rotate { .. }
@@ -146,6 +153,18 @@ mod tests {
             path: PathBuf::from("/tmp/a.jsonl"),
             source: std::io::Error::from(std::io::ErrorKind::BrokenPipe),
         };
+        assert_eq!(err.code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn parse_variant_maps_to_internal() {
+        // Pin the `Parse` variant in the runtime/Internal bucket alongside
+        // its peers (`Serialize`, `Read`, ...). A future mutation that moves
+        // `Parse` into the Config arm would silently misclassify deserialize
+        // failures from `parse_line`.
+        let serde_err = serde_json::from_slice::<serde_json::Value>(b"{not json")
+            .expect_err("malformed JSON must error");
+        let err = AuditError::Parse(serde_err);
         assert_eq!(err.code(), ErrorCode::Internal);
     }
 
