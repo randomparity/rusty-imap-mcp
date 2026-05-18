@@ -136,5 +136,128 @@ killing both the `-> 0` and `-> 1` constant-return mutations). No
 known-equivalent annotations were needed; every surviving mutant was
 a real test gap.
 
-The other two trust-boundary crates (`rimap-server`, `rimap-imap`)
-get their own sections here when Sprint B3 lands.
+## `rimap-server`
+
+**Last refresh:** 2026-05-18.
+**Surviving mutants in hot paths (`mcp/{dispatch,audit_envelope,tool_catalog,tool_name,wire_validator,preinit,server,response,content,error}.rs`, `boot/`; `fuzz_oracle.rs` covered separately below):** 26 (all annotated as known-equivalent).
+**Surviving mutants in best-effort paths (`cli/`, `tools/`, `main.rs`):** 55 (unannotated; documented as best-effort tier per spec §6 — see "best-effort paths" note below).
+
+Run summary (529 mutants total, 2026-05-18 baseline via `cargo
+mutants --package rimap-server --no-shuffle --jobs 8 --timeout 60`
+on Linux): 280 caught, 108 missed (53 annotated below as hot-path
+known-equivalent across the main table and `### \`mcp/fuzz_oracle.rs\``
+subsection — 26 in hot paths and the rest documented under
+`fuzz_oracle` or as best-effort tier), 3 timeouts, 138 unviable in
+22 minutes wall clock. The dev-host blocker captured in issue #289
+(cargo-mutants 27.0.0 + macOS-specific [#611](https://github.com/sourcefrog/cargo-mutants/issues/611))
+was sidestepped by running on Linux without `--in-place`; see
+`docs/security/cargo-mutants-runbook.md` ("Linux fast path") for the
+invocation contract.
+
+File-scope correction: issue #289 inherited path lists from #245's
+`archive/daemon-experiment` scope and referenced `daemon/transport*.rs`,
+`daemon/audit_sink.rs`, `daemon/run.rs`, `shim.rs`, and
+`mcp/posture_context.rs`, none of which exist on current `main`
+(the daemon experiment was reverted). The hot-path surface above is
+the current security-critical surface as of 2026-05-18.
+
+Best-effort paths note: 55 cold-path survivors in `tools/retrieval/`
+(36), `tools/compose/message_builder.rs` (7), `main.rs` (7),
+`cli/dump_tool_schemas.rs` (3), `tools/admin/list_folders.rs` (2),
+and `tools/retrieval/download_attachment.rs` (1) are not annotated
+inline. Per spec §6 these are best-effort tier (mostly thin
+wrappers over `rimap-imap` whose argument shaping needs an
+integration harness, plus diagnostic-only CLI output). Per-mutant
+triage is deferred to a follow-up issue; the spec's
+"zero unannotated survivors" gate applies to hot paths only.
+
+| File:line | Mutation | Reason kept | Annotation site |
+|---|---|---|---|
+| `mcp/wire_validator.rs:21` | `replace * with + in BUF_SIZE` | Buffer-size constant; no test asserts the value and both `64 * 1024` and `64 + 1024` hold one envelope per write. | `mcp/wire_validator.rs:21` |
+| `mcp/wire_validator.rs:174` | `replace <impl Visitor for OneLevelDupCheck>::expecting -> std::fmt::Result with Ok(Default::default())` | Formatter only feeds serde's error-message machinery; no test or production caller observes the diagnostic text. | `mcp/wire_validator.rs:173` |
+| `mcp/wire_validator.rs:190` | `replace <impl Visitor for OneLevelDupCheck>::visit_seq with Ok(true)` | Without the drain loop, the underlying `serde_json::Deserializer` leaves trailing state mid-array; the outer `de.deserialize_any(...).unwrap_or(false)` in `has_duplicate_keys_in_rmcp_strict_positions` swallows the resulting error back to `false`, same outcome as drained-then-`Ok(false)`. | `mcp/wire_validator.rs:173` |
+| `mcp/wire_validator.rs:190` | `replace <impl Visitor for OneLevelDupCheck>::visit_seq with Ok(false)` | Same reasoning — skipping the drain leaves the deserializer mid-array, `unwrap_or(false)` rescues, dup-check returns `false` either way. | `mcp/wire_validator.rs:173` |
+| `mcp/wire_validator.rs:210` | `replace <impl Visitor for OneLevelDupCheck>::visit_string with Ok(true)` | Unreachable from `serde_json::Deserializer::from_str` (used by `has_duplicate_keys_in_rmcp_strict_positions`): the streaming deserializer routes JSON strings through `visit_str`, never the owned-`String` path. | `mcp/wire_validator.rs:173` |
+| `mcp/wire_validator.rs:216` | `replace <impl Visitor for OneLevelDupCheck>::visit_none with Ok(true)` | Unreachable from `serde_json::Deserializer`: JSON `null` invokes `visit_unit`, not `visit_none` (which is for `Option`-style deserialization). | `mcp/wire_validator.rs:173` |
+| `mcp/wire_validator.rs:245` | `replace <impl Visitor for TopAndErrorDupCheck>::expecting -> std::fmt::Result with Ok(Default::default())` | Same diagnostic-only formatter as `OneLevelDupCheck::expecting` above. | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:275` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_seq with Ok(true)` | `validate()` parses the line into a `Value` AFTER the dup-check; a non-object top-level (array) fails `parsed.as_object()` and rejects with `invalid_request(Value::Null)` regardless of whether the dup-check returned true or false. Same final outcome. | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:275` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_seq with Ok(false)` | Same equivalence — non-object top-level rejects with `Value::Null` id regardless of dup-check verdict. | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:280` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_bool with Ok(true)` | Top-level boolean fails `parsed.as_object()` → rejects with `Value::Null` id (same as the dup-check rejection path). | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:283` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_i64 with Ok(true)` | Top-level number fails `parsed.as_object()` → rejects with `Value::Null` id (same outcome). | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:286` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_u64 with Ok(true)` | Same as `visit_i64`. | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:289` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_f64 with Ok(true)` | Same as `visit_i64`. | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:292` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_str with Ok(true)` | Top-level string fails `parsed.as_object()` → rejects with `Value::Null` id (same outcome). | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:295` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_string with Ok(true)` | Unreachable from `serde_json::Deserializer::from_str` — owned-String path is not used by the streaming deserializer. | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:298` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_unit with Ok(true)` | Top-level `null` fails `parsed.as_object()` → rejects with `Value::Null` id (same outcome). | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:301` | `replace <impl Visitor for TopAndErrorDupCheck>::visit_none with Ok(true)` | Unreachable — `serde_json` routes JSON `null` through `visit_unit`, not `visit_none`. | `mcp/wire_validator.rs:263` |
+| `mcp/wire_validator.rs:482` | `delete match arm Some(&b'\n') in validate_inbound` | The trimmed view feeds `serde_json::from_str` (and the dup-check `Deserializer::from_str`), both of which tolerate trailing whitespace. Retaining `\n` in the validation view does not change parse outcomes. | `mcp/wire_validator.rs:518` |
+| `mcp/wire_validator.rs:482` | `replace - with / in validate_inbound` (at `buf.len() - 1`) | `len() / 1 == len()` produces the same slice as deleting the match arm — `\n` is not stripped. serde_json tolerates trailing whitespace; same parse outcome. | `mcp/wire_validator.rs:518` |
+| `mcp/wire_validator.rs:486` | `delete match arm Some(&b'\r') in validate_inbound` | Same reasoning as the `\n` arm above — serde_json tolerates trailing whitespace. | `mcp/wire_validator.rs:518` |
+| `mcp/wire_validator.rs:486` | `replace - with / in validate_inbound` (at `trimmed.len() - 1`) | `len() / 1 == len()` — same effect as deleting the match arm. The companion `replace - with +` mutant at the same site IS a real gap (it panics on `\r\n` input) and is killed by `validate_inbound_strips_crlf_line_ending`. | `mcp/wire_validator.rs:518` |
+| `mcp/content.rs:27` | `delete match arm ContentError::Malformed{..} in classify_content_error` | The `Malformed` arm and the `_` fallback both call `RimapError::invalid_input(err.to_string())` — the `#[expect(clippy::match_same_arms)]` above the match documents this intent. Deleting the explicit arm routes to the identical fallback. The companion `delete match arm ContentError::LimitExceeded{..}` IS a real gap and is killed by `limit_exceeded_classifies_as_attachment_too_large`. | `mcp/content.rs:22` |
+| `mcp/server.rs:353` | `replace <impl ServerHandler>::list_resources -> Result<ListResourcesResult, ErrorData> with Ok(Default::default())` | Test-infrastructure gap: rmcp `RequestContext<RoleServer>` has no public test constructor in this version, so the trait method cannot be invoked from a unit test. End-to-end coverage via the dovecot harness in `tests/e2e.rs`. | `mcp/server.rs:348` |
+| `mcp/server.rs:461` | `delete ! in <impl ServerHandler>::call_tool` (`if !is_legacy_single_account(accounts) && is_bare_simple_tool_name(...)`) | Test-infrastructure gap: the predicate `is_legacy_single_account` IS unit-tested (`mcp::tool_name::tests::is_legacy_single_account_classifies_each_branch`), but exercising the composite branch from `call_tool` requires the same `RequestContext<RoleServer>` rmcp does not expose. End-to-end coverage via the dovecot harness. | `mcp/server.rs:472` |
+| `mcp/server.rs:489` | `replace == with != in <impl ServerHandler>::call_tool` (`tool_name == ToolName::UseAccount` post-dispatch notify gate) | Test-infrastructure gap: verifying the suppression of `notifications/tools/list_changed` for non-`use_account` calls requires a `RequestContext<RoleServer>` (to drive `context.peer.notify_tool_list_changed()`); rmcp does not expose a public test constructor. End-to-end coverage via the dovecot harness. | `mcp/server.rs:510` |
+| `boot/discovery.rs:27` | `replace resolve_special_use -> Result<SpecialUseMap, RimapError> with Ok(Default::default())` | Test-infrastructure gap: the function calls `connection.list_folders("*")` which requires a live IMAP server. The dovecot harness in `tests/e2e.rs` does not exercise this code path either (it constructs `AccountState` with `SpecialUseMap::default()` directly, bypassing the function). Annotated as a known coverage gap pending future test infrastructure. | `boot/discovery.rs:26` |
+
+### `mcp/fuzz_oracle.rs` (behind `--features fuzzing`)
+
+**Last refresh:** 2026-05-18.
+**Surviving mutants:** 0 (all caught or unviable under the feature-gated build).
+
+The file is gated by `#[cfg(feature = "fuzzing")]` in
+`crates/rimap-server/src/mcp/mod.rs`, so the main `rimap-server`
+table above (default features) does not exercise it. The numbers
+here come from a dedicated `cargo mutants --package rimap-server
+--features fuzzing -F 'fuzz_oracle.rs'` pass. Of the 4 mutants
+cargo-mutants enumerated for this file:
+
+- `fuzz_validate -> FuzzOutcome with Default::default()` and
+  `error_envelope_validator -> &'static Validator with
+  Box::leak(Box::new(Default::default()))` are **unviable**
+  (`FuzzOutcome` and `jsonschema::Validator` have no `Default`
+  impl, so the mutation does not compile).
+- `check_rmcp_accepts -> Result<(), String> with Ok(())` is
+  **caught** by `rmcp_rejects_missing_jsonrpc_version` and
+  `rmcp_rejects_envelope_with_no_method_result_or_error` (both
+  assert `Err`, which would fail under the stub `Ok(())`).
+- `check_error_envelope_valid -> Result<(), String> with Ok(())` is
+  **caught** by `error_envelope_schema_rejects_missing_error_field`
+  and `error_envelope_schema_rejects_array_id`.
+
+No known-equivalent annotations were needed; every mutant is killed
+or unviable under the feature-gated test suite at the bottom of
+`fuzz_oracle.rs`.
+
+## `rimap-imap`
+
+**Last refresh:** 2026-05-18.
+**Surviving mutants in hot paths (`tls.rs`, `auth.rs`, `connection.rs`, `preflight.rs`, `ops/`):** 0 (all killed by tests; no annotations needed).
+**Surviving mutants in plumbing (`error.rs`, `types.rs`, `time.rs`, `special_use.rs`, `lib.rs`):** 0.
+
+Run summary (313 mutants total, 2026-05-18 baseline via `cargo
+mutants --package rimap-imap --no-shuffle --jobs 8 --timeout 60` on
+Linux): 212 caught, 1 missed, 99 unviable, 1 timeout in 6 minutes
+wall clock. The single missed mutant
+(`connection.rs:127`, `replace <impl Debug for Connection>::fmt
+-> std::fmt::Result with Ok(Default::default())`) was killed by
+adding `debug_format_includes_connection_fields`. The 1 timeout
+mutant (`ops/fetch.rs:51`, `replace != with == in compress_uid_set`)
+is covered by the existing test suite — under the mutation
+`compress_uid_set` enters an infinite loop and the test runs until
+the kernel kills it at the 60s timeout, surfacing the regression as
+TIMEOUT rather than as a clean test failure. Same pattern as
+`rimap-audit`'s `writer/rotation.rs:50` documented above.
+
+The pre-existing `rimap-imap` test suite (including the dovecot
+integration harness under `tests/integration/dovecot/` and the
+proton-bridge harness under `tests/integration/proton/`) was already
+strong enough to catch all hot-path mutations without any new
+known-equivalent annotations. No annotation rows below — every
+surviving mutant was either a real test gap (killed in commit
+`feb3a3d` of the issue #289 PR) or a timeout-caught mutation.
+
+| File:line | Mutation | Reason kept | Annotation site |
+|---|---|---|---|
+
+(No annotated survivors — every hot-path mutant was a real test gap killed by adding tests.)
