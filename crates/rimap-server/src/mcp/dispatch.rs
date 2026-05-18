@@ -311,6 +311,32 @@ mod tests {
     }
 
     #[test]
+    fn posture_context_round_trips_account_and_infrastructure() {
+        // `PostureContext::posture` must:
+        //   - return `Some(posture)` for the per-account variant
+        //     (the audit writer formats this onto the per-call record).
+        //   - return `None` for the infrastructure variant (the audit
+        //     writer renders `None` as the dedicated
+        //     "infrastructure" sentinel on disk).
+        //
+        // The two cargo-mutants survivors at line 73 (`replace ... ->
+        // Option<Posture> with None` and `... with Some(Default::default())`)
+        // would collapse one or both branches to the same wrong value.
+        use rimap_core::Posture;
+        use super::PostureContext;
+
+        assert_eq!(
+            PostureContext::Account(Posture::DraftSafe).posture(),
+            Some(Posture::DraftSafe),
+        );
+        assert_eq!(
+            PostureContext::Account(Posture::Readonly).posture(),
+            Some(Posture::Readonly),
+        );
+        assert_eq!(PostureContext::Infrastructure.posture(), None);
+    }
+
+    #[test]
     fn breaker_reason_ignores_user_errors() {
         use rimap_core::RimapError;
         assert_eq!(

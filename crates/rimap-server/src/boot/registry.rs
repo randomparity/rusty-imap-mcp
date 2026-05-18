@@ -286,6 +286,130 @@ mod tests {
     }
 
     #[test]
+    fn debug_format_includes_account_state_fields() {
+        // The manual `Debug` impl writes a non-trivial set of fields
+        // (id, smtp.is_some(), special_use_drafts/sent/trash). The
+        // stub-Ok(()) mutation at line 77 produces no output. Assert
+        // the struct name appears in the formatted string so that
+        // mutation is observable.
+        use crate::test_support::make_test_account_state;
+        let state = make_test_account_state("formatting-test-account");
+        let formatted = format!("{state:?}");
+        assert!(
+            formatted.contains("AccountState"),
+            "Debug must include struct name; got {formatted:?}",
+        );
+        assert!(
+            formatted.contains("formatting-test-account"),
+            "Debug must include account id; got {formatted:?}",
+        );
+    }
+
+    #[test]
+    fn check_infrastructure_rate_rejects_after_burst_exhaustion() {
+        // The limiter is configured for 5 req/sec sustained with a
+        // burst of 10. Hammering it in a tight loop must eventually
+        // trip the rate-limit; the cargo-mutants stub-Ok(()) mutation
+        // at line 125 would never reject.
+        let reg = AccountRegistry::new(BTreeMap::new());
+        let mut admitted = 0;
+        let mut rejected_with_rate_limited = false;
+        for _ in 0..50 {
+            match reg.check_infrastructure_rate() {
+                Ok(()) => admitted += 1,
+                Err(err) => {
+                    // First rejection: confirm it's the expected variant.
+                    assert!(
+                        matches!(err, RimapError::Authz { code, .. } if code == ErrorCode::RateLimited),
+                        "expected rate-limited Authz error, got {err:?}",
+                    );
+                    rejected_with_rate_limited = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            rejected_with_rate_limited,
+            "must reject within 50 burst calls; admitted={admitted}",
+        );
+    }
+
+    #[test]
+    fn account_name_strings_returns_populated_sorted_names() {
+        // The existing `account_name_strings_empty` test only covers
+        // the empty-registry case; the cargo-mutants `vec![]` stub at
+        // line 199 also returns empty, so the existing test does not
+        // distinguish. A populated registry kills the mutation.
+        use crate::test_support::make_test_account_state;
+        let alpha = make_test_account_state("alpha");
+        let beta = make_test_account_state("beta");
+        let mut accounts = BTreeMap::new();
+        accounts.insert(alpha.id.clone(), alpha);
+        accounts.insert(beta.id.clone(), beta);
+        let reg = AccountRegistry::new(accounts);
+
+        let names = reg.account_name_strings();
+        assert_eq!(
+            names,
+            vec!["alpha".to_string(), "beta".to_string()],
+            "account_name_strings must return all configured account ids in BTreeMap (sorted) order",
+        );
+    }
+
+    #[test]
+    fn build_account_connection_omits_account_field_for_default_name() {
+        // `ConnectionConfig.account` is `Some(name)` for non-default
+        // accounts and `None` for the legacy "default" sentinel. The
+        // cargo-mutants `replace == with !=` mutation at line 223
+        // would flip the assignment, breaking the audit-log
+        // "infrastructure vs per-account" rendering.
+        use rimap_config::model::{
+            ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig,
+        };
+        use rimap_config::validate::ValidatedAccountConfig;
+        use rimap_core::account::AccountId;
+        use rimap_core::posture::Posture;
+
+        let acfg = ValidatedAccountConfig {
+            id: AccountId::default_account(),
+            imap: ImapConfig {
+                host: "imap.example.com".into(),
+                port: 993,
+                username: "u@example.com".into(),
+                encryption: ImapEncryption::Tls,
+                tls_fingerprint_sha256: None,
+                connect_timeout_seconds: 10,
+                command_timeout_seconds: 30,
+            },
+            smtp: None,
+            security: SecurityConfig {
+                posture: Posture::DraftSafe,
+                ..SecurityConfig::default()
+            },
+            limits: LimitsConfig::default(),
+            tool_overrides: BTreeMap::new(),
+            tls_fingerprint: None,
+            fallback_mode: rimap_config::model::FallbackMode::default(),
+        };
+
+        let default_id = AccountId::new(rimap_core::account::DEFAULT_ACCOUNT_NAME).unwrap();
+        let conn_default = build_account_connection(&default_id, &acfg);
+        assert!(
+            conn_default.account.is_none(),
+            "default account name must produce account = None; got {:?}",
+            conn_default.account,
+        );
+
+        let work_id = AccountId::new("work").unwrap();
+        let conn_work = build_account_connection(&work_id, &acfg);
+        assert_eq!(
+            conn_work.account,
+            Some("work".to_string()),
+            "non-default account name must produce account = Some(name)",
+        );
+    }
+
+    #[test]
     fn concurrent_active_swap_and_resolve() {
         // Exercises the ArcSwapOption-backed active slot under
         // concurrent writers and readers. The registry is empty

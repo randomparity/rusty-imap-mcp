@@ -14,3 +14,6 @@ pub mod boot;
 pub mod mcp;
 #[doc(hidden)]
 pub mod tools;
+
+#[cfg(test)]
+mod test_support;
