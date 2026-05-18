@@ -76,7 +76,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-      - uses: taiki-e/install-action@1329c298aa20c3257846c9b2e0e55967df3e3c37  # v2.75.25
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2.77.1
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --no-tests=pass
@@ -104,7 +104,7 @@ jobs:
         with:
           key: msrv
       - run: cargo check --workspace --all-targets --all-features --locked
-      - uses: taiki-e/install-action@1329c298aa20c3257846c9b2e0e55967df3e3c37  # v2.75.25
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2.77.1
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --no-tests=pass
@@ -125,7 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: tool-schema-drift
-      - uses: taiki-e/install-action@1329c298aa20c3257846c9b2e0e55967df3e3c37  # v2.75.25
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2.77.1
         with:
           tool: just
       - name: Regenerate tool schemas
@@ -156,7 +156,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@1329c298aa20c3257846c9b2e0e55967df3e3c37  # v2.75.25
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2.77.1
         with:
           tool: zizmor
       - run: zizmor .github/workflows/
@@ -187,7 +187,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: sonarqube
-      - uses: taiki-e/install-action@1329c298aa20c3257846c9b2e0e55967df3e3c37  # v2.75.25
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3  # v2.77.1
         with:
           tool: cargo-llvm-cov
       - name: Generate coverage report
