@@ -130,7 +130,7 @@ mod tests {
     fn error_variant_returns_none() {
         let msg = ClientJsonRpcMessage::Error(JsonRpcError {
             jsonrpc: JsonRpcVersion2_0,
-            id: NumberOrString::Number(1),
+            id: Some(NumberOrString::Number(1)),
             error: ErrorData::internal_error("synthetic".to_string(), None),
         });
         assert!(synthesize_pre_init_error_envelope(&msg).is_none());
