@@ -8,6 +8,7 @@ on:
       - 'crates/rimap-audit/**'
       - 'crates/rimap-server/**'
       - 'fuzz/**'
+      - '.clusterfuzzlite/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/fuzz.yml'
