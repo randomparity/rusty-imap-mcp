@@ -10,6 +10,15 @@
 
 FROM gcr.io/oss-fuzz-base/base-builder-rust
 
+# `crates/rimap-server/fuzz/` pulls in the workspace `keyring` crate's
+# `linux-native-sync-persistent` backend (transitively, via rimap-server),
+# which links against libdbus at build time. Without these packages the
+# fuzz build fails with "pkg-config command could not be found" trying to
+# resolve `dbus-1`. Same pattern as every Linux Rust job in `ci.yml`.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . $SRC/rusty-imap-mcp
 COPY .clusterfuzzlite/build.sh $SRC/
 WORKDIR $SRC/rusty-imap-mcp
