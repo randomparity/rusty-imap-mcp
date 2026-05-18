@@ -82,18 +82,10 @@ pub struct DovecotHarness {
 
 impl DovecotHarness {
     /// Start a fresh Dovecot container. Returns `Err(DockerUnavailable)`
-    /// and skips the test silently in any of these cases (unless
-    /// `RIMAP_REQUIRE_DOCKER=1` is set, in which case each becomes a
-    /// hard error):
-    ///
-    /// - Neither `docker` nor `podman` is installed. Pick one explicitly
-    ///   with `RIMAP_CONTAINER_TOOL={docker,podman}`.
-    /// - The host architecture is not `x86_64`. The pinned
-    ///   `dovecot/dovecot:2.3.21` image is amd64-only, and running it
-    ///   under Rosetta/QEMU emulation crashes dovecot's worker processes
-    ///   at startup with `mmap_anonymous_rw mmap failed` before anything
-    ///   can bind port 993. See the comment in `docker-compose.yml` for
-    ///   the full context and why a 2.4 bump isn't viable in Sprint 3.
+    /// and skips the test silently when neither `docker` nor `podman`
+    /// is installed (unless `RIMAP_REQUIRE_DOCKER=1` is set, in which
+    /// case the absence becomes a hard error). Pick a specific runtime
+    /// with `RIMAP_CONTAINER_TOOL={docker,podman}`.
     pub fn try_start() -> Result<Self, HarnessError> {
         check_prerequisites()?;
 
@@ -257,17 +249,6 @@ impl DovecotHarness {
 
 fn check_prerequisites() -> Result<(), HarnessError> {
     let require_runtime = std::env::var("RIMAP_REQUIRE_DOCKER").is_ok();
-
-    if std::env::consts::ARCH != "x86_64" {
-        return if require_runtime {
-            Err(HarnessError::DockerCommandFailed(format!(
-                "host arch {} cannot run amd64 dovecot image but RIMAP_REQUIRE_DOCKER=1",
-                std::env::consts::ARCH
-            )))
-        } else {
-            Err(HarnessError::DockerUnavailable)
-        };
-    }
 
     if !runtime_available() {
         return if require_runtime {
@@ -505,6 +486,24 @@ fn compose_down(project: &str, compose_dir: &std::path::Path) {
         .status();
 }
 
+/// Parse a compose project name into the embedded creation timestamp.
+/// Returns `Some(SystemTime)` if the name follows the
+/// `rimap-it-<hex-nanos>[-<other-segments>]` format, where the leading
+/// hex segment (before any `-`) is interpreted as nanoseconds since
+/// `UNIX_EPOCH`. Returns `None` for any name that does not start with
+/// `rimap-it-`, has no hex prefix, or whose hex prefix doesn't parse.
+fn project_creation_time(name: &str) -> Option<std::time::SystemTime> {
+    let suffix = name.strip_prefix("rimap-it-")?;
+    let hex_nanos = suffix.split('-').next()?;
+    if hex_nanos.is_empty() {
+        return None;
+    }
+    let nanos = u128::from_str_radix(hex_nanos, 16).ok()?;
+    let secs = u64::try_from(nanos / 1_000_000_000).ok()?;
+    let sub_nanos = u32::try_from(nanos % 1_000_000_000).ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, sub_nanos))
+}
+
 /// Best-effort cleanup of leaked `rimap-it-*` compose projects from previous
 /// runs that died via SIGKILL or power loss (Drop doesn't fire on either).
 /// Skips projects younger than `STALE_PROJECT_AGE` to avoid disturbing
@@ -533,22 +532,9 @@ fn prune_stale_projects(compose_dir: &std::path::Path) {
         let Some(name) = project.get("Name").and_then(|v| v.as_str()) else {
             continue;
         };
-        if !name.starts_with("rimap-it-") {
-            continue;
-        }
-        // Parse the embedded nanosecond timestamp from the project name.
-        // Project names look like "rimap-it-<hex-nanos>" where the suffix is
-        // hex-encoded `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()`.
-        let suffix = &name["rimap-it-".len()..];
-        let Ok(nanos) = u128::from_str_radix(suffix, 16) else {
+        let Some(created) = project_creation_time(name) else {
             continue;
         };
-        // Convert the nanos value to a SystemTime. u128 -> Duration requires
-        // splitting into seconds + sub-nanos because Duration::from_nanos
-        // only accepts u64.
-        let secs = u64::try_from(nanos / 1_000_000_000).unwrap_or(u64::MAX);
-        let sub_nanos = u32::try_from(nanos % 1_000_000_000).unwrap_or(0);
-        let created = std::time::UNIX_EPOCH + std::time::Duration::new(secs, sub_nanos);
         let age = now.duration_since(created).unwrap_or_default();
         if age < STALE_PROJECT_AGE {
             continue;
@@ -628,12 +614,16 @@ impl ReservedPort {
 const STALE_PROJECT_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{nanos:x}")
+    let pid = std::process::id();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}-{pid:x}-{n:x}")
 }
 
 use rimap_audit::{AuditOptions, AuditWriter, Seq};
@@ -828,6 +818,52 @@ mod tests {
         let mut p = ReservedPort::acquire().expect("acquire");
         p.release();
         p.release(); // must not panic
+    }
+
+    #[test]
+    fn project_creation_time_parses_legacy_hex_only_format() {
+        // Old format before Task 6a: "rimap-it-<hex-nanos>".
+        // This may still appear for projects created before this fix is
+        // deployed.
+        let t = project_creation_time("rimap-it-18af360a97189210");
+        assert!(t.is_some(), "legacy hex-only format must parse");
+    }
+
+    #[test]
+    fn project_creation_time_parses_new_pid_counter_format() {
+        // New format from Task 6a: "rimap-it-<hex-nanos>-<hex-pid>-<hex-counter>".
+        let t = project_creation_time("rimap-it-18af360a97189210-3f0-0");
+        assert!(t.is_some(), "new pid+counter format must parse");
+    }
+
+    #[test]
+    fn project_creation_time_matches_for_both_formats() {
+        // Same leading hex must produce the same SystemTime regardless
+        // of trailing -pid-counter segments.
+        let legacy = project_creation_time("rimap-it-18af360a97189210");
+        let new = project_creation_time("rimap-it-18af360a97189210-3f0-0");
+        assert_eq!(legacy, new);
+    }
+
+    #[test]
+    fn project_creation_time_rejects_missing_prefix() {
+        assert!(project_creation_time("other-project-deadbeef").is_none());
+    }
+
+    #[test]
+    fn project_creation_time_rejects_non_hex_prefix() {
+        assert!(project_creation_time("rimap-it-not-hex-here").is_none());
+    }
+
+    #[test]
+    fn project_creation_time_rejects_empty_suffix() {
+        assert!(project_creation_time("rimap-it-").is_none());
+    }
+
+    #[test]
+    fn project_creation_time_rejects_empty_hex_segment_before_dash() {
+        // "rimap-it--3f0-0" — leading hex segment is empty.
+        assert!(project_creation_time("rimap-it--3f0-0").is_none());
     }
 
     use std::sync::Mutex;

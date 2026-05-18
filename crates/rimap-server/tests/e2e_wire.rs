@@ -5,8 +5,8 @@
 //! Phase 1's vendored MCP spec schemas + per-tool response schemas
 //! under `tests/fixtures/rimap-tool-schemas/`.
 //!
-//! Silent-skip when no container runtime is available or the host
-//! arch is not `x86_64`; `RIMAP_REQUIRE_DOCKER=1` flips to loud failure.
+//! Silent-skip when no container runtime is available;
+//! `RIMAP_REQUIRE_DOCKER=1` flips to loud failure.
 
 #![expect(clippy::expect_used, reason = "integration tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]

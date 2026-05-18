@@ -4,6 +4,7 @@ pub(crate) mod audit_envelope;
 pub mod content;
 pub(crate) mod dispatch;
 pub mod error;
+pub mod preinit;
 pub mod response;
 pub mod server;
 // `tool_catalog` is `pub` (doc-hidden via the parent `#[doc(hidden)] pub mod
@@ -12,6 +13,13 @@ pub mod server;
 // `dispatch` and `server` and do not import this module directly.
 pub mod tool_catalog;
 pub(crate) mod tool_name;
+pub mod wire_validator;
+
+// Feature-gated: see `crates/rimap-server/Cargo.toml` `fuzzing` and
+// `crates/rimap-server/src/mcp/fuzz_oracle.rs` for the contract.
+// Production builds (default features) do not see this module.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_oracle;
 
 /// Render a `tokio::task::JoinError` from `spawn_blocking` as
 /// `RimapError::InternalSourced`. Shared by every `mcp/*` async wrapper so

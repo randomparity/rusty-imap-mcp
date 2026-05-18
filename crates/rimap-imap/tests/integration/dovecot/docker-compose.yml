@@ -1,13 +1,10 @@
 services:
   dovecot:
-    # Pinned amd64-only. Multi-arch (arm64) is only available on dovecot/dovecot:2.4.x
-    # but the 2.4 line has breaking config-format changes that would require a
-    # parallel dovecot.conf migration. CI runs on Linux amd64 natively so this
-    # works there; local arm64 Mac hosts cannot run the suite under Rosetta
-    # because dovecot's child processes hit "mmap_anonymous_rw mmap failed".
-    # Fully-qualified so podman (with short-name-mode=enforcing, the Fedora
-    # default) does not try to prompt a TTY to disambiguate registries.
-    image: docker.io/dovecot/dovecot:2.3.21
+    # Pinned to the multi-arch `-root` flavor (2.4.x default images are
+    # rootless on non-privileged ports; the `-root` variant preserves the
+    # rootful contract this fixture's entrypoint relies on: writes to
+    # /etc/dovecot, /var/mail, /var/run/dovecot and binds 143/993).
+    image: docker.io/dovecot/dovecot:2.4.4-root
     container_name: ${COMPOSE_PROJECT_NAME:-rimap-it}-dovecot
     ports:
       # Loopback-only. The host port is pre-allocated by the Rust harness
