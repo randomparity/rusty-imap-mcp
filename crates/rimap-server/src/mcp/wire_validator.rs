@@ -18,6 +18,9 @@ use tokio::task::JoinHandle;
 /// Bridge-task duplex buffer. Large enough that one well-formed
 /// envelope fits in a single write; both directions are independent
 /// tasks so inbound stalls cannot cause outbound deadlock.
+// cargo-mutants: known-equivalent — `64 * 1024` vs `64 + 1024` is a
+// buffer-size constant; no test asserts on the value and both sizes
+// are large enough to hold one envelope per write.
 const BUF_SIZE: usize = 64 * 1024;
 
 /// What the validator decides for a given line.
@@ -167,6 +170,25 @@ pub(crate) fn invalid_request(id: Value) -> ErrorEnvelope {
 /// [`has_duplicate_keys_in_rmcp_strict_positions`].
 struct OneLevelDupCheck;
 
+// cargo-mutants: known-equivalent group — the non-`visit_map` methods
+// below have several mutants the test suite does not kill, by design:
+//   * `expecting` is invoked only by serde to format error diagnostics;
+//     its return value never reaches our control flow.
+//   * `visit_string` and `visit_none` are unreachable from
+//     `serde_json::Deserializer::from_str` (which is what
+//     `has_duplicate_keys_in_rmcp_strict_positions` constructs): the
+//     streaming deserializer prefers `visit_str` for JSON strings and
+//     `visit_unit` for JSON null, never the owned-String or `Option`
+//     paths.
+//   * `visit_seq` mutated to a constant return skips the drain loop;
+//     the surrounding `DupCheckOneLevel`/`map.next_value()?` chain
+//     then leaves the parser mid-array, the outer
+//     `de.deserialize_any(...).unwrap_or(false)` swallows the
+//     resulting trailing-data error, and the dup-check signals "no
+//     duplicates" — identical to the unmutated outcome (drained,
+//     returns `Ok(false)`).
+// Inline `visit_<primitive>` mutants (i64/u64/f64/bool/unit) ARE
+// killed by `error_body_as_primitive_echoes_id` further down.
 impl<'de> serde::de::Visitor<'de> for OneLevelDupCheck {
     type Value = bool;
 
@@ -238,6 +260,21 @@ impl<'de> serde::de::Deserialize<'de> for DupCheckOneLevel {
 /// [`has_duplicate_keys_in_rmcp_strict_positions`].
 struct TopAndErrorDupCheck;
 
+// cargo-mutants: known-equivalent group — every method below except
+// `visit_map` produces an observably-equivalent outcome under any
+// stub-return mutation. `has_duplicate_keys_in_rmcp_strict_positions`
+// is called from `validate(line)` BEFORE the line is parsed into a
+// `Value`. For a non-object top-level (string/number/bool/null/array)
+// the parsed `Value` later fails `parsed.as_object()` and is rejected
+// via `invalid_request(Value::Null)` — the same id used by the
+// dup-check rejection path. So whether `visit_<primitive>` returns
+// `Ok(true)` or `Ok(false)`, the final ValidationOutcome is the same
+// `Reject(invalid_request(Value::Null))`. `expecting` only formats
+// serde diagnostics. `visit_seq` without drain triggers a trailing-
+// data error that the outer `unwrap_or(false)` swallows back to the
+// "no duplicates" verdict — same outcome path as drained-then-
+// Ok(false). `visit_map` (the one we actually care about) IS killed
+// by `duplicate_top_level_keys_reject` and `duplicate_keys_inside_error_body_reject`.
 impl<'de> serde::de::Visitor<'de> for TopAndErrorDupCheck {
     type Value = bool;
 
@@ -478,6 +515,17 @@ where
 
         // Strip trailing \n and optional \r for the validation view.
         // rmcp's codec also strips \r; matching its grammar.
+        // cargo-mutants: known-equivalent group — for the next two
+        // `match` blocks, both `delete match arm Some(&b'\n'/'\r')`
+        // and `replace - with /` mutants are observably equivalent.
+        // The trimmed view is fed to `serde_json::from_str` (and
+        // `Deserializer::from_str` in the dup-check), both of which
+        // tolerate trailing whitespace — so a line that retains its
+        // \n or \r still parses identically. `len() / 1 == len()` so
+        // the slice does not shrink, same effect as deleting the arm.
+        // The `replace - with +` mutant at the \r-strip site IS a
+        // real gap (slices past the buffer end and panics on \r\n
+        // input) and is killed by `validate_inbound_strips_crlf_line_ending`.
         let trimmed: &[u8] = match buf.last() {
             Some(&b'\n') => &buf[..buf.len() - 1],
             _ => &buf[..],
@@ -707,7 +755,12 @@ pub fn stdio_with_validation() -> ValidatedStdio {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1333,5 +1386,178 @@ mod tests {
         // on the test runner) is acceptable — we mainly want to confirm
         // no panic and no hang.
         assert!(r.is_ok(), "drain hung after dropping transport");
+    }
+
+    #[test]
+    fn error_body_as_primitive_echoes_id() {
+        // OneLevelDupCheck::visit_<primitive> methods must return
+        // Ok(false): a non-map JSON value can have no keys, so no
+        // duplicates are possible. The validate() rejection then comes
+        // from the shape-validation catch-all, which echoes the
+        // original id via extract_id(obj) — NOT Value::Null from the
+        // dup-check rejection path. Each case kills one
+        // OneLevelDupCheck visit-method mutant.
+        let cases: &[(&str, Value, &str)] = &[
+            (
+                r#"{"jsonrpc":"2.0","id":1,"error":175}"#,
+                json!(1),
+                "visit_i64",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":2,"error":18446744073709551615}"#,
+                json!(2),
+                "visit_u64",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3,"error":1.5}"#,
+                json!(3),
+                "visit_f64",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":4,"error":true}"#,
+                json!(4),
+                "visit_bool",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":5,"error":null}"#,
+                json!(5),
+                "visit_unit",
+            ),
+        ];
+        for (line, expected_id, label) in cases {
+            let outcome = validate(line);
+            let ValidationOutcome::Reject(env) = outcome else {
+                panic!("{label}: expected Reject, got {outcome:?}");
+            };
+            assert_eq!(
+                env.id, *expected_id,
+                "{label}: id MUST echo original (not Null); line={line}",
+            );
+            assert_eq!(env.code, -32600, "{label}: expected -32600 invalid-request");
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_inbound_strips_crlf_line_ending() {
+        // Lines terminated with \r\n (typical Windows line endings)
+        // must be handled cleanly: the trailing \n is stripped by the
+        // first match, then the trailing \r is stripped by the second.
+        // The slice arithmetic `&trimmed[..trimmed.len() - 1]` at the
+        // \r-strip site must use subtraction; the `replace - with +`
+        // mutation would slice past the end and panic.
+        let stdin = std::io::Cursor::new(
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"id\":1}\r\n".to_vec(),
+        );
+        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+        let consumer = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            rmcp_end.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+        validate_inbound(stdin, our_end, stdout).await.unwrap();
+        let forwarded = consumer.await.unwrap();
+
+        let s = std::str::from_utf8(&forwarded).unwrap();
+        assert!(
+            s.contains("\"method\":\"tools/list\""),
+            "expected forwarded line, got {s:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_failure_surfaces_outbound_error() {
+        // shutdown_after_failure aborts inbound (discarding its
+        // result) and then awaits outbound. The outbound's error MUST
+        // surface as the supervisor's return value — the stub
+        // `Ok(())` mutation would silently swallow this and report
+        // success on every failure path.
+        let inbound =
+            tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        let outbound =
+            tokio::spawn(
+                async { Err::<(), std::io::Error>(std::io::Error::other("outbound boom")) },
+            );
+        let supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            supervisor.shutdown_after_failure(),
+        )
+        .await
+        .expect("shutdown_after_failure must not hang");
+        assert!(r.is_err(), "outbound error must surface");
+        assert!(
+            r.unwrap_err().to_string().contains("outbound boom"),
+            "expected outbound error message",
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_for_error_surfaces_bridge_task_panic() {
+        // A panicking bridge task produces a JoinError where
+        // `je.is_cancelled()` is false. The flatten match guard must
+        // NOT collapse all JoinErrors to Ok(()) — only the
+        // cancellation variant. The `replace match guard with true`
+        // mutation would silently swallow panics.
+        let inbound: JoinHandle<std::io::Result<()>> = tokio::spawn(async move {
+            panic!("intentional bridge-task panic for flatten guard test");
+        });
+        let outbound =
+            tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        let mut supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            supervisor.watch_for_error(),
+        )
+        .await
+        .expect("watch_for_error must surface bridge panic promptly");
+        assert!(r.is_err(), "panic must surface as Err, got {r:?}");
+        assert!(
+            r.unwrap_err().to_string().contains("bridge task panic"),
+            "expected bridge-panic error message",
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_for_error_treats_cancellation_as_ok() {
+        // An aborted bridge task produces a cancellation-variant
+        // JoinError. The flatten match guard must treat this as
+        // Ok(()) — abort is the supervisor's own primitive in
+        // shutdown_after_failure and must not be misreported as an
+        // error. The `replace match guard with false` mutation would
+        // surface every cancellation as an Err.
+        let inbound =
+            tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        inbound.abort();
+        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        // Give the aborted inbound a tick to transition to finished.
+        tokio::task::yield_now().await;
+        let mut supervisor = ValidatorSupervisor {
+            inbound,
+            outbound,
+            inbound_consumed: false,
+            outbound_consumed: false,
+        };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            supervisor.watch_for_error(),
+        )
+        .await
+        .expect("watch_for_error must return promptly when bridges finish");
+        assert!(
+            r.is_ok(),
+            "cancelled inbound + Ok outbound must yield Ok, got {r:?}",
+        );
     }
 }
