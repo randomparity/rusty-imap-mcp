@@ -433,6 +433,7 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
 )]
 mod tests {
     use super::*;
+    use rimap_imap::types::{HeaderSearch, StructuredQuery};
 
     #[test]
     fn sanitize_strips_null_byte() {
@@ -481,8 +482,6 @@ mod tests {
         let input = "cafe\u{0301} naïve résumé 日本語";
         assert_eq!(sanitize_for_output(input), "café naïve résumé 日本語");
     }
-
-    use rimap_imap::types::{HeaderSearch, StructuredQuery};
 
     fn input_with_folder() -> SearchInput {
         SearchInput {
@@ -601,6 +600,22 @@ mod tests {
             name: "List-Id".to_string(),
             value: "  ".to_string(),
         }]);
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_empty_name_in_second_header() {
+        let mut input = input_with_folder();
+        input.headers = Some(vec![
+            HeaderInput {
+                name: "List-Id".to_string(),
+                value: "rust".to_string(),
+            },
+            HeaderInput {
+                name: String::new(),
+                value: "x".to_string(),
+            },
+        ]);
         assert!(build(&input).is_err());
     }
 
