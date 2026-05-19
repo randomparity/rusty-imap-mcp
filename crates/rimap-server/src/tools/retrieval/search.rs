@@ -50,13 +50,13 @@ pub struct SearchInput {
     /// Filter by `Subject` header substring.
     pub subject: Option<String>,
     /// Substring search across body parts. Content-oracle — requires
-    /// `SearchAdvanced` posture.
+    /// `SearchAdvanced` posture (Full or Destructive).
     pub body: Option<String>,
     /// Substring search across headers OR body. Content-oracle —
-    /// requires `SearchAdvanced` posture.
+    /// requires `SearchAdvanced` posture (Full or Destructive).
     pub text: Option<String>,
     /// One or more `HEADER name value` filters. Content-oracle when
-    /// non-empty — requires `SearchAdvanced` posture.
+    /// non-empty — requires `SearchAdvanced` posture (Full or Destructive).
     pub headers: Option<Vec<HeaderInput>>,
     /// Match messages strictly larger than this many octets.
     pub larger: Option<u64>,
