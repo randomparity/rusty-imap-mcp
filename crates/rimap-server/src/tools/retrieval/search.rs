@@ -116,6 +116,10 @@ pub struct SearchResultEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to: Vec<String>,
     /// Cc addresses, sanitized. Omitted when empty.
+    ///
+    /// Note: `bcc` is intentionally absent — exposing BCC recipients
+    /// violates the privacy boundary enforced at the `SearchInput` and
+    /// output layers. See the spec's Privacy subsection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cc: Vec<String>,
     /// RFC 2822 `Message-ID`, sanitized.
@@ -359,6 +363,16 @@ fn format_addresses(addrs: &[Address]) -> Vec<String> {
     addrs.iter().map(format_address).collect()
 }
 
+/// Apply the search-result envelope address pipeline: format each
+/// address as `"name <mailbox@host>"`, then route through
+/// `sanitize_for_output`. Returns an empty `Vec` when `addrs` is empty.
+fn sanitize_address_list(addrs: &[Address]) -> Vec<String> {
+    format_addresses(addrs)
+        .into_iter()
+        .map(|a| sanitize_for_output(&a))
+        .collect()
+}
+
 /// Format a flag for JSON output.
 fn format_flag(flag: &Flag) -> &str {
     match flag {
@@ -390,30 +404,9 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
             let raw = String::from_utf8_lossy(d);
             sanitize_for_output(&raw)
         });
-        let from = if env.from.is_empty() {
-            Vec::new()
-        } else {
-            format_addresses(&env.from)
-                .into_iter()
-                .map(|a| sanitize_for_output(&a))
-                .collect()
-        };
-        let to = if env.to.is_empty() {
-            Vec::new()
-        } else {
-            format_addresses(&env.to)
-                .into_iter()
-                .map(|a| sanitize_for_output(&a))
-                .collect()
-        };
-        let cc = if env.cc.is_empty() {
-            Vec::new()
-        } else {
-            format_addresses(&env.cc)
-                .into_iter()
-                .map(|a| sanitize_for_output(&a))
-                .collect()
-        };
+        let from = sanitize_address_list(&env.from);
+        let to = sanitize_address_list(&env.to);
+        let cc = sanitize_address_list(&env.cc);
         let message_id = env.message_id.as_ref().map(|mid| {
             let raw = String::from_utf8_lossy(mid.as_bytes());
             sanitize_for_output(&raw)
@@ -445,7 +438,7 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
 )]
 mod tests {
     use super::*;
-    use rimap_imap::types::{HeaderSearch, StructuredQuery};
+    use rimap_imap::types::{Address, Envelope, FetchedMessage, HeaderSearch, StructuredQuery};
 
     #[test]
     fn sanitize_strips_null_byte() {
@@ -656,8 +649,6 @@ mod tests {
             rimap_imap::types::SearchQuery::Raw(r) => panic!("unexpected raw: {r}"),
         }
     }
-
-    use rimap_imap::types::{Address, Envelope, FetchedMessage};
 
     fn addr(name: &str, mailbox: &str, host: &str) -> Address {
         Address {
