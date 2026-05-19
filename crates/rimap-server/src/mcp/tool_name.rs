@@ -83,14 +83,31 @@ pub(super) fn refine_tool_name(
 /// metadata, not content scans, and stay under the low-posture
 /// `Search` seat.
 fn promotes_search_to_advanced(args: &serde_json::Map<String, serde_json::Value>) -> bool {
-    if args.get("advanced_query").is_some()
-        || args.get("body").is_some()
-        || args.get("text").is_some()
-        || args.get("bcc").is_some()
+    // Use as_str() rather than is_some() so explicit JSON null (e.g.
+    // {"body": null}) is treated as absent — serde deserializes
+    // Option<String> = null as None, and promoting a no-op filter to
+    // SearchAdvanced would produce a misleading PostureDenied.
+    if args
+        .get("advanced_query")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        || args
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || args
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || args
+            .get("bcc")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
     {
         return true;
     }
-    // headers triggers only when present AND non-empty.
+    // headers triggers only when present AND non-empty (as_array filters
+    // non-array types automatically).
     matches!(
         args.get("headers").and_then(serde_json::Value::as_array),
         Some(arr) if !arr.is_empty(),
@@ -373,6 +390,19 @@ mod tests {
     fn refine_tool_name_does_not_promote_on_empty_headers_array() {
         let mut args = serde_json::Map::new();
         args.insert("headers".into(), serde_json::json!([]));
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::Search,
+        );
+    }
+
+    #[test]
+    fn refine_tool_name_does_not_promote_on_explicit_null_body() {
+        // JSON {"body": null} must NOT promote: serde deserializes
+        // Option<String> = null as None, so the filter is a no-op
+        // and promotion would yield a misleading PostureDenied.
+        let mut args = serde_json::Map::new();
+        args.insert("body".into(), serde_json::Value::Null);
         assert_eq!(
             refine_tool_name(ToolName::Search, Some(&args)),
             ToolName::Search,
