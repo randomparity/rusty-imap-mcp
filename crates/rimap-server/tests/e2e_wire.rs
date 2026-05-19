@@ -646,6 +646,31 @@ async fn assert_readonly_denial(harness: &mut Harness) {
         Some(POSTURE_DENIAL_CODE),
         "posture-denial wire code drifted; got {resp}",
     );
+
+    // Regression coverage for the sub-capability dispatch order bug.
+    // refine_tool_name promotes Search -> SearchAdvanced when
+    // `advanced_query` is set; the TOOL_DEFS check must run on the
+    // parsed (parent) name so the refined name reaches DispatchGuard
+    // and returns PostureDenied (not RESOURCE_NOT_FOUND).
+    let advanced_denial = harness
+        .request(
+            "tools/call",
+            json!({
+                "name": "readonly.search",
+                "arguments": {"folder": "INBOX", "advanced_query": "FROM x"},
+            }),
+        )
+        .await;
+    assert!(
+        advanced_denial["error"].is_object(),
+        "expected error envelope for readonly.search advanced_query, got {advanced_denial}",
+    );
+    assert_eq!(
+        advanced_denial["error"]["code"].as_i64(),
+        Some(POSTURE_DENIAL_CODE),
+        "readonly.search advanced_query must be posture-denied (sub-capability \
+         dispatch reaches DispatchGuard); got {advanced_denial}",
+    );
 }
 
 /// Verify audit records from the readonly posture denial test.
@@ -714,6 +739,40 @@ fn assert_readonly_audit_records(audit_path: &std::path::Path) {
         "readonly.move_message tool_end must record account=\"readonly\": {records:#?}",
     );
     assert_eq!(mm_ends[0]["start_seq"], mm_starts[0]["seq"]);
+
+    // Denial path: search_advanced pair, account="readonly" (advanced_query
+    // sub-capability, denied by DispatchGuard after the reordered
+    // TOOL_DEFS check). The audit writer logs the *refined* tool name
+    // (SearchAdvanced.as_str() == "search.advanced_query"), not "search".
+    let s_starts: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["kind"] == "tool_start" && r["tool"] == "search.advanced_query")
+        .collect();
+    assert_eq!(
+        s_starts.len(),
+        1,
+        "expected exactly one search.advanced_query tool_start"
+    );
+    assert_eq!(
+        s_starts[0]["account"].as_str(),
+        Some("readonly"),
+        "readonly.search tool_start must record account=\"readonly\": {records:#?}",
+    );
+    let s_ends: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["kind"] == "tool_end" && r["tool"] == "search.advanced_query")
+        .collect();
+    assert_eq!(
+        s_ends.len(),
+        1,
+        "expected exactly one search.advanced_query tool_end"
+    );
+    assert_eq!(
+        s_ends[0]["account"].as_str(),
+        Some("readonly"),
+        "readonly.search tool_end must record account=\"readonly\": {records:#?}",
+    );
+    assert_eq!(s_ends[0]["start_seq"], s_starts[0]["seq"]);
 }
 
 async fn seed_multipart_message(dovecot: &DovecotHarness) {

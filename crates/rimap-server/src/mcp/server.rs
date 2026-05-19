@@ -443,24 +443,33 @@ impl ServerHandler for ImapMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let (namespaced_account, bare_name) = split_tool_name(&request.name);
 
-        let tool_name = ToolName::from_str(bare_name)
+        let parsed_tool = ToolName::from_str(bare_name)
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-        // Refine the tool name based on argument shape BEFORE DispatchGuard::pre_dispatch
-        // so the posture check covers sub-capabilities (FetchMessageHtml vs
-        // FetchMessage, SearchAdvanced vs Search) at a single seam rather
-        // than being re-checked inside every handler.
-        let tool_name = refine_tool_name(tool_name, request.arguments.as_ref());
 
-        // Reject tools that have no definition (not yet implemented).
-        // This prevents unimplemented v2 tools from consuming rate
-        // limiter tokens and producing misleading INTERNAL_ERROR.
-        if TOOL_DEFS.get(&tool_name).is_none() {
+        // Reject tools that have no MCP definition.
+        //
+        // This check answers "is this advertised tool implemented?" —
+        // a property of the *parsed* (parent) name, not the refined
+        // sub-capability. Sub-capabilities (`SearchAdvanced`,
+        // `FetchMessageHtml`) intentionally have no `TOOL_DEFS` entry
+        // (`crates/rimap-server/src/mcp/tool_catalog.rs:178`); they
+        // share the parent's schema. Running this check on the
+        // post-refinement name would short-circuit every refined
+        // sub-capability call with RESOURCE_NOT_FOUND, defeating
+        // `refine_tool_name` and bypassing `DispatchGuard::pre_dispatch`.
+        if TOOL_DEFS.get(&parsed_tool).is_none() {
             return Err(ErrorData::new(
                 McpCode::RESOURCE_NOT_FOUND,
                 format!("tool `{}` is not available", request.name),
                 None,
             ));
         }
+
+        // Refine the tool name based on argument shape AFTER the
+        // TOOL_DEFS check, so sub-capability promotion reaches
+        // DispatchGuard::pre_dispatch and the posture matrix governs
+        // the gated variant.
+        let tool_name = refine_tool_name(parsed_tool, request.arguments.as_ref());
 
         // Multi-account contract: bare simple tool names are only valid
         // in legacy single-account mode. In multi-account mode, clients
