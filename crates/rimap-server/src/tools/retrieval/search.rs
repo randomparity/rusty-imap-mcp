@@ -157,7 +157,7 @@ pub async fn handle(
 ) -> Result<ToolResponse<SearchMeta, SearchUntrusted>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
 
-    let query = build_query(account, &input)?;
+    let query = build_query(&input)?;
 
     let uids = Box::pin(account.imap.search(&input.folder, query)).await?;
     let total_matched = uids.len();
@@ -201,10 +201,7 @@ pub async fn handle(
 
 /// Build a `SearchQuery` from the input. The `SearchAdvanced` posture
 /// check happens upstream in `refine_tool_name` + `DispatchGuard::pre_dispatch`.
-fn build_query(
-    _account: &AccountState,
-    input: &SearchInput,
-) -> Result<SearchQuery, rimap_core::RimapError> {
+fn build_query(input: &SearchInput) -> Result<SearchQuery, rimap_core::RimapError> {
     if let Some(raw) = &input.advanced_query {
         if raw.bytes().any(|b| b == b'\r' || b == b'\n' || b == b'\0') {
             return Err(rimap_core::RimapError::invalid_input(
@@ -214,8 +211,53 @@ fn build_query(
         return Ok(SearchQuery::Raw(raw.clone()));
     }
 
+    // Reject empty/whitespace-only string filters at the MCP boundary —
+    // the IMAP server happily executes broad scans like `BODY ""` and
+    // the existing quote() only blocks CR/LF/NUL.
+    let cc = require_non_empty("cc", input.cc.as_deref())?;
+    let bcc = require_non_empty("bcc", input.bcc.as_deref())?;
+    let body = require_non_empty("body", input.body.as_deref())?;
+    let text = require_non_empty("text", input.text.as_deref())?;
+
+    // Empty headers vec carries no filter intent — normalize to None
+    // so the emitter does not have to special-case it.
+    let headers = match &input.headers {
+        Some(v) if v.is_empty() => None,
+        Some(v) => {
+            let mut converted = Vec::with_capacity(v.len());
+            for h in v {
+                if h.name.trim().is_empty() {
+                    return Err(rimap_core::RimapError::invalid_input(
+                        "headers[].name must not be empty or whitespace-only",
+                    ));
+                }
+                if h.value.trim().is_empty() {
+                    return Err(rimap_core::RimapError::invalid_input(
+                        "headers[].value must not be empty or whitespace-only",
+                    ));
+                }
+                converted.push(rimap_imap::types::HeaderSearch {
+                    name: h.name.clone(),
+                    value: h.value.clone(),
+                });
+            }
+            Some(converted)
+        }
+        None => None,
+    };
+
     let since = input.since.as_deref().map(parse_iso_date).transpose()?;
     let before = input.before.as_deref().map(parse_iso_date).transpose()?;
+    let sent_since = input
+        .sent_since
+        .as_deref()
+        .map(parse_iso_date)
+        .transpose()?;
+    let sent_before = input
+        .sent_before
+        .as_deref()
+        .map(parse_iso_date)
+        .transpose()?;
 
     Ok(SearchQuery::Structured(StructuredQuery {
         from: input.from.clone(),
@@ -225,8 +267,38 @@ fn build_query(
         before,
         seen: input.seen,
         has_attachment: input.has_attachment.unwrap_or(false),
-        ..Default::default()
+        cc,
+        bcc,
+        body,
+        text,
+        headers,
+        larger: input.larger,
+        smaller: input.smaller,
+        sent_since,
+        sent_before,
+        answered: input.answered,
+        flagged: input.flagged,
+        draft: input.draft,
     }))
+}
+
+/// Reject empty/whitespace-only string filters. Returns `Ok(None)` for
+/// `None`, `Ok(Some(s.to_string()))` for a non-trimmed-empty value, and
+/// `Err(RimapError::invalid_input)` otherwise. The `field` label flows
+/// straight into the error message.
+fn require_non_empty(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, rimap_core::RimapError> {
+    let Some(s) = value else {
+        return Ok(None);
+    };
+    if s.trim().is_empty() {
+        return Err(rimap_core::RimapError::invalid_input(format!(
+            "{field} must not be empty or whitespace-only"
+        )));
+    }
+    Ok(Some(s.to_string()))
 }
 
 /// Parse an ISO 8601 date string ("YYYY-MM-DD") into a `time::Date`.
@@ -353,6 +425,12 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
 
@@ -402,5 +480,204 @@ mod tests {
         // Other already-precomposed characters pass through unchanged.
         let input = "cafe\u{0301} naïve résumé 日本語";
         assert_eq!(sanitize_for_output(input), "café naïve résumé 日本語");
+    }
+
+    use rimap_imap::types::{HeaderSearch, StructuredQuery};
+
+    fn input_with_folder() -> SearchInput {
+        SearchInput {
+            folder: "INBOX".to_string(),
+            from: None,
+            to: None,
+            cc: None,
+            bcc: None,
+            subject: None,
+            body: None,
+            text: None,
+            headers: None,
+            larger: None,
+            smaller: None,
+            since: None,
+            before: None,
+            sent_since: None,
+            sent_before: None,
+            seen: None,
+            answered: None,
+            flagged: None,
+            draft: None,
+            has_attachment: None,
+            advanced_query: None,
+            limit: None,
+            offset: None,
+        }
+    }
+
+    fn build(
+        input: &SearchInput,
+    ) -> Result<rimap_imap::types::SearchQuery, rimap_core::RimapError> {
+        super::build_query(input)
+    }
+
+    #[test]
+    fn build_query_rejects_empty_cc() {
+        let mut input = input_with_folder();
+        input.cc = Some(String::new());
+        let err = build(&input).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("cc"),
+            "expected cc-empty error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn build_query_rejects_whitespace_cc() {
+        let mut input = input_with_folder();
+        input.cc = Some("   ".to_string());
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_empty_bcc() {
+        let mut input = input_with_folder();
+        input.bcc = Some(String::new());
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_empty_body() {
+        let mut input = input_with_folder();
+        input.body = Some(String::new());
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_whitespace_body() {
+        let mut input = input_with_folder();
+        input.body = Some("\t ".to_string());
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_empty_text() {
+        let mut input = input_with_folder();
+        input.text = Some(String::new());
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_empty_header_name() {
+        let mut input = input_with_folder();
+        input.headers = Some(vec![HeaderInput {
+            name: String::new(),
+            value: "x".to_string(),
+        }]);
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_whitespace_header_name() {
+        let mut input = input_with_folder();
+        input.headers = Some(vec![HeaderInput {
+            name: "   ".to_string(),
+            value: "x".to_string(),
+        }]);
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_empty_header_value() {
+        let mut input = input_with_folder();
+        input.headers = Some(vec![HeaderInput {
+            name: "List-Id".to_string(),
+            value: String::new(),
+        }]);
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_whitespace_header_value() {
+        let mut input = input_with_folder();
+        input.headers = Some(vec![HeaderInput {
+            name: "List-Id".to_string(),
+            value: "  ".to_string(),
+        }]);
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_accepts_empty_headers_array_as_no_filter() {
+        let mut input = input_with_folder();
+        input.headers = Some(Vec::new());
+        let q = build(&input).expect("empty headers vec is accepted");
+        match q {
+            rimap_imap::types::SearchQuery::Structured(s) => {
+                assert!(s.headers.is_none(), "headers should be normalized to None");
+            }
+            rimap_imap::types::SearchQuery::Raw(r) => panic!("unexpected raw: {r}"),
+        }
+    }
+
+    #[test]
+    fn build_query_threads_cc_into_structured_query() {
+        let mut input = input_with_folder();
+        input.cc = Some("alice@example.com".to_string());
+        let q = build(&input).unwrap();
+        match q {
+            rimap_imap::types::SearchQuery::Structured(s) => {
+                assert_eq!(s.cc.as_deref(), Some("alice@example.com"));
+            }
+            rimap_imap::types::SearchQuery::Raw(r) => panic!("unexpected raw: {r}"),
+        }
+    }
+
+    #[test]
+    fn build_query_threads_all_new_fields_into_structured_query() {
+        let mut input = input_with_folder();
+        input.cc = Some("c@example.com".to_string());
+        input.bcc = Some("b@example.com".to_string());
+        input.body = Some("hi".to_string());
+        input.text = Some("anywhere".to_string());
+        input.headers = Some(vec![HeaderInput {
+            name: "List-Id".to_string(),
+            value: "rust".to_string(),
+        }]);
+        input.larger = Some(1024);
+        input.smaller = Some(2_048_000);
+        input.sent_since = Some("2026-01-01".to_string());
+        input.sent_before = Some("2026-02-01".to_string());
+        input.answered = Some(true);
+        input.flagged = Some(false);
+        input.draft = Some(true);
+        let q = build(&input).unwrap();
+        let s: StructuredQuery = match q {
+            rimap_imap::types::SearchQuery::Structured(s) => s,
+            rimap_imap::types::SearchQuery::Raw(r) => panic!("unexpected raw: {r}"),
+        };
+        assert_eq!(s.cc.as_deref(), Some("c@example.com"));
+        assert_eq!(s.bcc.as_deref(), Some("b@example.com"));
+        assert_eq!(s.body.as_deref(), Some("hi"));
+        assert_eq!(s.text.as_deref(), Some("anywhere"));
+        let hs = s.headers.expect("headers");
+        assert_eq!(hs.len(), 1);
+        assert_eq!(
+            hs[0],
+            HeaderSearch {
+                name: "List-Id".to_string(),
+                value: "rust".to_string()
+            }
+        );
+        assert_eq!(s.larger, Some(1024));
+        assert_eq!(s.smaller, Some(2_048_000));
+        assert_eq!(
+            s.sent_since,
+            Some(::time::Date::from_calendar_date(2026, ::time::Month::January, 1).unwrap()),
+        );
+        assert_eq!(
+            s.sent_before,
+            Some(::time::Date::from_calendar_date(2026, ::time::Month::February, 1).unwrap()),
+        );
+        assert_eq!(s.answered, Some(true));
+        assert_eq!(s.flagged, Some(false));
+        assert_eq!(s.draft, Some(true));
     }
 }
