@@ -1,11 +1,36 @@
-//! Lenient integer deserializers + schema helpers.
+//! Lenient integer deserializers + schema helpers (issue #292).
 //!
-//! Some MCP hosts (notably Claude Code, see issue #292) stringify
-//! integer-typed tool arguments before sending them. Strict JSON
-//! Schema validators in those hosts then reject the call before it
-//! reaches us. This module widens each integer input field's published
-//! schema to accept either the integer or a digit-string, and decodes
-//! the string form back to the canonical Rust type.
+//! Some MCP hosts (notably Claude Code, see
+//! [anthropics/claude-code#24599]) stringify integer-typed tool
+//! arguments before sending them. Strict JSON Schema validators in
+//! those hosts then reject the call before it reaches us. This module
+//! widens each integer input field's published schema to accept either
+//! the integer form or a digit-string form, and decodes the string
+//! form back to the canonical Rust type.
+//!
+//! # Exported pairs
+//!
+//! Apply each pair to a struct field via:
+//!
+//! ```ignore
+//! #[serde(default, deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize")]
+//! #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
+//! pub limit: Option<usize>,
+//! ```
+//!
+//! | Field type           | Deserializer                  | Schema                  |
+//! |----------------------|-------------------------------|-------------------------|
+//! | `Option<usize>`      | `deserialize_opt_usize`       | `schema_opt_usize`      |
+//! | `Option<u32>`        | `deserialize_opt_u32`         | `schema_opt_u32`        |
+//! | `NonZeroU32`         | `deserialize_nonzero_u32`     | `schema_nonzero_u32`    |
+//! | `Option<NonZeroU32>` | `deserialize_opt_nonzero_u32` | `schema_opt_nonzero_u32`|
+//!
+//! Booleans and string fields are intentionally NOT covered — see the
+//! design doc at
+//! `docs/superpowers/specs/2026-05-18-issue-292-lenient-int-coercion-design.md`
+//! "Out of scope" section.
+//!
+//! [anthropics/claude-code#24599]: https://github.com/anthropics/claude-code/issues/24599
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
