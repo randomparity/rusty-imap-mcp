@@ -304,10 +304,21 @@ async fn assert_search(harness: &mut Harness) -> u32 {
     assert!(uid > 0);
 
     // Exercise the new `cc` input field. The seeded message has no
-    // Cc header (verified in fixtures.rs::multipart_with_attachment),
-    // so this asserts that the wire path round-trips the new field
-    // and the IMAP server honors the `CC` SEARCH key (returning zero
-    // matches).
+    // Cc header (see fixtures.rs::multipart_with_attachment), so this
+    // asserts that the wire path round-trips the new field and the
+    // IMAP server honors the `CC` SEARCH key (returning zero matches).
+    //
+    // Coverage caveat: a regression that silently drops the `cc` arg
+    // would also produce zero matches (the IMAP query would degrade
+    // to ALL on an inbox with one message that doesn't match other
+    // criteria). The wire-format direction itself is pinned by the
+    // unit tests:
+    //   - rimap-server build_query_threads_cc_into_structured_query
+    //   - rimap-imap structured_to_key_emits_cc_and_bcc
+    // Together those guarantee the field reaches the IMAP key; this
+    // e2e check adds proof that Dovecot accepts the resulting
+    // command. A positive-case e2e (seed a message with a Cc header)
+    // is a worthwhile follow-up but is deferred from this PR.
     let cc_body = call_tool(
         harness,
         "draftsafe.search",
