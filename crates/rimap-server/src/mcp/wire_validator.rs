@@ -1398,11 +1398,16 @@ mod tests {
         // dup-check rejection path. Each case kills one
         // OneLevelDupCheck visit-method mutant.
         let cases: &[(&str, Value, &str)] = &[
+            // Negative integer — serde_json routes through `visit_i64`.
+            // (Positive integers route through `visit_u64` instead, so
+            // this case is what actually exercises the i64 visitor.)
             (
-                r#"{"jsonrpc":"2.0","id":1,"error":175}"#,
+                r#"{"jsonrpc":"2.0","id":1,"error":-175}"#,
                 json!(1),
                 "visit_i64",
             ),
+            // Positive integer fitting in i64 still routes through u64
+            // in serde_json, so this case kills visit_u64.
             (
                 r#"{"jsonrpc":"2.0","id":2,"error":18446744073709551615}"#,
                 json!(2),
