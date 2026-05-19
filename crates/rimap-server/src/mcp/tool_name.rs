@@ -9,6 +9,7 @@ use std::str::FromStr;
 
 use rimap_core::account::{AccountId, DEFAULT_ACCOUNT_NAME};
 use rimap_core::tool::ToolName;
+use rmcp::model::ErrorData;
 
 use crate::boot::registry::AccountState;
 
@@ -135,6 +136,26 @@ pub(crate) fn is_bare_simple_tool_name(raw: &str) -> bool {
     !matches!(tool, ToolName::UseAccount | ToolName::ListAccounts)
 }
 
+/// Enforce the multi-account namespace contract: in non-legacy
+/// (multi-account) mode, bare simple non-infrastructure tool names
+/// must be rejected with `INVALID_PARAMS`. Legacy single-account
+/// deployments and dotted/infrastructure tool names always pass.
+pub(super) fn validate_bare_tool_namespace(
+    legacy_single_account: bool,
+    raw_name: &str,
+) -> Result<(), ErrorData> {
+    if !legacy_single_account && is_bare_simple_tool_name(raw_name) {
+        return Err(ErrorData::invalid_params(
+            format!(
+                "tool name must be namespaced in multi-account mode: \
+                 <account>.{raw_name}",
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Split a possibly-namespaced MCP tool name into `(account, tool)`.
 ///
 /// Preserves sub-capability tool names that contain dots (e.g.
@@ -162,10 +183,16 @@ fn is_valid_account_prefix(s: &str) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "tests use unwrap_err for assertions on namespace-validation errors"
+)]
 mod tests {
     use rimap_core::tool::ToolName;
 
-    use super::{is_bare_simple_tool_name, refine_tool_name, split_tool_name};
+    use super::{
+        is_bare_simple_tool_name, refine_tool_name, split_tool_name, validate_bare_tool_namespace,
+    };
 
     #[test]
     fn split_tool_name_bare() {
@@ -314,6 +341,56 @@ mod tests {
         two_accts.insert(default_state2.id.clone(), default_state2);
         two_accts.insert(personal_state.id.clone(), personal_state);
         assert!(!is_legacy_single_account(&two_accts));
+    }
+
+    #[test]
+    fn validate_bare_tool_namespace_truth_table() {
+        // Five cases cover every mutation surface on
+        // `validate_bare_tool_namespace`'s composite guard
+        // (`!legacy_single_account && is_bare_simple_tool_name(raw)`).
+        //
+        // Case 3 (multi-account + bare simple tool) specifically kills
+        // the `delete ! in <impl ServerHandler>::call_tool` mutation
+        // formerly annotated as a known-equivalent test-infrastructure
+        // gap — under the mutation the helper would return `Ok(())`
+        // and let the bare call through, but the unmutated function
+        // returns `Err(INVALID_PARAMS)`.
+
+        // Case 1: legacy mode + bare simple → Ok (legacy preserves
+        // bare names regardless of tool simplicity).
+        assert!(validate_bare_tool_namespace(true, "send_email").is_ok());
+
+        // Case 2: legacy mode + namespaced → Ok (dotted prefix is fine
+        // anywhere).
+        assert!(validate_bare_tool_namespace(true, "work.send_email").is_ok());
+
+        // Case 3: multi-account + bare simple → INVALID_PARAMS. Kills
+        // `delete !`: the mutated form `legacy_single_account && ...`
+        // returns `Ok(())` here (the legacy_single_account=false branch
+        // short-circuits the `&&`).
+        let err = validate_bare_tool_namespace(false, "send_email").unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("multi-account mode"),
+            "message should explain the contract: {message}",
+            message = err.message,
+        );
+        assert!(
+            err.message.contains("send_email"),
+            "message should echo the tool name: {message}",
+            message = err.message,
+        );
+
+        // Case 4: multi-account + namespaced → Ok (the dotted form is
+        // exactly what the multi-account contract requires).
+        assert!(validate_bare_tool_namespace(false, "work.send_email").is_ok());
+
+        // Case 5: multi-account + infrastructure tool → Ok.
+        // `is_bare_simple_tool_name` returns false for `use_account` /
+        // `list_accounts`, so the composite short-circuits to `Ok(())`
+        // regardless of mode (infrastructure tools are always bare).
+        assert!(validate_bare_tool_namespace(false, "use_account").is_ok());
+        assert!(validate_bare_tool_namespace(false, "list_accounts").is_ok());
     }
 
     #[test]

@@ -28,7 +28,7 @@ use crate::boot::registry::{AccountRegistry, AccountState};
 use crate::mcp::dispatch::{PostureContext, rimap_error_to_breaker_reason};
 use crate::mcp::tool_catalog::TOOL_DEFS;
 use crate::mcp::tool_name::{
-    is_bare_simple_tool_name, is_legacy_single_account, refine_tool_name, split_tool_name,
+    is_legacy_single_account, refine_tool_name, split_tool_name, validate_bare_tool_namespace,
 };
 
 /// Core MCP server. Owns every resource the handler methods need.
@@ -478,26 +478,7 @@ impl ServerHandler for ImapMcpServer {
         // tools (use_account, list_accounts) remain valid bare forms
         // regardless. (#73)
         let accounts = self.registry.accounts();
-        // cargo-mutants: known-equivalent (test-infrastructure gap) —
-        // the `delete ! in <impl ServerHandler ...>::call_tool` mutation
-        // inverts the legacy-mode guard so legacy single-account
-        // deployments would reject bare tool names. The underlying
-        // predicate `is_legacy_single_account(accounts)` IS unit-tested
-        // (see `mcp::tool_name::tests::is_legacy_single_account_classifies_each_branch`),
-        // but exercising this composite branch through `call_tool`
-        // requires a `RequestContext<RoleServer>` for which rmcp
-        // exposes no public test constructor. Covered end-to-end by
-        // the dovecot harness; documented in `mutation-baseline.md`.
-        if !is_legacy_single_account(accounts) && is_bare_simple_tool_name(&request.name) {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "tool name must be namespaced in multi-account mode: \
-                     <account>.{}",
-                    &request.name,
-                ),
-                None,
-            ));
-        }
+        validate_bare_tool_namespace(is_legacy_single_account(accounts), &request.name)?;
 
         let mut args = request.arguments.unwrap_or_default();
 

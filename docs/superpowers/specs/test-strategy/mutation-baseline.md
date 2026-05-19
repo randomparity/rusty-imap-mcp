@@ -139,14 +139,14 @@ a real test gap.
 ## `rimap-server`
 
 **Last refresh:** 2026-05-18.
-**Surviving mutants in hot paths (`mcp/{dispatch,audit_envelope,tool_catalog,tool_name,wire_validator,preinit,server,response,content,error}.rs`, `boot/`; `fuzz_oracle.rs` covered separately below):** 26 (all annotated as known-equivalent).
+**Surviving mutants in hot paths (`mcp/{dispatch,audit_envelope,tool_catalog,tool_name,wire_validator,preinit,server,response,content,error}.rs`, `boot/`; `fuzz_oracle.rs` covered separately below):** 24 (all annotated as known-equivalent).
 **Surviving mutants in best-effort paths (`cli/`, `tools/`, `main.rs`):** 55 (unannotated; documented as best-effort tier per spec §6 — see "best-effort paths" note below).
 
 Run summary (529 mutants total, 2026-05-18 baseline via `cargo
 mutants --package rimap-server --no-shuffle --jobs 8 --timeout 60`
-on Linux): 280 caught, 108 missed (53 annotated below as hot-path
+on Linux): 282 caught, 106 missed (51 annotated below as hot-path
 known-equivalent across the main table and `### \`mcp/fuzz_oracle.rs\``
-subsection — 26 in hot paths and the rest documented under
+subsection — 24 in hot paths and the rest documented under
 `fuzz_oracle` or as best-effort tier), 3 timeouts, 138 unviable in
 22 minutes wall clock. The dev-host blocker captured in issue #289
 (cargo-mutants 27.0.0 + macOS-specific [#611](https://github.com/sourcefrog/cargo-mutants/issues/611))
@@ -196,9 +196,7 @@ triage is deferred to a follow-up issue; the spec's
 | `mcp/wire_validator.rs:486` | `replace - with / in validate_inbound` (at `trimmed.len() - 1`) | `len() / 1 == len()` — same effect as deleting the match arm. The companion `replace - with +` mutant at the same site IS a real gap (it panics on `\r\n` input) and is killed by `validate_inbound_strips_crlf_line_ending`. | `mcp/wire_validator.rs:518` |
 | `mcp/content.rs:27` | `delete match arm ContentError::Malformed{..} in classify_content_error` | The `Malformed` arm and the `_` fallback both call `RimapError::invalid_input(err.to_string())` — the `#[expect(clippy::match_same_arms)]` above the match documents this intent. Deleting the explicit arm routes to the identical fallback. The companion `delete match arm ContentError::LimitExceeded{..}` IS a real gap and is killed by `limit_exceeded_classifies_as_attachment_too_large`. | `mcp/content.rs:22` |
 | `mcp/server.rs:353` | `replace <impl ServerHandler>::list_resources -> Result<ListResourcesResult, ErrorData> with Ok(Default::default())` | Test-infrastructure gap: rmcp `RequestContext<RoleServer>` has no public test constructor in this version, so the trait method cannot be invoked from a unit test. End-to-end coverage via the dovecot harness in `tests/e2e.rs`. | `mcp/server.rs:348` |
-| `mcp/server.rs:461` | `delete ! in <impl ServerHandler>::call_tool` (`if !is_legacy_single_account(accounts) && is_bare_simple_tool_name(...)`) | Test-infrastructure gap: the predicate `is_legacy_single_account` IS unit-tested (`mcp::tool_name::tests::is_legacy_single_account_classifies_each_branch`), but exercising the composite branch from `call_tool` requires the same `RequestContext<RoleServer>` rmcp does not expose. End-to-end coverage via the dovecot harness. | `mcp/server.rs:472` |
 | `mcp/server.rs:489` | `replace == with != in <impl ServerHandler>::call_tool` (`tool_name == ToolName::UseAccount` post-dispatch notify gate) | Test-infrastructure gap: verifying the suppression of `notifications/tools/list_changed` for non-`use_account` calls requires a `RequestContext<RoleServer>` (to drive `context.peer.notify_tool_list_changed()`); rmcp does not expose a public test constructor. End-to-end coverage via the dovecot harness. | `mcp/server.rs:510` |
-| `boot/discovery.rs:27` | `replace resolve_special_use -> Result<SpecialUseMap, RimapError> with Ok(Default::default())` | Test-infrastructure gap: the function calls `connection.list_folders("*")` which requires a live IMAP server. The dovecot harness in `tests/e2e.rs` does not exercise this code path either (it constructs `AccountState` with `SpecialUseMap::default()` directly, bypassing the function). Annotated as a known coverage gap pending future test infrastructure. | `boot/discovery.rs:26` |
 
 ### `mcp/fuzz_oracle.rs` (behind `--features fuzzing`)
 
