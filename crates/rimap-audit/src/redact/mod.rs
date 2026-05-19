@@ -1,7 +1,9 @@
 //! Structural argument redaction for audit records. Each tool declares a
 //! [`RedactionSchema`] that classifies its top-level argument fields:
 //!
-//! - [`FieldPolicy::Verbatim`] — structural fields copied into the record.
+//! - [`FieldPolicy::Verbatim`] — structural fields copied into the record
+//!   verbatim *if and only if* the JSON value matches the declared
+//!   [`VerbatimType`]. Type mismatches fall through to [`FieldPolicy::RedactString`].
 //! - [`FieldPolicy::RedactString`] — replaced with `"<redacted:N>"` where `N`
 //!   is the UTF-8 byte length of the original string.
 //! - [`FieldPolicy::SaltedHash`] — replaced with the first 16 hex chars of
@@ -23,14 +25,16 @@ use sha2::{Digest, Sha256};
 /// Per-field policy for the redaction pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldPolicy {
-    /// Copy the field's JSON value into the record unchanged. This policy
-    /// assumes the value has already passed the `rimap-content` mailbox-name
-    /// validator (no bare CR/LF, no NUL, no other ASCII control chars). The
-    /// invariant matters for downstream consumers of the audit JSONL who
-    /// pretty-print or grep the file: smuggled control bytes would surface
-    /// as confusing output, and a permissive JSONL re-parser could
-    /// re-introduce the bytes into a downstream sink.
-    Verbatim,
+    /// Copy the field's JSON value into the record if and only if it
+    /// matches the declared [`VerbatimType`]. Type-mismatched values
+    /// (e.g. a string supplied for a `U64` field) fall through to
+    /// [`Self::RedactString`] so a malicious or prompt-injected client
+    /// cannot smuggle arbitrary text into the audit log by mistyping a
+    /// "structural" field. `tool_start` is emitted before argument
+    /// deserialization runs, so the type check here is the only defense
+    /// against that vector. See [`Redactor::redact_string`] for the
+    /// fall-through output shape.
+    Verbatim(VerbatimType),
     /// Replace string values with `"<redacted:N>"`. Non-string values are
     /// replaced with `"<redacted:?>"`.
     RedactString,
@@ -42,6 +46,36 @@ pub enum FieldPolicy {
     /// via `tracing::warn!` and the field is dropped.
     Forbidden,
 }
+
+/// JSON-type expected by a [`FieldPolicy::Verbatim`] field. A mismatch
+/// falls through to [`FieldPolicy::RedactString`] inside [`Redactor::apply`]
+/// rather than copying the value into the audit log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerbatimType {
+    /// Any `Value::String`.
+    String,
+    /// `Value::String` capped at 32 bytes. Covers ISO 8601 date / date-time
+    /// shapes (`YYYY-MM-DD`, `YYYY-MM-DDTHH:MM:SS+HH:MM`); the cap exists
+    /// to prevent a long blob from being persisted under a "date" field
+    /// when the JSON type alone matches. Strict ISO parsing stays in
+    /// `build_query`; the redactor's job is just to keep a blob out of
+    /// the log.
+    DateString,
+    /// `Value::Number` that fits in a `u64`.
+    U64,
+    /// `Value::Bool`.
+    Bool,
+    /// `Value::Array` whose every element fits in a `u64`.
+    U64Array,
+    /// `Value::Array` whose every element is a `Value::String`.
+    StringArray,
+}
+
+/// Length cap on [`VerbatimType::DateString`]. 32 bytes accommodates
+/// `YYYY-MM-DDTHH:MM:SS+HH:MM` (25) with room for fractional seconds
+/// (`.fff`) and a trailing zone suffix; longer values are treated as
+/// suspicious blobs.
+const DATE_STRING_MAX_BYTES: usize = 32;
 
 /// Declarative schema for one tool's arguments. Field names are top-level
 /// JSON object keys.
@@ -130,9 +164,14 @@ impl<'a> Redactor<'a> {
                 .copied()
                 .unwrap_or(FieldPolicy::RedactString);
             match policy {
-                FieldPolicy::Verbatim => {
-                    out.insert(name.clone(), value.clone());
-                }
+                FieldPolicy::Verbatim(vt) => match Self::verbatim_check(value, vt) {
+                    Some(v) => {
+                        out.insert(name.clone(), v);
+                    }
+                    None => {
+                        out.insert(name.clone(), Self::redact_string(value));
+                    }
+                },
                 FieldPolicy::RedactString => {
                     out.insert(name.clone(), Self::redact_string(value));
                 }
@@ -149,6 +188,32 @@ impl<'a> Redactor<'a> {
             }
         }
         Value::Object(out)
+    }
+
+    /// Return `Some(value.clone())` when `value` matches the JSON shape
+    /// implied by `vt`, otherwise `None`. Callers fall through to
+    /// [`Self::redact_string`] on `None` so a wrong-typed payload (e.g.
+    /// a string smuggled into a `U64` field) cannot reach the audit log
+    /// verbatim. See [`FieldPolicy::Verbatim`] for the threat-model
+    /// rationale.
+    fn verbatim_check(value: &Value, vt: VerbatimType) -> Option<Value> {
+        match vt {
+            VerbatimType::String => value.as_str().map(|_| value.clone()),
+            VerbatimType::DateString => value
+                .as_str()
+                .filter(|s| s.len() <= DATE_STRING_MAX_BYTES)
+                .map(|_| value.clone()),
+            VerbatimType::U64 => value.as_u64().map(|_| value.clone()),
+            VerbatimType::Bool => value.as_bool().map(|_| value.clone()),
+            VerbatimType::U64Array => value
+                .as_array()
+                .filter(|arr| arr.iter().all(serde_json::Value::is_u64))
+                .map(|_| value.clone()),
+            VerbatimType::StringArray => value
+                .as_array()
+                .filter(|arr| arr.iter().all(serde_json::Value::is_string))
+                .map(|_| value.clone()),
+        }
     }
 
     fn redact_string(value: &Value) -> Value {
@@ -290,23 +355,24 @@ fn list_folders_schema(tool: ToolName) -> RedactionSchema {
 // Decision recorded in #22.
 fn search_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
+    use VerbatimType::{Bool, DateString, String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("limit", Verbatim),
-            ("offset", Verbatim),
-            ("larger", Verbatim),
-            ("smaller", Verbatim),
-            ("since", Verbatim),
-            ("before", Verbatim),
-            ("sent_since", Verbatim),
-            ("sent_before", Verbatim),
-            ("seen", Verbatim),
-            ("answered", Verbatim),
-            ("flagged", Verbatim),
-            ("draft", Verbatim),
-            ("has_attachment", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("limit", Verbatim(U64)),
+            ("offset", Verbatim(U64)),
+            ("larger", Verbatim(U64)),
+            ("smaller", Verbatim(U64)),
+            ("since", Verbatim(DateString)),
+            ("before", Verbatim(DateString)),
+            ("sent_since", Verbatim(DateString)),
+            ("sent_before", Verbatim(DateString)),
+            ("seen", Verbatim(Bool)),
+            ("answered", Verbatim(Bool)),
+            ("flagged", Verbatim(Bool)),
+            ("draft", Verbatim(Bool)),
+            ("has_attachment", Verbatim(Bool)),
             ("from", RedactString),
             ("to", RedactString),
             ("cc", RedactString),
@@ -327,23 +393,24 @@ fn search_schema(tool: ToolName) -> RedactionSchema {
 // and the `headers` SaltedHash rationale.
 fn search_advanced_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
+    use VerbatimType::{Bool, DateString, String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("limit", Verbatim),
-            ("offset", Verbatim),
-            ("larger", Verbatim),
-            ("smaller", Verbatim),
-            ("since", Verbatim),
-            ("before", Verbatim),
-            ("sent_since", Verbatim),
-            ("sent_before", Verbatim),
-            ("seen", Verbatim),
-            ("answered", Verbatim),
-            ("flagged", Verbatim),
-            ("draft", Verbatim),
-            ("has_attachment", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("limit", Verbatim(U64)),
+            ("offset", Verbatim(U64)),
+            ("larger", Verbatim(U64)),
+            ("smaller", Verbatim(U64)),
+            ("since", Verbatim(DateString)),
+            ("before", Verbatim(DateString)),
+            ("sent_since", Verbatim(DateString)),
+            ("sent_before", Verbatim(DateString)),
+            ("seen", Verbatim(Bool)),
+            ("answered", Verbatim(Bool)),
+            ("flagged", Verbatim(Bool)),
+            ("draft", Verbatim(Bool)),
+            ("has_attachment", Verbatim(Bool)),
             ("from", RedactString),
             ("to", RedactString),
             ("cc", RedactString),
@@ -361,12 +428,13 @@ fn search_advanced_schema(tool: ToolName) -> RedactionSchema {
 
 fn fetch_message_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{Bool, String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("uid", Verbatim),
-            ("include_html", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
+            ("include_html", Verbatim(Bool)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -378,11 +446,12 @@ fn fetch_message_schema(tool: ToolName) -> RedactionSchema {
 /// `mark_read`, `mark_unread`.
 fn folder_uid_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("uid", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -391,12 +460,13 @@ fn folder_uid_schema(tool: ToolName) -> RedactionSchema {
 
 fn download_attachment_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("uid", Verbatim),
-            ("part", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
+            ("part", Verbatim(VtString)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -405,12 +475,13 @@ fn download_attachment_schema(tool: ToolName) -> RedactionSchema {
 
 fn flag_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("uid", Verbatim),
-            ("flag", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
+            ("flag", Verbatim(VtString)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -419,12 +490,13 @@ fn flag_schema(tool: ToolName) -> RedactionSchema {
 
 fn move_message_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("uid", Verbatim),
-            ("destination", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
+            ("destination", Verbatim(VtString)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -433,11 +505,12 @@ fn move_message_schema(tool: ToolName) -> RedactionSchema {
 
 fn create_draft_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
+    use VerbatimType::{String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("in_reply_to_uid", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("in_reply_to_uid", Verbatim(U64)),
             ("to", SaltedHash),
             ("cc", SaltedHash),
             ("bcc", SaltedHash),
@@ -452,6 +525,7 @@ fn create_draft_schema(tool: ToolName) -> RedactionSchema {
 
 fn send_email_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
+    use VerbatimType::{String as VtString, StringArray, U64};
     RedactionSchema::new(
         tool,
         &[
@@ -460,12 +534,12 @@ fn send_email_schema(tool: ToolName) -> RedactionSchema {
             ("bcc", SaltedHash),
             ("subject", RedactString),
             ("body", RedactString),
-            ("in_reply_to", Verbatim),
-            ("references", Verbatim),
-            ("message_id", Verbatim),
+            ("in_reply_to", Verbatim(VtString)),
+            ("references", Verbatim(StringArray)),
+            ("message_id", Verbatim(VtString)),
             ("smtp_response", RedactString),
-            ("sent_copy_uid", Verbatim),
-            ("folder", Verbatim),
+            ("sent_copy_uid", Verbatim(U64)),
+            ("folder", Verbatim(VtString)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -474,13 +548,14 @@ fn send_email_schema(tool: ToolName) -> RedactionSchema {
 
 fn delete_message_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("uid", Verbatim),
-            ("message_id", Verbatim),
-            ("destination", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
+            ("message_id", Verbatim(VtString)),
+            ("destination", Verbatim(VtString)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -489,12 +564,13 @@ fn delete_message_schema(tool: ToolName) -> RedactionSchema {
 
 fn expunge_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{String as VtString, U64, U64Array};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("expunged_count", Verbatim),
-            ("expunged_uids", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("expunged_count", Verbatim(U64)),
+            ("expunged_uids", Verbatim(U64Array)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -503,10 +579,11 @@ fn expunge_schema(tool: ToolName) -> RedactionSchema {
 
 fn create_folder_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::String as VtString;
     RedactionSchema::new(
         tool,
         &[
-            ("name", Verbatim),
+            ("name", Verbatim(VtString)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -515,11 +592,12 @@ fn create_folder_schema(tool: ToolName) -> RedactionSchema {
 
 fn rename_folder_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::String as VtString;
     RedactionSchema::new(
         tool,
         &[
-            ("old_name", Verbatim),
-            ("new_name", Verbatim),
+            ("old_name", Verbatim(VtString)),
+            ("new_name", Verbatim(VtString)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -528,11 +606,12 @@ fn rename_folder_schema(tool: ToolName) -> RedactionSchema {
 
 fn delete_folder_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::{Forbidden, Verbatim};
+    use VerbatimType::{String as VtString, U64};
     RedactionSchema::new(
         tool,
         &[
-            ("name", Verbatim),
-            ("message_count", Verbatim),
+            ("name", Verbatim(VtString)),
+            ("message_count", Verbatim(U64)),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -541,29 +620,36 @@ fn delete_folder_schema(tool: ToolName) -> RedactionSchema {
 
 fn add_remove_label_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::Verbatim;
+    use VerbatimType::{String as VtString, U64, U64Array};
     RedactionSchema::new(
         tool,
         &[
-            ("folder", Verbatim),
-            ("uid", Verbatim),
-            ("uids", Verbatim),
-            ("label", Verbatim),
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
+            ("uids", Verbatim(U64Array)),
+            ("label", Verbatim(VtString)),
         ],
     )
 }
 
 fn list_labels_schema(tool: ToolName) -> RedactionSchema {
     use FieldPolicy::Verbatim;
-    RedactionSchema::new(tool, &[("folder", Verbatim), ("uid", Verbatim)])
+    use VerbatimType::{String as VtString, U64};
+    RedactionSchema::new(
+        tool,
+        &[("folder", Verbatim(VtString)), ("uid", Verbatim(U64))],
+    )
 }
 
 fn use_account_schema(tool: ToolName) -> RedactionSchema {
-    // `account` is redacted — NOT verbatim — because the handler's
-    // bidi/zero-width pre-check runs AFTER `tool_start` is emitted,
-    // so a spoofed name would otherwise land in the audit log verbatim.
-    // Operators reviewing audit records see `<redacted:N>`; the handler
-    // still returns `ERR_INVALID_INPUT` for spoofed input so downstream
-    // correlation via `tool_end.code` is unaffected (#111).
+    // `account` stays `RedactString` — NOT a typed `Verbatim(String)` —
+    // because the handler's bidi/zero-width pre-check runs AFTER
+    // `tool_start` is emitted. The typed Verbatim policies elsewhere in
+    // this module cover the "wrong JSON type smuggles a string into the
+    // log" vector, but a well-typed `Value::String` carrying spoofed
+    // bidi/zero-width codepoints would still pass the type check. The
+    // handler returns `ERR_INVALID_INPUT` for spoofed input so
+    // downstream correlation via `tool_end.code` is unaffected (#111).
     use FieldPolicy::RedactString;
     RedactionSchema::new(tool, &[("account", RedactString)])
 }
@@ -591,7 +677,9 @@ mod tests {
 
     use rimap_core::tool::ToolName;
 
-    use crate::redact::{FieldPolicy, RedactionSalt, RedactionSchema, Redactor, hash_arguments};
+    use crate::redact::{
+        FieldPolicy, RedactionSalt, RedactionSchema, Redactor, VerbatimType, hash_arguments,
+    };
 
     fn schema() -> RedactionSchema {
         RedactionSchema::new(
@@ -600,7 +688,7 @@ mod tests {
                 ("to", FieldPolicy::SaltedHash),
                 ("subject", FieldPolicy::RedactString),
                 ("body_text", FieldPolicy::RedactString),
-                ("in_reply_to_uid", FieldPolicy::Verbatim),
+                ("in_reply_to_uid", FieldPolicy::Verbatim(VerbatimType::U64)),
                 ("password", FieldPolicy::Forbidden),
             ],
         )
@@ -617,6 +705,207 @@ mod tests {
         let r = Redactor::new(&s, &salt);
         let out = r.apply(&json!({"in_reply_to_uid": 12345}));
         assert_eq!(out["in_reply_to_uid"], json!(12345));
+    }
+
+    #[test]
+    fn verbatim_u64_rejects_string_payload() {
+        // A client mistypes (or maliciously pokes) a structural u64 field
+        // with a string. The verbatim policy must NOT copy the raw string
+        // into the audit log; the value falls through to RedactString.
+        let canary = "u64-canary-leak";
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        for field in ["limit", "offset", "larger", "smaller"] {
+            let input = json!({ field: canary });
+            let out = r.apply(&input);
+            assert_eq!(
+                out[field],
+                json!(format!("<redacted:{}>", canary.len())),
+                "field {field} leaked a string payload verbatim",
+            );
+            let serialized = serde_json::to_string(&out).unwrap();
+            assert!(
+                !serialized.contains(canary),
+                "canary appeared in redacted output for field {field}: {serialized}",
+            );
+        }
+    }
+
+    #[test]
+    fn verbatim_bool_rejects_string_payload() {
+        let canary = "bool-canary-leak";
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        for field in ["seen", "answered", "flagged", "draft", "has_attachment"] {
+            let input = json!({ field: canary });
+            let out = r.apply(&input);
+            assert_eq!(
+                out[field],
+                json!(format!("<redacted:{}>", canary.len())),
+                "field {field} leaked a string payload verbatim",
+            );
+            let serialized = serde_json::to_string(&out).unwrap();
+            assert!(
+                !serialized.contains(canary),
+                "canary appeared in redacted output for field {field}: {serialized}",
+            );
+        }
+    }
+
+    #[test]
+    fn verbatim_date_string_rejects_oversized_value() {
+        // A 64-byte "date" string violates the 32-byte cap. Falls through
+        // to RedactString and the original bytes never reach the log.
+        let canary = "x".repeat(64);
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        for field in ["since", "before", "sent_since", "sent_before"] {
+            let input = json!({ field: canary.clone() });
+            let out = r.apply(&input);
+            assert_eq!(
+                out[field],
+                json!(format!("<redacted:{}>", canary.len())),
+                "oversized date field {field} leaked verbatim",
+            );
+        }
+    }
+
+    #[test]
+    fn verbatim_date_string_accepts_iso_dates() {
+        // Well-typed ISO date values stay verbatim — the 32-byte cap
+        // accommodates `YYYY-MM-DDTHH:MM:SS+HH:MM` and similar shapes.
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let input = json!({
+            "since": "2026-05-19",
+            "before": "2026-05-19T12:00:00+00:00",
+        });
+        let out = r.apply(&input);
+        assert_eq!(out["since"], json!("2026-05-19"));
+        assert_eq!(out["before"], json!("2026-05-19T12:00:00+00:00"));
+    }
+
+    #[test]
+    fn verbatim_u64_array_rejects_non_array() {
+        let canary = "array-canary-leak";
+        let schema = crate::redact::schemas()
+            .into_iter()
+            .find(|s| s.tool == ToolName::Expunge)
+            .expect("expunge schema exists");
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let out = r.apply(&json!({ "expunged_uids": canary }));
+        assert_eq!(
+            out["expunged_uids"],
+            json!(format!("<redacted:{}>", canary.len()))
+        );
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(!serialized.contains(canary));
+    }
+
+    #[test]
+    fn verbatim_u64_array_rejects_mixed_element_types() {
+        let schema = crate::redact::schemas()
+            .into_iter()
+            .find(|s| s.tool == ToolName::Expunge)
+            .expect("expunge schema exists");
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let canary = "mixed-canary-leak";
+        let out = r.apply(&json!({ "expunged_uids": [1, canary, 3] }));
+        // Whole array is wrong-typed → falls through to RedactString,
+        // which for a non-string value emits `<redacted:?>`. The canary
+        // must NOT appear anywhere in the redacted output.
+        assert_eq!(out["expunged_uids"], json!("<redacted:?>"));
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(
+            !serialized.contains(canary),
+            "canary leaked through array fall-through: {serialized}",
+        );
+    }
+
+    #[test]
+    fn verbatim_string_array_rejects_mixed_element_types() {
+        let schema = crate::redact::schemas()
+            .into_iter()
+            .find(|s| s.tool == ToolName::SendEmail)
+            .expect("send_email schema exists");
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let out = r.apply(&json!({ "references": ["<a@x>", 42, "<b@x>"] }));
+        assert_eq!(out["references"], json!("<redacted:?>"));
+    }
+
+    #[test]
+    fn verbatim_string_rejects_non_string() {
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let out = r.apply(&json!({"folder": 12345}));
+        // Number is not a string → falls through, gets `<redacted:?>`.
+        assert_eq!(out["folder"], json!("<redacted:?>"));
+    }
+
+    #[test]
+    fn search_canary_never_leaks_through_any_verbatim_field() {
+        // Codex adversarial-review regression: drive every Verbatim
+        // field on the search schema with a TYPE-MISMATCHED poison
+        // payload and verify the audit-record JSON never contains the
+        // canary. Per-field class:
+        //   * Verbatim(String)         → poison with an array (non-string).
+        //   * Verbatim(U64)            → poison with a string.
+        //   * Verbatim(Bool)           → poison with a string.
+        //   * Verbatim(DateString)     → poison with a string > 32 bytes
+        //                                AND poison with an array
+        //                                (cap and type both exercised).
+        // A well-typed but adversarial value (e.g. a short malformed
+        // string in a DateString field) is out of scope at the redactor
+        // layer; the plan keeps strict format parsing inside
+        // `build_query`.
+        let canary = "secret-leak-canary";
+        let oversized = "x".repeat(64) + canary;
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+
+        let string_field_poisons: &[(&str, serde_json::Value)] = &[("folder", json!([canary]))];
+        let u64_field_poisons: &[(&str, serde_json::Value)] = &[
+            ("limit", json!(canary)),
+            ("offset", json!(canary)),
+            ("larger", json!(canary)),
+            ("smaller", json!(canary)),
+        ];
+        let bool_field_poisons: &[(&str, serde_json::Value)] = &[
+            ("seen", json!(canary)),
+            ("answered", json!(canary)),
+            ("flagged", json!(canary)),
+            ("draft", json!(canary)),
+            ("has_attachment", json!(canary)),
+        ];
+        let date_field_poisons: &[(&str, serde_json::Value)] = &[
+            ("since", json!(oversized)),
+            ("before", json!([canary])),
+            ("sent_since", json!(oversized)),
+            ("sent_before", json!([canary])),
+        ];
+        let all_cases = string_field_poisons
+            .iter()
+            .chain(u64_field_poisons)
+            .chain(bool_field_poisons)
+            .chain(date_field_poisons);
+        for (field, poison) in all_cases {
+            let input = json!({ *field: poison.clone() });
+            let out = r.apply(&input);
+            let serialized = serde_json::to_string(&out).unwrap();
+            assert!(
+                !serialized.contains(canary),
+                "canary leaked for field {field}: {serialized}",
+            );
+        }
     }
 
     #[test]
@@ -765,7 +1054,7 @@ mod tests {
             .expect("search schema exists");
         assert_eq!(
             schema.policies.get("folder").copied(),
-            Some(FieldPolicy::Verbatim),
+            Some(FieldPolicy::Verbatim(VerbatimType::String)),
         );
         assert_eq!(
             schema.policies.get("body").copied(),
@@ -782,18 +1071,18 @@ mod tests {
             .expect("send_email schema exists");
         assert_eq!(
             schema.policies.get("in_reply_to").copied(),
-            Some(FieldPolicy::Verbatim),
-            "in_reply_to should be Verbatim per spec",
+            Some(FieldPolicy::Verbatim(VerbatimType::String)),
+            "in_reply_to should be Verbatim(String) per spec",
         );
         assert_eq!(
             schema.policies.get("references").copied(),
-            Some(FieldPolicy::Verbatim),
-            "references should be Verbatim per spec",
+            Some(FieldPolicy::Verbatim(VerbatimType::StringArray)),
+            "references should be Verbatim(StringArray) per spec",
         );
         assert_eq!(
             schema.policies.get("message_id").copied(),
-            Some(FieldPolicy::Verbatim),
-            "message_id result field should be Verbatim",
+            Some(FieldPolicy::Verbatim(VerbatimType::String)),
+            "message_id result field should be Verbatim(String)",
         );
         assert_eq!(
             schema.policies.get("smtp_response").copied(),
@@ -802,13 +1091,13 @@ mod tests {
         );
         assert_eq!(
             schema.policies.get("sent_copy_uid").copied(),
-            Some(FieldPolicy::Verbatim),
-            "sent_copy_uid should be Verbatim",
+            Some(FieldPolicy::Verbatim(VerbatimType::U64)),
+            "sent_copy_uid should be Verbatim(U64)",
         );
         assert_eq!(
             schema.policies.get("folder").copied(),
-            Some(FieldPolicy::Verbatim),
-            "folder (Sent) should be Verbatim",
+            Some(FieldPolicy::Verbatim(VerbatimType::String)),
+            "folder (Sent) should be Verbatim(String)",
         );
         assert!(
             !schema.policies.contains_key("in_reply_to_uid"),
@@ -845,11 +1134,11 @@ mod tests {
             .expect("delete_message schema exists");
         assert_eq!(
             schema.policies.get("message_id").copied(),
-            Some(FieldPolicy::Verbatim),
+            Some(FieldPolicy::Verbatim(VerbatimType::String)),
         );
         assert_eq!(
             schema.policies.get("destination").copied(),
-            Some(FieldPolicy::Verbatim),
+            Some(FieldPolicy::Verbatim(VerbatimType::String)),
         );
     }
 
@@ -862,11 +1151,11 @@ mod tests {
             .expect("expunge schema exists");
         assert_eq!(
             schema.policies.get("expunged_count").copied(),
-            Some(FieldPolicy::Verbatim),
+            Some(FieldPolicy::Verbatim(VerbatimType::U64)),
         );
         assert_eq!(
             schema.policies.get("expunged_uids").copied(),
-            Some(FieldPolicy::Verbatim),
+            Some(FieldPolicy::Verbatim(VerbatimType::U64Array)),
         );
     }
 
@@ -879,7 +1168,7 @@ mod tests {
             .expect("delete_folder schema exists");
         assert_eq!(
             schema.policies.get("message_count").copied(),
-            Some(FieldPolicy::Verbatim),
+            Some(FieldPolicy::Verbatim(VerbatimType::U64)),
         );
     }
 
