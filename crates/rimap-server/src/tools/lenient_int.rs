@@ -18,11 +18,18 @@ use serde::de::{self, Deserializer};
 /// does not reliably dispatch `i128` through every data format; `i64`
 /// covers every integer type we widen (`usize` on 64-bit is bounded by
 /// the values we actually accept, `u32` and `NonZeroU32` fit easily).
+///
+/// Uses owned `String` rather than `&'a str` so the same deserializer
+/// works whether the caller calls `serde_json::from_str` (which can
+/// borrow from the original buffer) or `serde_json::from_value` (which
+/// goes through `serde_json::Value` and cannot borrow). The MCP
+/// dispatch layer in `mcp/tool_catalog.rs` uses `from_value`, so the
+/// borrow path is not viable in production.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum IntOrStr<'a> {
+enum IntOrStr {
     Int(i64),
-    Str(&'a str),
+    Str(String),
 }
 
 fn parse_usize_str<E: de::Error>(s: &str) -> Result<usize, E> {
@@ -62,11 +69,11 @@ fn i64_to_usize<E: de::Error>(n: i64) -> Result<usize, E> {
 /// negative integer, an empty/non-digit string, or numerically out of
 /// range for `usize`.
 pub fn deserialize_opt_usize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    let v: Option<IntOrStr<'_>> = Option::deserialize(d)?;
+    let v: Option<IntOrStr> = Option::deserialize(d)?;
     match v {
         None => Ok(None),
         Some(IntOrStr::Int(n)) => i64_to_usize(n).map(Some),
-        Some(IntOrStr::Str(s)) => parse_usize_str(s).map(Some),
+        Some(IntOrStr::Str(s)) => parse_usize_str(&s).map(Some),
     }
 }
 
@@ -98,11 +105,11 @@ fn i64_to_u32<E: de::Error>(n: i64) -> Result<u32, E> {
 ///
 /// Same semantics as [`deserialize_opt_usize`], scoped to `u32` range.
 pub fn deserialize_opt_u32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
-    let v: Option<IntOrStr<'_>> = Option::deserialize(d)?;
+    let v: Option<IntOrStr> = Option::deserialize(d)?;
     match v {
         None => Ok(None),
         Some(IntOrStr::Int(n)) => i64_to_u32(n).map(Some),
-        Some(IntOrStr::Str(s)) => parse_u32_str(s).map(Some),
+        Some(IntOrStr::Str(s)) => parse_u32_str(&s).map(Some),
     }
 }
 
@@ -119,7 +126,7 @@ pub fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(
     let v = IntOrStr::deserialize(d)?;
     let n: u32 = match v {
         IntOrStr::Int(n) => i64_to_u32(n)?,
-        IntOrStr::Str(s) => parse_u32_str(s)?,
+        IntOrStr::Str(s) => parse_u32_str(&s)?,
     };
     core::num::NonZeroU32::new(n)
         .ok_or_else(|| de::Error::invalid_value(de::Unexpected::Unsigned(0), &"nonzero u32"))
@@ -135,11 +142,11 @@ pub fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(
 pub fn deserialize_opt_nonzero_u32<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<core::num::NonZeroU32>, D::Error> {
-    let v: Option<IntOrStr<'_>> = Option::deserialize(d)?;
+    let v: Option<IntOrStr> = Option::deserialize(d)?;
     let Some(int_or_str) = v else { return Ok(None) };
     let n: u32 = match int_or_str {
         IntOrStr::Int(n) => i64_to_u32(n)?,
-        IntOrStr::Str(s) => parse_u32_str(s)?,
+        IntOrStr::Str(s) => parse_u32_str(&s)?,
     };
     let nz = core::num::NonZeroU32::new(n)
         .ok_or_else(|| de::Error::invalid_value(de::Unexpected::Unsigned(0), &"nonzero u32"))?;
