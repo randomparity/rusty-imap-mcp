@@ -700,6 +700,29 @@ async fn assert_readonly_denial(harness: &mut Harness) {
         "readonly.search advanced_query must be posture-denied (sub-capability \
          dispatch reaches DispatchGuard); got {advanced_denial}",
     );
+
+    // The new `body` input is a content-oracle; refine_tool_name
+    // promotes Search -> SearchAdvanced, which the posture matrix
+    // denies under Readonly. Pin the wire error to the posture-denial
+    // code so silent drift in refinement OR the matrix surfaces here.
+    let body_denial = harness
+        .request(
+            "tools/call",
+            json!({
+                "name": "readonly.search",
+                "arguments": {"folder": "INBOX", "body": "hello"},
+            }),
+        )
+        .await;
+    assert!(
+        body_denial["error"].is_object(),
+        "expected error envelope for readonly.search body, got {body_denial}",
+    );
+    assert_eq!(
+        body_denial["error"]["code"].as_i64(),
+        Some(POSTURE_DENIAL_CODE),
+        "readonly.search body must be posture-denied; got {body_denial}",
+    );
 }
 
 /// Verify audit records from the readonly posture denial test.
@@ -769,42 +792,59 @@ fn assert_readonly_audit_records(audit_path: &std::path::Path) {
     );
     assert_eq!(mm_ends[0]["start_seq"], mm_starts[0]["seq"]);
 
-    // Denial path: search.advanced_query pair, account="readonly" (advanced_query
-    // sub-capability, denied by DispatchGuard after the reordered
-    // TOOL_DEFS check). The audit writer logs the *refined* tool name
-    // (SearchAdvanced.as_str() == "search.advanced_query"), not "search".
+    // Denial path: TWO search.advanced_query pairs — advanced_query (Task 3)
+    // and body (Task 10), both refine to SearchAdvanced.
+    assert_readonly_audit_search_pairs(&records);
+}
+
+/// Assert the two `search.advanced_query` audit pairs produced by the
+/// readonly denial test (one from `advanced_query`, one from `body` — both
+/// refine to `SearchAdvanced` and serialize as `"search.advanced_query"`).
+fn assert_readonly_audit_search_pairs(records: &[Value]) {
     let s_starts: Vec<&Value> = records
         .iter()
         .filter(|r| r["kind"] == "tool_start" && r["tool"] == "search.advanced_query")
         .collect();
     assert_eq!(
         s_starts.len(),
-        1,
-        "expected exactly one search.advanced_query tool_start"
+        2,
+        "expected exactly two search.advanced_query tool_start \
+         (advanced_query + body): {records:#?}",
     );
-    assert_eq!(
-        s_starts[0]["account"].as_str(),
-        Some("readonly"),
-        "readonly.search tool_start must record account=\"readonly\": {records:#?}",
-    );
+    for s in &s_starts {
+        assert_eq!(
+            s["account"].as_str(),
+            Some("readonly"),
+            "readonly.search tool_start must record account=\"readonly\": {records:#?}",
+        );
+    }
     let s_ends: Vec<&Value> = records
         .iter()
         .filter(|r| r["kind"] == "tool_end" && r["tool"] == "search.advanced_query")
         .collect();
     assert_eq!(
         s_ends.len(),
-        1,
-        "expected exactly one search.advanced_query tool_end"
+        2,
+        "expected exactly two search.advanced_query tool_end: {records:#?}",
     );
-    assert_eq!(
-        s_ends[0]["account"].as_str(),
-        Some("readonly"),
-        "readonly.search tool_end must record account=\"readonly\": {records:#?}",
-    );
-    assert_eq!(s_ends[0]["start_seq"], s_starts[0]["seq"]);
-    // NOTE(Task 10): if body promotion adds a second search.advanced_query
-    // denial, bump both == 1 above to == 2 and consider extracting an
-    // assert_audit_pair(records, tool, account, expected_count) helper.
+    for e in &s_ends {
+        assert_eq!(
+            e["account"].as_str(),
+            Some("readonly"),
+            "readonly.search tool_end must record account=\"readonly\": {records:#?}",
+        );
+    }
+    // Each tool_end's start_seq must match a tool_start's seq.
+    let start_seqs: std::collections::HashSet<&Value> =
+        s_starts.iter().map(|s| &s["seq"]).collect();
+    for e in &s_ends {
+        let start_seq = &e["start_seq"];
+        assert!(
+            start_seqs.contains(start_seq),
+            "tool_end start_seq {start_seq} should match a \
+             tool_start seq from {start_seqs:?}",
+        );
+    }
 }
 
 async fn seed_multipart_message(dovecot: &DovecotHarness) {
