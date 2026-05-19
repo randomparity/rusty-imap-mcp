@@ -115,6 +115,9 @@ pub struct SearchResultEntry {
     /// To addresses, sanitized. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to: Vec<String>,
+    /// Cc addresses, sanitized. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
     /// RFC 2822 `Message-ID`, sanitized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -378,7 +381,7 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
         .as_ref()
         .map(|f| f.iter().map(|flag| format_flag(flag).to_string()).collect());
 
-    let (subject, date, from, to, message_id) = if let Some(env) = &msg.envelope {
+    let (subject, date, from, to, cc, message_id) = if let Some(env) = &msg.envelope {
         let subject = env.subject_raw.as_ref().map(|s| {
             let raw = String::from_utf8_lossy(s);
             sanitize_for_output(&raw)
@@ -403,13 +406,21 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
                 .map(|a| sanitize_for_output(&a))
                 .collect()
         };
+        let cc = if env.cc.is_empty() {
+            Vec::new()
+        } else {
+            format_addresses(&env.cc)
+                .into_iter()
+                .map(|a| sanitize_for_output(&a))
+                .collect()
+        };
         let message_id = env.message_id.as_ref().map(|mid| {
             let raw = String::from_utf8_lossy(mid.as_bytes());
             sanitize_for_output(&raw)
         });
-        (subject, date, from, to, message_id)
+        (subject, date, from, to, cc, message_id)
     } else {
-        (None, None, Vec::new(), Vec::new(), None)
+        (None, None, Vec::new(), Vec::new(), Vec::new(), None)
     };
 
     SearchResultEntry {
@@ -420,6 +431,7 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
         date,
         from,
         to,
+        cc,
         message_id,
     }
 }
@@ -643,6 +655,106 @@ mod tests {
             }
             rimap_imap::types::SearchQuery::Raw(r) => panic!("unexpected raw: {r}"),
         }
+    }
+
+    use rimap_imap::types::{Address, Envelope, FetchedMessage};
+
+    fn addr(name: &str, mailbox: &str, host: &str) -> Address {
+        Address {
+            name: if name.is_empty() {
+                None
+            } else {
+                Some(name.as_bytes().to_vec())
+            },
+            adl: None,
+            mailbox: Some(mailbox.as_bytes().to_vec()),
+            host: Some(host.as_bytes().to_vec()),
+        }
+    }
+
+    fn uid(n: u32) -> rimap_imap::types::Uid {
+        use std::num::NonZeroU32;
+        rimap_imap::types::Uid::from(NonZeroU32::new(n).expect("non-zero"))
+    }
+
+    fn fetched_with_envelope(env: Envelope) -> FetchedMessage {
+        FetchedMessage {
+            uid: uid(42),
+            envelope: Some(env),
+            bodystructure: None,
+            flags: None,
+            size: None,
+        }
+    }
+
+    #[test]
+    fn format_search_result_populates_cc_from_envelope() {
+        let env = Envelope {
+            date: None,
+            subject_raw: None,
+            from: vec![],
+            sender: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![addr("Carol", "carol", "example.com")],
+            bcc: vec![],
+            in_reply_to: None,
+            message_id: None,
+        };
+        let entry = format_search_result(&fetched_with_envelope(env));
+        assert_eq!(entry.cc, vec!["Carol <carol@example.com>"]);
+    }
+
+    #[test]
+    fn format_search_result_returns_empty_cc_when_envelope_omits_it() {
+        let env = Envelope {
+            date: None,
+            subject_raw: None,
+            from: vec![],
+            sender: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            in_reply_to: None,
+            message_id: None,
+        };
+        let entry = format_search_result(&fetched_with_envelope(env));
+        assert!(entry.cc.is_empty());
+
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert!(
+            !json.contains("\"cc\""),
+            "empty cc must be skipped on serialize; got {json}",
+        );
+    }
+
+    #[test]
+    fn format_search_result_never_emits_bcc_even_when_envelope_has_it() {
+        // Privacy boundary: bcc must NOT appear in SearchResultEntry in
+        // any posture. format_search_result must ignore env.bcc.
+        let env = Envelope {
+            date: None,
+            subject_raw: None,
+            from: vec![],
+            sender: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![addr("Blind", "blind", "example.com")],
+            in_reply_to: None,
+            message_id: None,
+        };
+        let entry = format_search_result(&fetched_with_envelope(env));
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert!(
+            !json.contains("bcc"),
+            "bcc key must not appear in serialized SearchResultEntry; got {json}",
+        );
+        assert!(
+            !json.contains("blind@example.com"),
+            "bcc address must not leak via any other field; got {json}",
+        );
     }
 
     #[test]
