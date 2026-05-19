@@ -29,6 +29,8 @@ pub struct DeleteMessageInput {
     /// Source folder containing the message.
     pub folder: String,
     /// UID of the message to delete.
+    #[serde(deserialize_with = "crate::tools::lenient_int::deserialize_nonzero_u32")]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_nonzero_u32")]
     pub uid: core::num::NonZeroU32,
 }
 
