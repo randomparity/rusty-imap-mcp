@@ -3,6 +3,13 @@
     "SearchResultEntry": {
       "description": "A single message entry in a `search` untrusted payload.",
       "properties": {
+        "cc": {
+          "description": "Cc addresses, sanitized. Omitted when empty.\n\nNote: `bcc` is intentionally absent \u2014 exposing BCC recipients\nviolates the privacy boundary enforced at the `SearchInput` and\noutput layers. See the spec's Privacy subsection.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "date": {
           "description": "Date header, sanitized.",
           "type": [
