@@ -338,6 +338,19 @@ mod tests {
     }
 
     #[test]
+    fn structured_to_key_header_value_with_embedded_quote_is_escaped() {
+        use crate::types::HeaderSearch;
+        let q = StructuredQuery {
+            headers: Some(vec![HeaderSearch {
+                name: "X-Tag".to_string(),
+                value: r#"a"b"#.to_string(),
+            }]),
+            ..StructuredQuery::default()
+        };
+        assert_eq!(structured_to_key(&q).unwrap(), r#"HEADER X-Tag "a\"b""#);
+    }
+
+    #[test]
     fn structured_to_key_treats_empty_headers_vec_as_no_clause() {
         let q = StructuredQuery {
             headers: Some(Vec::new()),
