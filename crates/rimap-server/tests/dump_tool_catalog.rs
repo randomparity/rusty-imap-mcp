@@ -52,3 +52,51 @@ fn dump_tool_catalog_emits_object_schemas() {
         );
     }
 }
+
+/// Pins the `lenient_int` schema shape (#292): `search.limit` must publish
+/// a `oneOf` with `integer`, `string` (digit pattern), and `null`
+/// branches so MCP hosts that pre-validate against the cached
+/// `inputSchema` accept both `100` and `"100"`.
+#[expect(clippy::panic, reason = "integration test assertion")]
+#[test]
+fn search_limit_publishes_lenient_int_schema() {
+    let output = Command::new(cargo_bin("rusty-imap-mcp"))
+        .arg("dump-tool-catalog")
+        .output()
+        .expect("spawn rusty-imap-mcp dump-tool-catalog");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+
+    let mut found = false;
+    for line in stdout.lines().filter(|l| !l.is_empty()) {
+        let v: Value = serde_json::from_str(line).expect("each line is JSON");
+        if v["name"] == "search" {
+            let limit = &v["inputSchema"]["properties"]["limit"];
+            let branches = limit["oneOf"]
+                .as_array()
+                .unwrap_or_else(|| panic!("search.limit must publish a oneOf, got {limit}"));
+            assert_eq!(branches.len(), 3, "expected 3 branches in {branches:?}");
+
+            let types: Vec<&str> = branches.iter().filter_map(|b| b["type"].as_str()).collect();
+            assert!(
+                types.contains(&"integer"),
+                "missing integer branch: {types:?}"
+            );
+            assert!(
+                types.contains(&"string"),
+                "missing string branch: {types:?}"
+            );
+            assert!(types.contains(&"null"), "missing null branch: {types:?}");
+
+            let string_branch = branches
+                .iter()
+                .find(|b| b["type"] == "string")
+                .expect("string branch present");
+            assert_eq!(string_branch["pattern"], "^[0-9]+$");
+
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "search tool not present in dump-tool-catalog output");
+}
