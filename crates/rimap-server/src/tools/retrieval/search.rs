@@ -45,8 +45,18 @@ pub struct SearchInput {
     /// Raw IMAP SEARCH query (full posture only).
     pub advanced_query: Option<String>,
     /// Max results to return (default 100, max 100).
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub limit: Option<usize>,
     /// Offset into the result set (default 0).
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub offset: Option<usize>,
 }
 

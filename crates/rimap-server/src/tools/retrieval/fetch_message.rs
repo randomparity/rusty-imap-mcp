@@ -24,10 +24,17 @@ pub struct FetchMessageInput {
     /// IMAP folder containing the message.
     pub folder: String,
     /// UID of the message to fetch.
+    #[serde(deserialize_with = "crate::tools::lenient_int::deserialize_nonzero_u32")]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_nonzero_u32")]
     pub uid: core::num::NonZeroU32,
     /// Include sanitized HTML body in the response.
     pub include_html: Option<bool>,
     /// Truncate body text (and HTML if included) to this many bytes.
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub max_body_bytes: Option<usize>,
 }
 
