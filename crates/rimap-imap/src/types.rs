@@ -274,6 +274,11 @@ pub enum BodyStructure {
 
 /// SEARCH query — either a structured builder or a raw passthrough.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "StructuredQuery is the dominant variant; boxing it would \
+              require updating every call site for no runtime benefit"
+)]
 pub enum SearchQuery {
     /// Typed query built via `StructuredQuery`. This is the path all
     /// untrusted input (agent prompts, MCP tool arguments, HTTP requests)
@@ -298,6 +303,20 @@ pub enum SearchQuery {
     Raw(String),
 }
 
+/// A single `HEADER name value` SEARCH clause built into a
+/// [`StructuredQuery`]. The `name` must satisfy RFC 5322 field-name
+/// syntax (printable ASCII, no `:`); the `value` is quoted on emission
+/// and CR/LF/NUL bytes are rejected. Both are enforced when the
+/// query is compiled to an IMAP search key — see
+/// `crates/rimap-imap/src/ops/search.rs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderSearch {
+    /// RFC 5322 field name (e.g. `"List-Id"`, `"X-Spam-Score"`).
+    pub name: String,
+    /// Substring to match within the header value.
+    pub value: String,
+}
+
 /// Structured SEARCH builder. Empty builder = `ALL`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StructuredQuery {
@@ -316,6 +335,33 @@ pub struct StructuredQuery {
     /// Restrict to messages with attachments (`HAS_ATTACHMENT` heuristic;
     /// emitted as `BODY "Content-Disposition: attachment"`).
     pub has_attachment: bool,
+    /// Match `CC` header substring.
+    pub cc: Option<String>,
+    /// Match `BCC` header substring. (Content-oracle — gated to
+    /// `SearchAdvanced` at the MCP dispatch seam.)
+    pub bcc: Option<String>,
+    /// Match `BODY` substring (body parts only). Content-oracle.
+    pub body: Option<String>,
+    /// Match `TEXT` substring (headers OR body). Content-oracle.
+    pub text: Option<String>,
+    /// One or more `HEADER name value` clauses. Content-oracle when
+    /// non-empty.
+    pub headers: Option<Vec<HeaderSearch>>,
+    /// `LARGER N` (messages strictly greater than N octets).
+    pub larger: Option<u64>,
+    /// `SMALLER N` (messages strictly less than N octets).
+    pub smaller: Option<u64>,
+    /// `SENTSINCE` (inclusive lower bound by `Date:` header, not
+    /// INTERNALDATE — distinct from [`Self::since`]).
+    pub sent_since: Option<::time::Date>,
+    /// `SENTBEFORE` (exclusive upper bound by `Date:` header).
+    pub sent_before: Option<::time::Date>,
+    /// Restrict to messages with `\Answered`.
+    pub answered: Option<bool>,
+    /// Restrict to messages with `\Flagged`.
+    pub flagged: Option<bool>,
+    /// Restrict to messages with `\Draft`.
+    pub draft: Option<bool>,
 }
 
 /// FETCH item selection. `ENVELOPE`, `BODYSTRUCTURE`, `UID`, `FLAGS`, `SIZE`.

@@ -184,6 +184,7 @@ fn build_query(
         before,
         seen: input.seen,
         has_attachment: input.has_attachment.unwrap_or(false),
+        ..Default::default()
     }))
 }
 
