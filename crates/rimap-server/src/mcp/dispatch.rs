@@ -322,8 +322,8 @@ mod tests {
         // The two cargo-mutants survivors at line 73 (`replace ... ->
         // Option<Posture> with None` and `... with Some(Default::default())`)
         // would collapse one or both branches to the same wrong value.
-        use rimap_core::Posture;
         use super::PostureContext;
+        use rimap_core::Posture;
 
         assert_eq!(
             PostureContext::Account(Posture::DraftSafe).posture(),

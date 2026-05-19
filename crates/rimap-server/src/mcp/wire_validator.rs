@@ -1473,12 +1473,10 @@ mod tests {
         // surface as the supervisor's return value — the stub
         // `Ok(())` mutation would silently swallow this and report
         // success on every failure path.
-        let inbound =
-            tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
-        let outbound =
-            tokio::spawn(
-                async { Err::<(), std::io::Error>(std::io::Error::other("outbound boom")) },
-            );
+        let inbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        let outbound = tokio::spawn(async {
+            Err::<(), std::io::Error>(std::io::Error::other("outbound boom"))
+        });
         let supervisor = ValidatorSupervisor {
             inbound,
             outbound,
@@ -1508,8 +1506,7 @@ mod tests {
         let inbound: JoinHandle<std::io::Result<()>> = tokio::spawn(async move {
             panic!("intentional bridge-task panic for flatten guard test");
         });
-        let outbound =
-            tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        let outbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
         let mut supervisor = ValidatorSupervisor {
             inbound,
             outbound,
@@ -1537,8 +1534,7 @@ mod tests {
         // shutdown_after_failure and must not be misreported as an
         // error. The `replace match guard with false` mutation would
         // surface every cancellation as an Err.
-        let inbound =
-            tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
+        let inbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
         inbound.abort();
         let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
         // Give the aborted inbound a tick to transition to finished.

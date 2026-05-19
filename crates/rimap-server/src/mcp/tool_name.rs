@@ -236,8 +236,8 @@ mod tests {
         // The four cargo-mutants survivors on this function (stub-false,
         // `&&` → `||`, `len() == 1` → `!=`, `id == DEFAULT` → `!=`) are
         // each killed by at least one of the cases below.
-        use std::collections::BTreeMap;
         use rimap_core::account::DEFAULT_ACCOUNT_NAME;
+        use std::collections::BTreeMap;
 
         use super::is_legacy_single_account;
         use crate::test_support::make_test_account_state;

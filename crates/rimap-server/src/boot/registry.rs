@@ -363,9 +363,7 @@ mod tests {
         // cargo-mutants `replace == with !=` mutation at line 223
         // would flip the assignment, breaking the audit-log
         // "infrastructure vs per-account" rendering.
-        use rimap_config::model::{
-            ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig,
-        };
+        use rimap_config::model::{ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig};
         use rimap_config::validate::ValidatedAccountConfig;
         use rimap_core::account::AccountId;
         use rimap_core::posture::Posture;
