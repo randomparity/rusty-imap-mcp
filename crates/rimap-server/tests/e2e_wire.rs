@@ -317,8 +317,7 @@ async fn assert_search(harness: &mut Harness) -> u32 {
     //   - rimap-imap structured_to_key_emits_cc_and_bcc
     // Together those guarantee the field reaches the IMAP key; this
     // e2e check adds proof that Dovecot accepts the resulting
-    // command. A positive-case e2e (seed a message with a Cc header)
-    // is a worthwhile follow-up but is deferred from this PR.
+    // command.
     let cc_body = call_tool(
         harness,
         "draftsafe.search",
@@ -792,8 +791,10 @@ fn assert_readonly_audit_records(audit_path: &std::path::Path) {
     );
     assert_eq!(mm_ends[0]["start_seq"], mm_starts[0]["seq"]);
 
-    // Denial path: TWO search.advanced_query pairs — advanced_query (Task 3)
-    // and body (Task 10), both refine to SearchAdvanced.
+    // Denial path: TWO search.advanced_query pairs, account="readonly".
+    // One from advanced_query, one from body — both refine to
+    // SearchAdvanced and serialize as "search.advanced_query" in the
+    // audit log. Each pair shares start_seq via the dispatch envelope.
     assert_readonly_audit_search_pairs(&records);
 }
 

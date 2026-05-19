@@ -23,6 +23,12 @@ use crate::mcp::response::ToolResponse;
 /// Maximum number of results per page.
 const MAX_LIMIT: usize = 100;
 
+/// Maximum number of `HEADER` filters per search request. IMAP servers
+/// typically reject more than a handful in a single SEARCH command;
+/// the cap also bounds CPU spent in `build_query`'s per-entry validation
+/// for adversarial inputs.
+const MAX_HEADERS: usize = 32;
+
 /// One `HEADER name value` filter for the `search` tool. Converted to
 /// [`rimap_imap::types::HeaderSearch`] in `build_query`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -231,6 +237,11 @@ fn build_query(input: &SearchInput) -> Result<SearchQuery, rimap_core::RimapErro
     let headers = match &input.headers {
         Some(v) if v.is_empty() => None,
         Some(v) => {
+            if v.len() > MAX_HEADERS {
+                return Err(rimap_core::RimapError::invalid_input(format!(
+                    "headers array exceeds maximum of {MAX_HEADERS} entries"
+                )));
+            }
             let mut converted = Vec::with_capacity(v.len());
             for h in v {
                 if h.name.trim().is_empty() {
@@ -358,18 +369,13 @@ fn format_address(addr: &Address) -> String {
     }
 }
 
-/// Format addresses list.
-fn format_addresses(addrs: &[Address]) -> Vec<String> {
-    addrs.iter().map(format_address).collect()
-}
-
 /// Apply the search-result envelope address pipeline: format each
 /// address as `"name <mailbox@host>"`, then route through
 /// `sanitize_for_output`. Returns an empty `Vec` when `addrs` is empty.
 fn sanitize_address_list(addrs: &[Address]) -> Vec<String> {
-    format_addresses(addrs)
-        .into_iter()
-        .map(|a| sanitize_for_output(&a))
+    addrs
+        .iter()
+        .map(|a| sanitize_for_output(&format_address(a)))
         .collect()
 }
 
@@ -636,6 +642,23 @@ mod tests {
             },
         ]);
         assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_headers_array_over_cap() {
+        let mut input = input_with_folder();
+        let too_many: Vec<HeaderInput> = (0..=MAX_HEADERS)
+            .map(|i| HeaderInput {
+                name: format!("X-Test-{i}"),
+                value: "v".to_string(),
+            })
+            .collect();
+        input.headers = Some(too_many);
+        let err = build(&input).unwrap_err();
+        assert!(
+            err.to_string().contains("headers array exceeds maximum"),
+            "expected over-cap error, got: {err}",
+        );
     }
 
     #[test]
