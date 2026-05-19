@@ -548,6 +548,13 @@ mod tests {
     }
 
     #[test]
+    fn build_query_rejects_whitespace_bcc() {
+        let mut input = input_with_folder();
+        input.bcc = Some("   ".to_string());
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
     fn build_query_rejects_empty_body() {
         let mut input = input_with_folder();
         input.body = Some(String::new());
@@ -565,6 +572,13 @@ mod tests {
     fn build_query_rejects_empty_text() {
         let mut input = input_with_folder();
         input.text = Some(String::new());
+        assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_whitespace_text() {
+        let mut input = input_with_folder();
+        input.text = Some("\t ".to_string());
         assert!(build(&input).is_err());
     }
 
