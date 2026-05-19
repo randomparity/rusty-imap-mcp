@@ -124,6 +124,22 @@ mod tests {
     }
 
     #[test]
+    fn custom_codes_lie_in_jsonrpc_server_error_range() {
+        // JSON-RPC §5.1 reserves -32000 to -32099 for application-defined
+        // server errors. The MCP wire contract requires these constants
+        // to be negative; the `delete -` cargo-mutants mutations on the
+        // numeric literals would flip them to positive values that no
+        // client would recognize as server errors. Asserting each
+        // constant's exact value pins the negative-range invariant and
+        // kills the three `delete -` survivors at lines 18/21/24.
+        assert_eq!(super::POSTURE_DENIED, McpCode(-32001));
+        assert_eq!(super::NOT_INITIALIZED, McpCode(-32002));
+        assert_eq!(super::RATE_LIMITED, McpCode(-32003));
+        assert_eq!(super::CIRCUIT_OPEN, McpCode(-32004));
+        assert_eq!(super::ATTACHMENT_TOO_LARGE, McpCode(-32005));
+    }
+
+    #[test]
     fn protected_folder_uses_opaque_message() {
         let err = authz_error(
             ErrorCode::ProtectedFolder,

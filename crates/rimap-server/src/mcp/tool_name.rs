@@ -225,6 +225,59 @@ mod tests {
     }
 
     #[test]
+    fn is_legacy_single_account_classifies_each_branch() {
+        // Pin the three observable outcomes of `is_legacy_single_account`:
+        //   - true  : exactly one account, whose id is the legacy
+        //             "default" sentinel (auto-namespace suppression).
+        //   - false : any other shape — zero accounts, multiple
+        //             accounts, or a single account with a non-default
+        //             name.
+        //
+        // The four cargo-mutants survivors on this function (stub-false,
+        // `&&` → `||`, `len() == 1` → `!=`, `id == DEFAULT` → `!=`) are
+        // each killed by at least one of the cases below.
+        use rimap_core::account::DEFAULT_ACCOUNT_NAME;
+        use std::collections::BTreeMap;
+
+        use super::is_legacy_single_account;
+        use crate::test_support::make_test_account_state;
+
+        // 0 accounts → false (sanity baseline; does not distinguish all
+        // mutants on its own).
+        let zero: BTreeMap<_, _> = BTreeMap::new();
+        assert!(!is_legacy_single_account(&zero));
+
+        // 1 account named "default" → true. Kills:
+        //   - stub-false (returns false when original is true).
+        //   - `len() == 1` → `!=` (would short-circuit to false).
+        //   - `id == DEFAULT` → `!=` (would flip the closure to false).
+        let default_state = make_test_account_state(DEFAULT_ACCOUNT_NAME);
+        let mut single_default = BTreeMap::new();
+        single_default.insert(default_state.id.clone(), default_state);
+        assert!(is_legacy_single_account(&single_default));
+
+        // 1 account NOT named "default" → false. Reinforces the
+        // `id == DEFAULT` → `!=` kill at the "non-default" branch
+        // (without this case the mutation would only be observable for
+        // the true→false transition above).
+        let other_state = make_test_account_state("work");
+        let mut single_other = BTreeMap::new();
+        single_other.insert(other_state.id.clone(), other_state);
+        assert!(!is_legacy_single_account(&single_other));
+
+        // 2 accounts including "default" → false. Kills:
+        //   - `&&` → `||` (would short-circuit to true because the
+        //     first key is "default" and the predicate becomes
+        //     `false || true`).
+        let default_state2 = make_test_account_state(DEFAULT_ACCOUNT_NAME);
+        let personal_state = make_test_account_state("personal");
+        let mut two_accts = BTreeMap::new();
+        two_accts.insert(default_state2.id.clone(), default_state2);
+        two_accts.insert(personal_state.id.clone(), personal_state);
+        assert!(!is_legacy_single_account(&two_accts));
+    }
+
+    #[test]
     fn refine_tool_name_is_identity_for_all_other_variants() {
         // Any variant without a refinement rule must pass through
         // unchanged, including when args are absent or irrelevant. A new

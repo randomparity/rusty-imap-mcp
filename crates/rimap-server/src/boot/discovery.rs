@@ -23,6 +23,18 @@ use rimap_imap::{Connection, SpecialUseMap};
 ///
 /// Returns `RimapError::Imap { ... }` when the underlying `LIST` call
 /// fails (transport error, server protocol error, auth expired, etc.).
+// cargo-mutants: known-equivalent (test-infrastructure gap) — the
+// `replace ... with Ok(Default::default())` stub returns an empty
+// SpecialUseMap, observably different from the populated map the
+// real implementation returns on a non-empty mailbox. Unit-testing
+// the mutation requires either a live IMAP server (covered by the
+// dovecot integration harness in `crates/rimap-server/tests/e2e.rs`
+// which is environment-gated and skipped by cargo-mutants runs that
+// have no Docker available) or a stub `Connection` that intercepts
+// `list_folders`. The latter would require either a new trait
+// boundary across `rimap-imap` or a refactor of this two-line
+// helper. Documented in `mutation-baseline.md` as a known coverage
+// gap pending future test-infrastructure work.
 pub async fn resolve_special_use(connection: &Connection) -> Result<SpecialUseMap, RimapError> {
     let folders = connection.list_folders("*").await?;
     Ok(SpecialUseMap::from_folders(&folders))

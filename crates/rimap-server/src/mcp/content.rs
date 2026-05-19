@@ -19,6 +19,13 @@ use tokio::sync::Semaphore;
               known variant has been classified explicitly"
 )]
 fn classify_content_error(err: &ContentError) -> RimapError {
+    // cargo-mutants: known-equivalent — `delete match arm ContentError::Malformed`.
+    // The Malformed arm and the `_` fallback produce identical
+    // output (`RimapError::invalid_input(err.to_string())`), as the
+    // `#[expect(clippy::match_same_arms)]` above documents. Deleting
+    // the explicit arm routes through the fallback with no observable
+    // behavior change. The `LimitExceeded` arm-delete IS a real gap
+    // and is killed by `limit_exceeded_classifies_as_attachment_too_large`.
     match err {
         ContentError::LimitExceeded { .. } => RimapError::Authz {
             code: ErrorCode::AttachmentTooLarge,
@@ -117,5 +124,30 @@ mod tests {
             sync_result.untrusted.body_text,
             async_result.untrusted.body_text
         );
+    }
+
+    #[test]
+    fn limit_exceeded_classifies_as_attachment_too_large() {
+        // `LimitExceeded` must map to `ErrorCode::AttachmentTooLarge`,
+        // not the generic `InvalidInput` fallback. The cargo-mutants
+        // `delete match arm ContentError::LimitExceeded` mutation
+        // would re-route here through the `_` arm and silently
+        // downgrade size-cap rejections to syntax-error responses —
+        // a real wire-contract change. The `Malformed` arm-delete is
+        // observably equivalent to the `_` fallback (both produce
+        // `invalid_input(...)`); see the inline note on the match.
+        let err = ContentError::LimitExceeded {
+            kind: "mime_depth",
+            limit: 8,
+        };
+        let mapped = classify_content_error(&err);
+        assert_eq!(mapped.code(), ErrorCode::AttachmentTooLarge);
+
+        // Sanity: Malformed → InvalidInput (same as `_` fallback).
+        let malformed = ContentError::Malformed {
+            reason: "unterminated boundary".into(),
+        };
+        let mapped_malformed = classify_content_error(&malformed);
+        assert_eq!(mapped_malformed.code(), ErrorCode::InvalidInput);
     }
 }

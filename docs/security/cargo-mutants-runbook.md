@@ -20,6 +20,41 @@ The `just mutants` recipe is a thin wrapper around `cargo mutants
 --in-place`. Pass any extra flags after the recipe name; they are
 forwarded verbatim.
 
+## Linux fast path (bypass `--in-place`)
+
+The `--in-place` flag exists to dodge a macOS-specific cargo-mutants
+bug ([#611](https://github.com/sourcefrog/cargo-mutants/issues/611)).
+On Linux, the temp-tree path the bug affects is not exercised — you
+can drop `--in-place` and run cargo-mutants directly with `--jobs N`
+for proportional wall-clock speedup. The 2026-05-18 issue #289
+baselines used:
+
+```bash
+cargo mutants --package rimap-server --no-shuffle --jobs 8 --timeout 60
+cargo mutants --package rimap-imap  --no-shuffle --jobs 8 --timeout 60
+```
+
+The `rimap-server` baseline (529 mutants) finished in 22 minutes at
+`--jobs 8` on a 48-thread Xeon w7-2495X, against the documented
+~3.5h `--jobs 1` wall time for the macOS workaround path.
+
+Trade-offs:
+
+- **No `just mutants` wrapper.** Drop down to plain `cargo mutants`
+  since the recipe forces `--in-place`. A future justfile change
+  could pick the right invocation per `uname -s`, but is not done
+  today.
+- **Tune `--jobs` to physical cores.** Each worker spawns a full
+  `cargo` invocation; rule of thumb `--jobs ≤ physical_cores / 2`,
+  more aggressive if the box has tens of GiB of RAM headroom per
+  worker.
+- **No source-tree contention.** Workers operate on `target/mutants/`
+  temp trees, so concurrent IDE / rust-analyzer work is fine.
+- **Ctrl-C is safe.** The source tree is never mutated.
+
+On macOS, do not use this path until cargo-mutants 27.0.1+ ships
+containing [PR #613](https://github.com/sourcefrog/cargo-mutants/pull/613).
+
 ## What `--in-place` costs you
 
 - **Locked to `--jobs 1`.** cargo-mutants refuses parallel jobs in
@@ -60,7 +95,10 @@ macOS, recovering most of the wall-clock cost above. We chose
 
 If wall-clock time on macOS becomes the binding constraint before
 [#611](https://github.com/sourcefrog/cargo-mutants/issues/611) is
-fixed, revisit this.
+fixed (i.e. a tagged release containing
+[PR #613](https://github.com/sourcefrog/cargo-mutants/pull/613)),
+revisit this. Linux contributors can use the "Linux fast path"
+section above today without changes.
 
 ## The bug, in detail
 

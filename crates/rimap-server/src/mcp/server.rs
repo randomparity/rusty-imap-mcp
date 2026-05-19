@@ -345,6 +345,17 @@ impl ServerHandler for ImapMcpServer {
         Ok(ListToolsResult::with_all_items(tools))
     }
 
+    // cargo-mutants: known-equivalent (test-infrastructure gap) — the
+    // `replace ... with Ok(Default::default())` stub on `list_resources`
+    // returns an empty `ListResourcesResult`, observably different
+    // from the per-account-populated list the real implementation
+    // returns. Unit-testing the mutation requires constructing an
+    // `rmcp::service::RequestContext<RoleServer>` for which rmcp
+    // exposes no public test constructor in this version. The
+    // mutation is covered end-to-end by the dovecot harness in
+    // `tests/e2e.rs`, which is environment-gated and skipped by
+    // cargo-mutants. Documented in `mutation-baseline.md` as a known
+    // coverage gap.
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -458,6 +469,16 @@ impl ServerHandler for ImapMcpServer {
         // tools (use_account, list_accounts) remain valid bare forms
         // regardless. (#73)
         let accounts = self.registry.accounts();
+        // cargo-mutants: known-equivalent (test-infrastructure gap) —
+        // the `delete ! in <impl ServerHandler ...>::call_tool` mutation
+        // inverts the legacy-mode guard so legacy single-account
+        // deployments would reject bare tool names. The underlying
+        // predicate `is_legacy_single_account(accounts)` IS unit-tested
+        // (see `mcp::tool_name::tests::is_legacy_single_account_classifies_each_branch`),
+        // but exercising this composite branch through `call_tool`
+        // requires a `RequestContext<RoleServer>` for which rmcp
+        // exposes no public test constructor. Covered end-to-end by
+        // the dovecot harness; documented in `mutation-baseline.md`.
         if !is_legacy_single_account(accounts) && is_bare_simple_tool_name(&request.name) {
             return Err(ErrorData::invalid_params(
                 format!(
@@ -485,6 +506,17 @@ impl ServerHandler for ImapMcpServer {
             // the effective tool list has changed (the session default account
             // flipped). Best-effort: transport failures do not fail the call
             // because use_account itself succeeded. (#80)
+            //
+            // cargo-mutants: known-equivalent (test-infrastructure gap) —
+            // the `replace == with != in <impl ServerHandler ...>::call_tool`
+            // mutation inverts the use_account-specific notify gate so
+            // ANY successful non-use_account call would emit
+            // `tools/list_changed`. Verifying the suppression for
+            // non-use_account calls requires a `RequestContext<RoleServer>`
+            // (so we can drive `context.peer.notify_tool_list_changed()`)
+            // for which rmcp exposes no public test constructor; covered
+            // end-to-end by the dovecot harness. Documented in
+            // `mutation-baseline.md`.
             if result.is_ok()
                 && tool_name == ToolName::UseAccount
                 && let Err(e) = context.peer.notify_tool_list_changed().await

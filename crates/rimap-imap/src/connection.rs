@@ -1822,4 +1822,49 @@ mod starttls_unit_tests {
         assert_eq!(recorded.len(), 1);
         assert!(recorded[0].contains("NOOP"));
     }
+
+    #[test]
+    fn debug_format_includes_connection_fields() {
+        // The manual `Debug` impl for `Connection` writes host, port,
+        // and username via `debug_struct(...).finish_non_exhaustive()`.
+        // The cargo-mutants `replace <impl Debug>::fmt -> std::fmt::Result
+        // with Ok(Default::default())` mutation at connection.rs:127
+        // returns Ok(()) without writing — the formatted output collapses
+        // to the empty string. Asserting that distinctive field values
+        // round-trip through the formatter kills the mutation.
+        //
+        // `Connection::new` is socket-free, so the IP / port values here
+        // are pure config — no listener is bound.
+        let cfg = ConnectionConfig {
+            account: None,
+            account_id: rimap_core::account::AccountId::default_account(),
+            host: "imap.fixture.invalid".into(),
+            port: 6143,
+            encryption: ImapEncryption::Tls,
+            username: "u@fixture.invalid".into(),
+            pinned_fingerprint: None,
+            connect_timeout: std::time::Duration::from_millis(1),
+            command_timeout: std::time::Duration::from_millis(1),
+            max_fetch_body_bytes: 1024,
+            max_append_bytes: 1024,
+        };
+        let conn = Connection::new(cfg, Arc::new(NoopAudit), Arc::new(PanicResolver));
+        let formatted = format!("{conn:?}");
+        assert!(
+            formatted.contains("Connection"),
+            "Debug must include struct name; got {formatted:?}",
+        );
+        assert!(
+            formatted.contains("imap.fixture.invalid"),
+            "Debug must include host; got {formatted:?}",
+        );
+        assert!(
+            formatted.contains("6143"),
+            "Debug must include port; got {formatted:?}",
+        );
+        assert!(
+            formatted.contains("u@fixture.invalid"),
+            "Debug must include username; got {formatted:?}",
+        );
+    }
 }
