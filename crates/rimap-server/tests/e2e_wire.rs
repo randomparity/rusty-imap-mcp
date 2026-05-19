@@ -740,7 +740,7 @@ fn assert_readonly_audit_records(audit_path: &std::path::Path) {
     );
     assert_eq!(mm_ends[0]["start_seq"], mm_starts[0]["seq"]);
 
-    // Denial path: search_advanced pair, account="readonly" (advanced_query
+    // Denial path: search.advanced_query pair, account="readonly" (advanced_query
     // sub-capability, denied by DispatchGuard after the reordered
     // TOOL_DEFS check). The audit writer logs the *refined* tool name
     // (SearchAdvanced.as_str() == "search.advanced_query"), not "search".
@@ -773,6 +773,9 @@ fn assert_readonly_audit_records(audit_path: &std::path::Path) {
         "readonly.search tool_end must record account=\"readonly\": {records:#?}",
     );
     assert_eq!(s_ends[0]["start_seq"], s_starts[0]["seq"]);
+    // NOTE(Task 10): if body promotion adds a second search.advanced_query
+    // denial, bump both == 1 above to == 2 and consider extracting an
+    // assert_audit_pair(records, tool, account, expected_count) helper.
 }
 
 async fn seed_multipart_message(dovecot: &DovecotHarness) {
