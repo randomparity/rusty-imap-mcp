@@ -289,34 +289,70 @@ fn list_folders_schema(tool: ToolName) -> RedactionSchema {
 // still records the byte length for unusual-payload detection.
 // Decision recorded in #22.
 fn search_schema(tool: ToolName) -> RedactionSchema {
-    use FieldPolicy::{Forbidden, RedactString, Verbatim};
+    use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
     RedactionSchema::new(
         tool,
         &[
             ("folder", Verbatim),
             ("limit", Verbatim),
-            ("include_seen", Verbatim),
+            ("offset", Verbatim),
+            ("larger", Verbatim),
+            ("smaller", Verbatim),
             ("since", Verbatim),
-            ("until", Verbatim),
+            ("before", Verbatim),
+            ("sent_since", Verbatim),
+            ("sent_before", Verbatim),
+            ("seen", Verbatim),
+            ("answered", Verbatim),
+            ("flagged", Verbatim),
+            ("draft", Verbatim),
+            ("has_attachment", Verbatim),
             ("from", RedactString),
             ("to", RedactString),
+            ("cc", RedactString),
+            ("bcc", RedactString),
             ("subject", RedactString),
             ("body", RedactString),
+            ("text", RedactString),
+            ("advanced_query", RedactString),
+            ("headers", SaltedHash),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
     )
 }
 
-// See [`search_schema`] for the RedactString rationale (#22).
+// Mirrors `search_schema` so a refinement-routing change cannot regress
+// redaction. See [`search_schema`] for the RedactString rationale (#22)
+// and the `headers` SaltedHash rationale.
 fn search_advanced_schema(tool: ToolName) -> RedactionSchema {
-    use FieldPolicy::{Forbidden, RedactString, Verbatim};
+    use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
     RedactionSchema::new(
         tool,
         &[
             ("folder", Verbatim),
             ("limit", Verbatim),
+            ("offset", Verbatim),
+            ("larger", Verbatim),
+            ("smaller", Verbatim),
+            ("since", Verbatim),
+            ("before", Verbatim),
+            ("sent_since", Verbatim),
+            ("sent_before", Verbatim),
+            ("seen", Verbatim),
+            ("answered", Verbatim),
+            ("flagged", Verbatim),
+            ("draft", Verbatim),
+            ("has_attachment", Verbatim),
+            ("from", RedactString),
+            ("to", RedactString),
+            ("cc", RedactString),
+            ("bcc", RedactString),
+            ("subject", RedactString),
+            ("body", RedactString),
+            ("text", RedactString),
             ("advanced_query", RedactString),
+            ("headers", SaltedHash),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -845,6 +881,139 @@ mod tests {
             schema.policies.get("message_count").copied(),
             Some(FieldPolicy::Verbatim),
         );
+    }
+
+    fn search_schema_for_tool(tool: ToolName) -> RedactionSchema {
+        let table = crate::redact::schemas();
+        table
+            .into_iter()
+            .find(|s| s.tool == tool)
+            .expect("schema exists for tool")
+    }
+
+    #[test]
+    fn search_schema_redacts_all_content_fields() {
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let out = r.apply(&json!({
+            "from": "alice@example.test",
+            "to": "bob@example.test",
+            "cc": "carol@example.test",
+            "bcc": "dave@example.test",
+            "subject": "hello world",
+            "body": "needle",
+            "text": "any-field-needle",
+            "advanced_query": "FROM alice",
+        }));
+        assert_eq!(out["from"], json!("<redacted:18>"));
+        assert_eq!(out["to"], json!("<redacted:16>"));
+        assert_eq!(out["cc"], json!("<redacted:18>"));
+        assert_eq!(out["bcc"], json!("<redacted:17>"));
+        assert_eq!(out["subject"], json!("<redacted:11>"));
+        assert_eq!(out["body"], json!("<redacted:6>"));
+        assert_eq!(out["text"], json!("<redacted:16>"));
+        assert_eq!(out["advanced_query"], json!("<redacted:10>"));
+    }
+
+    #[test]
+    fn search_schema_preserves_structural_fields() {
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let input = json!({
+            "folder": "INBOX",
+            "limit": 50,
+            "offset": 10,
+            "larger": 1000_u64,
+            "smaller": 5000_u64,
+            "since": "2026-01-01",
+            "before": "2026-12-31",
+            "sent_since": "2026-02-01",
+            "sent_before": "2026-11-30",
+            "seen": true,
+            "answered": false,
+            "flagged": true,
+            "draft": false,
+            "has_attachment": true,
+        });
+        let out = r.apply(&input);
+        // Every structural field round-trips with original JSON type/value.
+        assert_eq!(out, input);
+        // Spot-check that types are preserved (not stringified).
+        assert!(out["limit"].is_u64());
+        assert!(out["larger"].is_u64());
+        assert!(out["seen"].is_boolean());
+        assert!(out["folder"].is_string());
+        assert!(out["since"].is_string());
+    }
+
+    #[test]
+    fn search_schema_hashes_headers_array() {
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let headers_a = json!({
+            "headers": [
+                {"name": "X-Custom", "value": "alpha"},
+                {"name": "List-Id", "value": "<list@example.test>"},
+            ],
+        });
+        let headers_b = json!({
+            "headers": [
+                {"name": "X-Custom", "value": "beta"},
+            ],
+        });
+        let a1 = r.apply(&headers_a);
+        let a2 = r.apply(&headers_a);
+        let b = r.apply(&headers_b);
+        let hash_a = a1["headers"].as_str().expect("salted hash is a string");
+        assert!(hash_a.starts_with("salted:"));
+        assert_eq!(hash_a.len(), "salted:".len() + 16);
+        assert_eq!(a1["headers"], a2["headers"]);
+        assert_ne!(a1["headers"], b["headers"]);
+    }
+
+    #[test]
+    fn search_schema_drops_password_and_token() {
+        let schema = search_schema_for_tool(ToolName::Search);
+        let salt = salt();
+        let r = Redactor::new(&schema, &salt);
+        let out = r.apply(&json!({
+            "folder": "INBOX",
+            "password": "hunter2",
+            "token": "abcdef",
+        }));
+        let map = out.as_object().expect("object output");
+        assert!(!map.contains_key("password"));
+        assert!(!map.contains_key("token"));
+        assert_eq!(out["folder"], json!("INBOX"));
+    }
+
+    #[test]
+    fn search_advanced_schema_matches_search_policy() {
+        let search = search_schema_for_tool(ToolName::Search);
+        let advanced = search_schema_for_tool(ToolName::SearchAdvanced);
+        let salt = salt();
+        let sample = json!({
+            "folder": "INBOX",
+            "limit": 25,
+            "answered": true,
+            "larger": 1024_u64,
+            "sent_since": "2026-03-01",
+            "from": "alice@example.test",
+            "cc": "carol@example.test",
+            "bcc": "dave@example.test",
+            "body": "needle",
+            "text": "scan-needle",
+            "advanced_query": "ALL",
+            "headers": [{"name": "X-Custom", "value": "x"}],
+            "password": "hunter2",
+            "token": "abcdef",
+        });
+        let from_search = Redactor::new(&search, &salt).apply(&sample);
+        let from_advanced = Redactor::new(&advanced, &salt).apply(&sample);
+        assert_eq!(from_search, from_advanced);
     }
 }
 
