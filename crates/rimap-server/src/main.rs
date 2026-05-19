@@ -430,11 +430,11 @@ async fn build_registry(
             ));
         let imap = Connection::new(conn_cfg, auth_sink.clone(), resolver);
 
-        let special_use = rimap_server::boot::discovery::resolve_special_use(&imap)
+        let folders = imap
+            .list_folders("*")
             .await
-            .with_context(|| {
-                format!("resolving special-use folders for account {}", id.as_str())
-            })?;
+            .with_context(|| format!("listing folders for account {}", id.as_str()))?;
+        let special_use = rimap_server::boot::discovery::resolve_special_use(&folders);
 
         // Expand the config-supplied protected-folders list with any
         // server-declared RFC 6154 names (e.g. Gmail's `[Gmail]/Sent Mail`).
