@@ -302,6 +302,24 @@ async fn assert_search(harness: &mut Harness) -> u32 {
     let uid_u64 = messages[0]["uid"].as_u64().expect("uid is integer");
     let uid = u32::try_from(uid_u64).expect("uid fits u32");
     assert!(uid > 0);
+
+    // Exercise the new `cc` input field. The seeded message has no
+    // Cc header (verified in fixtures.rs::multipart_with_attachment),
+    // so this asserts that the wire path round-trips the new field
+    // and the IMAP server honors the `CC` SEARCH key (returning zero
+    // matches).
+    let cc_body = call_tool(
+        harness,
+        "draftsafe.search",
+        json!({ "folder": "INBOX", "cc": "noone@example.com" }),
+    )
+    .await;
+    assert_eq!(
+        cc_body["meta"]["total_matched"].as_u64(),
+        Some(0),
+        "cc filter against unseeded address must yield zero hits: {cc_body}",
+    );
+
     uid
 }
 
