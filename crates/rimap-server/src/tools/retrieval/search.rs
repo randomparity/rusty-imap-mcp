@@ -23,6 +23,16 @@ use crate::mcp::response::ToolResponse;
 /// Maximum number of results per page.
 const MAX_LIMIT: usize = 100;
 
+/// One `HEADER name value` filter for the `search` tool. Converted to
+/// [`rimap_imap::types::HeaderSearch`] in `build_query`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HeaderInput {
+    /// RFC 5322 field name (e.g. `"List-Id"`).
+    pub name: String,
+    /// Substring to match within the header value.
+    pub value: String,
+}
+
 /// Input for the `search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchInput {
@@ -32,14 +42,45 @@ pub struct SearchInput {
     pub from: Option<String>,
     /// Filter by `To` header substring.
     pub to: Option<String>,
+    /// Filter by `Cc` header substring.
+    pub cc: Option<String>,
+    /// Filter by `Bcc` header substring. Content-oracle — requires
+    /// `SearchAdvanced` posture (Full or Destructive).
+    pub bcc: Option<String>,
     /// Filter by `Subject` header substring.
     pub subject: Option<String>,
-    /// Messages since this ISO date (inclusive), e.g. "2026-01-01".
+    /// Substring search across body parts. Content-oracle — requires
+    /// `SearchAdvanced` posture.
+    pub body: Option<String>,
+    /// Substring search across headers OR body. Content-oracle —
+    /// requires `SearchAdvanced` posture.
+    pub text: Option<String>,
+    /// One or more `HEADER name value` filters. Content-oracle when
+    /// non-empty — requires `SearchAdvanced` posture.
+    pub headers: Option<Vec<HeaderInput>>,
+    /// Match messages strictly larger than this many octets.
+    pub larger: Option<u64>,
+    /// Match messages strictly smaller than this many octets.
+    pub smaller: Option<u64>,
+    /// Messages since this ISO date (inclusive) by INTERNALDATE,
+    /// e.g. "2026-01-01".
     pub since: Option<String>,
-    /// Messages before this ISO date (exclusive), e.g. "2026-02-01".
+    /// Messages before this ISO date (exclusive) by INTERNALDATE.
     pub before: Option<String>,
+    /// Messages since this ISO date (inclusive) by the message's
+    /// `Date:` header — distinct from `since` which uses INTERNALDATE.
+    pub sent_since: Option<String>,
+    /// Messages before this ISO date (exclusive) by the message's
+    /// `Date:` header — distinct from `before` which uses INTERNALDATE.
+    pub sent_before: Option<String>,
     /// Filter by seen/unseen status.
     pub seen: Option<bool>,
+    /// Filter by answered/unanswered status.
+    pub answered: Option<bool>,
+    /// Filter by flagged/unflagged status.
+    pub flagged: Option<bool>,
+    /// Filter by draft/non-draft status.
+    pub draft: Option<bool>,
     /// Filter for messages with attachments.
     pub has_attachment: Option<bool>,
     /// Raw IMAP SEARCH query (full posture only).
