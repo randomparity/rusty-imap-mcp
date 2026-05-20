@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use rimap_core::{ErrorCode, Posture, WarningCode, tool::ToolName};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub(crate) mod error;
 pub mod ids;
 
 use crate::record::ids::{ProcessId, Seq, Timestamp};
@@ -169,11 +168,11 @@ pub struct AuditRecord {
     pub payload: Payload,
 }
 
-// `Auth` and `AuthResult` were moved to `rimap_core::auth_event` so
-// `rimap-imap` can build them without depending on this crate. They
-// are re-exported below at their historical names for compatibility
-// with existing call sites and on-disk format tests.
-pub use rimap_core::auth_event::{AuthEvent as Auth, AuthResult};
+// `AuthEvent` and `AuthResult` live in `rimap_core::auth_event` so
+// `rimap-imap` can construct them without depending on this crate.
+// Re-exported here under their canonical names for ergonomic access
+// from within `rimap-audit` (writer, reader, on-disk format tests).
+pub use rimap_core::auth_event::{AuthEvent, AuthResult};
 
 /// Payload of the `tool_start` kind. Recorded before dispatch begins so a
 /// crash mid-call still leaves a breadcrumb.
@@ -279,7 +278,7 @@ pub enum Payload {
     /// Process shutdown event — best-effort.
     ProcessEnd(ProcessEnd),
     /// IMAP authentication attempt.
-    Auth(Auth),
+    Auth(AuthEvent),
     /// A tool call has entered the dispatch chain.
     ToolStart(ToolStart),
     /// A tool call has exited the dispatch chain.
@@ -376,7 +375,7 @@ mod tests {
             seq: Seq(2),
             ts: Timestamp::now(),
             process_id: ProcessId::new_now(),
-            payload: Payload::Auth(crate::record::Auth {
+            payload: Payload::Auth(crate::record::AuthEvent {
                 account: None,
                 result: crate::record::AuthResult::Success,
                 host: "127.0.0.1".to_string(),

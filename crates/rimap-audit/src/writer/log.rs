@@ -67,7 +67,7 @@ impl AuditWriter {
     /// Propagates any error from `allocate_seq` or `write_record`.
     pub fn log_auth(
         &self,
-        payload: crate::record::Auth,
+        payload: crate::record::AuthEvent,
     ) -> Result<crate::record::ids::Seq, AuditError> {
         self.emit(crate::record::Payload::Auth(payload))
     }

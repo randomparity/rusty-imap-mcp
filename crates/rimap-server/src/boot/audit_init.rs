@@ -32,7 +32,7 @@ pub fn init_audit_writer_multi(
     })?;
 
     if let Some(parent) = writer.path().parent() {
-        rimap_audit::backup_exclude::exclude_from_backup(parent);
+        rimap_audit::reader::backup_exclude::exclude_from_backup(parent);
     }
 
     let current = rimap_audit::current_inode(audit_path)?;

@@ -175,7 +175,7 @@ where
         line_no += 1;
 
         if let Some((prev_no, prev_line)) = prev.take() {
-            process_record(
+            parse_filter_and_dispatch(
                 path,
                 prev_no,
                 &prev_line,
@@ -190,7 +190,7 @@ where
 
     // The final buffered line is the "trailing" one — malformed trailing is tolerated.
     if let Some((prev_no, prev_line)) = prev {
-        process_record(
+        parse_filter_and_dispatch(
             path,
             prev_no,
             &prev_line,
@@ -204,7 +204,7 @@ where
     Ok(count)
 }
 
-fn process_record<F>(
+fn parse_filter_and_dispatch<F>(
     path: &Path,
     line_no: usize,
     line: &str,
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn account_filter_excludes_record_with_different_account() {
-        use crate::record::{Auth, AuthResult};
+        use crate::record::{AuthEvent, AuthResult};
 
         let dir = TempDir::new().unwrap();
         let pid = ProcessId::new_now();
@@ -628,7 +628,7 @@ mod tests {
             seq: crate::record::ids::Seq(1),
             ts: Timestamp::from_offset(datetime!(2026-04-07 14:22:01.000 UTC)),
             process_id: pid,
-            payload: Payload::Auth(Auth {
+            payload: Payload::Auth(AuthEvent {
                 account: Some("bob".to_string()),
                 result: AuthResult::Success,
                 host: "h".to_string(),

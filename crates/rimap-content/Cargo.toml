@@ -41,21 +41,19 @@ phf = { workspace = true }
 phf_codegen = { workspace = true }
 
 [features]
-# Test/diagnostic helpers exposed via `rimap_content::testutil`. Enable
-# for the epvme_runner binary and when depending on this crate from
-# integration tests.
-test-util = []
-# Optional JsonSchema derives on the wire-facing public types
-# (SecurityWarning, WarningCode, AttachmentMeta). Enabled transitively
-# by rimap-server's test-support feature so Phase 3's wire-conformance
-# harness can generate schemas for the full response envelope. Off in
-# production — schemars stays out of the runtime dep graph.
+# Test/diagnostic helpers and JsonSchema derives for out-of-tree tests
+# and tooling. Enables `rimap_content::test_support` (label helpers and
+# fuzz re-exports for the epvme_runner binary, fuzz harnesses, and
+# integration tests) plus JsonSchema derives on the wire-facing public
+# types (SecurityWarning, WarningCode, AttachmentMeta) so rimap-server's
+# wire-conformance harness can generate schemas for the full response
+# envelope. Off in production — schemars stays out of the runtime dep graph.
 test-support = ["dep:schemars"]
 
 [[bin]]
 name = "epvme_runner"
 path = "src/bin/epvme_runner.rs"
-required-features = ["test-util"]
+required-features = ["test-support"]
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -66,7 +64,7 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies.rimap-content]
 path = "."
 version = "0.1.0"
-features = ["test-util"]
+features = ["test-support"]
 
 # `phf` is consumed by the `include!`-expanded output of `build.rs`, so
 # static analyzers like cargo-machete cannot see the direct usage.

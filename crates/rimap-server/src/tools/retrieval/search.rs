@@ -32,6 +32,7 @@ const MAX_HEADERS: usize = 32;
 /// One `HEADER name value` filter for the `search` tool. Converted to
 /// [`rimap_imap::types::HeaderSearch`] in `build_query`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[non_exhaustive]
 pub struct HeaderInput {
     /// RFC 5322 field name (e.g. `"List-Id"`).
     pub name: String,
@@ -41,6 +42,7 @@ pub struct HeaderInput {
 
 /// Input for the `search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[non_exhaustive]
 pub struct SearchInput {
     /// IMAP folder to search in.
     pub folder: String,

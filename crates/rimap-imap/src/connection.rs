@@ -37,17 +37,10 @@ use crate::auth::{AuthContext, auth_failure, auth_success};
 use crate::error::{AuthFailure, ImapError, StarttlsFailure, StarttlsRefusal};
 use crate::tls::{TlsConfigBundle, build_tls_config};
 
-/// IMAP transport encryption mode. Mirrors `rimap_config::model::ImapEncryption`
-/// to avoid a reverse dependency; `rimap-server` maps between the two at the
-/// crate boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ImapEncryption {
-    /// Implicit TLS (IMAPS).
-    #[default]
-    Tls,
-    /// STARTTLS upgrade on the IMAP port.
-    Starttls,
-}
+// `ImapEncryption` is owned by `rimap-core` and shared with `rimap-config`,
+// so adding a new transport mode is a single-place edit. Re-exported here
+// so `rimap_imap::ImapEncryption` continues to resolve.
+pub use rimap_core::ImapEncryption;
 
 /// Everything `Connection` needs to open a session. The caller pulls
 /// these fields from a validated config entry; `Connection` clones

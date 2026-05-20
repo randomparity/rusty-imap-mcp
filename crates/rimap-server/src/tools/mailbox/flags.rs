@@ -30,6 +30,7 @@ use crate::mcp::response::ToolResponse;
 /// scalar `uid` so the response schema and error semantics stay
 /// unambiguous.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[non_exhaustive]
 pub struct FlagInput {
     /// Target folder.
     pub folder: String,

@@ -113,16 +113,9 @@ pub enum SmtpEncryption {
     None,
 }
 
-/// IMAP transport encryption mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ImapEncryption {
-    /// Implicit TLS (IMAPS), typical port 993.
-    #[default]
-    Tls,
-    /// STARTTLS upgrade on the IMAP port, typical port 143 or 1143.
-    Starttls,
-}
+// IMAP transport encryption mode lives in rimap-core as the single source
+// of truth shared with rimap-imap. See `rimap_core::imap_encryption`.
+pub use rimap_core::ImapEncryption;
 
 /// `[smtp]` block. Optional — required only when `send_email` is enabled.
 #[derive(Clone, Serialize, Deserialize)]

@@ -7,7 +7,7 @@
 
 use crate::output::{SecurityWarning, WarningCode};
 
-// `pub` only because `testutil` re-exports through `pub mod testutil` (Rust
+// `pub` only because `test_support` re-exports through `pub mod test_support` (Rust
 // E0364 forbids `pub use` of `pub(crate)` items). Module privacy
 // (`pub(crate) mod mime_scrub` in `parse/mod.rs`) keeps this unreachable
 // outside the crate; production callers reach it via
@@ -145,7 +145,7 @@ fn locate_encoded_word_end(
     EncodedWordEnd::Missing
 }
 
-// `pub` only because `testutil` re-exports through `pub mod testutil` (Rust
+// `pub` only because `test_support` re-exports through `pub mod test_support` (Rust
 // E0364 forbids `pub use` of `pub(crate)` items). Module privacy
 // (`pub(crate) mod mime_scrub` in `parse/mod.rs`) keeps this unreachable
 // outside the crate; production callers reach it via `scrub_header_smuggling`.
