@@ -250,3 +250,49 @@ async fn wire_clean_eof_shutdown_exits_zero() {
         "server must exit 0 on clean stdin EOF, got {status:?}",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(clippy::panic, reason = "integration test: panic on fixture I/O failure")]
+async fn wire_published_output_schema_matches_fixture() {
+    // The wire `outputSchema` MUST be byte-equal to the per-tool fixture
+    // under tests/fixtures/rimap-tool-schemas/. Both are generated from
+    // the same Rust types via schemars — drift signals either a
+    // regenerate-fixtures miss or a divergence between dump_tool_schemas
+    // and tool_catalog::output_schema.
+    //
+    // Scope: the zero-account harness exercises exactly two tools
+    // (`list_accounts`, `use_account`). Full-catalog coverage lives in
+    // the dovecot e2e harness gated by RIMAP_REQUIRE_DOCKER.
+    let mut harness = Harness::spawn().await;
+    let _ = harness.initialize_handshake().await;
+    harness.send_initialized().await;
+    let resp = harness.request("tools/list", json!({})).await;
+    let tools = resp["result"]["tools"]
+        .as_array()
+        .expect("tools/list returns an array");
+
+    for tool in tools {
+        let name = tool["name"].as_str().expect("tool has name");
+        // Strip any `<account>.` prefix — namespaced clones share the
+        // bare tool's outputSchema and load the same fixture.
+        let bare = name.rsplit_once('.').map_or(name, |(_, b)| b);
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rimap-tool-schemas")
+            .join(format!("{bare}.schema.json"));
+        let fixture_raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("read fixture {fixture_path:?}: {e}"));
+        let fixture_value: serde_json::Value = serde_json::from_str(&fixture_raw)
+            .unwrap_or_else(|e| panic!("parse fixture {fixture_path:?}: {e}"));
+
+        let published = &tool["outputSchema"];
+        assert!(
+            published.is_object(),
+            "tool {name} must publish outputSchema; got {published}",
+        );
+        assert_eq!(
+            published, &fixture_value,
+            "tool {name} published outputSchema diverges from fixture {fixture_path:?}.\n\
+             Run `just regen-tool-schemas` and rerun the test.",
+        );
+    }
+}
