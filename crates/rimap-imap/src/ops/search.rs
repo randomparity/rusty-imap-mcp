@@ -77,26 +77,10 @@ fn structured_to_key(q: &StructuredQuery) -> Result<String, ImapError> {
     if let Some(d) = q.sent_before {
         parts.push(format!("SENTBEFORE {}", format_imap_date(d)));
     }
-    match q.seen {
-        Some(true) => parts.push("SEEN".to_string()),
-        Some(false) => parts.push("UNSEEN".to_string()),
-        None => {}
-    }
-    match q.answered {
-        Some(true) => parts.push("ANSWERED".to_string()),
-        Some(false) => parts.push("UNANSWERED".to_string()),
-        None => {}
-    }
-    match q.flagged {
-        Some(true) => parts.push("FLAGGED".to_string()),
-        Some(false) => parts.push("UNFLAGGED".to_string()),
-        None => {}
-    }
-    match q.draft {
-        Some(true) => parts.push("DRAFT".to_string()),
-        Some(false) => parts.push("UNDRAFT".to_string()),
-        None => {}
-    }
+    push_flag_clause(&mut parts, q.seen, "SEEN", "UNSEEN");
+    push_flag_clause(&mut parts, q.answered, "ANSWERED", "UNANSWERED");
+    push_flag_clause(&mut parts, q.flagged, "FLAGGED", "UNFLAGGED");
+    push_flag_clause(&mut parts, q.draft, "DRAFT", "UNDRAFT");
     if q.has_attachment {
         // Heuristic: scan the message body for the literal Content-Disposition
         // header. False negatives for unusual capitalization or nested MIME
@@ -107,6 +91,22 @@ fn structured_to_key(q: &StructuredQuery) -> Result<String, ImapError> {
         return Ok("ALL".to_string());
     }
     Ok(parts.join(" "))
+}
+
+/// Emit `yes` when the flag is `Some(true)`, `no` when `Some(false)`, and
+/// nothing when `None`. Collapses the IMAP SEEN/UNSEEN, FLAGGED/UNFLAGGED,
+/// ANSWERED/UNANSWERED, DRAFT/UNDRAFT match blocks into one-liners.
+fn push_flag_clause(
+    parts: &mut Vec<String>,
+    value: Option<bool>,
+    yes: &'static str,
+    no: &'static str,
+) {
+    match value {
+        Some(true) => parts.push(yes.to_string()),
+        Some(false) => parts.push(no.to_string()),
+        None => {}
+    }
 }
 
 fn quote(s: &str) -> Result<String, ImapError> {

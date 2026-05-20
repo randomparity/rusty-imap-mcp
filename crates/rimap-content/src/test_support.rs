@@ -7,11 +7,11 @@
 //! the corpus test harness panics on `None` (a new variant = a harness
 //! gap that must fail loudly).
 
-/// Re-export of [`crate::html::process`] under the alias `sanitize_html`
+/// Re-export of [`crate::html::sanitize`] under the alias `sanitize_html`
 /// for fuzz harnesses and out-of-tree integration tests. Production code
-/// must continue to reach `process` through the [`crate::parse::parse_message`]
+/// must continue to reach `sanitize` through the [`crate::parse::parse_message`]
 /// pipeline.
-pub use crate::html::process as sanitize_html;
+pub use crate::html::sanitize as sanitize_html;
 
 /// Re-export of [`crate::parse::mime_scrub::scrub_header_smuggling`]
 /// for fuzz harnesses. Production code reaches this function through

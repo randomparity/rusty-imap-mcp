@@ -175,7 +175,7 @@ where
         line_no += 1;
 
         if let Some((prev_no, prev_line)) = prev.take() {
-            process_record(
+            parse_filter_and_dispatch(
                 path,
                 prev_no,
                 &prev_line,
@@ -190,7 +190,7 @@ where
 
     // The final buffered line is the "trailing" one — malformed trailing is tolerated.
     if let Some((prev_no, prev_line)) = prev {
-        process_record(
+        parse_filter_and_dispatch(
             path,
             prev_no,
             &prev_line,
@@ -204,7 +204,7 @@ where
     Ok(count)
 }
 
-fn process_record<F>(
+fn parse_filter_and_dispatch<F>(
     path: &Path,
     line_no: usize,
     line: &str,
