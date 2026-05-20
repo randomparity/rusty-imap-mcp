@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rimap_core::tool::ToolName;
-use rmcp::model::Tool;
+use rmcp::model::{Tool, ToolAnnotations};
 
 /// Type alias for tool spec tuples — `(title, description, schema)`. The wire
 /// name comes from `ToolName::as_str()` so there is a single source of
@@ -83,6 +83,23 @@ fn no_args_schema() -> serde_json::Map<String, serde_json::Value> {
         serde_json::Value::Object(serde_json::Map::new()),
     );
     map
+}
+
+/// Translate the language-agnostic `ToolAnnotationHints` into rmcp's
+/// `ToolAnnotations` shape and mirror the catalog title.
+///
+/// Uses `ToolAnnotations::from_raw` because the struct is
+/// `#[non_exhaustive]` and cannot be built via a struct literal from
+/// outside the rmcp crate.
+fn build_annotations(title: &'static str, name: ToolName) -> ToolAnnotations {
+    let hints = name.annotation_hints();
+    ToolAnnotations::from_raw(
+        Some(title.to_string()),
+        Some(hints.read_only),
+        Some(hints.destructive),
+        Some(hints.idempotent),
+        Some(hints.open_world),
+    )
 }
 
 /// Return (title, description, schema) for the given `ToolName`, or `None`
@@ -244,7 +261,9 @@ pub static TOOL_DEFS: std::sync::LazyLock<HashMap<ToolName, Tool>> =
             };
             map.insert(
                 tn,
-                Tool::new(tn.as_str(), description, Arc::new(schema)).with_title(title),
+                Tool::new(tn.as_str(), description, Arc::new(schema))
+                    .with_title(title)
+                    .with_annotations(build_annotations(title, tn)),
             );
         }
         map
@@ -351,6 +370,50 @@ mod tests {
                 def.name,
             );
         }
+    }
+
+    #[test]
+    fn every_tool_has_annotations() {
+        for def in ToolName::all()
+            .into_iter()
+            .filter_map(|tn| TOOL_DEFS.get(&tn))
+        {
+            assert!(
+                def.annotations.is_some(),
+                "tool {} must publish annotations",
+                def.name,
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "panicking on missing entry or annotation is the right test behavior"
+    )]
+    fn use_account_advertises_not_read_only() {
+        let def = TOOL_DEFS
+            .get(&ToolName::UseAccount)
+            .expect("use_account in TOOL_DEFS");
+        let ann = def.annotations.as_ref().expect("annotations present");
+        assert_eq!(
+            ann.read_only_hint,
+            Some(false),
+            "use_account mutates session state; read_only_hint must be false",
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "panicking on missing entry or annotation is the right test behavior"
+    )]
+    fn delete_message_advertises_destructive() {
+        let def = TOOL_DEFS
+            .get(&ToolName::DeleteMessage)
+            .expect("delete_message in TOOL_DEFS");
+        let ann = def.annotations.as_ref().expect("annotations present");
+        assert_eq!(ann.destructive_hint, Some(true));
     }
 
     #[test]
