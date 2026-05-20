@@ -61,6 +61,27 @@ impl<M: Serialize, U: Serialize> ToolResponse<M, U> {
     }
 }
 
+/// Build the schemars-derived JSON Schema for a `ToolResponse<M, U>`
+/// (or any other schemars-typed wire response). Strips the root
+/// `title` so dumped/published schemas don't leak Rust type names.
+///
+/// This is the SINGLE SOURCE OF TRUTH for the per-tool output
+/// envelope. Both runtime publication (`tool_catalog::output_schema`)
+/// and the test-support fixture dump (`cli::dump_tool_schemas::tool_envelope`)
+/// MUST call this so the dumped fixtures and the published `outputSchema`
+/// are byte-identical.
+#[must_use]
+pub fn envelope_schema<T: schemars::JsonSchema>() -> serde_json::Map<String, serde_json::Value> {
+    let schema = schemars::schema_for!(T);
+    match serde_json::to_value(schema) {
+        Ok(serde_json::Value::Object(mut map)) => {
+            map.remove("title");
+            map
+        }
+        _ => serde_json::Map::new(),
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
 mod schema_tests {

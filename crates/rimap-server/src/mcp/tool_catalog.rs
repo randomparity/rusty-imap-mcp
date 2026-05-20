@@ -15,6 +15,8 @@ use std::sync::Arc;
 use rimap_core::tool::ToolName;
 use rmcp::model::{Tool, ToolAnnotations};
 
+use crate::mcp::response::{envelope_schema, ToolResponse};
+
 /// Type alias for tool spec tuples — `(title, description, schema)`. The wire
 /// name comes from `ToolName::as_str()` so there is a single source of
 /// truth for tool names.
@@ -43,28 +45,6 @@ pub(super) fn parse_args<T: serde::de::DeserializeOwned>(
 ) -> Result<T, rimap_core::RimapError> {
     serde_json::from_value(serde_json::Value::Object(args.clone()))
         .map_err(|e| rimap_core::RimapError::invalid_input(format!("invalid arguments: {e}")))
-}
-
-/// Convert a `schemars::JsonSchema` type into a JSON object map
-/// suitable for an MCP tool's `inputSchema`.
-fn schema_map<T: schemars::JsonSchema>() -> serde_json::Map<String, serde_json::Value> {
-    let schema = schemars::schema_for!(T);
-    match serde_json::to_value(schema) {
-        Ok(serde_json::Value::Object(mut map)) => {
-            // Strip Rust struct name to avoid leaking implementation
-            // details in the MCP list_tools response.
-            map.remove("title");
-            map
-        }
-        Ok(
-            serde_json::Value::Null
-            | serde_json::Value::Bool(_)
-            | serde_json::Value::Number(_)
-            | serde_json::Value::String(_)
-            | serde_json::Value::Array(_),
-        )
-        | Err(_) => serde_json::Map::new(),
-    }
 }
 
 /// JSON Schema for a tool that takes no arguments. The MCP spec models
@@ -102,6 +82,93 @@ fn build_annotations(title: &'static str, name: ToolName) -> ToolAnnotations {
     )
 }
 
+/// Per-tool output-envelope JSON Schema, byte-identical to what
+/// `crates/rimap-server/src/cli/dump_tool_schemas.rs::tool_envelope`
+/// dumps for the fixture set. Returns `None` for sub-capability
+/// variants that share an MCP wire name with their parent.
+fn output_schema(name: ToolName) -> Option<serde_json::Map<String, serde_json::Value>> {
+    use crate::tools::{
+        admin::{
+            accounts::{ListAccountsMeta, UseAccountMeta},
+            list_folders::ListFoldersMeta,
+        },
+        compose::{create_draft::CreateDraftMeta, send_email::SendEmailMeta},
+        mailbox::{
+            delete_message::DeleteMessageMeta,
+            expunge::ExpungeMeta,
+            flags::FlagsMeta,
+            folder_management::{CreateFolderMeta, DeleteFolderMeta, RenameFolderMeta},
+            labels::{LabelsMeta, ListLabelsMeta},
+            move_message::MoveMessageMeta,
+        },
+        retrieval::{
+            download_attachment::{DownloadAttachmentMeta, DownloadAttachmentUntrusted},
+            fetch_message::{FetchMessageMeta, FetchMessageUntrusted},
+            list_attachments::{ListAttachmentsMeta, ListAttachmentsUntrusted},
+            search::{SearchMeta, SearchUntrusted},
+        },
+    };
+
+    let schema = match name {
+        ToolName::ListAccounts => {
+            envelope_schema::<ToolResponse<ListAccountsMeta, ()>>()
+        }
+        ToolName::UseAccount => {
+            envelope_schema::<ToolResponse<UseAccountMeta, ()>>()
+        }
+        ToolName::ListFolders => {
+            envelope_schema::<ToolResponse<ListFoldersMeta, ()>>()
+        }
+        ToolName::Search => {
+            envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>()
+        }
+        ToolName::FetchMessage => envelope_schema::<
+            ToolResponse<FetchMessageMeta, FetchMessageUntrusted>,
+        >(),
+        ToolName::ListAttachments => envelope_schema::<
+            ToolResponse<ListAttachmentsMeta, ListAttachmentsUntrusted>,
+        >(),
+        ToolName::DownloadAttachment => envelope_schema::<
+            ToolResponse<DownloadAttachmentMeta, DownloadAttachmentUntrusted>,
+        >(),
+        ToolName::MarkRead | ToolName::MarkUnread | ToolName::Flag | ToolName::Unflag => {
+            envelope_schema::<ToolResponse<FlagsMeta, ()>>()
+        }
+        ToolName::AddLabel | ToolName::RemoveLabel => {
+            envelope_schema::<ToolResponse<LabelsMeta, ()>>()
+        }
+        ToolName::ListLabels => {
+            envelope_schema::<ToolResponse<ListLabelsMeta, ()>>()
+        }
+        ToolName::MoveMessage => {
+            envelope_schema::<ToolResponse<MoveMessageMeta, ()>>()
+        }
+        ToolName::CreateDraft => {
+            envelope_schema::<ToolResponse<CreateDraftMeta, ()>>()
+        }
+        ToolName::SendEmail => {
+            envelope_schema::<ToolResponse<SendEmailMeta, ()>>()
+        }
+        ToolName::DeleteMessage => {
+            envelope_schema::<ToolResponse<DeleteMessageMeta, ()>>()
+        }
+        ToolName::Expunge => {
+            envelope_schema::<ToolResponse<ExpungeMeta, ()>>()
+        }
+        ToolName::CreateFolder => {
+            envelope_schema::<ToolResponse<CreateFolderMeta, ()>>()
+        }
+        ToolName::RenameFolder => {
+            envelope_schema::<ToolResponse<RenameFolderMeta, ()>>()
+        }
+        ToolName::DeleteFolder => {
+            envelope_schema::<ToolResponse<DeleteFolderMeta, ()>>()
+        }
+        ToolName::SearchAdvanced | ToolName::FetchMessageHtml => return None,
+    };
+    Some(schema)
+}
+
 /// Return (title, description, schema) for the given `ToolName`, or `None`
 /// for sub-capabilities that share an MCP tool name with a parent
 /// (e.g. `SearchAdvanced`, `FetchMessageHtml`).
@@ -134,102 +201,102 @@ fn tool_spec(name: ToolName) -> Option<ToolSpec> {
         ToolName::Search => (
             "Search Messages",
             "Search messages with structured query",
-            schema_map::<SearchInput>(),
+            envelope_schema::<SearchInput>(),
         ),
         ToolName::FetchMessage => (
             "Fetch Message",
             "Fetch message metadata and text body",
-            schema_map::<FetchMessageInput>(),
+            envelope_schema::<FetchMessageInput>(),
         ),
         ToolName::ListAttachments => (
             "List Message Attachments",
             "List attachments on a message",
-            schema_map::<ListAttachmentsInput>(),
+            envelope_schema::<ListAttachmentsInput>(),
         ),
         ToolName::DownloadAttachment => (
             "Download Attachment",
             "Download an attachment to the sandbox directory",
-            schema_map::<DownloadAttachmentInput>(),
+            envelope_schema::<DownloadAttachmentInput>(),
         ),
         ToolName::MarkRead => (
             "Mark Messages Read",
             "Mark messages as read",
-            schema_map::<FlagInput>(),
+            envelope_schema::<FlagInput>(),
         ),
         ToolName::MarkUnread => (
             "Mark Messages Unread",
             "Mark messages as unread",
-            schema_map::<FlagInput>(),
+            envelope_schema::<FlagInput>(),
         ),
         ToolName::Flag => (
             "Flag Messages",
             "Add the flagged flag to messages",
-            schema_map::<FlagInput>(),
+            envelope_schema::<FlagInput>(),
         ),
         ToolName::Unflag => (
             "Unflag Messages",
             "Remove the flagged flag from messages",
-            schema_map::<FlagInput>(),
+            envelope_schema::<FlagInput>(),
         ),
         ToolName::MoveMessage => (
             "Move Messages",
             "Move messages to another folder",
-            schema_map::<MoveMessageInput>(),
+            envelope_schema::<MoveMessageInput>(),
         ),
         ToolName::CreateDraft => (
             "Create Draft Email",
             "Create a draft email with $PendingReview flag",
-            schema_map::<CreateDraftInput>(),
+            envelope_schema::<CreateDraftInput>(),
         ),
         ToolName::SendEmail => (
             "Send Email",
             "Send an email via SMTP",
-            schema_map::<SendEmailInput>(),
+            envelope_schema::<SendEmailInput>(),
         ),
         ToolName::DeleteMessage => (
             "Delete Message",
             "Delete a message (move to Trash)",
-            schema_map::<DeleteMessageInput>(),
+            envelope_schema::<DeleteMessageInput>(),
         ),
         ToolName::Expunge => (
             "Expunge Folder",
             "Permanently remove deleted messages from a folder",
-            schema_map::<ExpungeInput>(),
+            envelope_schema::<ExpungeInput>(),
         ),
         ToolName::CreateFolder => (
             "Create IMAP Folder",
             "Create a new IMAP folder",
-            schema_map::<CreateFolderInput>(),
+            envelope_schema::<CreateFolderInput>(),
         ),
         ToolName::RenameFolder => (
             "Rename IMAP Folder",
             "Rename an IMAP folder",
-            schema_map::<RenameFolderInput>(),
+            envelope_schema::<RenameFolderInput>(),
         ),
         ToolName::DeleteFolder => (
             "Delete IMAP Folder",
             "Delete an IMAP folder and all its contents",
-            schema_map::<DeleteFolderInput>(),
+            envelope_schema::<DeleteFolderInput>(),
         ),
         ToolName::AddLabel => (
             "Add Label to Messages",
             "Add a keyword label to messages",
-            schema_map::<LabelInput>(),
+            envelope_schema::<LabelInput>(),
         ),
         ToolName::RemoveLabel => (
             "Remove Label from Messages",
             "Remove a keyword label from messages",
-            schema_map::<LabelInput>(),
+            envelope_schema::<LabelInput>(),
         ),
         ToolName::ListLabels => (
             "List Labels on Message",
             "List keyword labels on a message",
-            schema_map::<ListLabelsInput>(),
+            envelope_schema::<ListLabelsInput>(),
         ),
         ToolName::UseAccount => (
             "Select Active Account",
             "Set the active account for subsequent tool calls",
-            schema_map::<UseAccountInput>(),
+            envelope_schema::<UseAccountInput>(),
         ),
         ToolName::ListAccounts => (
             "List Email Accounts",
@@ -245,6 +312,35 @@ fn tool_spec(name: ToolName) -> Option<ToolSpec> {
     Some(tuple)
 }
 
+/// Build the complete map of tool definitions. Called once by `TOOL_DEFS`.
+///
+/// `expect` is load-bearing: every `tool_spec`-positive `ToolName` is also
+/// `output_schema`-positive. Both functions return `None` for the same two
+/// sub-capability variants (`SearchAdvanced`, `FetchMessageHtml`), so the
+/// `continue` guard above means we never reach the `expect` for those.
+#[expect(
+    clippy::expect_used,
+    reason = "output_schema returns None exactly for the same variants tool_spec returns None for; \
+              the continue guard above means we never reach expect for those variants"
+)]
+fn build_tool_defs() -> HashMap<ToolName, Tool> {
+    let mut map = HashMap::new();
+    for tn in ToolName::all() {
+        let Some((title, description, schema)) = tool_spec(tn) else {
+            continue;
+        };
+        let out_schema = output_schema(tn).expect("every catalog tool has an output schema");
+        map.insert(
+            tn,
+            Tool::new(tn.as_str(), description, Arc::new(schema))
+                .with_title(title)
+                .with_annotations(build_annotations(title, tn))
+                .with_raw_output_schema(Arc::new(out_schema)),
+        );
+    }
+    map
+}
+
 /// Memoized MCP tool definitions. Built once at first access; each
 /// `list_tools` call reuses the same `Arc<JsonObject>` for schemas.
 ///
@@ -253,21 +349,7 @@ fn tool_spec(name: ToolName) -> Option<ToolSpec> {
 /// parent `mcp` module is `#[doc(hidden)]` so this does not become a
 /// stable library API.
 pub static TOOL_DEFS: std::sync::LazyLock<HashMap<ToolName, Tool>> =
-    std::sync::LazyLock::new(|| {
-        let mut map = HashMap::new();
-        for tn in ToolName::all() {
-            let Some((title, description, schema)) = tool_spec(tn) else {
-                continue;
-            };
-            map.insert(
-                tn,
-                Tool::new(tn.as_str(), description, Arc::new(schema))
-                    .with_title(title)
-                    .with_annotations(build_annotations(title, tn)),
-            );
-        }
-        map
-    });
+    std::sync::LazyLock::new(build_tool_defs);
 
 #[cfg(test)]
 mod tests {
@@ -414,6 +496,39 @@ mod tests {
             .expect("delete_message in TOOL_DEFS");
         let ann = def.annotations.as_ref().expect("annotations present");
         assert_eq!(ann.destructive_hint, Some(true));
+    }
+
+    #[test]
+    fn every_advertised_tool_has_output_schema() {
+        for def in ToolName::all()
+            .into_iter()
+            .filter_map(|tn| TOOL_DEFS.get(&tn))
+        {
+            assert!(
+                def.output_schema.is_some(),
+                "tool {} must publish an outputSchema",
+                def.name,
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "panicking on missing entry is the right test behavior"
+    )]
+    fn search_output_schema_declares_object_type() {
+        let def = TOOL_DEFS
+            .get(&ToolName::Search)
+            .expect("search in TOOL_DEFS");
+        let schema = def
+            .output_schema
+            .as_ref()
+            .expect("output schema present");
+        assert_eq!(
+            schema.get("type").and_then(serde_json::Value::as_str),
+            Some("object"),
+        );
     }
 
     #[test]

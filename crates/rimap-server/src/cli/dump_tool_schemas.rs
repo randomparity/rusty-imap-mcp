@@ -93,29 +93,17 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
 }
 
 /// Produce the JSON Schema for a tool's full response envelope by
-/// deriving it from `ToolResponse<M, U>`. This is byte-identical to
-/// what `crates/rimap-server/src/mcp/tool_catalog.rs::output_schema`
-/// will publish at runtime (Task D4), so the per-tool fixtures dumped
-/// here pin the same shape that ships on the wire.
-#[expect(
-    clippy::expect_used,
-    reason = "schemars always produces serializable output; failure is a bug"
-)]
+/// deriving it from `ToolResponse<M, U>`. Delegates to
+/// `rimap_server::mcp::response::envelope_schema`, the single source
+/// of truth shared with `tool_catalog::output_schema`, so fixtures and
+/// the published `outputSchema` are byte-identical.
 fn tool_envelope<M, U>() -> Value
 where
     M: schemars::JsonSchema + serde::Serialize,
     U: schemars::JsonSchema + serde::Serialize,
 {
-    use rimap_server::mcp::response::ToolResponse;
-    let schema = schemars::schema_for!(ToolResponse<M, U>);
-    let mut value = serde_json::to_value(schema).expect("schema serializes");
-    if let Some(obj) = value.as_object_mut() {
-        // Strip the schemars-emitted root title (defaults to the Rust
-        // type name like "ToolResponse_for_FooMeta_and_BarUntrusted")
-        // so the dumped schema doesn't leak Rust type names.
-        obj.remove("title");
-    }
-    value
+    use rimap_server::mcp::response::{envelope_schema, ToolResponse};
+    Value::Object(envelope_schema::<ToolResponse<M, U>>())
 }
 
 #[cfg(test)]
