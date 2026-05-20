@@ -40,6 +40,11 @@ pub struct ComposeInput {
     /// Plain text body.
     pub body_text: String,
     /// UID of message to reply to (for threading headers).
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_nonzero_u32"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_nonzero_u32")]
     pub in_reply_to_uid: Option<core::num::NonZeroU32>,
     /// Folder containing the message to reply to (default INBOX).
     pub in_reply_to_folder: Option<String>,

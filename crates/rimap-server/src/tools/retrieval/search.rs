@@ -65,8 +65,18 @@ pub struct SearchInput {
     /// non-empty — requires `SearchAdvanced` posture (Full or Destructive).
     pub headers: Option<Vec<HeaderInput>>,
     /// Match messages strictly larger than this many octets.
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_u64"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_u64")]
     pub larger: Option<u64>,
     /// Match messages strictly smaller than this many octets.
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_u64"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_u64")]
     pub smaller: Option<u64>,
     /// Messages since this ISO date (inclusive) by INTERNALDATE,
     /// e.g. "2026-01-01".
@@ -92,8 +102,18 @@ pub struct SearchInput {
     /// Raw IMAP SEARCH query (full posture only).
     pub advanced_query: Option<String>,
     /// Max results to return (default 100, max 100).
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub limit: Option<usize>,
     /// Offset into the result set (default 0).
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub offset: Option<usize>,
 }
 

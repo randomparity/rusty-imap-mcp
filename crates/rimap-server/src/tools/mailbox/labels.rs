@@ -89,7 +89,12 @@ pub struct LabelInput {
     /// When set, the handler verifies the folder's UIDVALIDITY matches this
     /// value before applying the label. A mismatch returns
     /// `ERR_UID_VALIDITY_CHANGED`. Omit to skip the guard.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_u32")]
     pub expected_uidvalidity: Option<u32>,
 }
 
@@ -99,11 +104,18 @@ pub struct ListLabelsInput {
     /// Target folder.
     pub folder: String,
     /// Message UID.
+    #[serde(deserialize_with = "crate::tools::lenient_int::deserialize_nonzero_u32")]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_nonzero_u32")]
     pub uid: core::num::NonZeroU32,
     /// When set, the handler verifies the folder's UIDVALIDITY matches this
     /// value before fetching labels. A mismatch returns
     /// `ERR_UID_VALIDITY_CHANGED`. Omit to skip the guard.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_u32")]
     pub expected_uidvalidity: Option<u32>,
 }
 

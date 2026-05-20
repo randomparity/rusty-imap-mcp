@@ -24,6 +24,8 @@ pub struct ListAttachmentsInput {
     /// IMAP folder containing the message.
     pub folder: String,
     /// UID of the message.
+    #[serde(deserialize_with = "crate::tools::lenient_int::deserialize_nonzero_u32")]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_nonzero_u32")]
     pub uid: core::num::NonZeroU32,
 }
 

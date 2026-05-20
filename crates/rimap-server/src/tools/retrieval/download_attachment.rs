@@ -27,6 +27,8 @@ pub struct DownloadAttachmentInput {
     /// IMAP folder containing the message.
     pub folder: String,
     /// UID of the message.
+    #[serde(deserialize_with = "crate::tools::lenient_int::deserialize_nonzero_u32")]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_nonzero_u32")]
     pub uid: core::num::NonZeroU32,
     /// MIME part ID of the attachment (e.g. "2", "1.2").
     pub part_id: String,
