@@ -18,6 +18,7 @@ pub struct ToolResponse<M: Serialize = serde_json::Value, U: Serialize = serde_j
     pub meta: M,
     /// Sanitized content derived from email data. Untrusted.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
     pub untrusted: Option<U>,
     /// Structured security observations. Trusted metadata.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -56,5 +57,37 @@ impl<M: Serialize, U: Serialize> ToolResponse<M, U> {
     pub fn with_warning(mut self, warning: rimap_content::SecurityWarning) -> Self {
         self.security_warnings.push(warning);
         self
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
+mod schema_tests {
+    use super::ToolResponse;
+
+    #[test]
+    fn untrusted_is_optional_in_json_schema() {
+        // Regression net for the verification-gate concern in the
+        // catalog-richness spec (Delta 4): if `untrusted` is in
+        // `required`, a future code path returning `meta_only()` for a
+        // tool whose outputSchema declared `untrusted` required would
+        // fail wire validation.
+        let schema = schemars::schema_for!(
+            ToolResponse<serde_json::Value, serde_json::Value>
+        );
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let required = value
+            .get("required")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let required_names: Vec<&str> = required
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            !required_names.contains(&"untrusted"),
+            "untrusted must not be in required; got {required_names:?}",
+        );
     }
 }
