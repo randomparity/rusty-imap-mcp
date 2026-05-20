@@ -206,12 +206,29 @@ impl ImapError {
 
 impl From<ImapError> for RimapError {
     fn from(err: ImapError) -> Self {
-        let code = err.code();
-        let message = err.to_string();
-        RimapError::Imap {
-            code,
-            message,
-            source: Some(Box::new(err)),
+        // UIDVALIDITY-change errors get a dedicated RimapError variant
+        // so MCP clients receive the typed `folder`/`expected`/`actual`
+        // fields via structured `data`. Every other ImapError flattens
+        // through the generic `Imap` arm.
+        match err {
+            ImapError::UidValidityChanged {
+                folder,
+                expected,
+                actual,
+            } => RimapError::UidValidityChanged {
+                folder,
+                expected,
+                actual,
+            },
+            other => {
+                let code = other.code();
+                let message = other.to_string();
+                RimapError::Imap {
+                    code,
+                    message,
+                    source: Some(Box::new(other)),
+                }
+            }
         }
     }
 }
@@ -280,5 +297,32 @@ mod tests {
             reason: StarttlsFailure::CapabilityMissing,
         };
         assert_eq!(err.code(), ErrorCode::Tls);
+    }
+
+    #[test]
+    fn uid_validity_changed_routes_to_dedicated_rimap_variant() {
+        use rimap_core::RimapError;
+
+        let imap_err = ImapError::UidValidityChanged {
+            folder: "INBOX".to_string(),
+            expected: 100,
+            actual: 101,
+        };
+        let rimap_err: RimapError = imap_err.into();
+        match rimap_err {
+            RimapError::UidValidityChanged {
+                folder,
+                expected,
+                actual,
+            } => {
+                assert_eq!(folder, "INBOX");
+                assert_eq!(expected, 100);
+                assert_eq!(actual, 101);
+            }
+            #[expect(clippy::panic, reason = "intentional test assertion failure path")]
+            other => panic!(
+                "expected RimapError::UidValidityChanged, got {other:?}",
+            ),
+        }
     }
 }
