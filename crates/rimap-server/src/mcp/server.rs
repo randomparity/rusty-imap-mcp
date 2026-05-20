@@ -369,9 +369,20 @@ impl ServerHandler for ImapMcpServer {
                         .into(),
                     )
                 };
+                // Single-account (legacy `default`) keeps the bare title to match
+                // the bare-name and bare-description policy in this branch.
+                let title = if use_bare_names {
+                    base_def.title.clone()
+                } else {
+                    base_def
+                        .title
+                        .as_deref()
+                        .map(|t| namespaced_title(id.as_str(), t))
+                };
                 let mut def = base_def.clone();
                 def.name = tool_name;
                 def.description = description;
+                def.title = title;
                 tools.push(def);
             }
         }
@@ -570,6 +581,16 @@ impl ServerHandler for ImapMcpServer {
     }
 }
 
+/// Compose the title shown to clients for a namespaced tool entry.
+///
+/// In the multi-account branch of `list_tools` the bare title would
+/// be context-free; prefixing with `[<account>] ` mirrors the
+/// description's `[account: X, posture: Y]` shape but stays terse.
+#[must_use]
+fn namespaced_title(account_id: &str, base_title: &str) -> String {
+    format!("[{account_id}] {base_title}")
+}
+
 /// Build the `ErrorData` payload returned by `ImapMcpServer::initialize`
 /// when the peer's `protocolVersion` is not exactly
 /// `ProtocolVersion::LATEST`. The envelope's `data` field carries
@@ -758,6 +779,23 @@ mod instructions_constants_tests {
         assert!(
             SERVER_INSTRUCTIONS_MULTI_ACCOUNT.contains("use_account"),
             "multi-account text must direct callers to use_account",
+        );
+    }
+}
+
+#[cfg(test)]
+mod namespaced_title_tests {
+    use super::namespaced_title;
+
+    #[test]
+    fn namespaced_title_prefixes_account_id() {
+        assert_eq!(
+            namespaced_title("work", "Search Messages"),
+            "[work] Search Messages",
+        );
+        assert_eq!(
+            namespaced_title("a-b_c", "Fetch Message"),
+            "[a-b_c] Fetch Message",
         );
     }
 }
