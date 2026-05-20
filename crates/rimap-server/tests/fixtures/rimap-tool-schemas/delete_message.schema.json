@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "DeleteMessageMeta": {
+      "description": "Trusted metadata for a `delete_message` response.",
+      "properties": {
+        "deleted": {
+          "description": "Always `true` when the handler returns `Ok`.",
+          "type": "boolean"
+        },
+        "destination": {
+          "description": "Trash folder the message was moved to.",
+          "type": "string"
+        },
+        "folder": {
+          "description": "Source folder the message was deleted from.",
+          "type": "string"
+        },
+        "moved_to_trash": {
+          "description": "Whether the message was moved to the trash folder.",
+          "type": "boolean"
+        },
+        "uid": {
+          "description": "UID of the deleted message.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "deleted",
+        "folder",
+        "uid",
+        "moved_to_trash",
+        "destination"
+      ],
+      "type": "object"
+    },
     "SecurityWarning": {
       "description": "A single warning emitted by the content pipeline.",
       "properties": {
@@ -24,26 +59,6 @@
       },
       "required": [
         "code"
-      ],
-      "type": "object"
-    },
-    "UseAccountMeta": {
-      "description": "Trusted metadata for a `use_account` response.",
-      "properties": {
-        "account": {
-          "description": "The account that is now active.",
-          "type": "string"
-        },
-        "previous": {
-          "description": "The previously active account, or `None` if none was set.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "account"
       ],
       "type": "object"
     },
@@ -172,7 +187,7 @@
   "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$ref": "#/$defs/UseAccountMeta",
+      "$ref": "#/$defs/DeleteMessageMeta",
       "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {

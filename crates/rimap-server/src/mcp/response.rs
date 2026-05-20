@@ -22,6 +22,7 @@ pub struct ToolResponse<M: Serialize = serde_json::Value, U: Serialize = serde_j
     pub untrusted: Option<U>,
     /// Structured security observations. Trusted metadata.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub security_warnings: Vec<rimap_content::SecurityWarning>,
 }
 
@@ -88,6 +89,32 @@ mod schema_tests {
         assert!(
             !required_names.contains(&"untrusted"),
             "untrusted must not be in required; got {required_names:?}",
+        );
+    }
+
+    #[test]
+    fn security_warnings_is_optional_in_json_schema() {
+        // Mirror of `untrusted_is_optional_in_json_schema`: the field carries
+        // `skip_serializing_if = "Vec::is_empty"` so it's absent from the wire
+        // when no warnings are present. Without `#[schemars(default)]`, schemars
+        // would put it in `required` and the wire validator would reject every
+        // tool response that omits it.
+        let schema = schemars::schema_for!(
+            ToolResponse<serde_json::Value, serde_json::Value>
+        );
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let required = value
+            .get("required")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let required_names: Vec<&str> = required
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            !required_names.contains(&"security_warnings"),
+            "security_warnings must not be in required; got {required_names:?}",
         );
     }
 }

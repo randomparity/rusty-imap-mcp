@@ -1,5 +1,37 @@
 {
   "$defs": {
+    "SearchMeta": {
+      "description": "Trusted metadata for a `search` response.",
+      "properties": {
+        "folder": {
+          "description": "Folder that was searched.",
+          "type": "string"
+        },
+        "returned": {
+          "description": "Number of messages returned in this response.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_matched": {
+          "description": "Total number of messages matching the query (before pagination).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether there are more results beyond this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "folder",
+        "total_matched",
+        "returned",
+        "truncated"
+      ],
+      "type": "object"
+    },
     "SearchResultEntry": {
       "description": "A single message entry in a `search` untrusted payload.",
       "properties": {
@@ -73,6 +105,49 @@
       },
       "required": [
         "uid"
+      ],
+      "type": "object"
+    },
+    "SearchUntrusted": {
+      "description": "Untrusted payload for a `search` response.",
+      "properties": {
+        "messages": {
+          "description": "Matching messages with sanitized header fields.",
+          "items": {
+            "$ref": "#/$defs/SearchResultEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "type": "object"
+    },
+    "SecurityWarning": {
+      "description": "A single warning emitted by the content pipeline.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/WarningCode",
+          "description": "Classification of the warning."
+        },
+        "detail": {
+          "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
       ],
       "type": "object"
     },
@@ -197,96 +272,34 @@
       ]
     }
   },
-  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Trusted metadata for a `search` response.",
-      "properties": {
-        "folder": {
-          "description": "Folder that was searched.",
-          "type": "string"
-        },
-        "returned": {
-          "description": "Number of messages returned in this response.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "total_matched": {
-          "description": "Total number of messages matching the query (before pagination).",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "truncated": {
-          "description": "Whether there are more results beyond this page.",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "folder",
-        "total_matched",
-        "returned",
-        "truncated"
-      ],
-      "title": "SearchMeta",
-      "type": "object"
+      "$ref": "#/$defs/SearchMeta",
+      "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {
+      "description": "Structured security observations. Trusted metadata.",
       "items": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "A single warning emitted by the content pipeline.",
-        "properties": {
-          "code": {
-            "$ref": "#/$defs/WarningCode",
-            "description": "Classification of the warning."
-          },
-          "detail": {
-            "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "location": {
-            "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ],
-        "title": "SecurityWarning",
-        "type": "object"
+        "$ref": "#/$defs/SecurityWarning"
       },
       "type": "array"
     },
     "untrusted": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Untrusted payload for a `search` response.",
-      "properties": {
-        "messages": {
-          "description": "Matching messages with sanitized header fields.",
-          "items": {
-            "$ref": "#/$defs/SearchResultEntry"
-          },
-          "type": "array"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchUntrusted"
+        },
+        {
+          "type": "null"
         }
-      },
-      "required": [
-        "messages"
       ],
-      "title": "SearchUntrusted",
-      "type": "object"
+      "description": "Sanitized content derived from email data. Untrusted."
     }
   },
   "required": [
-    "meta",
-    "untrusted"
+    "meta"
   ],
   "type": "object"
 }

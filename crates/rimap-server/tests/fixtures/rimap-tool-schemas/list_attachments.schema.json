@@ -32,6 +32,76 @@
       ],
       "type": "object"
     },
+    "ListAttachmentsMeta": {
+      "description": "Trusted metadata for a `list_attachments` response.",
+      "properties": {
+        "attachment_count": {
+          "description": "Number of attachment parts found.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "folder": {
+          "description": "IMAP folder the message was fetched from.",
+          "type": "string"
+        },
+        "uid": {
+          "description": "UID of the inspected message.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "folder",
+        "uid",
+        "attachment_count"
+      ],
+      "type": "object"
+    },
+    "ListAttachmentsUntrusted": {
+      "description": "Untrusted payload for a `list_attachments` response.",
+      "properties": {
+        "attachments": {
+          "description": "Attachment parts found in the MIME tree.",
+          "items": {
+            "$ref": "#/$defs/AttachmentInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "attachments"
+      ],
+      "type": "object"
+    },
+    "SecurityWarning": {
+      "description": "A single warning emitted by the content pipeline.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/WarningCode",
+          "description": "Classification of the warning."
+        },
+        "detail": {
+          "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
     "WarningCode": {
       "description": "Classification of pipeline warnings. New variants will be added as\nnew detectors land \u2014 the enum is `#[non_exhaustive]` so matches\noutside this crate must include a wildcard arm.",
       "oneOf": [
@@ -153,91 +223,34 @@
       ]
     }
   },
-  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Trusted metadata for a `list_attachments` response.",
-      "properties": {
-        "attachment_count": {
-          "description": "Number of attachment parts found.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "folder": {
-          "description": "IMAP folder the message was fetched from.",
-          "type": "string"
-        },
-        "uid": {
-          "description": "UID of the inspected message.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "folder",
-        "uid",
-        "attachment_count"
-      ],
-      "title": "ListAttachmentsMeta",
-      "type": "object"
+      "$ref": "#/$defs/ListAttachmentsMeta",
+      "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {
+      "description": "Structured security observations. Trusted metadata.",
       "items": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "A single warning emitted by the content pipeline.",
-        "properties": {
-          "code": {
-            "$ref": "#/$defs/WarningCode",
-            "description": "Classification of the warning."
-          },
-          "detail": {
-            "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "location": {
-            "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ],
-        "title": "SecurityWarning",
-        "type": "object"
+        "$ref": "#/$defs/SecurityWarning"
       },
       "type": "array"
     },
     "untrusted": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Untrusted payload for a `list_attachments` response.",
-      "properties": {
-        "attachments": {
-          "description": "Attachment parts found in the MIME tree.",
-          "items": {
-            "$ref": "#/$defs/AttachmentInfo"
-          },
-          "type": "array"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ListAttachmentsUntrusted"
+        },
+        {
+          "type": "null"
         }
-      },
-      "required": [
-        "attachments"
       ],
-      "title": "ListAttachmentsUntrusted",
-      "type": "object"
+      "description": "Sanitized content derived from email data. Untrusted."
     }
   },
   "required": [
-    "meta",
-    "untrusted"
+    "meta"
   ],
   "type": "object"
 }
