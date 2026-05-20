@@ -241,6 +241,28 @@ pub enum RimapError {
         /// Names of the available accounts.
         available: Vec<String>,
     },
+    /// IMAP `UIDVALIDITY` value changed between the caller's recorded
+    /// SELECT and the server's current report. Surfaces the typed fields
+    /// so MCP clients can implement fresh SELECT + re-fetch without
+    /// parsing prose.
+    ///
+    /// Routed through `From<ImapError> for RimapError`'s dedicated arm
+    /// (set up in Task E2) rather than the generic `Imap` variant, so
+    /// the typed fields survive translation. See
+    /// `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
+    /// (Delta 5).
+    #[error(
+        "UIDVALIDITY changed for `{folder}`: expected {expected}, \
+         server reports {actual}"
+    )]
+    UidValidityChanged {
+        /// The folder that was selected.
+        folder: String,
+        /// The UIDVALIDITY value the caller expected.
+        expected: u32,
+        /// The UIDVALIDITY value the server reported.
+        actual: u32,
+    },
 }
 
 impl RimapError {
@@ -268,6 +290,7 @@ impl RimapError {
             Self::Internal(_) | Self::InternalSourced { .. } => ErrorCode::Internal,
             Self::NoAccount { .. } => ErrorCode::NoAccount,
             Self::UnknownAccount { .. } => ErrorCode::UnknownAccount,
+            Self::UidValidityChanged { .. } => ErrorCode::UidValidityChanged,
         }
     }
 }
@@ -383,5 +406,28 @@ mod tests {
         assert!(!displayed.contains("disk full"));
         let source = err.source().expect("source present");
         assert_eq!(source.to_string(), "disk full");
+    }
+
+    #[test]
+    fn uid_validity_changed_variant_maps_to_error_code() {
+        let err = RimapError::UidValidityChanged {
+            folder: "INBOX".to_string(),
+            expected: 100,
+            actual: 101,
+        };
+        assert_eq!(err.code(), ErrorCode::UidValidityChanged);
+    }
+
+    #[test]
+    fn uid_validity_changed_display_includes_typed_fields() {
+        let err = RimapError::UidValidityChanged {
+            folder: "INBOX".to_string(),
+            expected: 100,
+            actual: 101,
+        };
+        let s = format!("{err}");
+        assert!(s.contains("INBOX"), "Display must include folder; got {s}");
+        assert!(s.contains("100"), "Display must include expected; got {s}");
+        assert!(s.contains("101"), "Display must include actual; got {s}");
     }
 }
