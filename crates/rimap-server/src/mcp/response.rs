@@ -12,8 +12,7 @@ use serde::Serialize;
 /// untrusted payload shape (must `Serialize`). Handlers that have no
 /// untrusted body should return `ToolResponse<M, ()>` with
 /// `untrusted: None`.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ToolResponse<M: Serialize = serde_json::Value, U: Serialize = serde_json::Value> {
     /// Server-controlled metadata. Trusted.
     pub meta: M,

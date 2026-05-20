@@ -11,7 +11,7 @@ use crate::tools::compose::message_builder::{self, ComposeInput};
 pub type SendEmailInput = ComposeInput;
 
 /// Copy-to-Sent result included in a `send_email` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct SentCopyInfo {
     /// Folder the copy was appended to.
@@ -29,7 +29,7 @@ pub struct SentCopyInfo {
 }
 
 /// Trusted metadata for a `send_email` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SendEmailMeta {
     /// Whether the message was delivered via SMTP.
     pub sent: bool,

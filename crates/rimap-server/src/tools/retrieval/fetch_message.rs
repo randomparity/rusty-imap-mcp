@@ -39,8 +39,7 @@ pub struct FetchMessageInput {
 }
 
 /// Trusted metadata for a `fetch_message` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FetchMessageMeta {
     /// IMAP folder the message was fetched from.
     pub folder: String,
@@ -55,8 +54,7 @@ pub struct FetchMessageMeta {
 }
 
 /// Sanitized untrusted payload for a `fetch_message` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FetchMessageUntrusted {
     /// Plain-text body (sanitized).
     pub body_text: String,
@@ -81,10 +79,7 @@ pub struct FetchMessageUntrusted {
     /// Note: the `time` crate does not enable `serde-human-readable` in
     /// this workspace, so `OffsetDateTime` always serializes as a tuple
     /// regardless of the serializer's `is_human_readable()` flag.
-    #[cfg_attr(
-        feature = "test-support",
-        schemars(schema_with = "offset_date_time_tuple_schema")
-    )]
+    #[schemars(schema_with = "offset_date_time_tuple_schema")]
     pub date: Option<time::OffsetDateTime>,
     /// MIME attachment parts found in the message.
     pub attachments: Vec<rimap_content::AttachmentMeta>,
@@ -177,7 +172,6 @@ pub async fn handle(
 ///
 /// Used via `#[schemars(schema_with = "offset_date_time_tuple_schema")]` on
 /// `FetchMessageUntrusted::date`.
-#[cfg(feature = "test-support")]
 fn offset_date_time_tuple_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     use schemars::json_schema;
     json_schema!({

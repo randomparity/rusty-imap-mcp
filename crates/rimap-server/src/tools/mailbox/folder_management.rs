@@ -30,7 +30,7 @@ pub struct DeleteFolderInput {
 }
 
 /// Trusted metadata for a `create_folder` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CreateFolderMeta {
     /// Always `true` when the handler returns `Ok`.
     pub created: bool,
@@ -39,7 +39,7 @@ pub struct CreateFolderMeta {
 }
 
 /// Trusted metadata for a `rename_folder` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct RenameFolderMeta {
     /// Always `true` when the handler returns `Ok`.
     pub renamed: bool,
@@ -50,7 +50,7 @@ pub struct RenameFolderMeta {
 }
 
 /// Trusted metadata for a `delete_folder` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct DeleteFolderMeta {
     /// Always `true` when the handler returns `Ok`.
     pub deleted: bool,

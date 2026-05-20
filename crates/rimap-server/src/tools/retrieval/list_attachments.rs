@@ -30,8 +30,7 @@ pub struct ListAttachmentsInput {
 }
 
 /// Metadata for a single attachment discovered in the MIME tree.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct AttachmentInfo {
     /// IMAP part identifier (e.g. `"2"`, `"1.2"`).
     pub part_id: String,
@@ -44,8 +43,7 @@ pub struct AttachmentInfo {
 }
 
 /// Trusted metadata for a `list_attachments` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListAttachmentsMeta {
     /// IMAP folder the message was fetched from.
     pub folder: String,
@@ -56,8 +54,7 @@ pub struct ListAttachmentsMeta {
 }
 
 /// Untrusted payload for a `list_attachments` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListAttachmentsUntrusted {
     /// Attachment parts found in the MIME tree.
     pub attachments: Vec<AttachmentInfo>,

@@ -11,8 +11,7 @@ use crate::tools::compose::message_builder::{self, ComposeInput};
 pub type CreateDraftInput = ComposeInput;
 
 /// Trusted metadata for a `create_draft` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CreateDraftMeta {
     /// Folder the draft was appended to.
     pub folder: String,
