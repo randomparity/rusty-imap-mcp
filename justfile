@@ -188,6 +188,16 @@ prune-containers:
 test: prune-containers
     cargo nextest run --workspace --locked --no-tests=pass
 
+# Inner-loop unit tests. Skips the five heaviest test binaries
+# (dovecot integration, e2e/e2e_wire MCP suites, and the slow HTML
+# lookalike proptest). Use this between `cargo check` cycles during
+# inner-loop iteration. Before pushing, run `just test` (or `just ci`)
+# for the full sweep. See
+# docs/superpowers/specs/2026-05-20-local-test-runtime-trim-design.md.
+test-fast:
+    cargo nextest run --workspace --locked --no-tests=pass \
+        -E 'not (binary(dovecot) | binary(e2e) | binary(e2e_wire) | binary(e2e_wire_cancellation) | binary(proptest_html_lookalike))'
+
 # Verify the MSRV toolchain still builds and tests the workspace.
 test-msrv:
     cargo +{{MSRV}} check --workspace --all-targets --all-features --locked
