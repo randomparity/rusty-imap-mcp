@@ -302,6 +302,34 @@ async fn assert_search(harness: &mut Harness) -> u32 {
     let uid_u64 = messages[0]["uid"].as_u64().expect("uid is integer");
     let uid = u32::try_from(uid_u64).expect("uid fits u32");
     assert!(uid > 0);
+
+    // Exercise the new `cc` input field. The seeded message has no
+    // Cc header (see fixtures.rs::multipart_with_attachment), so this
+    // asserts that the wire path round-trips the new field and the
+    // IMAP server honors the `CC` SEARCH key (returning zero matches).
+    //
+    // Coverage caveat: a regression that silently drops the `cc` arg
+    // would also produce zero matches (the IMAP query would degrade
+    // to ALL on an inbox with one message that doesn't match other
+    // criteria). The wire-format direction itself is pinned by the
+    // unit tests:
+    //   - rimap-server build_query_threads_cc_into_structured_query
+    //   - rimap-imap structured_to_key_emits_cc_and_bcc
+    // Together those guarantee the field reaches the IMAP key; this
+    // e2e check adds proof that Dovecot accepts the resulting
+    // command.
+    let cc_body = call_tool(
+        harness,
+        "draftsafe.search",
+        json!({ "folder": "INBOX", "cc": "noone@example.com" }),
+    )
+    .await;
+    assert_eq!(
+        cc_body["meta"]["total_matched"].as_u64(),
+        Some(0),
+        "cc filter against unseeded address must yield zero hits: {cc_body}",
+    );
+
     uid
 }
 
@@ -646,6 +674,54 @@ async fn assert_readonly_denial(harness: &mut Harness) {
         Some(POSTURE_DENIAL_CODE),
         "posture-denial wire code drifted; got {resp}",
     );
+
+    // Regression coverage for the sub-capability dispatch order bug.
+    // refine_tool_name promotes Search -> SearchAdvanced when
+    // `advanced_query` is set; the TOOL_DEFS check must run on the
+    // parsed (parent) name so the refined name reaches DispatchGuard
+    // and returns PostureDenied (not RESOURCE_NOT_FOUND).
+    let advanced_denial = harness
+        .request(
+            "tools/call",
+            json!({
+                "name": "readonly.search",
+                "arguments": {"folder": "INBOX", "advanced_query": "FROM x"},
+            }),
+        )
+        .await;
+    assert!(
+        advanced_denial["error"].is_object(),
+        "expected error envelope for readonly.search advanced_query, got {advanced_denial}",
+    );
+    assert_eq!(
+        advanced_denial["error"]["code"].as_i64(),
+        Some(POSTURE_DENIAL_CODE),
+        "readonly.search advanced_query must be posture-denied (sub-capability \
+         dispatch reaches DispatchGuard); got {advanced_denial}",
+    );
+
+    // The new `body` input is a content-oracle; refine_tool_name
+    // promotes Search -> SearchAdvanced, which the posture matrix
+    // denies under Readonly. Pin the wire error to the posture-denial
+    // code so silent drift in refinement OR the matrix surfaces here.
+    let body_denial = harness
+        .request(
+            "tools/call",
+            json!({
+                "name": "readonly.search",
+                "arguments": {"folder": "INBOX", "body": "hello"},
+            }),
+        )
+        .await;
+    assert!(
+        body_denial["error"].is_object(),
+        "expected error envelope for readonly.search body, got {body_denial}",
+    );
+    assert_eq!(
+        body_denial["error"]["code"].as_i64(),
+        Some(POSTURE_DENIAL_CODE),
+        "readonly.search body must be posture-denied; got {body_denial}",
+    );
 }
 
 /// Verify audit records from the readonly posture denial test.
@@ -714,6 +790,62 @@ fn assert_readonly_audit_records(audit_path: &std::path::Path) {
         "readonly.move_message tool_end must record account=\"readonly\": {records:#?}",
     );
     assert_eq!(mm_ends[0]["start_seq"], mm_starts[0]["seq"]);
+
+    // Denial path: TWO search.advanced_query pairs, account="readonly".
+    // One from advanced_query, one from body — both refine to
+    // SearchAdvanced and serialize as "search.advanced_query" in the
+    // audit log. Each pair shares start_seq via the dispatch envelope.
+    assert_readonly_audit_search_pairs(&records);
+}
+
+/// Assert the two `search.advanced_query` audit pairs produced by the
+/// readonly denial test (one from `advanced_query`, one from `body` — both
+/// refine to `SearchAdvanced` and serialize as `"search.advanced_query"`).
+fn assert_readonly_audit_search_pairs(records: &[Value]) {
+    let s_starts: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["kind"] == "tool_start" && r["tool"] == "search.advanced_query")
+        .collect();
+    assert_eq!(
+        s_starts.len(),
+        2,
+        "expected exactly two search.advanced_query tool_start \
+         (advanced_query + body): {records:#?}",
+    );
+    for s in &s_starts {
+        assert_eq!(
+            s["account"].as_str(),
+            Some("readonly"),
+            "readonly.search tool_start must record account=\"readonly\": {records:#?}",
+        );
+    }
+    let s_ends: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["kind"] == "tool_end" && r["tool"] == "search.advanced_query")
+        .collect();
+    assert_eq!(
+        s_ends.len(),
+        2,
+        "expected exactly two search.advanced_query tool_end: {records:#?}",
+    );
+    for e in &s_ends {
+        assert_eq!(
+            e["account"].as_str(),
+            Some("readonly"),
+            "readonly.search tool_end must record account=\"readonly\": {records:#?}",
+        );
+    }
+    // Each tool_end's start_seq must match a tool_start's seq.
+    let start_seqs: std::collections::HashSet<&Value> =
+        s_starts.iter().map(|s| &s["seq"]).collect();
+    for e in &s_ends {
+        let start_seq = &e["start_seq"];
+        assert!(
+            start_seqs.contains(start_seq),
+            "tool_end start_seq {start_seq} should match a \
+             tool_start seq from {start_seqs:?}",
+        );
+    }
 }
 
 async fn seed_multipart_message(dovecot: &DovecotHarness) {

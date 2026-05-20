@@ -51,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
                 .get(name.as_str())
                 .copied()
                 .unwrap_or(rimap_audit::FieldPolicy::RedactString);
-            if matches!(policy, rimap_audit::FieldPolicy::Verbatim) {
+            if matches!(policy, rimap_audit::FieldPolicy::Verbatim(_)) {
                 continue;
             }
             let serde_json::Value::String(s_in) = value_in else {

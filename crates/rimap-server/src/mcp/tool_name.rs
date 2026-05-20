@@ -48,7 +48,7 @@ pub(super) fn refine_tool_name(
         {
             ToolName::FetchMessageHtml
         }
-        ToolName::Search if args.get("advanced_query").is_some() => ToolName::SearchAdvanced,
+        ToolName::Search if promotes_search_to_advanced(args) => ToolName::SearchAdvanced,
         ToolName::ListFolders
         | ToolName::Search
         | ToolName::SearchAdvanced
@@ -74,6 +74,45 @@ pub(super) fn refine_tool_name(
         | ToolName::UseAccount
         | ToolName::ListAccounts => base,
     }
+}
+
+/// Whether the `search` argument shape forces promotion to
+/// `SearchAdvanced`. Triggers on any content-oracle input:
+/// `advanced_query`, `body`, `text`, `bcc`, or a non-empty `headers`
+/// array. Envelope/flag fields (`cc`, `larger`, `sent_*`, `answered`,
+/// `flagged`, `draft`) do NOT promote — they map to IMAP-indexed
+/// metadata, not content scans, and stay under the low-posture
+/// `Search` seat.
+fn promotes_search_to_advanced(args: &serde_json::Map<String, serde_json::Value>) -> bool {
+    // Use as_str() rather than is_some() so explicit JSON null (e.g.
+    // {"body": null}) is treated as absent — serde deserializes
+    // Option<String> = null as None, and promoting a no-op filter to
+    // SearchAdvanced would produce a misleading PostureDenied.
+    if args
+        .get("advanced_query")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        || args
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || args
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || args
+            .get("bcc")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+    {
+        return true;
+    }
+    // headers triggers only when present AND non-empty (as_array filters
+    // non-array types automatically).
+    matches!(
+        args.get("headers").and_then(serde_json::Value::as_array),
+        Some(arr) if !arr.is_empty(),
+    )
 }
 
 /// Whether `raw` is a bare simple (undotted) tool name for a non-infrastructure
@@ -375,6 +414,90 @@ mod tests {
                 ToolName::Search => assert_eq!(refined, ToolName::SearchAdvanced),
                 other => assert_eq!(refined, other, "{other:?} unexpectedly refined"),
             }
+        }
+    }
+
+    #[test]
+    fn refine_tool_name_promotes_search_on_body() {
+        let mut args = serde_json::Map::new();
+        args.insert("body".into(), serde_json::Value::String("hello".into()));
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::SearchAdvanced,
+        );
+    }
+
+    #[test]
+    fn refine_tool_name_promotes_search_on_text() {
+        let mut args = serde_json::Map::new();
+        args.insert("text".into(), serde_json::Value::String("anywhere".into()));
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::SearchAdvanced,
+        );
+    }
+
+    #[test]
+    fn refine_tool_name_promotes_search_on_bcc() {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "bcc".into(),
+            serde_json::Value::String("blind@example.com".into()),
+        );
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::SearchAdvanced,
+        );
+    }
+
+    #[test]
+    fn refine_tool_name_promotes_search_on_non_empty_headers() {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "headers".into(),
+            serde_json::json!([{"name": "List-Id", "value": "rust"}]),
+        );
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::SearchAdvanced,
+        );
+    }
+
+    #[test]
+    fn refine_tool_name_does_not_promote_on_empty_headers_array() {
+        let mut args = serde_json::Map::new();
+        args.insert("headers".into(), serde_json::json!([]));
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::Search,
+        );
+    }
+
+    #[test]
+    fn refine_tool_name_does_not_promote_on_explicit_null_body() {
+        // JSON {"body": null} must NOT promote: serde deserializes
+        // Option<String> = null as None, so the filter is a no-op
+        // and promotion would yield a misleading PostureDenied.
+        let mut args = serde_json::Map::new();
+        args.insert("body".into(), serde_json::Value::Null);
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::Search,
+        );
+    }
+
+    #[test]
+    fn refine_tool_name_does_not_promote_on_envelope_or_flag_fields() {
+        // cc/larger/sent_since/answered are NOT content-oracle inputs;
+        // they ride the existing low-posture Search seat.
+        for field in ["cc", "larger", "sent_since", "answered"] {
+            let mut args = serde_json::Map::new();
+            args.insert(field.into(), serde_json::json!("payload"));
+            assert_eq!(
+                refine_tool_name(ToolName::Search, Some(&args)),
+                ToolName::Search,
+                "{field} unexpectedly promoted",
+            );
         }
     }
 }
