@@ -214,6 +214,83 @@ impl ToolName {
     }
 }
 
+/// MCP tool annotation hints. Mirrored to `rmcp::model::ToolAnnotations`
+/// in the server crate; defined here so `ToolName` owns the
+/// classification.
+// Four orthogonal annotation axes map directly to the MCP spec fields;
+// state-machine enums would add indirection without adding safety here.
+#[expect(clippy::struct_excessive_bools, reason = "four MCP spec fields, each a distinct axis")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolAnnotationHints {
+    /// `read_only_hint`: tool does not modify mailbox or session state.
+    pub read_only: bool,
+    /// `destructive_hint`: tool performs irreversible operations on the
+    /// server.
+    pub destructive: bool,
+    /// `idempotent_hint`: calling twice has the same effect as calling
+    /// once.
+    pub idempotent: bool,
+    /// `open_world_hint`: tool interacts with an external system
+    /// (IMAP/SMTP server). `false` for tools that operate purely on
+    /// local registry state.
+    pub open_world: bool,
+}
+
+impl ToolName {
+    /// MCP tool annotation hints for this tool. Hand-authored per
+    /// variant; see the spec at
+    /// `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
+    /// (Delta 3) for the classification rules.
+    #[must_use]
+    pub fn annotation_hints(self) -> ToolAnnotationHints {
+        let (read_only, destructive, idempotent, open_world) = match self {
+            // Read-only, external (IMAP).
+            Self::ListFolders
+            | Self::Search
+            | Self::SearchAdvanced
+            | Self::FetchMessage
+            | Self::FetchMessageHtml
+            | Self::ListAttachments
+            | Self::DownloadAttachment
+            | Self::ListLabels => (true, false, false, true),
+
+            // Read-only, local registry (no IMAP/SMTP).
+            Self::ListAccounts => (true, false, false, false),
+
+            // Mutates session state, local registry.
+            Self::UseAccount => (false, false, true, false),
+
+            // Idempotent flag mutations on IMAP.
+            Self::MarkRead
+            | Self::MarkUnread
+            | Self::Flag
+            | Self::Unflag
+            | Self::AddLabel
+            | Self::RemoveLabel => (false, false, true, true),
+
+            // Non-idempotent, non-destructive mutations. `CreateFolder`
+            // also falls here: same name fails the second call per IMAP
+            // semantics.
+            Self::MoveMessage
+            | Self::CreateDraft
+            | Self::RenameFolder
+            | Self::CreateFolder => (false, false, false, true),
+
+            // Destructive, irreversible.
+            Self::SendEmail
+            | Self::DeleteMessage
+            | Self::Expunge
+            | Self::DeleteFolder => (false, true, false, true),
+        };
+        ToolAnnotationHints {
+            read_only,
+            destructive,
+            idempotent,
+            open_world,
+        }
+    }
+}
+
 impl fmt::Display for ToolName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -325,5 +402,73 @@ mod tests {
             ToolName::SearchAdvanced.to_string(),
             "search.advanced_query"
         );
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use super::ToolName;
+
+    #[test]
+    fn list_folders_is_read_only_open_world() {
+        let h = ToolName::ListFolders.annotation_hints();
+        assert!(h.read_only);
+        assert!(!h.destructive);
+        assert!(h.open_world);
+    }
+
+    #[test]
+    fn use_account_is_not_read_only() {
+        // use_account mutates the session-scoped active-account state via
+        // AccountRegistry::set_active. See spec rationale (Delta 3).
+        let h = ToolName::UseAccount.annotation_hints();
+        assert!(!h.read_only, "use_account must not advertise read_only_hint");
+        assert!(!h.open_world, "use_account is local-registry only");
+        assert!(
+            h.idempotent,
+            "use_account is idempotent: calling set_active twice = once",
+        );
+    }
+
+    #[test]
+    fn delete_message_is_destructive() {
+        let h = ToolName::DeleteMessage.annotation_hints();
+        assert!(h.destructive);
+        assert!(!h.read_only);
+    }
+
+    #[test]
+    fn move_message_is_not_destructive() {
+        // Per spec: move is reversible.
+        let h = ToolName::MoveMessage.annotation_hints();
+        assert!(!h.destructive);
+    }
+
+    #[test]
+    fn mark_read_is_idempotent() {
+        let h = ToolName::MarkRead.annotation_hints();
+        assert!(h.idempotent);
+    }
+
+    #[test]
+    fn create_folder_is_not_idempotent() {
+        // Same name fails the second call per IMAP semantics; treat as
+        // non-idempotent.
+        let h = ToolName::CreateFolder.annotation_hints();
+        assert!(!h.idempotent);
+    }
+
+    #[test]
+    fn list_accounts_is_not_open_world() {
+        let h = ToolName::ListAccounts.annotation_hints();
+        assert!(!h.open_world);
+        assert!(h.read_only);
+    }
+
+    #[test]
+    fn search_is_read_only_open_world() {
+        let h = ToolName::Search.annotation_hints();
+        assert!(h.read_only);
+        assert!(h.open_world);
     }
 }
