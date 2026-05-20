@@ -293,10 +293,17 @@ impl ServerHandler for ImapMcpServer {
             .enable_tool_list_changed()
             .enable_resources()
             .build();
-        ServerInfo::new(capabilities).with_server_info(Implementation::new(
-            "rusty-imap-mcp",
-            rimap_core::version::version(),
-        ))
+        let instructions = if is_legacy_single_account(self.registry.accounts()) {
+            SERVER_INSTRUCTIONS_SINGLE_ACCOUNT
+        } else {
+            SERVER_INSTRUCTIONS_MULTI_ACCOUNT
+        };
+        ServerInfo::new(capabilities)
+            .with_server_info(Implementation::new(
+                "rusty-imap-mcp",
+                rimap_core::version::version(),
+            ))
+            .with_instructions(instructions)
     }
 
     async fn initialize(
@@ -662,6 +669,67 @@ mod protocol_version_tests {
         let v = version_from_str("1999-01-01");
         let err = unsupported_protocol_version_error(&v);
         assert!(err.data.is_some(), "data field must be present");
+    }
+}
+
+#[cfg(test)]
+mod instructions_selection_tests {
+    #![expect(clippy::expect_used, reason = "tests")]
+
+    use std::collections::BTreeMap;
+
+    use rimap_audit::{AuditOptions, AuditWriter, Seq};
+    use rmcp::handler::server::ServerHandler;
+    use tempfile::TempDir;
+
+    use super::{
+        ImapMcpServer, SERVER_INSTRUCTIONS_MULTI_ACCOUNT, SERVER_INSTRUCTIONS_SINGLE_ACCOUNT,
+    };
+    use crate::boot::registry::AccountRegistry;
+
+    fn make_server(registry: AccountRegistry) -> (ImapMcpServer, TempDir) {
+        let audit_dir = TempDir::new().expect("audit tempdir");
+        let audit_path = audit_dir.path().join("audit.jsonl");
+        let audit = AuditWriter::open(&AuditOptions {
+            path: audit_path,
+            rotate_bytes: 0,
+            rotate_keep: 0,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: Seq::FIRST,
+        })
+        .expect("audit open");
+        let (cancellation_sender, _rx) = rimap_audit::cancellation_channel();
+        (
+            ImapMcpServer::new(registry, audit, cancellation_sender),
+            audit_dir,
+        )
+    }
+
+    #[test]
+    fn get_info_emits_single_account_instructions_for_single_default_account() {
+        // is_legacy_single_account returns true only for exactly one account
+        // named "default". A single "default" account is the canonical
+        // single-account deployment shape.
+        use rimap_core::account::DEFAULT_ACCOUNT_NAME;
+
+        use crate::test_support::make_test_account_state;
+
+        let state = make_test_account_state(DEFAULT_ACCOUNT_NAME);
+        let mut accounts = BTreeMap::new();
+        accounts.insert(state.id.clone(), state);
+        let registry = AccountRegistry::new(accounts);
+        let (server, _t) = make_server(registry);
+        let info = server.get_info();
+        assert_eq!(
+            info.instructions.as_deref(),
+            Some(SERVER_INSTRUCTIONS_SINGLE_ACCOUNT),
+            "single default-named account is treated as single-account",
+        );
+        assert_ne!(
+            info.instructions.as_deref(),
+            Some(SERVER_INSTRUCTIONS_MULTI_ACCOUNT),
+        );
     }
 }
 
