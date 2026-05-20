@@ -51,6 +51,34 @@ fn search_input_rejects_non_digit_string() {
 }
 
 #[test]
+fn search_input_accepts_integer_larger() {
+    let v = json!({"folder": "INBOX", "larger": 1_048_576});
+    let input: SearchInput = serde_json::from_value(v).unwrap();
+    assert_eq!(input.larger, Some(1_048_576));
+}
+
+#[test]
+fn search_input_accepts_string_larger() {
+    let v = json!({"folder": "INBOX", "larger": "1048576"});
+    let input: SearchInput = serde_json::from_value(v).unwrap();
+    assert_eq!(input.larger, Some(1_048_576));
+}
+
+#[test]
+fn search_input_accepts_string_smaller() {
+    let v = json!({"folder": "INBOX", "smaller": "4096"});
+    let input: SearchInput = serde_json::from_value(v).unwrap();
+    assert_eq!(input.smaller, Some(4096));
+}
+
+#[test]
+fn search_input_rejects_negative_larger() {
+    let v = json!({"folder": "INBOX", "larger": -1});
+    let err = serde_json::from_value::<SearchInput>(v).unwrap_err();
+    assert!(err.to_string().contains("non-negative"), "got: {err}");
+}
+
+#[test]
 fn create_draft_input_accepts_integer_reply_uid() {
     let v = json!({
         "to": [{"address": "a@b.test"}],

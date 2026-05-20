@@ -221,10 +221,18 @@ pub fn deserialize_opt_nonzero_u32<'de, D: Deserializer<'de>>(
 /// Schema for `Option<usize>` accepted as integer, digit-string, or null.
 ///
 /// Emitted via `#[schemars(schema_with = "lenient_int::schema_opt_usize")]`.
+///
+/// # Bounds
+///
+/// The integer branch caps `maximum` at `i64::MAX` (`9_223_372_036_854_775_807`)
+/// because [`deserialize_opt_usize`] decodes through `IntOrStr::Int(i64)`.
+/// Callers needing larger values must use the digit-string branch; pinning
+/// the schema ceiling keeps host-side pre-flight validation aligned with
+/// what the deserializer will actually accept (issue #292).
 pub fn schema_opt_usize(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            { "type": "integer", "minimum": 0 },
+            { "type": "integer", "minimum": 0, "maximum": 9_223_372_036_854_775_807_u64 },
             { "type": "string", "pattern": "^[0-9]+$" },
             { "type": "null" }
         ]
@@ -243,10 +251,18 @@ pub fn schema_opt_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
 }
 
 /// Schema for `Option<u64>` accepted as integer, digit-string, or null.
+///
+/// # Bounds
+///
+/// The integer branch caps `maximum` at `i64::MAX` (`9_223_372_036_854_775_807`)
+/// because [`deserialize_opt_u64`] decodes through `IntOrStr::Int(i64)`.
+/// `u64` values above that ceiling must be supplied via the digit-string
+/// branch; the deserializer's rustdoc says the same thing. Keeping schema
+/// and runtime in sync is the whole point of issue #292.
 pub fn schema_opt_u64(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            { "type": "integer", "minimum": 0, "maximum": 18_446_744_073_709_551_615_u64 },
+            { "type": "integer", "minimum": 0, "maximum": 9_223_372_036_854_775_807_u64 },
             { "type": "string", "pattern": "^[0-9]+$" },
             { "type": "null" }
         ]
@@ -563,6 +579,50 @@ mod tests {
         assert!(types.contains(&"integer"));
         assert!(types.contains(&"string"));
         assert!(!types.contains(&"null"));
+    }
+
+    #[test]
+    fn schema_opt_usize_integer_branch_capped_at_i64_max() {
+        let mut g = schemars::SchemaGenerator::default();
+        let s = super::schema_opt_usize(&mut g);
+        let v = serde_json::to_value(s).unwrap();
+        let one_of = v
+            .get("oneOf")
+            .and_then(|x| x.as_array())
+            .expect("oneOf array");
+        let integer_branch = one_of
+            .iter()
+            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("integer"))
+            .expect("integer branch present");
+        assert_eq!(
+            integer_branch
+                .get("maximum")
+                .and_then(serde_json::Value::as_u64),
+            Some(9_223_372_036_854_775_807),
+            "integer branch must cap at i64::MAX to match IntOrStr::Int(i64); got {integer_branch:?}",
+        );
+    }
+
+    #[test]
+    fn schema_opt_u64_integer_branch_capped_at_i64_max() {
+        let mut g = schemars::SchemaGenerator::default();
+        let s = super::schema_opt_u64(&mut g);
+        let v = serde_json::to_value(s).unwrap();
+        let one_of = v
+            .get("oneOf")
+            .and_then(|x| x.as_array())
+            .expect("oneOf array");
+        let integer_branch = one_of
+            .iter()
+            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("integer"))
+            .expect("integer branch present");
+        assert_eq!(
+            integer_branch
+                .get("maximum")
+                .and_then(serde_json::Value::as_u64),
+            Some(9_223_372_036_854_775_807),
+            "integer branch must cap at i64::MAX to match IntOrStr::Int(i64); got {integer_branch:?}",
+        );
     }
 
     #[test]
