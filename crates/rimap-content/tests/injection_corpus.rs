@@ -150,7 +150,7 @@ fn assert_warning_codes(
     let observed: Vec<&'static str> = warnings
         .iter()
         .map(|w| {
-            rimap_content::testutil::warning_code_label(w.code).unwrap_or_else(|| {
+            rimap_content::test_support::warning_code_label(w.code).unwrap_or_else(|| {
                 panic!(
                     "corpus harness encountered unclassified WarningCode variant {:?}",
                     w.code
@@ -214,7 +214,7 @@ fn assert_err_kind(name: &str, err: &ContentError, expected: &Expected) -> Resul
     let Some(want) = expected.error_kind.as_deref() else {
         return Err(format!("{name}: expect=error requires error_kind field"));
     };
-    let got = rimap_content::testutil::error_kind_label(err).unwrap_or_else(|| {
+    let got = rimap_content::test_support::error_kind_label(err).unwrap_or_else(|| {
         panic!("corpus harness encountered unclassified ContentError variant {err:?}")
     });
     if got == want {

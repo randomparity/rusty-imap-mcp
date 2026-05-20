@@ -78,6 +78,8 @@ pub async fn handle_create_folder(
     account: &AccountState,
     input: CreateFolderInput,
 ) -> Result<ToolResponse<CreateFolderMeta>, rimap_core::RimapError> {
+    crate::tools::validation::validate_folder_input("folder", &input.folder)?;
+
     account
         .folder_guard
         .check_protected(&input.folder, "create")?;
@@ -108,6 +110,9 @@ pub async fn handle_rename_folder(
     account: &AccountState,
     input: RenameFolderInput,
 ) -> Result<ToolResponse<RenameFolderMeta>, rimap_core::RimapError> {
+    crate::tools::validation::validate_folder_input("folder", &input.folder)?;
+    crate::tools::validation::validate_folder_input("new_folder", &input.new_folder)?;
+
     account
         .folder_guard
         .check_rename(&input.folder, &input.new_folder)?;
@@ -145,6 +150,8 @@ pub async fn handle_delete_folder(
     account: &AccountState,
     input: DeleteFolderInput,
 ) -> Result<ToolResponse<DeleteFolderMeta>, rimap_core::RimapError> {
+    crate::tools::validation::validate_folder_input("folder", &input.folder)?;
+
     account
         .folder_guard
         .check_protected(&input.folder, "delete")?;

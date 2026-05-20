@@ -27,8 +27,10 @@ const MAX_MIME_DEPTH: u32 = 64;
 ///
 /// # Errors
 ///
-/// Returns `ContentError::Malformed` when the input is not a
-/// parseable RFC 5322 message.
+/// - [`ContentError::Malformed`] when the input is not a
+///   parseable RFC 5322 message.
+/// - [`ContentError::ParserPanic`] when the underlying `mail-parser`
+///   panics and is caught by the safe-parser wrapper.
 pub fn walk_attachment_parts(raw: &[u8]) -> Result<Vec<RawPart>, ContentError> {
     let parsed = crate::parse::safe_parser::safe_parse(raw)
         .map_err(|_| ContentError::ParserPanic)?

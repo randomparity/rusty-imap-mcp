@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn account_filter_excludes_record_with_different_account() {
-        use crate::record::{Auth, AuthResult};
+        use crate::record::{AuthEvent, AuthResult};
 
         let dir = TempDir::new().unwrap();
         let pid = ProcessId::new_now();
@@ -628,7 +628,7 @@ mod tests {
             seq: crate::record::ids::Seq(1),
             ts: Timestamp::from_offset(datetime!(2026-04-07 14:22:01.000 UTC)),
             process_id: pid,
-            payload: Payload::Auth(Auth {
+            payload: Payload::Auth(AuthEvent {
                 account: Some("bob".to_string()),
                 result: AuthResult::Success,
                 host: "h".to_string(),

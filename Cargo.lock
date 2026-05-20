@@ -2315,7 +2315,6 @@ version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
  "fs4",
- "futures",
  "hex",
  "libc",
  "proptest",

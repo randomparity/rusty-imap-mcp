@@ -1,4 +1,4 @@
-//! Test/diagnostic label helpers. Gated on the `test-util` feature so the
+//! Test/diagnostic label helpers. Gated on the `test-support` feature so the
 //! mappings are not part of the regular public API surface.
 //!
 //! Callers decide how to treat unknown variants (both enums are
@@ -206,11 +206,11 @@ mod tests {
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
-mod test_util_reexports {
+mod test_support_reexports {
     use crate::output::SecurityWarning;
 
     #[test]
-    fn fuzz_entries_are_callable_via_testutil() {
+    fn fuzz_entries_are_callable_via_test_support() {
         // sanitize_html: minimal HTML body should round-trip without panic.
         let result = super::sanitize_html(b"<p>hi</p>", Some("utf-8"))
             .expect("sanitize_html on minimal HTML must succeed");

@@ -16,8 +16,8 @@ pub mod unicode;
 mod html;
 mod lookalike;
 
-#[cfg(any(test, feature = "test-util"))]
-pub mod testutil;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use error::ContentError;
 pub use output::{

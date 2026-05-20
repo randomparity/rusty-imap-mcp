@@ -7,7 +7,7 @@
 //! in the workspace.
 //!
 //! The single entrypoint visible outside `parse_message` is [`process`],
-//! re-exported through [`crate::testutil`] (under the alias `sanitize_html`)
+//! re-exported through [`crate::test_support`] (under the alias `sanitize_html`)
 //! for fuzz harnesses; production callers reach it via
 //! [`crate::parse::parse_message`].
 
@@ -29,7 +29,7 @@ use crate::html::hidden::detect_hidden;
 use crate::html::mismatch::detect_mismatches;
 use crate::html::sanitize::sanitize_body;
 
-// `pub` only because `testutil` re-exports through `pub mod testutil` (Rust
+// `pub` only because `test_support` re-exports through `pub mod test_support` (Rust
 // E0364 forbids `pub use` of `pub(crate)` items). Module privacy keeps
 // this unreachable outside the crate; production callers reach this type
 // through [`crate::output::Content`] populated by [`crate::parse::parse_message`].
@@ -109,7 +109,7 @@ impl HiddenMethod {
     }
 }
 
-// `pub` only because `testutil` re-exports through `pub mod testutil` (Rust
+// `pub` only because `test_support` re-exports through `pub mod test_support` (Rust
 // E0364 forbids `pub use` of `pub(crate)` items). Module privacy (`mod html;`
 // in `lib.rs`) keeps this unreachable outside the crate; production callers
 // MUST reach it via [`crate::parse::parse_message`] so the unicode +

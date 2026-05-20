@@ -142,6 +142,30 @@ impl SpecialUseMap {
         self.trash.as_deref()
     }
 
+    /// Discovered `\Junk` folder name, or `None`.
+    #[must_use]
+    pub fn junk(&self) -> Option<&str> {
+        self.junk.as_deref()
+    }
+
+    /// Discovered `\Archive` folder name, or `None`.
+    #[must_use]
+    pub fn archive(&self) -> Option<&str> {
+        self.archive.as_deref()
+    }
+
+    /// Discovered `\All` folder name (e.g. Gmail "All Mail"), or `None`.
+    #[must_use]
+    pub fn all(&self) -> Option<&str> {
+        self.all.as_deref()
+    }
+
+    /// Discovered `\Flagged` folder name (e.g. Gmail "Starred"), or `None`.
+    #[must_use]
+    pub fn flagged(&self) -> Option<&str> {
+        self.flagged.as_deref()
+    }
+
     /// All discovered folder names, in no particular order.
     #[must_use]
     pub fn all_discovered(&self) -> Vec<String> {

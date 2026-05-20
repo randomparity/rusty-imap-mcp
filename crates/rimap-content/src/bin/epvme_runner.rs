@@ -288,7 +288,7 @@ where
             SampleOutcome::Ok(content) => {
                 summary.ok_count += 1;
                 for warning in content.security_warnings {
-                    let label = rimap_content::testutil::warning_code_label(warning.code)
+                    let label = rimap_content::test_support::warning_code_label(warning.code)
                         .unwrap_or_else(|| unknown_warning_code_label(warning.code))
                         .to_string();
                     *summary.warning_counts.entry(label).or_insert(0) += 1;
@@ -296,7 +296,7 @@ where
             }
             SampleOutcome::ParseError(err) => {
                 summary.parse_error_count += 1;
-                let label = rimap_content::testutil::error_kind_label(&err)
+                let label = rimap_content::test_support::error_kind_label(&err)
                     .unwrap_or("Unknown")
                     .to_string();
                 *summary.parse_error_counts.entry(label.clone()).or_insert(0) += 1;

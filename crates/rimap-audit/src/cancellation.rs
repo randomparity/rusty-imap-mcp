@@ -118,13 +118,17 @@ mod tests {
         tx.try_send(dummy_inputs("a")).unwrap();
         tx.try_send(dummy_inputs("b")).unwrap();
         drop(tx);
-        let received: Vec<_> = futures::executor::block_on(async {
-            let mut out = Vec::new();
-            while let Ok(inputs) = rx.inner.recv().await {
-                out.push(inputs);
-            }
-            out
-        });
+        let received: Vec<_> = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut out = Vec::new();
+                while let Ok(inputs) = rx.inner.recv().await {
+                    out.push(inputs);
+                }
+                out
+            });
         assert_eq!(received.len(), 2);
         assert_eq!(received[0].account.as_deref(), Some("a"));
         assert_eq!(received[1].account.as_deref(), Some("b"));

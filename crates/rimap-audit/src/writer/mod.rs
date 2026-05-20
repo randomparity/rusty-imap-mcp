@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn log_auth_writes_one_record_with_allocated_seq() {
-        use crate::record::{Auth, AuthResult};
+        use crate::record::{AuthEvent, AuthResult};
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("audit.jsonl");
@@ -630,7 +630,7 @@ mod tests {
         .unwrap();
 
         let seq = writer
-            .log_auth(Auth {
+            .log_auth(AuthEvent {
                 account: None,
                 result: AuthResult::Success,
                 host: "127.0.0.1".to_string(),
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn log_auth_uses_writer_process_id_for_every_record() {
-        use crate::record::{Auth, AuthResult};
+        use crate::record::{AuthEvent, AuthResult};
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("audit.jsonl");
@@ -673,7 +673,7 @@ mod tests {
         .unwrap();
         let pid = writer.process_id();
 
-        let make = || Auth {
+        let make = || AuthEvent {
             account: None,
             result: AuthResult::Failure,
             host: "h".into(),
