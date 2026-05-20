@@ -22,6 +22,7 @@
 //! |----------------------|-------------------------------|-------------------------|
 //! | `Option<usize>`      | `deserialize_opt_usize`       | `schema_opt_usize`      |
 //! | `Option<u32>`        | `deserialize_opt_u32`         | `schema_opt_u32`        |
+//! | `Option<u64>`        | `deserialize_opt_u64`         | `schema_opt_u64`        |
 //! | `NonZeroU32`         | `deserialize_nonzero_u32`     | `schema_nonzero_u32`    |
 //! | `Option<NonZeroU32>` | `deserialize_opt_nonzero_u32` | `schema_opt_nonzero_u32`|
 //!
@@ -138,6 +139,45 @@ pub fn deserialize_opt_u32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32
     }
 }
 
+fn parse_u64_str<E: de::Error>(s: &str) -> Result<u64, E> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(E::invalid_value(
+            de::Unexpected::Str(s),
+            &"integer in string form (digits only)",
+        ));
+    }
+    s.parse::<u64>()
+        .map_err(|_| E::invalid_value(de::Unexpected::Str(s), &"integer in u64 range"))
+}
+
+fn i64_to_u64<E: de::Error>(n: i64) -> Result<u64, E> {
+    if n < 0 {
+        return Err(E::invalid_value(
+            de::Unexpected::Signed(n),
+            &"non-negative integer",
+        ));
+    }
+    u64::try_from(n)
+        .map_err(|_| E::invalid_value(de::Unexpected::Other("integer"), &"integer in u64 range"))
+}
+
+/// Deserialize `Option<u64>` from integer, digit-string, or null/absent.
+///
+/// # Errors
+///
+/// Same semantics as [`deserialize_opt_usize`], scoped to `u64` range.
+/// Note that the integer form is bounded by `i64::MAX` because the
+/// internal `IntOrStr` enum uses `i64`; values above that ceiling must
+/// be supplied as a digit string.
+pub fn deserialize_opt_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let v: Option<IntOrStr> = Option::deserialize(d)?;
+    match v {
+        None => Ok(None),
+        Some(IntOrStr::Int(n)) => i64_to_u64(n).map(Some),
+        Some(IntOrStr::Str(s)) => parse_u64_str(&s).map(Some),
+    }
+}
+
 /// Deserialize `NonZeroU32` from integer or digit-string. Rejects 0
 /// and overflow.
 ///
@@ -196,6 +236,17 @@ pub fn schema_opt_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
             { "type": "integer", "minimum": 0, "maximum": 4_294_967_295_u64 },
+            { "type": "string", "pattern": "^[0-9]+$" },
+            { "type": "null" }
+        ]
+    })
+}
+
+/// Schema for `Option<u64>` accepted as integer, digit-string, or null.
+pub fn schema_opt_u64(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 18_446_744_073_709_551_615_u64 },
             { "type": "string", "pattern": "^[0-9]+$" },
             { "type": "null" }
         ]
@@ -326,6 +377,67 @@ mod tests {
     #[test]
     fn opt_u32_null_is_none() {
         let w: WrapOptU32 = serde_json::from_str(r#"{"n": null}"#).unwrap();
+        assert_eq!(w.n, None);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct WrapOptU64 {
+        #[serde(default, deserialize_with = "super::deserialize_opt_u64")]
+        n: Option<u64>,
+    }
+
+    #[test]
+    fn opt_u64_int_form() {
+        let w: WrapOptU64 = serde_json::from_str(r#"{"n": 9223372036854775807}"#).unwrap();
+        assert_eq!(w.n, Some(9_223_372_036_854_775_807));
+    }
+
+    #[test]
+    fn opt_u64_string_form() {
+        let w: WrapOptU64 = serde_json::from_str(r#"{"n": "12345"}"#).unwrap();
+        assert_eq!(w.n, Some(12345));
+    }
+
+    #[test]
+    fn opt_u64_string_form_above_i64_max() {
+        let w: WrapOptU64 = serde_json::from_str(r#"{"n": "18446744073709551615"}"#).unwrap();
+        assert_eq!(w.n, Some(u64::MAX));
+    }
+
+    #[test]
+    fn opt_u64_rejects_overflow_string() {
+        let err =
+            serde_json::from_str::<WrapOptU64>(r#"{"n": "18446744073709551616"}"#).unwrap_err();
+        assert!(err.to_string().contains("integer"), "got: {err}");
+    }
+
+    #[test]
+    fn opt_u64_rejects_negative_int() {
+        let err = serde_json::from_str::<WrapOptU64>(r#"{"n": -1}"#).unwrap_err();
+        assert!(err.to_string().contains("non-negative"), "got: {err}");
+    }
+
+    #[test]
+    fn opt_u64_rejects_negative_string() {
+        let err = serde_json::from_str::<WrapOptU64>(r#"{"n": "-1"}"#).unwrap_err();
+        assert!(err.to_string().contains("integer"), "got: {err}");
+    }
+
+    #[test]
+    fn opt_u64_rejects_non_digit_string() {
+        let err = serde_json::from_str::<WrapOptU64>(r#"{"n": "abc"}"#).unwrap_err();
+        assert!(err.to_string().contains("integer"), "got: {err}");
+    }
+
+    #[test]
+    fn opt_u64_null_is_none() {
+        let w: WrapOptU64 = serde_json::from_str(r#"{"n": null}"#).unwrap();
+        assert_eq!(w.n, None);
+    }
+
+    #[test]
+    fn opt_u64_absent_is_none() {
+        let w: WrapOptU64 = serde_json::from_str(r"{}").unwrap();
         assert_eq!(w.n, None);
     }
 

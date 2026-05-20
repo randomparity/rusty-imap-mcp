@@ -57,9 +57,27 @@ fn dump_tool_catalog_emits_object_schemas() {
 /// a `oneOf` with `integer`, `string` (digit pattern), and `null`
 /// branches so MCP hosts that pre-validate against the cached
 /// `inputSchema` accept both `100` and `"100"`.
-#[expect(clippy::panic, reason = "integration test assertion")]
 #[test]
 fn search_limit_publishes_lenient_int_schema() {
+    assert_search_field_has_lenient_int_schema("limit");
+}
+
+/// Pins the `lenient_int` schema shape (#292) for `search.larger`, added
+/// to `SearchInput` by PR #295 alongside other expanded search fields.
+#[test]
+fn search_larger_publishes_lenient_int_schema() {
+    assert_search_field_has_lenient_int_schema("larger");
+}
+
+/// Pins the `lenient_int` schema shape (#292) for `search.smaller`, added
+/// to `SearchInput` by PR #295 alongside other expanded search fields.
+#[test]
+fn search_smaller_publishes_lenient_int_schema() {
+    assert_search_field_has_lenient_int_schema("smaller");
+}
+
+#[expect(clippy::panic, reason = "integration test assertion")]
+fn assert_search_field_has_lenient_int_schema(field: &str) {
     let output = Command::new(cargo_bin("rusty-imap-mcp"))
         .arg("dump-tool-catalog")
         .output()
@@ -71,10 +89,10 @@ fn search_limit_publishes_lenient_int_schema() {
     for line in stdout.lines().filter(|l| !l.is_empty()) {
         let v: Value = serde_json::from_str(line).expect("each line is JSON");
         if v["name"] == "search" {
-            let limit = &v["inputSchema"]["properties"]["limit"];
-            let branches = limit["oneOf"]
+            let prop = &v["inputSchema"]["properties"][field];
+            let branches = prop["oneOf"]
                 .as_array()
-                .unwrap_or_else(|| panic!("search.limit must publish a oneOf, got {limit}"));
+                .unwrap_or_else(|| panic!("search.{field} must publish a oneOf, got {prop}"));
             assert_eq!(branches.len(), 3, "expected 3 branches in {branches:?}");
 
             let types: Vec<&str> = branches.iter().filter_map(|b| b["type"].as_str()).collect();
