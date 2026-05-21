@@ -251,7 +251,6 @@ impl ToolName {
             | Self::FetchMessage
             | Self::FetchMessageHtml
             | Self::ListAttachments
-            | Self::DownloadAttachment
             | Self::ListLabels => (true, false, false, true),
 
             // Read-only, local registry (no IMAP/SMTP).
@@ -268,13 +267,16 @@ impl ToolName {
             // single-argument-shape definition of idempotence.
             Self::UseAccount => (false, false, true, false),
 
-            // Idempotent flag mutations on IMAP.
+            // Idempotent flag mutations on IMAP, plus download_attachment
+            // (writes to the local sandbox; same UID+part_id writes
+            // identical bytes, so calling twice = once observably).
             Self::MarkRead
             | Self::MarkUnread
             | Self::Flag
             | Self::Unflag
             | Self::AddLabel
-            | Self::RemoveLabel => (false, false, true, true),
+            | Self::RemoveLabel
+            | Self::DownloadAttachment => (false, false, true, true),
 
             // Non-idempotent, non-destructive mutations. `CreateFolder`
             // also falls here: same name fails the second call per IMAP
@@ -478,5 +480,22 @@ mod annotation_tests {
         let h = ToolName::Search.annotation_hints();
         assert!(h.read_only);
         assert!(h.open_world);
+    }
+
+    #[test]
+    fn download_attachment_is_not_read_only() {
+        // download_attachment writes a file into the sandbox directory
+        // (`state.download_dir`) and emits a `path` field in its meta
+        // payload — that is environmental modification per the MCP
+        // `read_only_hint` definition. Calling twice with the same
+        // UID+part_id writes identical bytes, so it is idempotent.
+        let h = ToolName::DownloadAttachment.annotation_hints();
+        assert!(
+            !h.read_only,
+            "download_attachment writes to the sandbox and must not advertise read_only_hint",
+        );
+        assert!(h.idempotent, "same UID+part_id yields identical bytes");
+        assert!(!h.destructive, "no irreversible server-side mutation");
+        assert!(h.open_world, "fetches from the IMAP server");
     }
 }
