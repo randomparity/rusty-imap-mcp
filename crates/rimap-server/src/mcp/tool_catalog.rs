@@ -533,6 +533,46 @@ mod tests {
 
     #[test]
     #[expect(
+        clippy::panic,
+        reason = "test fixture I/O failures should panic with a clear message"
+    )]
+    fn every_tool_output_schema_matches_fixture() {
+        // Catches drift between this file's `output_schema(name)` match
+        // and `cli/dump_tool_schemas.rs::build_schemas` if their parallel
+        // `ToolName → (MetaType, UntrustedType)` tables disagree. The wire
+        // test `wire_published_output_schema_matches_fixture` only
+        // exercises 2 tools in the zero-account harness; this unit test
+        // covers all 22 without docker.
+        use std::path::Path;
+        for def in ToolName::all()
+            .into_iter()
+            .filter_map(|tn| TOOL_DEFS.get(&tn))
+        {
+            let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/rimap-tool-schemas")
+                .join(format!("{}.schema.json", def.name));
+            let fixture_raw = std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|e| panic!("read fixture {fixture_path:?}: {e}"));
+            let fixture_value: serde_json::Value = serde_json::from_str(&fixture_raw)
+                .unwrap_or_else(|e| panic!("parse fixture {fixture_path:?}: {e}"));
+            let published = def
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool {} has no output_schema", def.name));
+            let published_value =
+                serde_json::Value::Object(published.as_ref().clone());
+            assert_eq!(
+                published_value, fixture_value,
+                "tool {} output_schema diverges from fixture {fixture_path:?}.\n\
+                 Run `just regen-tool-schemas` AND audit `tool_catalog::output_schema` \
+                 vs `dump_tool_schemas::build_schemas` for type-pair drift.",
+                def.name,
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
         clippy::expect_used,
         reason = "panicking on missing title or empty word is the right test behavior"
     )]
