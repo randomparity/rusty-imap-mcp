@@ -904,14 +904,8 @@ mod namespaced_title_tests {
         assert_eq!(clone.name, base.name);
         assert_eq!(clone.title, base.title);
         assert_eq!(clone.description, base.description);
-        let base_ann_title = base
-            .annotations
-            .as_ref()
-            .and_then(|a| a.title.as_deref());
-        let clone_ann_title = clone
-            .annotations
-            .as_ref()
-            .and_then(|a| a.title.as_deref());
+        let base_ann_title = base.annotations.as_ref().and_then(|a| a.title.as_deref());
+        let clone_ann_title = clone.annotations.as_ref().and_then(|a| a.title.as_deref());
         assert_eq!(clone_ann_title, base_ann_title);
     }
 }
