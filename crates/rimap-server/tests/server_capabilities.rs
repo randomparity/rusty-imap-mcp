@@ -105,8 +105,10 @@ fn build_test_connection(account_name: &str, audit: &AuditWriter) -> Connection 
         max_append_bytes: 1024,
     };
     let store: Arc<dyn CredentialStore> = Arc::new(StaticCreds("testpass".into()));
-    let creds: Arc<dyn rimap_core::CredentialResolver> =
-        Arc::new(KeyringCredentialResolver::new(store, FallbackMode::KeyringThenEnv));
+    let creds: Arc<dyn rimap_core::CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
+        store,
+        FallbackMode::KeyringThenEnv,
+    ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
     Connection::new(conn_cfg, sink, creds)
 }

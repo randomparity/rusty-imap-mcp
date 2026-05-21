@@ -15,14 +15,14 @@ use std::sync::Arc;
 use rimap_core::tool::ToolName;
 use rmcp::model::{Tool, ToolAnnotations};
 
-use crate::mcp::response::{envelope_schema, ToolResponse};
+use crate::mcp::response::{ToolResponse, envelope_schema};
 
 /// Type alias for tool spec tuples — `(title, description, schema)`. The wire
 /// name comes from `ToolName::as_str()` so there is a single source of
 /// truth for tool names.
 type ToolSpec = (
-    &'static str, // title (Title Case, human-readable)
-    &'static str, // description
+    &'static str,                               // title (Title Case, human-readable)
+    &'static str,                               // description
     serde_json::Map<String, serde_json::Value>, // input schema
 );
 
@@ -110,60 +110,34 @@ fn output_schema(name: ToolName) -> Option<serde_json::Map<String, serde_json::V
     };
 
     let schema = match name {
-        ToolName::ListAccounts => {
-            envelope_schema::<ToolResponse<ListAccountsMeta, ()>>()
+        ToolName::ListAccounts => envelope_schema::<ToolResponse<ListAccountsMeta, ()>>(),
+        ToolName::UseAccount => envelope_schema::<ToolResponse<UseAccountMeta, ()>>(),
+        ToolName::ListFolders => envelope_schema::<ToolResponse<ListFoldersMeta, ()>>(),
+        ToolName::Search => envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>(),
+        ToolName::FetchMessage => {
+            envelope_schema::<ToolResponse<FetchMessageMeta, FetchMessageUntrusted>>()
         }
-        ToolName::UseAccount => {
-            envelope_schema::<ToolResponse<UseAccountMeta, ()>>()
+        ToolName::ListAttachments => {
+            envelope_schema::<ToolResponse<ListAttachmentsMeta, ListAttachmentsUntrusted>>()
         }
-        ToolName::ListFolders => {
-            envelope_schema::<ToolResponse<ListFoldersMeta, ()>>()
+        ToolName::DownloadAttachment => {
+            envelope_schema::<ToolResponse<DownloadAttachmentMeta, DownloadAttachmentUntrusted>>()
         }
-        ToolName::Search => {
-            envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>()
-        }
-        ToolName::FetchMessage => envelope_schema::<
-            ToolResponse<FetchMessageMeta, FetchMessageUntrusted>,
-        >(),
-        ToolName::ListAttachments => envelope_schema::<
-            ToolResponse<ListAttachmentsMeta, ListAttachmentsUntrusted>,
-        >(),
-        ToolName::DownloadAttachment => envelope_schema::<
-            ToolResponse<DownloadAttachmentMeta, DownloadAttachmentUntrusted>,
-        >(),
         ToolName::MarkRead | ToolName::MarkUnread | ToolName::Flag | ToolName::Unflag => {
             envelope_schema::<ToolResponse<FlagsMeta, ()>>()
         }
         ToolName::AddLabel | ToolName::RemoveLabel => {
             envelope_schema::<ToolResponse<LabelsMeta, ()>>()
         }
-        ToolName::ListLabels => {
-            envelope_schema::<ToolResponse<ListLabelsMeta, ()>>()
-        }
-        ToolName::MoveMessage => {
-            envelope_schema::<ToolResponse<MoveMessageMeta, ()>>()
-        }
-        ToolName::CreateDraft => {
-            envelope_schema::<ToolResponse<CreateDraftMeta, ()>>()
-        }
-        ToolName::SendEmail => {
-            envelope_schema::<ToolResponse<SendEmailMeta, ()>>()
-        }
-        ToolName::DeleteMessage => {
-            envelope_schema::<ToolResponse<DeleteMessageMeta, ()>>()
-        }
-        ToolName::Expunge => {
-            envelope_schema::<ToolResponse<ExpungeMeta, ()>>()
-        }
-        ToolName::CreateFolder => {
-            envelope_schema::<ToolResponse<CreateFolderMeta, ()>>()
-        }
-        ToolName::RenameFolder => {
-            envelope_schema::<ToolResponse<RenameFolderMeta, ()>>()
-        }
-        ToolName::DeleteFolder => {
-            envelope_schema::<ToolResponse<DeleteFolderMeta, ()>>()
-        }
+        ToolName::ListLabels => envelope_schema::<ToolResponse<ListLabelsMeta, ()>>(),
+        ToolName::MoveMessage => envelope_schema::<ToolResponse<MoveMessageMeta, ()>>(),
+        ToolName::CreateDraft => envelope_schema::<ToolResponse<CreateDraftMeta, ()>>(),
+        ToolName::SendEmail => envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
+        ToolName::DeleteMessage => envelope_schema::<ToolResponse<DeleteMessageMeta, ()>>(),
+        ToolName::Expunge => envelope_schema::<ToolResponse<ExpungeMeta, ()>>(),
+        ToolName::CreateFolder => envelope_schema::<ToolResponse<CreateFolderMeta, ()>>(),
+        ToolName::RenameFolder => envelope_schema::<ToolResponse<RenameFolderMeta, ()>>(),
+        ToolName::DeleteFolder => envelope_schema::<ToolResponse<DeleteFolderMeta, ()>>(),
         ToolName::SearchAdvanced | ToolName::FetchMessageHtml => return None,
     };
     Some(schema)
@@ -521,10 +495,7 @@ mod tests {
         let def = TOOL_DEFS
             .get(&ToolName::Search)
             .expect("search in TOOL_DEFS");
-        let schema = def
-            .output_schema
-            .as_ref()
-            .expect("output schema present");
+        let schema = def.output_schema.as_ref().expect("output schema present");
         assert_eq!(
             schema.get("type").and_then(serde_json::Value::as_str),
             Some("object"),
@@ -559,8 +530,7 @@ mod tests {
                 .output_schema
                 .as_ref()
                 .unwrap_or_else(|| panic!("tool {} has no output_schema", def.name));
-            let published_value =
-                serde_json::Value::Object(published.as_ref().clone());
+            let published_value = serde_json::Value::Object(published.as_ref().clone());
             assert_eq!(
                 published_value, fixture_value,
                 "tool {} output_schema diverges from fixture {fixture_path:?}.\n\
@@ -581,9 +551,8 @@ mod tests {
         // (articles, prepositions, coordinating conjunctions) when not
         // in the first position.
         const LOWERCASE_EXCEPTIONS: &[&str] = &[
-            "a", "an", "the", "and", "but", "or", "nor", "for", "so",
-            "yet", "at", "by", "in", "of", "on", "to", "up", "via",
-            "from", "into", "with",
+            "a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet", "at", "by", "in",
+            "of", "on", "to", "up", "via", "from", "into", "with",
         ];
         for def in ToolName::all()
             .into_iter()
@@ -592,7 +561,8 @@ mod tests {
             let title = def.title.as_deref().expect("title present");
             for (i, word) in title.split_whitespace().enumerate() {
                 let first = word.chars().next().expect("non-empty word");
-                let is_exception = LOWERCASE_EXCEPTIONS.contains(&word.to_ascii_lowercase().as_str());
+                let is_exception =
+                    LOWERCASE_EXCEPTIONS.contains(&word.to_ascii_lowercase().as_str());
                 // First word must always be uppercase; subsequent words may
                 // be lowercase only if they are a recognized function word.
                 if i == 0 || !is_exception {

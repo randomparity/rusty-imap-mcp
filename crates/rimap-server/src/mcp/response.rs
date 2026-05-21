@@ -103,10 +103,7 @@ mod schema_tests {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let required_names: Vec<&str> = required
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(
             !required_names.contains(&"untrusted"),
             "untrusted must not be in required; got {required_names:?}",
@@ -129,10 +126,7 @@ mod schema_tests {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let required_names: Vec<&str> = required
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(
             !required_names.contains(&"security_warnings"),
             "security_warnings must not be in required; got {required_names:?}",

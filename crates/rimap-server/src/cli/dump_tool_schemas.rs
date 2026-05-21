@@ -72,10 +72,7 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
     out.insert("delete_folder", tool_envelope::<DeleteFolderMeta, ()>());
 
     // meta + untrusted tools
-    out.insert(
-        "search",
-        tool_envelope::<SearchMeta, SearchUntrusted>(),
-    );
+    out.insert("search", tool_envelope::<SearchMeta, SearchUntrusted>());
     out.insert(
         "fetch_message",
         tool_envelope::<FetchMessageMeta, FetchMessageUntrusted>(),
@@ -102,7 +99,7 @@ where
     M: schemars::JsonSchema + serde::Serialize,
     U: schemars::JsonSchema + serde::Serialize,
 {
-    use rimap_server::mcp::response::{envelope_schema, ToolResponse};
+    use rimap_server::mcp::response::{ToolResponse, envelope_schema};
     Value::Object(envelope_schema::<ToolResponse<M, U>>())
 }
 

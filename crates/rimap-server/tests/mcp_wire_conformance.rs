@@ -252,7 +252,10 @@ async fn wire_clean_eof_shutdown_exits_zero() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[expect(clippy::panic, reason = "integration test: panic on fixture I/O failure")]
+#[expect(
+    clippy::panic,
+    reason = "integration test: panic on fixture I/O failure"
+)]
 async fn wire_published_output_schema_matches_fixture() {
     // The wire `outputSchema` MUST be byte-equal to the per-tool fixture
     // under tests/fixtures/rimap-tool-schemas/. Both are generated from

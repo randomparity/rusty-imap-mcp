@@ -219,7 +219,10 @@ impl ToolName {
 /// classification.
 // Four orthogonal annotation axes map directly to the MCP spec fields;
 // state-machine enums would add indirection without adding safety here.
-#[expect(clippy::struct_excessive_bools, reason = "four MCP spec fields, each a distinct axis")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four MCP spec fields, each a distinct axis"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolAnnotationHints {
     /// `read_only_hint`: tool does not modify mailbox or session state.
@@ -281,16 +284,14 @@ impl ToolName {
             // Non-idempotent, non-destructive mutations. `CreateFolder`
             // also falls here: same name fails the second call per IMAP
             // semantics.
-            Self::MoveMessage
-            | Self::CreateDraft
-            | Self::RenameFolder
-            | Self::CreateFolder => (false, false, false, true),
+            Self::MoveMessage | Self::CreateDraft | Self::RenameFolder | Self::CreateFolder => {
+                (false, false, false, true)
+            }
 
             // Destructive, irreversible.
-            Self::SendEmail
-            | Self::DeleteMessage
-            | Self::Expunge
-            | Self::DeleteFolder => (false, true, false, true),
+            Self::SendEmail | Self::DeleteMessage | Self::Expunge | Self::DeleteFolder => {
+                (false, true, false, true)
+            }
         };
         ToolAnnotationHints {
             read_only,
@@ -432,7 +433,10 @@ mod annotation_tests {
         // use_account mutates the session-scoped active-account state via
         // AccountRegistry::set_active. See spec rationale (Delta 3).
         let h = ToolName::UseAccount.annotation_hints();
-        assert!(!h.read_only, "use_account must not advertise read_only_hint");
+        assert!(
+            !h.read_only,
+            "use_account must not advertise read_only_hint"
+        );
         assert!(!h.open_world, "use_account is local-registry only");
         assert!(
             h.idempotent,

@@ -784,7 +784,7 @@ mod instructions_selection_tests {
 mod instructions_constants_tests {
     #[test]
     fn server_instructions_constants_exist_and_differ() {
-        use super::{SERVER_INSTRUCTIONS_SINGLE_ACCOUNT, SERVER_INSTRUCTIONS_MULTI_ACCOUNT};
+        use super::{SERVER_INSTRUCTIONS_MULTI_ACCOUNT, SERVER_INSTRUCTIONS_SINGLE_ACCOUNT};
         assert!(
             !SERVER_INSTRUCTIONS_SINGLE_ACCOUNT.is_empty(),
             "single-account instructions must not be empty",
@@ -794,8 +794,7 @@ mod instructions_constants_tests {
             "multi-account instructions must not be empty",
         );
         assert_ne!(
-            SERVER_INSTRUCTIONS_SINGLE_ACCOUNT,
-            SERVER_INSTRUCTIONS_MULTI_ACCOUNT,
+            SERVER_INSTRUCTIONS_SINGLE_ACCOUNT, SERVER_INSTRUCTIONS_MULTI_ACCOUNT,
             "two variants must differ",
         );
         assert!(

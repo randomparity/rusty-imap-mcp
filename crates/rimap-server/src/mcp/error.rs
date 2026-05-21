@@ -226,7 +226,9 @@ mod tests {
             serde_json::json!(["work", "personal"]),
         );
         assert!(
-            data_value["hint"].as_str().is_some_and(|h| h.contains("use_account")),
+            data_value["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("use_account")),
             "hint must mention use_account; got {data_value}",
         );
     }

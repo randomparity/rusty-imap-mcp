@@ -323,16 +323,14 @@ mod tests {
                 assert_eq!(expected, 100);
                 assert_eq!(actual, 101);
                 assert!(
-                    source.downcast_ref::<ImapError>().is_some_and(|ie| {
-                        matches!(ie, ImapError::UidValidityChanged { .. })
-                    }),
+                    source
+                        .downcast_ref::<ImapError>()
+                        .is_some_and(|ie| { matches!(ie, ImapError::UidValidityChanged { .. }) }),
                     "source must wrap the original ImapError::UidValidityChanged",
                 );
             }
             #[expect(clippy::panic, reason = "intentional test assertion failure path")]
-            other => panic!(
-                "expected RimapError::UidValidityChanged, got {other:?}",
-            ),
+            other => panic!("expected RimapError::UidValidityChanged, got {other:?}",),
         }
     }
 }
