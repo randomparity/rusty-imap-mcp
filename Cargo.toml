@@ -124,7 +124,7 @@ unicode-properties = "0.1.4"
 # Sprint 4b: HTML + lookalike content pipeline
 # scraper pulls html5ever + selectors transitively — no direct html5ever dep.
 # scraper is ISC-licensed (the only non-MIT/Apache crate in the Sprint 4b delta); ISC is already on deny.toml's allow list.
-scraper = { version = "0.26.0", default-features = false }
+scraper = { version = "0.27.0", default-features = false }
 # ammonia MSRV 1.80, MIT OR Apache-2.0
 ammonia = "4.1.2"
 linkify = "0.11"
