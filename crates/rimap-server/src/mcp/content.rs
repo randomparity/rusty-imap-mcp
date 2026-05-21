@@ -27,6 +27,14 @@ fn classify_content_error(err: &ContentError) -> RimapError {
     // behavior change. The `LimitExceeded` arm-delete IS a real gap
     // and is killed by `limit_exceeded_classifies_as_attachment_too_large`.
     match err {
+        // Phase 2 — structured `data` plumbing (deferred): the typed
+        // `limit_bytes`/`actual_bytes` from `ContentError::LimitExceeded`
+        // are absorbed into the message string via `err.to_string()` and
+        // lost before reaching `to_mcp_error`. Plumbing requires
+        // refactoring `ContentError` to carry typed fields. Tracked in
+        // GitHub issue #TBD; spec reference:
+        // docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md
+        // "Deferred work — Phase 2".
         ContentError::LimitExceeded { .. } => RimapError::Authz {
             code: ErrorCode::AttachmentTooLarge,
             message: err.to_string(),

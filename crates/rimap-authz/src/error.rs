@@ -13,6 +13,16 @@ pub enum AuthzError {
     #[error("tool `{0}` denied by current posture")]
     PostureDenied(ToolName),
     /// Rate limiter rejected the call; `retry_after_ms` is a hint.
+    ///
+    /// # Phase 2: structured `data` plumbing (deferred)
+    ///
+    /// Today `to_mcp_error` produces `ErrorData` with `data: None` for this
+    /// code; the typed `retry_after_ms` is absorbed into the message string
+    /// by `From<AuthzError> for RimapError` and lost. Plumbing it through
+    /// requires either extending `RimapError::Authz` with a data field or
+    /// introducing a dedicated variant. Tracked in GitHub issue #TBD; spec
+    /// reference: `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
+    /// "Deferred work — Phase 2".
     #[error("rate limited; retry after {retry_after_ms} ms")]
     RateLimited {
         /// Hint for how long the caller should wait before retrying.
@@ -30,6 +40,16 @@ pub enum AuthzError {
     ///   immediately with no delay"; it means "the probe slot is taken, back
     ///   off briefly and try again once the probe resolves." A short fixed
     ///   delay (e.g. tens of milliseconds) is the intended caller behavior.
+    ///
+    /// # Phase 2: structured `data` plumbing (deferred)
+    ///
+    /// Today `to_mcp_error` produces `ErrorData` with `data: None` for this
+    /// code; the typed `retry_after_ms` is absorbed into the message string
+    /// by `From<AuthzError> for RimapError` and lost. Plumbing it through
+    /// requires either extending `RimapError::Authz` with a data field or
+    /// introducing a dedicated variant. Tracked in GitHub issue #TBD; spec
+    /// reference: `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
+    /// "Deferred work — Phase 2".
     #[error("circuit breaker open; retry after {retry_after_ms} ms")]
     CircuitOpen {
         /// Hint for how long the caller should wait before retrying. See the
