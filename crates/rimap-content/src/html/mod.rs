@@ -18,8 +18,10 @@ mod pipeline;
 mod sanitize;
 mod style_parse;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use pipeline::HtmlResult;
+pub use pipeline::sanitize;
 pub(crate) use pipeline::{
     ElementIndex, HiddenMethod, MAX_ANCHOR_TEXT_SCAN, MAX_HIDDEN_HITS, MAX_HTML_BYTES,
     MAX_MISMATCH_HITS,
 };
-pub use pipeline::{HtmlResult, sanitize};
