@@ -351,38 +351,12 @@ impl ServerHandler for ImapMcpServer {
                 let Some(base_def) = TOOL_DEFS.get(&tn) else {
                     continue;
                 };
-                let tool_name = if use_bare_names {
-                    base_def.name.clone()
-                } else {
-                    format!("{}.{}", id.as_str(), base_def.name).into()
-                };
-                let description = if use_bare_names {
-                    base_def.description.clone()
-                } else {
-                    Some(
-                        format!(
-                            "[account: {}, posture: {}] {}",
-                            id.as_str(),
-                            state.guard.matrix().posture().as_str(),
-                            base_def.description.as_deref().unwrap_or(""),
-                        )
-                        .into(),
-                    )
-                };
-                // Single-account (legacy `default`) keeps the bare title to match
-                // the bare-name and bare-description policy in this branch.
-                let title = if use_bare_names {
-                    base_def.title.clone()
-                } else {
-                    base_def
-                        .title
-                        .as_deref()
-                        .map(|t| namespaced_title(id.as_str(), t))
-                };
-                let mut def = base_def.clone();
-                def.name = tool_name;
-                def.description = description;
-                def.title = title;
+                let def = build_advertised_tool(
+                    base_def,
+                    id.as_str(),
+                    state.guard.matrix().posture().as_str(),
+                    !use_bare_names,
+                );
                 tools.push(def);
             }
         }
@@ -591,6 +565,52 @@ fn namespaced_title(account_id: &str, base_title: &str) -> String {
     format!("[{account_id}] {base_title}")
 }
 
+/// Build a single advertised `Tool` entry for `list_tools`.
+///
+/// When `namespaced` is true (multi-account deployment), produces a
+/// `<account>.<bare_name>` clone whose `title`, `description`, AND
+/// `annotations.title` all carry the account prefix. The annotation-
+/// title mirror is load-bearing: per the MCP 2025-11-25 spec both
+/// `Tool.title` and `Tool.annotations.title` are valid surfaces for
+/// the human-readable name, and clients may consult either. Without
+/// the mirror, the annotation surface silently publishes the bare
+/// tool title — losing the account disambiguation that namespacing
+/// is supposed to provide.
+///
+/// When `namespaced` is false (legacy single-`default` deployment),
+/// returns `base_def.clone()` unchanged — bare names, bare title,
+/// bare annotations.
+fn build_advertised_tool(
+    base_def: &Tool,
+    account_id: &str,
+    posture: &str,
+    namespaced: bool,
+) -> Tool {
+    if !namespaced {
+        return base_def.clone();
+    }
+    let new_name = format!("{}.{}", account_id, base_def.name);
+    let new_description = format!(
+        "[account: {}, posture: {}] {}",
+        account_id,
+        posture,
+        base_def.description.as_deref().unwrap_or(""),
+    );
+    let new_title = base_def
+        .title
+        .as_deref()
+        .map(|t| namespaced_title(account_id, t));
+
+    let mut def = base_def.clone();
+    def.name = new_name.into();
+    def.description = Some(new_description.into());
+    def.title.clone_from(&new_title);
+    if let Some(ann) = def.annotations.as_mut() {
+        ann.title = new_title;
+    }
+    def
+}
+
 /// Build the `ErrorData` payload returned by `ImapMcpServer::initialize`
 /// when the peer's `protocolVersion` is not exactly
 /// `ProtocolVersion::LATEST`. The envelope's `data` field carries
@@ -785,7 +805,10 @@ mod instructions_constants_tests {
 
 #[cfg(test)]
 mod namespaced_title_tests {
-    use super::namespaced_title;
+    use rimap_core::tool::ToolName;
+
+    use super::{build_advertised_tool, namespaced_title};
+    use crate::mcp::tool_catalog::TOOL_DEFS;
 
     #[test]
     fn namespaced_title_prefixes_account_id() {
@@ -797,5 +820,58 @@ mod namespaced_title_tests {
             namespaced_title("a-b_c", "Fetch Message"),
             "[a-b_c] Fetch Message",
         );
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "test fixture lookup")]
+    fn build_advertised_tool_mirrors_title_into_annotations_when_namespaced() {
+        // Regression net for review finding #1 (2026-05-20): the
+        // namespaced clone must update both Tool.title AND
+        // Tool.annotations.title so clients that prefer the
+        // annotation field (per MCP spec) see the same account-
+        // prefixed text.
+        let base = TOOL_DEFS
+            .get(&ToolName::Search)
+            .expect("search in TOOL_DEFS");
+        let clone = build_advertised_tool(base, "work", "draft_safe", true);
+        assert_eq!(
+            clone.title.as_deref(),
+            Some("[work] Search Messages"),
+            "top-level title must carry the [account] prefix",
+        );
+        let ann = clone
+            .annotations
+            .as_ref()
+            .expect("annotations must be carried through");
+        assert_eq!(
+            ann.title.as_deref(),
+            clone.title.as_deref(),
+            "annotation title must mirror top-level title for parity \
+             with clients that prefer annotations.title",
+        );
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "test fixture lookup")]
+    fn build_advertised_tool_bare_branch_preserves_base_fields() {
+        // The single-account (bare) branch returns the base def
+        // unchanged. Pin this so a future refactor does not silently
+        // start renaming bare-name tools.
+        let base = TOOL_DEFS
+            .get(&ToolName::Search)
+            .expect("search in TOOL_DEFS");
+        let clone = build_advertised_tool(base, "default", "draft_safe", false);
+        assert_eq!(clone.name, base.name);
+        assert_eq!(clone.title, base.title);
+        assert_eq!(clone.description, base.description);
+        let base_ann_title = base
+            .annotations
+            .as_ref()
+            .and_then(|a| a.title.as_deref());
+        let clone_ann_title = clone
+            .annotations
+            .as_ref()
+            .and_then(|a| a.title.as_deref());
+        assert_eq!(clone_ann_title, base_ann_title);
     }
 }
