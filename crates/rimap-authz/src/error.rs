@@ -20,7 +20,7 @@ pub enum AuthzError {
     /// code; the typed `retry_after_ms` is absorbed into the message string
     /// by `From<AuthzError> for RimapError` and lost. Plumbing it through
     /// requires either extending `RimapError::Authz` with a data field or
-    /// introducing a dedicated variant. Tracked in GitHub issue #TBD; spec
+    /// introducing a dedicated variant. Tracked in GitHub issue #303; spec
     /// reference: `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
     /// "Deferred work — Phase 2".
     #[error("rate limited; retry after {retry_after_ms} ms")]
@@ -47,7 +47,7 @@ pub enum AuthzError {
     /// code; the typed `retry_after_ms` is absorbed into the message string
     /// by `From<AuthzError> for RimapError` and lost. Plumbing it through
     /// requires either extending `RimapError::Authz` with a data field or
-    /// introducing a dedicated variant. Tracked in GitHub issue #TBD; spec
+    /// introducing a dedicated variant. Tracked in GitHub issue #303; spec
     /// reference: `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
     /// "Deferred work — Phase 2".
     #[error("circuit breaker open; retry after {retry_after_ms} ms")]

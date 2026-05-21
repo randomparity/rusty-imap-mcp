@@ -32,7 +32,7 @@ fn classify_content_error(err: &ContentError) -> RimapError {
         // are absorbed into the message string via `err.to_string()` and
         // lost before reaching `to_mcp_error`. Plumbing requires
         // refactoring `ContentError` to carry typed fields. Tracked in
-        // GitHub issue #TBD; spec reference:
+        // GitHub issue #303; spec reference:
         // docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md
         // "Deferred work — Phase 2".
         ContentError::LimitExceeded { .. } => RimapError::Authz {
