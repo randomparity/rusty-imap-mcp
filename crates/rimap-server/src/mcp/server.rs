@@ -13,6 +13,7 @@ use rimap_audit::AuditWriter;
 use rimap_audit::CancelledToolEndSender;
 use rimap_audit::redact::RedactionSalt;
 use rimap_core::account::AccountId;
+use rimap_core::posture::Posture;
 use rimap_core::tool::ToolName;
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
@@ -352,16 +353,13 @@ impl ServerHandler for ImapMcpServer {
         let use_bare_names = is_legacy_single_account(accounts);
 
         for (id, state) in accounts {
-            for &tn in &state.guard.matrix().advertised() {
+            let matrix = state.guard.matrix();
+            let posture = matrix.posture();
+            for &tn in &matrix.advertised() {
                 let Some(base_def) = TOOL_DEFS.get(&tn) else {
                     continue;
                 };
-                let def = build_advertised_tool(
-                    base_def,
-                    id.as_str(),
-                    state.guard.matrix().posture().as_str(),
-                    !use_bare_names,
-                );
+                let def = build_advertised_tool(base_def, id.as_str(), posture, !use_bare_names);
                 tools.push(def);
             }
         }
@@ -589,7 +587,7 @@ fn namespaced_title(account_id: &str, base_title: &str) -> String {
 fn build_advertised_tool(
     base_def: &Tool,
     account_id: &str,
-    posture: &str,
+    posture: Posture,
     namespaced: bool,
 ) -> Tool {
     if !namespaced {
@@ -599,7 +597,7 @@ fn build_advertised_tool(
     let new_description = format!(
         "[account: {}, posture: {}] {}",
         account_id,
-        posture,
+        posture.as_str(),
         base_def.description.as_deref().unwrap_or(""),
     );
     let new_title = base_def
@@ -831,6 +829,7 @@ mod instructions_constants_tests {
 
 #[cfg(test)]
 mod namespaced_title_tests {
+    use rimap_core::posture::Posture;
     use rimap_core::tool::ToolName;
 
     use super::{build_advertised_tool, namespaced_title};
@@ -859,7 +858,7 @@ mod namespaced_title_tests {
         let base = TOOL_DEFS
             .get(&ToolName::Search)
             .expect("search in TOOL_DEFS");
-        let clone = build_advertised_tool(base, "work", "draft_safe", true);
+        let clone = build_advertised_tool(base, "work", Posture::DraftSafe, true);
         assert_eq!(
             clone.title.as_deref(),
             Some("[work] Search Messages"),
@@ -899,7 +898,7 @@ mod namespaced_title_tests {
         let base = TOOL_DEFS
             .get(&ToolName::Search)
             .expect("search in TOOL_DEFS");
-        let clone = build_advertised_tool(base, "default", "draft_safe", false);
+        let clone = build_advertised_tool(base, "default", Posture::DraftSafe, false);
         assert_eq!(clone.name, base.name);
         assert_eq!(clone.title, base.title);
         assert_eq!(clone.description, base.description);
