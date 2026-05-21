@@ -209,25 +209,28 @@ impl From<ImapError> for RimapError {
         // UIDVALIDITY-change errors get a dedicated RimapError variant
         // so MCP clients receive the typed `folder`/`expected`/`actual`
         // fields via structured `data`. Every other ImapError flattens
-        // through the generic `Imap` arm.
-        match err {
-            ImapError::UidValidityChanged {
-                folder,
-                expected,
-                actual,
-            } => RimapError::UidValidityChanged {
-                folder,
-                expected,
-                actual,
-            },
-            other => {
-                let code = other.code();
-                let message = other.to_string();
-                RimapError::Imap {
-                    code,
-                    message,
-                    source: Some(Box::new(other)),
-                }
+        // through the generic `Imap` arm. Both arms preserve the
+        // original `ImapError` as a `#[source]` so reporters that walk
+        // `error.source().chain()` see consistent depth.
+        if let ImapError::UidValidityChanged {
+            folder,
+            expected,
+            actual,
+        } = &err
+        {
+            RimapError::UidValidityChanged {
+                folder: folder.clone(),
+                expected: *expected,
+                actual: *actual,
+                source: Box::new(err),
+            }
+        } else {
+            let code = err.code();
+            let message = err.to_string();
+            RimapError::Imap {
+                code,
+                message,
+                source: Some(Box::new(err)),
             }
         }
     }
@@ -314,10 +317,17 @@ mod tests {
                 folder,
                 expected,
                 actual,
+                source,
             } => {
                 assert_eq!(folder, "INBOX");
                 assert_eq!(expected, 100);
                 assert_eq!(actual, 101);
+                assert!(
+                    source.downcast_ref::<ImapError>().is_some_and(|ie| {
+                        matches!(ie, ImapError::UidValidityChanged { .. })
+                    }),
+                    "source must wrap the original ImapError::UidValidityChanged",
+                );
             }
             #[expect(clippy::panic, reason = "intentional test assertion failure path")]
             other => panic!(

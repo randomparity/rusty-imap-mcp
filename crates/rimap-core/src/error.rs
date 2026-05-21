@@ -262,6 +262,13 @@ pub enum RimapError {
         expected: u32,
         /// The UIDVALIDITY value the server reported.
         actual: u32,
+        /// Underlying `ImapError::UidValidityChanged` captured by
+        /// `From<ImapError> for RimapError`. Mirrors the `source` shape
+        /// on sibling variants (`Imap`, `Smtp`, `Audit`) so tracing
+        /// reporters walking `error.source().chain()` see consistent
+        /// depth for every IMAP-origin variant.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 }
 
@@ -414,6 +421,7 @@ mod tests {
             folder: "INBOX".to_string(),
             expected: 100,
             actual: 101,
+            source: Box::new(std::io::Error::other("test source")),
         };
         assert_eq!(err.code(), ErrorCode::UidValidityChanged);
     }
@@ -424,6 +432,7 @@ mod tests {
             folder: "INBOX".to_string(),
             expected: 100,
             actual: 101,
+            source: Box::new(std::io::Error::other("test source")),
         };
         let s = format!("{err}");
         assert!(s.contains("INBOX"), "Display must include folder; got {s}");

@@ -62,6 +62,7 @@ pub fn to_mcp_error(err: &RimapError) -> ErrorData {
             folder,
             expected,
             actual,
+            ..
         } => {
             let data = serde_json::json!({
                 "error_code": ErrorCode::UidValidityChanged.as_str(),
@@ -250,6 +251,7 @@ mod tests {
             folder: "INBOX".into(),
             expected: 100,
             actual: 101,
+            source: Box::new(std::io::Error::other("test source")),
         };
         let mcp = to_mcp_error(&err);
         let data = mcp.data.as_ref().expect("data populated");
