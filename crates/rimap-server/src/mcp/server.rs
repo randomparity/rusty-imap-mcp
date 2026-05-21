@@ -580,6 +580,7 @@ fn namespaced_title(account_id: &str, base_title: &str) -> String {
 /// When `namespaced` is false (legacy single-`default` deployment),
 /// returns `base_def.clone()` unchanged — bare names, bare title,
 /// bare annotations.
+#[must_use]
 fn build_advertised_tool(
     base_def: &Tool,
     account_id: &str,
@@ -839,10 +840,23 @@ mod namespaced_title_tests {
             Some("[work] Search Messages"),
             "top-level title must carry the [account] prefix",
         );
+        // The catalog invariant `every_tool_has_annotations`
+        // (tool_catalog.rs) guarantees `annotations` is `Some` for
+        // every TOOL_DEFS entry, so the namespaced-branch mirror in
+        // `build_advertised_tool` is guaranteed to run. Pin the
+        // assumption here so a future catalog change that allowed
+        // `annotations: None` would fail this test loudly instead of
+        // silently dropping the mirror.
+        assert!(
+            clone.annotations.is_some(),
+            "TOOL_DEFS entries must carry annotations (pinned by \
+             tool_catalog::every_tool_has_annotations); the helper's \
+             mirror relies on this invariant",
+        );
         let ann = clone
             .annotations
             .as_ref()
-            .expect("annotations must be carried through");
+            .expect("annotations is Some per assertion above");
         assert_eq!(
             ann.title.as_deref(),
             clone.title.as_deref(),
