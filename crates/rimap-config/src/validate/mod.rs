@@ -25,8 +25,9 @@ mod limits;
 mod paths;
 mod rules;
 
-pub use compose::{ValidatedAccountConfig, ValidatedMultiConfig, validate_legacy_as_multi,
-    validate_multi};
+pub use compose::{
+    ValidatedAccountConfig, ValidatedMultiConfig, validate_legacy_as_multi, validate_multi,
+};
 
 #[cfg(feature = "test-support")]
 pub use compose::validate_multi_allowing_empty;

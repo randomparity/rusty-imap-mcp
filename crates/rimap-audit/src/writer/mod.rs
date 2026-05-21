@@ -19,5 +19,5 @@ pub(crate) mod rotation;
 pub(crate) mod self_check;
 
 pub use core::{AuditOptions, AuditWriter};
-pub use log::{ProcessStartInputs, ToolEndInputs, ToolStartInputs};
 pub(crate) use core::{Inner, set_file_mode_0600};
+pub use log::{ProcessStartInputs, ToolEndInputs, ToolStartInputs};
