@@ -74,7 +74,13 @@ pub fn to_mcp_error(err: &RimapError) -> ErrorData {
         _ => {}
     }
 
-    // Existing code-based dispatch for non-structured variants.
+    // Existing code-based dispatch for non-structured variants. The
+    // `NoAccount` / `UnknownAccount` / `UidValidityChanged` arms below
+    // are defensive: the dedicated `RimapError` variants are short-
+    // circuited above with structured data, so these only fire if a
+    // future `RimapError::Authz { code: ErrorCode::NoAccount, .. }`
+    // (or similar) is ever constructed by accident — they produce a
+    // correct but data-less response rather than a wrong code.
     match err.code() {
         ErrorCode::InvalidInput
         | ErrorCode::NoAccount

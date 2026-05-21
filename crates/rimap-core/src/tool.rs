@@ -258,6 +258,14 @@ impl ToolName {
             Self::ListAccounts => (true, false, false, false),
 
             // Mutates session state, local registry.
+            //
+            // `idempotent: true` interpreted in MCP's sense: calling
+            // `use_account("A")` twice has the same net effect as
+            // calling it once. Calls with *different* arguments are a
+            // different operation and don't bear on this hint. The
+            // spec's Delta 3 table does not enumerate `use_account`
+            // explicitly; this interpretation matches MCP's standard
+            // single-argument-shape definition of idempotence.
             Self::UseAccount => (false, false, true, false),
 
             // Idempotent flag mutations on IMAP.
