@@ -19,5 +19,5 @@ fuzz_target!(|data: &[u8]| {
         _ => Some("us-ascii"),
     };
     let body = &data[1..];
-    let _ = rimap_content::testutil::sanitize_html(body, charset);
+    let _ = rimap_content::test_support::sanitize_html(body, charset);
 });

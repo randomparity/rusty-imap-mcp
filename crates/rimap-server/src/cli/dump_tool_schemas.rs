@@ -1,9 +1,10 @@
 //! `dump-tool-schemas` test-support CLI subcommand. Emits one JSON
-//! Schema per in-scope tool, composing `<Tool>Meta` and (where
-//! present) `<Tool>Untrusted` into a single `{meta, untrusted}`
-//! envelope schema. Used by the Phase 3 wire-conformance harness
-//! (issue #265) to validate every wire response against a per-tool
-//! schema regenerated from the Rust output structs.
+//! Schema per in-scope tool, deriving the per-tool envelope from
+//! `schemars::schema_for!(ToolResponse<M, U>)`. The resulting fixtures
+//! are byte-identical to what `output_schema()` (Task D4) will publish
+//! at runtime, so the Phase 3 wire-conformance harness (issue #265)
+//! validates every response against the same schema that ships on the
+//! wire.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -31,9 +32,12 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
             accounts::{ListAccountsMeta, UseAccountMeta},
             list_folders::ListFoldersMeta,
         },
-        compose::create_draft::CreateDraftMeta,
+        compose::{create_draft::CreateDraftMeta, send_email::SendEmailMeta},
         mailbox::{
+            delete_message::DeleteMessageMeta,
+            expunge::ExpungeMeta,
             flags::FlagsMeta,
+            folder_management::{CreateFolderMeta, DeleteFolderMeta, RenameFolderMeta},
             labels::{LabelsMeta, ListLabelsMeta},
             move_message::MoveMessageMeta,
         },
@@ -47,160 +51,56 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
 
     let mut out = BTreeMap::<&'static str, Value>::new();
 
-    // meta-only tools (no untrusted payload on the wire)
-    out.insert("list_folders", meta_only::<ListFoldersMeta>());
-    out.insert("list_accounts", meta_only::<ListAccountsMeta>());
-    out.insert("list_labels", meta_only::<ListLabelsMeta>());
-    out.insert("mark_read", meta_only::<FlagsMeta>());
-    out.insert("mark_unread", meta_only::<FlagsMeta>());
-    out.insert("flag", meta_only::<FlagsMeta>());
-    out.insert("unflag", meta_only::<FlagsMeta>());
-    out.insert("add_label", meta_only::<LabelsMeta>());
-    out.insert("remove_label", meta_only::<LabelsMeta>());
-    out.insert("move_message", meta_only::<MoveMessageMeta>());
-    out.insert("create_draft", meta_only::<CreateDraftMeta>());
-    out.insert("use_account", meta_only::<UseAccountMeta>());
+    // meta-only tools (no untrusted payload on the wire): U = ()
+    out.insert("list_folders", tool_envelope::<ListFoldersMeta, ()>());
+    out.insert("list_accounts", tool_envelope::<ListAccountsMeta, ()>());
+    out.insert("use_account", tool_envelope::<UseAccountMeta, ()>());
+    out.insert("list_labels", tool_envelope::<ListLabelsMeta, ()>());
+    out.insert("mark_read", tool_envelope::<FlagsMeta, ()>());
+    out.insert("mark_unread", tool_envelope::<FlagsMeta, ()>());
+    out.insert("flag", tool_envelope::<FlagsMeta, ()>());
+    out.insert("unflag", tool_envelope::<FlagsMeta, ()>());
+    out.insert("add_label", tool_envelope::<LabelsMeta, ()>());
+    out.insert("remove_label", tool_envelope::<LabelsMeta, ()>());
+    out.insert("move_message", tool_envelope::<MoveMessageMeta, ()>());
+    out.insert("create_draft", tool_envelope::<CreateDraftMeta, ()>());
+    out.insert("send_email", tool_envelope::<SendEmailMeta, ()>());
+    out.insert("delete_message", tool_envelope::<DeleteMessageMeta, ()>());
+    out.insert("expunge", tool_envelope::<ExpungeMeta, ()>());
+    out.insert("create_folder", tool_envelope::<CreateFolderMeta, ()>());
+    out.insert("rename_folder", tool_envelope::<RenameFolderMeta, ()>());
+    out.insert("delete_folder", tool_envelope::<DeleteFolderMeta, ()>());
 
     // meta + untrusted tools
-    out.insert(
-        "search",
-        meta_and_untrusted::<SearchMeta, SearchUntrusted>(),
-    );
+    out.insert("search", tool_envelope::<SearchMeta, SearchUntrusted>());
     out.insert(
         "fetch_message",
-        meta_and_untrusted::<FetchMessageMeta, FetchMessageUntrusted>(),
+        tool_envelope::<FetchMessageMeta, FetchMessageUntrusted>(),
     );
     out.insert(
         "list_attachments",
-        meta_and_untrusted::<ListAttachmentsMeta, ListAttachmentsUntrusted>(),
+        tool_envelope::<ListAttachmentsMeta, ListAttachmentsUntrusted>(),
     );
     out.insert(
         "download_attachment",
-        meta_and_untrusted::<DownloadAttachmentMeta, DownloadAttachmentUntrusted>(),
+        tool_envelope::<DownloadAttachmentMeta, DownloadAttachmentUntrusted>(),
     );
 
     out
 }
 
-// Top-level wire envelope is `{meta, untrusted?, security_warnings?}`
-// per crates/rimap-server/src/mcp/response.rs:14-25. untrusted and
-// security_warnings are skip-serialize-if-empty/None, so the schema
-// makes them optional, not required.
-
-/// Strip the `$defs` block from `value` and return the extracted defs.
-/// `value` is mutated in place: after the call it no longer carries a
-/// `$defs` key at its top level. Returns an empty `Map` if there were
-/// no defs to hoist.
-fn extract_defs(value: &mut Value) -> serde_json::Map<String, Value> {
-    let Some(obj) = value.as_object_mut() else {
-        return serde_json::Map::new();
-    };
-    match obj.remove("$defs") {
-        Some(Value::Object(defs)) => defs,
-        _ => serde_json::Map::new(),
-    }
-}
-
-/// Merge `from` into `into`. Panics if any key in `from` already
-/// exists in `into` with a different value — that would be a real
-/// name collision and we want to surface it loudly rather than
-/// silently keep one side. For Phase 3's struct set this should
-/// never trigger; schemars uses the Rust type's identifier as the
-/// def key and the four root types we compose don't share inner
-/// types with different shapes.
-#[expect(
-    clippy::panic,
-    reason = "programmer error: schemars $defs key collision"
-)]
-fn merge_defs(into: &mut serde_json::Map<String, Value>, from: serde_json::Map<String, Value>) {
-    for (key, value) in from {
-        match into.get(&key) {
-            None => {
-                into.insert(key, value);
-            }
-            Some(existing) if existing == &value => { /* identical, skip */ }
-            Some(existing) => {
-                panic!(
-                    "duplicate $defs key {key:?} with conflicting shapes:\n\
-                     existing: {existing}\nincoming: {value}"
-                );
-            }
-        }
-    }
-}
-
-/// `Vec<rimap_content::SecurityWarning>` schema, with its nested $defs
-/// hoisted into the caller's accumulator.
-#[expect(
-    clippy::expect_used,
-    reason = "schemars always produces serializable output; failure is a bug"
-)]
-fn warnings_schema(defs: &mut serde_json::Map<String, Value>) -> Value {
-    let mut schema = serde_json::to_value(schemars::schema_for!(rimap_content::SecurityWarning))
-        .expect("SecurityWarning schema serializes");
-    merge_defs(defs, extract_defs(&mut schema));
-    serde_json::json!({
-        "type": "array",
-        "items": schema,
-    })
-}
-
-#[expect(
-    clippy::expect_used,
-    reason = "schemars always produces serializable output; failure is a bug"
-)]
-fn meta_only<M: schemars::JsonSchema>() -> Value {
-    let mut meta = serde_json::to_value(schemars::schema_for!(M)).expect("meta schema serializes");
-    let mut defs = extract_defs(&mut meta);
-    let warnings = warnings_schema(&mut defs);
-
-    let mut envelope = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "meta": meta,
-            "security_warnings": warnings,
-        },
-        "required": ["meta"],
-        "additionalProperties": false,
-    });
-    if !defs.is_empty() {
-        envelope
-            .as_object_mut()
-            .expect("envelope is object")
-            .insert("$defs".to_string(), Value::Object(defs));
-    }
-    envelope
-}
-
-#[expect(
-    clippy::expect_used,
-    reason = "schemars always produces serializable output; failure is a bug"
-)]
-fn meta_and_untrusted<M: schemars::JsonSchema, U: schemars::JsonSchema>() -> Value {
-    let mut meta = serde_json::to_value(schemars::schema_for!(M)).expect("meta schema serializes");
-    let mut untrusted =
-        serde_json::to_value(schemars::schema_for!(U)).expect("untrusted schema serializes");
-    let mut defs = extract_defs(&mut meta);
-    merge_defs(&mut defs, extract_defs(&mut untrusted));
-    let warnings = warnings_schema(&mut defs);
-
-    let mut envelope = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "meta": meta,
-            "untrusted": untrusted,
-            "security_warnings": warnings,
-        },
-        "required": ["meta", "untrusted"],
-        "additionalProperties": false,
-    });
-    if !defs.is_empty() {
-        envelope
-            .as_object_mut()
-            .expect("envelope is object")
-            .insert("$defs".to_string(), Value::Object(defs));
-    }
-    envelope
+/// Produce the JSON Schema for a tool's full response envelope by
+/// deriving it from `ToolResponse<M, U>`. Delegates to
+/// `rimap_server::mcp::response::envelope_schema`, the single source
+/// of truth shared with `tool_catalog::output_schema`, so fixtures and
+/// the published `outputSchema` are byte-identical.
+fn tool_envelope<M, U>() -> Value
+where
+    M: schemars::JsonSchema + serde::Serialize,
+    U: schemars::JsonSchema + serde::Serialize,
+{
+    use rimap_server::mcp::response::{ToolResponse, envelope_schema};
+    Value::Object(envelope_schema::<ToolResponse<M, U>>())
 }
 
 #[cfg(test)]
@@ -218,11 +118,8 @@ mod tests {
         for name in [
             "list_folders",
             "list_accounts",
+            "use_account",
             "list_labels",
-            "list_attachments",
-            "download_attachment",
-            "search",
-            "fetch_message",
             "mark_read",
             "mark_unread",
             "flag",
@@ -231,7 +128,16 @@ mod tests {
             "remove_label",
             "move_message",
             "create_draft",
-            "use_account",
+            "send_email",
+            "delete_message",
+            "expunge",
+            "create_folder",
+            "rename_folder",
+            "delete_folder",
+            "search",
+            "fetch_message",
+            "list_attachments",
+            "download_attachment",
         ] {
             assert!(parsed.contains_key(name), "missing schema for {name}");
             let entry = &parsed[name];
@@ -241,6 +147,13 @@ mod tests {
                 "{name}.meta must be a JSON Schema object"
             );
         }
+
+        assert_eq!(
+            parsed.len(),
+            22,
+            "expected exactly 22 tool schemas, found {}",
+            parsed.len()
+        );
     }
 
     #[test]
@@ -257,6 +170,27 @@ mod tests {
             assert!(
                 parsed[name]["properties"]["untrusted"].is_object(),
                 "{name} must declare an untrusted schema"
+            );
+        }
+    }
+
+    #[test]
+    fn dump_covers_every_catalog_tool() {
+        use rimap_core::tool::ToolName;
+        let mut buf = Vec::new();
+        dump_tool_schemas(&mut buf).unwrap();
+        let parsed: serde_json::Map<String, Value> = serde_json::from_slice(&buf).unwrap();
+
+        for tn in ToolName::all() {
+            // Sub-capabilities share a wire name with their parent; they are
+            // not separately dumped.
+            if matches!(tn, ToolName::SearchAdvanced | ToolName::FetchMessageHtml) {
+                continue;
+            }
+            assert!(
+                parsed.contains_key(tn.as_str()),
+                "dump_tool_schemas must emit a schema for {}",
+                tn.as_str(),
             );
         }
     }

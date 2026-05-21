@@ -30,6 +30,7 @@ use crate::mcp::response::ToolResponse;
 /// scalar `uid` so the response schema and error semantics stay
 /// unambiguous.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[non_exhaustive]
 pub struct FlagInput {
     /// Target folder.
     pub folder: String,
@@ -49,8 +50,7 @@ pub struct FlagInput {
 }
 
 /// Trusted metadata for a flag mutation response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FlagsMeta {
     /// Folder the flags were updated in.
     pub folder: String,

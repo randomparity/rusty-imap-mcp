@@ -14,7 +14,7 @@ serde_json = "1"
 
 [dependencies.rimap-content]
 path = "../crates/rimap-content"
-features = ["test-util"]
+features = ["test-support"]
 
 [dependencies.rimap-audit]
 path = "../crates/rimap-audit"

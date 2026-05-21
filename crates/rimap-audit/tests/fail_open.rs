@@ -5,9 +5,9 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use rimap_audit::ids::{ProcessId, Seq, Timestamp};
 use rimap_audit::record::{AuditRecord, Payload, ProcessEnd, ProcessEndReason};
 use rimap_audit::{AuditOptions, AuditWriter};
+use rimap_audit::{ProcessId, Seq, Timestamp};
 use tempfile::TempDir;
 
 fn make_record(seq: u64) -> AuditRecord {

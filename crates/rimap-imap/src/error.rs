@@ -206,12 +206,32 @@ impl ImapError {
 
 impl From<ImapError> for RimapError {
     fn from(err: ImapError) -> Self {
-        let code = err.code();
-        let message = err.to_string();
-        RimapError::Imap {
-            code,
-            message,
-            source: Some(Box::new(err)),
+        // UIDVALIDITY-change errors get a dedicated RimapError variant
+        // so MCP clients receive the typed `folder`/`expected`/`actual`
+        // fields via structured `data`. Every other ImapError flattens
+        // through the generic `Imap` arm. Both arms preserve the
+        // original `ImapError` as a `#[source]` so reporters that walk
+        // `error.source().chain()` see consistent depth.
+        if let ImapError::UidValidityChanged {
+            folder,
+            expected,
+            actual,
+        } = &err
+        {
+            RimapError::UidValidityChanged {
+                folder: folder.clone(),
+                expected: *expected,
+                actual: *actual,
+                source: Box::new(err),
+            }
+        } else {
+            let code = err.code();
+            let message = err.to_string();
+            RimapError::Imap {
+                code,
+                message,
+                source: Some(Box::new(err)),
+            }
         }
     }
 }
@@ -280,5 +300,37 @@ mod tests {
             reason: StarttlsFailure::CapabilityMissing,
         };
         assert_eq!(err.code(), ErrorCode::Tls);
+    }
+
+    #[test]
+    fn uid_validity_changed_routes_to_dedicated_rimap_variant() {
+        use rimap_core::RimapError;
+
+        let imap_err = ImapError::UidValidityChanged {
+            folder: "INBOX".to_string(),
+            expected: 100,
+            actual: 101,
+        };
+        let rimap_err: RimapError = imap_err.into();
+        match rimap_err {
+            RimapError::UidValidityChanged {
+                folder,
+                expected,
+                actual,
+                source,
+            } => {
+                assert_eq!(folder, "INBOX");
+                assert_eq!(expected, 100);
+                assert_eq!(actual, 101);
+                assert!(
+                    source
+                        .downcast_ref::<ImapError>()
+                        .is_some_and(|ie| { matches!(ie, ImapError::UidValidityChanged { .. }) }),
+                    "source must wrap the original ImapError::UidValidityChanged",
+                );
+            }
+            #[expect(clippy::panic, reason = "intentional test assertion failure path")]
+            other => panic!("expected RimapError::UidValidityChanged, got {other:?}",),
+        }
     }
 }

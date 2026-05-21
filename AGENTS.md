@@ -52,7 +52,8 @@ just check           # fast compile-check (inner loop)
 just fmt             # format the workspace in place
 just fmt-check       # verify formatting without modifying
 just lint            # cargo clippy with -D warnings
-just test            # cargo nextest run --workspace
+just test-fast       # inner-loop unit tests (~4 s; skips heavy integration/proptest)
+just test            # full nextest workspace — run before pushing
 just test-msrv       # same as `test` but on the MSRV toolchain (1.88.0)
 just deny            # cargo deny check (advisories, licenses, bans, sources)
 just ci              # full local-CI equivalent — run this before pushing

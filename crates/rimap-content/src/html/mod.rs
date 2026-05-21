@@ -6,8 +6,8 @@
 //! stripped. The only consumer of `scraper`, `ammonia`, and `linkify`
 //! in the workspace.
 //!
-//! The single entrypoint visible outside `parse_message` is [`process`],
-//! re-exported through [`crate::testutil`] (under the alias `sanitize_html`)
+//! The single entrypoint visible outside `parse_message` is [`sanitize`],
+//! re-exported through [`crate::test_support`] (under the alias `sanitize_html`)
 //! for fuzz harnesses; production callers reach it via
 //! [`crate::parse::parse_message`].
 
@@ -29,7 +29,7 @@ use crate::html::hidden::detect_hidden;
 use crate::html::mismatch::detect_mismatches;
 use crate::html::sanitize::sanitize_body;
 
-// `pub` only because `testutil` re-exports through `pub mod testutil` (Rust
+// `pub` only because `test_support` re-exports through `pub mod test_support` (Rust
 // E0364 forbids `pub use` of `pub(crate)` items). Module privacy keeps
 // this unreachable outside the crate; production callers reach this type
 // through [`crate::output::Content`] populated by [`crate::parse::parse_message`].
@@ -109,7 +109,7 @@ impl HiddenMethod {
     }
 }
 
-// `pub` only because `testutil` re-exports through `pub mod testutil` (Rust
+// `pub` only because `test_support` re-exports through `pub mod test_support` (Rust
 // E0364 forbids `pub use` of `pub(crate)` items). Module privacy (`mod html;`
 // in `lib.rs`) keeps this unreachable outside the crate; production callers
 // MUST reach it via [`crate::parse::parse_message`] so the unicode +
@@ -128,7 +128,7 @@ impl HiddenMethod {
 ///
 /// Returns [`ContentError::LimitExceeded`] if `raw` exceeds
 /// [`MAX_HTML_BYTES`].
-pub fn process(raw: &[u8], charset: Option<&str>) -> Result<HtmlResult, ContentError> {
+pub fn sanitize(raw: &[u8], charset: Option<&str>) -> Result<HtmlResult, ContentError> {
     if raw.len() > MAX_HTML_BYTES {
         return Err(ContentError::LimitExceeded {
             kind: HTML_BODY_LIMIT_KIND,
@@ -202,9 +202,9 @@ mod tests {
     use crate::html::style_parse::{classify_inline_style, classify_single_declaration};
 
     #[test]
-    fn process_oversize_input_returns_limit_exceeded() {
+    fn sanitize_oversize_input_returns_limit_exceeded() {
         let huge = vec![b'<'; MAX_HTML_BYTES + 1];
-        let err = process(&huge, None).expect_err("oversize input must error");
+        let err = sanitize(&huge, None).expect_err("oversize input must error");
         match err {
             ContentError::LimitExceeded { kind, limit } => {
                 assert_eq!(kind, HTML_BODY_LIMIT_KIND);
@@ -215,13 +215,13 @@ mod tests {
     }
 
     #[test]
-    fn process_accepts_input_at_max_html_bytes() {
+    fn sanitize_accepts_input_at_max_html_bytes() {
         // Kills `> with >=` on `raw.len() > MAX_HTML_BYTES`. With `>=`,
         // a 1 MiB body errors immediately with html_body kind; the
         // original passes the check and proceeds (may emit body
         // truncation warnings later, but kind != html_body).
         let body = vec![b'a'; MAX_HTML_BYTES];
-        let result = process(&body, None);
+        let result = sanitize(&body, None);
         match result {
             Ok(_) => (),
             Err(ContentError::LimitExceeded { kind, .. }) => {
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn process_emits_mismatch_summary_warning_when_overflow_positive() {
+    fn sanitize_emits_mismatch_summary_warning_when_overflow_positive() {
         // Kills `> with <` on `if mismatch_overflow > 0`. With `<`,
         // mismatch_overflow (a usize) can never satisfy `< 0`, so the
         // summary warning is never emitted regardless of overflow.
@@ -251,7 +251,7 @@ mod tests {
             .expect("write! into String never fails");
         }
         let html = format!("<html><body>{body}</body></html>");
-        let result = process(html.as_bytes(), None).expect("sanitize must succeed");
+        let result = sanitize(html.as_bytes(), None).expect("sanitize must succeed");
         let summary_count = result
             .warnings
             .iter()
@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn process_scans_anchor_text_up_to_max_anchor_text_scan() {
+    fn sanitize_scans_anchor_text_up_to_max_anchor_text_scan() {
         // Kills `* with +` on `MAX_ANCHOR_TEXT_SCAN = 4 * 1024`. The
         // mutant flips the constant to 4 + 1024 = 1028, well below 4 KiB.
         // An anchor whose mismatched URL sits at byte offset ~2000
@@ -279,7 +279,7 @@ mod tests {
         let html = format!(
             "<html><body><a href=\"https://actual.com\">{padding} https://evil.example</a></body></html>",
         );
-        let result = process(html.as_bytes(), None).expect("sanitize must succeed");
+        let result = sanitize(html.as_bytes(), None).expect("sanitize must succeed");
         let mismatch_seen = result.warnings.iter().any(|w| {
             w.code == crate::output::WarningCode::HtmlLinkTextHrefMismatch
                 && w.detail
@@ -293,8 +293,8 @@ mod tests {
     }
 
     #[test]
-    fn process_empty_input_returns_empty_result() {
-        let result = process(b"", None).expect("empty input is valid");
+    fn sanitize_empty_input_returns_empty_result() {
+        let result = sanitize(b"", None).expect("empty input is valid");
         assert!(result.body_text.is_empty());
         // ammonia returns an empty string for empty input.
         assert!(result.body_html.is_empty());
@@ -303,10 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn process_minimal_html_document_parses_without_panic() {
+    fn sanitize_minimal_html_document_parses_without_panic() {
         let html = b"<!DOCTYPE html><html><head><title>Hi</title></head>\
             <body><p>hello</p></body></html>";
-        let result = process(html, Some("utf-8")).expect("valid html parses");
+        let result = sanitize(html, Some("utf-8")).expect("valid html parses");
         assert_eq!(result.body_text, "hello");
         assert!(result.body_html.contains("<p>hello</p>"));
         assert!(result.anchor_hrefs.is_empty());
@@ -314,11 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn process_unclosed_tags_does_not_error() {
+    fn sanitize_unclosed_tags_does_not_error() {
         // scraper/html5ever recovers from malformed input rather than
         // erroring; verify the pipeline tolerates it.
         let html = b"<html><body><p>oops<div><span>still here";
-        let result = process(html, None).expect("malformed html still parses");
+        let result = sanitize(html, None).expect("malformed html still parses");
         assert!(result.body_text.contains("oops"));
         assert!(result.body_text.contains("still here"));
         assert!(result.warnings.is_empty());
@@ -453,12 +453,12 @@ mod tests {
     }
 
     #[test]
-    fn process_detects_display_none_in_body() {
+    fn sanitize_detects_display_none_in_body() {
         let input = br#"<html><body>
             <p>visible</p>
             <div style="display: none">HIDDEN SECRET</div>
         </body></html>"#;
-        let result = process(input, None).expect("process should succeed");
+        let result = sanitize(input, None).expect("process should succeed");
         let hit = result
             .warnings
             .iter()
@@ -474,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn process_hidden_hit_cap_summarizes_overflow() {
+    fn sanitize_hidden_hit_cap_summarizes_overflow() {
         use std::fmt::Write as _;
         let mut body = String::from("<html><body>");
         for i in 0..(MAX_HIDDEN_HITS + 5) {
@@ -482,7 +482,7 @@ mod tests {
                 .expect("write to String never fails");
         }
         body.push_str("</body></html>");
-        let result = process(body.as_bytes(), None).expect("process should succeed");
+        let result = sanitize(body.as_bytes(), None).expect("process should succeed");
         let hidden_warnings: Vec<_> = result
             .warnings
             .iter()
@@ -509,7 +509,7 @@ mod tests {
         let input = br#"<html><body>
             <a href="https://attacker.example/login">Visit bank.example.com now</a>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         let mismatch = result
             .warnings
             .iter()
@@ -529,7 +529,7 @@ mod tests {
         let input = br#"<html><body>
             <a href="https://bank.example.com/auth">Go to login.bank.example.com</a>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(
             !result
                 .warnings
@@ -545,7 +545,7 @@ mod tests {
         let input = br#"<html><body>
             <a href="https://attacker.example">click here</a>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(
             !result
                 .warnings
@@ -589,7 +589,7 @@ mod tests {
             <a href="mailto:foo@example.com">visit example.com</a>
             <a href="/relative/path">relative.example</a>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(
             !result
                 .warnings
@@ -603,7 +603,7 @@ mod tests {
         let input = br#"<html><body>
             <a href="https://evilserver/phish">Visit paypal.com now</a>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(
             result
                 .warnings
@@ -626,7 +626,7 @@ mod tests {
                 <p>second paragraph</p>
             </body>
         </html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(
             result.body_text.contains("visible paragraph"),
             "got {:?}",
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn extract_text_normalizes_whitespace() {
         let input = b"<html><body><p>hello    world</p>   <p>line\t\ttwo</p></body></html>";
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(!result.body_text.contains("    "));
         assert!(!result.body_text.contains("\t\t"));
         assert!(result.body_text.contains("hello world"));
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn extract_text_empty_body_returns_empty_string() {
         let input = b"<html><head><title>t</title></head><body></body></html>";
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(result.body_text.is_empty(), "got {:?}", result.body_text);
     }
 
@@ -671,7 +671,7 @@ mod tests {
             <span style="display:none">SECRET</span>
             <span>omega</span>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(
             result.body_text.contains("alpha"),
             "got {:?}",
@@ -696,7 +696,7 @@ mod tests {
             <div style="display:none"><span>nested hidden</span><em>still hidden</em></div>
             <p>after</p>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(result.body_text.contains("before"));
         assert!(result.body_text.contains("after"));
         assert!(!result.body_text.contains("nested hidden"));
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn sanitize_produces_body_html_with_safe_tags() {
         let input = b"<html><body><p>hello <strong>world</strong></p></body></html>";
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(result.body_html.contains("<p>"));
         assert!(result.body_html.contains("<strong>"));
         assert!(result.body_html.contains("hello"));
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn sanitize_strips_script_and_warns() {
         let input = br"<html><body><p>ok</p><script>evil()</script></body></html>";
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(!result.body_html.contains("<script"));
         assert!(!result.body_html.contains("evil()"));
         assert!(
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn sanitize_strips_style_and_warns() {
         let input = br"<html><body><style>.x{color:red}</style><p>ok</p></body></html>";
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(!result.body_html.contains("<style"));
         assert!(
             result
@@ -744,7 +744,7 @@ mod tests {
         let input = br#"<html><body>
             <img src="https://tracker.example/px.gif" alt="invoice attached" width="1" height="1">
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(!result.body_html.contains("tracker.example"));
         assert!(!result.body_html.contains("src="));
         assert!(result.body_html.contains("alt=\"invoice attached\""));
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn sanitize_drops_javascript_url_from_anchor() {
         let input = br#"<html><body><a href="javascript:alert(1)">click</a></body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert!(!result.body_html.contains("javascript:"));
     }
 
@@ -771,7 +771,7 @@ mod tests {
             <a href="mailto:foo@example.com">email</a>
             <a href="javascript:alert(1)">bad</a>
         </body></html>"#;
-        let result = process(input, None).expect("ok");
+        let result = sanitize(input, None).expect("ok");
         assert_eq!(result.anchor_hrefs.len(), 3);
         assert!(
             result
@@ -800,7 +800,7 @@ mod tests {
             <p>visible</p>
             <![CDATA[<script>alert("cdata-bypass")</script>]]>
         </body></html>"#;
-        let result = process(html, None).expect("ok");
+        let result = sanitize(html, None).expect("ok");
         assert!(
             !result.body_text.contains("alert"),
             "CDATA script content should not leak into body_text: {:?}",
@@ -824,7 +824,7 @@ mod tests {
             <p>visible</p>
             <![CDATA[<script>alert("leaked")
         </body></html>"#;
-        let result = process(html, None).expect("ok");
+        let result = sanitize(html, None).expect("ok");
         assert!(
             !result.body_text.contains("alert"),
             "unclosed CDATA script content should not leak: {:?}",
@@ -851,7 +851,7 @@ mod tests {
         ];
         for tag in tags {
             let input = format!("<html><body><{tag}>hidden content</{tag}></body></html>");
-            let result = process(input.as_bytes(), None).expect("process should succeed");
+            let result = sanitize(input.as_bytes(), None).expect("process should succeed");
             assert!(
                 !result.body_html.contains(&format!("<{tag}")),
                 "tag <{tag}> should be stripped from body_html, got: {}",
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn body_html_has_no_html_comments() {
         let input = b"<html><body><!-- secret comment --><p>visible</p></body></html>";
-        let result = process(input, None).expect("process should succeed");
+        let result = sanitize(input, None).expect("process should succeed");
         assert!(
             !result.body_html.contains("<!--"),
             "HTML comments should be stripped, got: {}",

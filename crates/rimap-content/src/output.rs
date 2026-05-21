@@ -79,8 +79,7 @@ pub struct MailingListInfo {
 
 /// Metadata for a single attachment part. Body bytes are not retained.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AttachmentMeta {
     /// Decoded filename if available (from `Content-Disposition` or
     /// `Content-Type` name parameter), sanitized.
@@ -116,8 +115,7 @@ pub struct Untrusted {
 
 /// A single warning emitted by the content pipeline.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SecurityWarning {
     /// Classification of the warning.
     pub code: WarningCode,

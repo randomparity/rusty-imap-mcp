@@ -13,8 +13,7 @@ pub struct UseAccountInput {
 }
 
 /// Trusted metadata for a `use_account` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct UseAccountMeta {
     /// The account that is now active.
     pub account: String,
@@ -23,8 +22,7 @@ pub struct UseAccountMeta {
 }
 
 /// A single account entry in a `list_accounts` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct AccountEntry {
     /// Account name.
     pub name: String,
@@ -33,8 +31,7 @@ pub struct AccountEntry {
 }
 
 /// Trusted metadata for a `list_accounts` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListAccountsMeta {
     /// All configured accounts.
     pub accounts: Vec<AccountEntry>,

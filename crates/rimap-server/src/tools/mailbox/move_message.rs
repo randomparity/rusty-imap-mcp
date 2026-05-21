@@ -42,8 +42,7 @@ pub struct MoveMessageInput {
 }
 
 /// Per-UID move result entry.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct MoveEntry {
     /// Source UID that was moved.
     pub old_uid: u32,
@@ -52,8 +51,7 @@ pub struct MoveEntry {
 }
 
 /// Trusted metadata for a `move_message` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct MoveMessageMeta {
     /// Source folder.
     pub folder: String,

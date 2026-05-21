@@ -14,12 +14,12 @@ use crate::boot::registry::AccountState;
 ///
 /// If `expected_uidvalidity` is `Some(v)`, the value is verified against the
 /// folder's UIDVALIDITY before the FETCH. A mismatch propagates
-/// `RimapError::Imap { code: UidValidityChanged, ... }`. Pass `None` to skip.
+/// `RimapError::UidValidityChanged`. Pass `None` to skip.
 ///
 /// # Errors
 ///
-/// - `RimapError::Imap { code: UidValidityChanged }` if expected UIDVALIDITY
-///   does not match the server's observed value.
+/// - `RimapError::UidValidityChanged` if expected UIDVALIDITY does not match
+///   the server's observed value.
 /// - `RimapError::Authz { code: NotFound }` if the server returned no
 ///   message for `uid` in `folder`.
 /// - Propagates `RimapError::Imap { ... }` from the underlying

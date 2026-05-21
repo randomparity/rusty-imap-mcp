@@ -1,5 +1,69 @@
 {
   "$defs": {
+    "ListLabelsMeta": {
+      "description": "Trusted metadata for a `list_labels` response.",
+      "properties": {
+        "folder": {
+          "description": "Folder the labels were fetched from.",
+          "type": "string"
+        },
+        "labels": {
+          "description": "Custom keyword labels on the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "uid": {
+          "description": "UID of the message.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uid_validity": {
+          "description": "UIDVALIDITY observed at the EXAMINE used for this operation. `None`\nwhen the server's EXAMINE response omitted the response code. (#70)",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "folder",
+        "uid",
+        "labels"
+      ],
+      "type": "object"
+    },
+    "SecurityWarning": {
+      "description": "A single warning emitted by the content pipeline.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/WarningCode",
+          "description": "Classification of the warning."
+        },
+        "detail": {
+          "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
     "WarningCode": {
       "description": "Classification of pipeline warnings. New variants will be added as\nnew detectors land \u2014 the enum is `#[non_exhaustive]` so matches\noutside this crate must include a wildcard arm.",
       "oneOf": [
@@ -121,78 +185,23 @@
       ]
     }
   },
-  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Trusted metadata for a `list_labels` response.",
-      "properties": {
-        "folder": {
-          "description": "Folder the labels were fetched from.",
-          "type": "string"
-        },
-        "labels": {
-          "description": "Custom keyword labels on the message.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "uid": {
-          "description": "UID of the message.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "uid_validity": {
-          "description": "UIDVALIDITY observed at the EXAMINE used for this operation. `None`\nwhen the server's EXAMINE response omitted the response code. (#70)",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "folder",
-        "uid",
-        "labels"
-      ],
-      "title": "ListLabelsMeta",
-      "type": "object"
+      "$ref": "#/$defs/ListLabelsMeta",
+      "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {
+      "description": "Structured security observations. Trusted metadata.",
       "items": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "A single warning emitted by the content pipeline.",
-        "properties": {
-          "code": {
-            "$ref": "#/$defs/WarningCode",
-            "description": "Classification of the warning."
-          },
-          "detail": {
-            "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "location": {
-            "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ],
-        "title": "SecurityWarning",
-        "type": "object"
+        "$ref": "#/$defs/SecurityWarning"
       },
       "type": "array"
+    },
+    "untrusted": {
+      "description": "Sanitized content derived from email data. Untrusted.",
+      "type": "null"
     }
   },
   "required": [

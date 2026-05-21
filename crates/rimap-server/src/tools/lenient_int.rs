@@ -33,6 +33,9 @@
 //!
 //! [anthropics/claude-code#24599]: https://github.com/anthropics/claude-code/issues/24599
 
+use core::num::NonZeroU32;
+use core::str::FromStr;
+
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
@@ -58,32 +61,71 @@ enum IntOrStr {
     Str(String),
 }
 
-fn parse_usize_str<E: de::Error>(s: &str) -> Result<usize, E> {
-    if s.is_empty() {
-        return Err(E::invalid_value(
-            de::Unexpected::Str(s),
-            &"non-empty digit string",
-        ));
-    }
-    if !s.bytes().all(|b| b.is_ascii_digit()) {
+/// Parse a digit-only string into any integer type that implements
+/// [`FromStr`]. Empty strings and any non-ASCII-digit byte are rejected
+/// up front so the error message identifies the wire-shape problem
+/// instead of forwarding an opaque `FromStr` failure.
+fn parse_int_str<T, E>(s: &str, label: &str) -> Result<T, E>
+where
+    T: FromStr,
+    E: de::Error,
+{
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return Err(E::invalid_value(
             de::Unexpected::Str(s),
             &"integer in string form (digits only)",
         ));
     }
-    s.parse::<usize>()
-        .map_err(|_| E::invalid_value(de::Unexpected::Str(s), &"integer in usize range"))
+    s.parse::<T>().map_err(|_| {
+        let exp = format!("integer in {label} range");
+        E::invalid_value(de::Unexpected::Str(s), &exp.as_str())
+    })
 }
 
-fn i64_to_usize<E: de::Error>(n: i64) -> Result<usize, E> {
+/// Convert a wire-decoded `i64` into any integer type that implements
+/// [`TryFrom<i64>`]. Rejects negatives explicitly so the error message
+/// distinguishes a sign error from a magnitude error.
+fn i64_to_int<T, E>(n: i64, label: &str) -> Result<T, E>
+where
+    T: TryFrom<i64>,
+    E: de::Error,
+{
     if n < 0 {
         return Err(E::invalid_value(
             de::Unexpected::Signed(n),
             &"non-negative integer",
         ));
     }
-    usize::try_from(n)
-        .map_err(|_| E::invalid_value(de::Unexpected::Other("integer"), &"integer in usize range"))
+    T::try_from(n).map_err(|_| {
+        let exp = format!("integer in {label} range");
+        E::invalid_value(de::Unexpected::Other("integer"), &exp.as_str())
+    })
+}
+
+/// Convert an [`IntOrStr`] into any integer type that implements both
+/// [`FromStr`] and [`TryFrom<i64>`]. Used by both the `Option<T>` and
+/// `NonZero` deserializers below.
+fn intorstr_to_int<T, E>(v: IntOrStr, label: &str) -> Result<T, E>
+where
+    T: FromStr + TryFrom<i64>,
+    E: de::Error,
+{
+    match v {
+        IntOrStr::Int(n) => i64_to_int::<T, E>(n, label),
+        IntOrStr::Str(s) => parse_int_str::<T, E>(&s, label),
+    }
+}
+
+/// Shared body for every `deserialize_opt_<integer>` shim below.
+fn deserialize_opt_int<'de, T, D>(d: D, label: &'static str) -> Result<Option<T>, D::Error>
+where
+    T: FromStr + TryFrom<i64>,
+    D: Deserializer<'de>,
+{
+    let Some(v) = Option::<IntOrStr>::deserialize(d)? else {
+        return Ok(None);
+    };
+    intorstr_to_int::<T, D::Error>(v, label).map(Some)
 }
 
 /// Deserialize `Option<usize>` from either a JSON integer, a JSON
@@ -95,34 +137,7 @@ fn i64_to_usize<E: de::Error>(n: i64) -> Result<usize, E> {
 /// negative integer, an empty/non-digit string, or numerically out of
 /// range for `usize`.
 pub fn deserialize_opt_usize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    let v: Option<IntOrStr> = Option::deserialize(d)?;
-    match v {
-        None => Ok(None),
-        Some(IntOrStr::Int(n)) => i64_to_usize(n).map(Some),
-        Some(IntOrStr::Str(s)) => parse_usize_str(&s).map(Some),
-    }
-}
-
-fn parse_u32_str<E: de::Error>(s: &str) -> Result<u32, E> {
-    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(E::invalid_value(
-            de::Unexpected::Str(s),
-            &"integer in string form (digits only)",
-        ));
-    }
-    s.parse::<u32>()
-        .map_err(|_| E::invalid_value(de::Unexpected::Str(s), &"integer in u32 range"))
-}
-
-fn i64_to_u32<E: de::Error>(n: i64) -> Result<u32, E> {
-    if n < 0 {
-        return Err(E::invalid_value(
-            de::Unexpected::Signed(n),
-            &"non-negative integer",
-        ));
-    }
-    u32::try_from(n)
-        .map_err(|_| E::invalid_value(de::Unexpected::Other("integer"), &"integer in u32 range"))
+    deserialize_opt_int::<usize, D>(d, "usize")
 }
 
 /// Deserialize `Option<u32>` from integer, digit-string, or null/absent.
@@ -131,34 +146,7 @@ fn i64_to_u32<E: de::Error>(n: i64) -> Result<u32, E> {
 ///
 /// Same semantics as [`deserialize_opt_usize`], scoped to `u32` range.
 pub fn deserialize_opt_u32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
-    let v: Option<IntOrStr> = Option::deserialize(d)?;
-    match v {
-        None => Ok(None),
-        Some(IntOrStr::Int(n)) => i64_to_u32(n).map(Some),
-        Some(IntOrStr::Str(s)) => parse_u32_str(&s).map(Some),
-    }
-}
-
-fn parse_u64_str<E: de::Error>(s: &str) -> Result<u64, E> {
-    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(E::invalid_value(
-            de::Unexpected::Str(s),
-            &"integer in string form (digits only)",
-        ));
-    }
-    s.parse::<u64>()
-        .map_err(|_| E::invalid_value(de::Unexpected::Str(s), &"integer in u64 range"))
-}
-
-fn i64_to_u64<E: de::Error>(n: i64) -> Result<u64, E> {
-    if n < 0 {
-        return Err(E::invalid_value(
-            de::Unexpected::Signed(n),
-            &"non-negative integer",
-        ));
-    }
-    u64::try_from(n)
-        .map_err(|_| E::invalid_value(de::Unexpected::Other("integer"), &"integer in u64 range"))
+    deserialize_opt_int::<u32, D>(d, "u32")
 }
 
 /// Deserialize `Option<u64>` from integer, digit-string, or null/absent.
@@ -170,12 +158,7 @@ fn i64_to_u64<E: de::Error>(n: i64) -> Result<u64, E> {
 /// internal `IntOrStr` enum uses `i64`; values above that ceiling must
 /// be supplied as a digit string.
 pub fn deserialize_opt_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
-    let v: Option<IntOrStr> = Option::deserialize(d)?;
-    match v {
-        None => Ok(None),
-        Some(IntOrStr::Int(n)) => i64_to_u64(n).map(Some),
-        Some(IntOrStr::Str(s)) => parse_u64_str(&s).map(Some),
-    }
+    deserialize_opt_int::<u64, D>(d, "u64")
 }
 
 /// Deserialize `NonZeroU32` from integer or digit-string. Rejects 0
@@ -183,17 +166,12 @@ pub fn deserialize_opt_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64
 ///
 /// # Errors
 ///
-/// In addition to the integer-range errors from `parse_u32_str` /
-/// `i64_to_u32`, returns an error when the parsed value is `0`.
-pub fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(
-    d: D,
-) -> Result<core::num::NonZeroU32, D::Error> {
+/// In addition to the integer-range errors from [`intorstr_to_int`]
+/// scoped to `u32`, returns an error when the parsed value is `0`.
+pub fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(d: D) -> Result<NonZeroU32, D::Error> {
     let v = IntOrStr::deserialize(d)?;
-    let n: u32 = match v {
-        IntOrStr::Int(n) => i64_to_u32(n)?,
-        IntOrStr::Str(s) => parse_u32_str(&s)?,
-    };
-    core::num::NonZeroU32::new(n)
+    let n: u32 = intorstr_to_int::<u32, D::Error>(v, "u32")?;
+    NonZeroU32::new(n)
         .ok_or_else(|| de::Error::invalid_value(de::Unexpected::Unsigned(0), &"nonzero u32"))
 }
 
@@ -206,17 +184,25 @@ pub fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(
 /// as `None`.
 pub fn deserialize_opt_nonzero_u32<'de, D: Deserializer<'de>>(
     d: D,
-) -> Result<Option<core::num::NonZeroU32>, D::Error> {
-    let v: Option<IntOrStr> = Option::deserialize(d)?;
-    let Some(int_or_str) = v else { return Ok(None) };
-    let n: u32 = match int_or_str {
-        IntOrStr::Int(n) => i64_to_u32(n)?,
-        IntOrStr::Str(s) => parse_u32_str(&s)?,
+) -> Result<Option<NonZeroU32>, D::Error> {
+    let Some(v) = Option::<IntOrStr>::deserialize(d)? else {
+        return Ok(None);
     };
-    let nz = core::num::NonZeroU32::new(n)
+    let n: u32 = intorstr_to_int::<u32, D::Error>(v, "u32")?;
+    let nz = NonZeroU32::new(n)
         .ok_or_else(|| de::Error::invalid_value(de::Unexpected::Unsigned(0), &"nonzero u32"))?;
     Ok(Some(nz))
 }
+
+/// Maximum representable in the integer-branch of a `oneOf` schema for
+/// any `usize`/`u64` lenient field — capped at `i64::MAX` because the
+/// internal [`IntOrStr::Int`] arm uses `i64`. Values above this ceiling
+/// must come in through the digit-string branch.
+const I64_MAX_AS_U64: u64 = i64::MAX as u64;
+
+/// Maximum representable in the integer-branch of a `oneOf` schema for
+/// any `u32`/`NonZeroU32` lenient field.
+const U32_MAX_AS_U64: u64 = u32::MAX as u64;
 
 /// Schema for `Option<usize>` accepted as integer, digit-string, or null.
 ///
@@ -232,7 +218,7 @@ pub fn deserialize_opt_nonzero_u32<'de, D: Deserializer<'de>>(
 pub fn schema_opt_usize(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            { "type": "integer", "minimum": 0, "maximum": 9_223_372_036_854_775_807_u64 },
+            { "type": "integer", "minimum": 0, "maximum": I64_MAX_AS_U64 },
             { "type": "string", "pattern": "^[0-9]+$" },
             { "type": "null" }
         ]
@@ -243,7 +229,7 @@ pub fn schema_opt_usize(_g: &mut schemars::SchemaGenerator) -> schemars::Schema 
 pub fn schema_opt_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            { "type": "integer", "minimum": 0, "maximum": 4_294_967_295_u64 },
+            { "type": "integer", "minimum": 0, "maximum": U32_MAX_AS_U64 },
             { "type": "string", "pattern": "^[0-9]+$" },
             { "type": "null" }
         ]
@@ -262,7 +248,7 @@ pub fn schema_opt_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
 pub fn schema_opt_u64(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            { "type": "integer", "minimum": 0, "maximum": 9_223_372_036_854_775_807_u64 },
+            { "type": "integer", "minimum": 0, "maximum": I64_MAX_AS_U64 },
             { "type": "string", "pattern": "^[0-9]+$" },
             { "type": "null" }
         ]
@@ -274,7 +260,7 @@ pub fn schema_opt_u64(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
 pub fn schema_nonzero_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            { "type": "integer", "minimum": 1, "maximum": 4_294_967_295_u64 },
+            { "type": "integer", "minimum": 1, "maximum": U32_MAX_AS_U64 },
             { "type": "string", "pattern": "^[1-9][0-9]*$" }
         ]
     })
@@ -285,7 +271,7 @@ pub fn schema_nonzero_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schem
 pub fn schema_opt_nonzero_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            { "type": "integer", "minimum": 1, "maximum": 4_294_967_295_u64 },
+            { "type": "integer", "minimum": 1, "maximum": U32_MAX_AS_U64 },
             { "type": "string", "pattern": "^[1-9][0-9]*$" },
             { "type": "null" }
         ]

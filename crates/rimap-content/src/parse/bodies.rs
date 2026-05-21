@@ -45,7 +45,7 @@ pub(super) fn extract_bodies(
     check_mime_depth(message, warnings)?;
 
     // Determine the part id of the first HTML body so only one HTML
-    // part per message flows through `html::process`. mail-parser 0.11
+    // part per message flows through `html::sanitize`. mail-parser 0.11
     // exposes html bodies via `message.html_body: Vec<MessagePartId>`
     // (MessagePartId = u32).
     let primary_html_part_id: Option<usize> = message.html_body.first().map(|id| *id as usize);
@@ -137,7 +137,7 @@ fn decode_text_part(
     }
 }
 
-/// Run the primary `text/html` part through [`crate::html::process`].
+/// Run the primary `text/html` part through [`crate::html::sanitize`].
 ///
 /// On success: merges the produced warnings into `warnings`, places
 /// the extracted plain text at the primary text slot if empty (else
@@ -153,7 +153,7 @@ fn sanitize_html_part(
     warnings: &mut Vec<SecurityWarning>,
 ) -> Result<(), ContentError> {
     let charset = part_charset(part);
-    match html::process(raw_bytes, charset.as_deref()) {
+    match html::sanitize(raw_bytes, charset.as_deref()) {
         Ok(result) => {
             warnings.extend(result.warnings);
             state.total_bytes = state.total_bytes.saturating_add(result.body_text.len());

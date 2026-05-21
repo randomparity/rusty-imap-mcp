@@ -40,7 +40,7 @@ pub struct DeleteMessageInput {
 const TRASH_FOLDER: &str = "Trash";
 
 /// Trusted metadata for a `delete_message` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct DeleteMessageMeta {
     /// Always `true` when the handler returns `Ok`.
     pub deleted: bool,

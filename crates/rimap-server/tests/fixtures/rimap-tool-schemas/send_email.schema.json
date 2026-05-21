@@ -1,0 +1,246 @@
+{
+  "$defs": {
+    "ErrorCode": {
+      "description": "Stable machine-readable error codes, per design spec \u00a79.",
+      "type": "string"
+    },
+    "SecurityWarning": {
+      "description": "A single warning emitted by the content pipeline.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/WarningCode",
+          "description": "Classification of the warning."
+        },
+        "detail": {
+          "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
+    "SendEmailMeta": {
+      "description": "Trusted metadata for a `send_email` response.",
+      "properties": {
+        "message_id": {
+          "description": "RFC 2822 `Message-ID` assigned to the outgoing message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sent": {
+          "description": "Whether the message was delivered via SMTP.",
+          "type": "boolean"
+        },
+        "sent_copy": {
+          "$ref": "#/$defs/SentCopyInfo",
+          "description": "Result of the best-effort copy to the Sent folder."
+        },
+        "smtp_status": {
+          "description": "Human-readable SMTP delivery status.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sent",
+        "smtp_status",
+        "sent_copy"
+      ],
+      "type": "object"
+    },
+    "SentCopyInfo": {
+      "description": "Copy-to-Sent result included in a `send_email` response.",
+      "properties": {
+        "failed": {
+          "description": "`true` if the APPEND failed (best-effort; send itself succeeded).",
+          "type": "boolean"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Error code classifying why the APPEND failed. Present only when\n`failed` is `true`. Clients use this to decide whether to retry\n(e.g. `Timeout`, `ConnectionLost`) or surface an operator action\n(e.g. `InvalidInput`, `ImapProtocol`, `AttachmentTooLarge`)."
+        },
+        "folder": {
+          "description": "Folder the copy was appended to.",
+          "type": "string"
+        },
+        "uid": {
+          "description": "UID assigned by the server, if returned.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "folder",
+        "failed"
+      ],
+      "type": "object"
+    },
+    "WarningCode": {
+      "description": "Classification of pipeline warnings. New variants will be added as\nnew detectors land \u2014 the enum is `#[non_exhaustive]` so matches\noutside this crate must include a wildcard arm.",
+      "oneOf": [
+        {
+          "const": "unicode_zero_width_stripped",
+          "description": "Zero-width codepoints were present in input text and stripped.",
+          "type": "string"
+        },
+        {
+          "const": "unicode_bidi_override_stripped",
+          "description": "Bidi-override codepoints were present in input text and stripped.",
+          "type": "string"
+        },
+        {
+          "const": "unicode_c0_c1_stripped",
+          "description": "C0 or C1 control codepoints (other than tab and newline) were stripped.",
+          "type": "string"
+        },
+        {
+          "const": "parse_header_smuggling_blocked",
+          "description": "A header containing a raw CRLF inside an RFC 2047 encoded-word\nwas dropped before parsing continued.",
+          "type": "string"
+        },
+        {
+          "const": "parse_mime_type_mismatch",
+          "description": "An attachment's declared content type did not match the magic\nbytes of its body. Detail format: `declared=<type>,sniffed=<type>`.",
+          "type": "string"
+        },
+        {
+          "const": "parse_bodystructure_type_mismatch",
+          "description": "BODYSTRUCTURE-declared MIME type disagreed with the type reported\nby the MIME parser for the same part. Distinct from\n`ParseMimeTypeMismatch` (which compares declared type against\nmagic-byte sniffing). Detail format:\n`bodystructure=<type>,parser=<type>`.",
+          "type": "string"
+        },
+        {
+          "const": "parse_attachment_polyglot",
+          "description": "An attachment matched multiple magic-byte signatures (polyglot\nfile). This frequently indicates a deliberate attempt to bypass\ncontent-type sniffing by encoding one file type as another.",
+          "type": "string"
+        },
+        {
+          "const": "parse_body_truncated",
+          "description": "The message body exceeded `MAX_BODY_BYTES` and was truncated.",
+          "type": "string"
+        },
+        {
+          "const": "parse_mime_depth_exceeded",
+          "description": "MIME nesting depth exceeded `MAX_MIME_DEPTH`. Emitted alongside\na terminal `ContentError::LimitExceeded`.",
+          "type": "string"
+        },
+        {
+          "const": "parse_mime_part_count_exceeded",
+          "description": "MIME part count exceeded `MAX_MIME_PARTS`. Emitted alongside a\nterminal `ContentError::LimitExceeded`.",
+          "type": "string"
+        },
+        {
+          "const": "parse_header_count_exceeded",
+          "description": "Header count exceeded `MAX_HEADER_COUNT`. Emitted alongside a\nterminal `ContentError::LimitExceeded`.",
+          "type": "string"
+        },
+        {
+          "const": "parse_attachment_filename_rewritten",
+          "description": "An attachment filename contained path separators, parent\nreferences, reserved Windows names, or other unsafe characters\nand was rewritten to a safe form.",
+          "type": "string"
+        },
+        {
+          "const": "html_hidden_content_detected",
+          "description": "HTML content contained hidden elements (e.g. `display:none`,\n`visibility:hidden`, `opacity:0`, off-screen positioning,\nzero font size, or background-color-matching text). Hidden\ncontent is stripped from `body_text` but may remain in\n`body_html` when the posture allows HTML exposure. Detail format:\n`method=<display_none|visibility_hidden|opacity_0|offscreen|zero_font|color_match>`\noptionally followed by `,count=N` when summarized.",
+          "type": "string"
+        },
+        {
+          "const": "html_link_text_href_mismatch",
+          "description": "An HTML anchor's visible text contained a URL-looking token\nwhose registrable domain differs from the anchor's `href`\nregistrable domain. Detail format:\n`text_domain=<ascii>,href_domain=<ascii>`.\n\nReflects the original message content (pre-ammonia), not the\nsanitized `body_html`. An anchor stripped by ammonia may still\nproduce this warning \u2014 the warning signals the message's\nintent, not the sanitized output.",
+          "type": "string"
+        },
+        {
+          "const": "html_script_stripped",
+          "description": "One or more `<script>` elements were removed during HTML\nsanitization. Detail format: `count=N`.",
+          "type": "string"
+        },
+        {
+          "const": "html_style_stripped",
+          "description": "One or more `<style>` elements were removed during HTML\nsanitization. Detail format: `count=N`.",
+          "type": "string"
+        },
+        {
+          "const": "html_remote_image_stripped",
+          "description": "One or more `<img>` elements had their `src`/`srcset`\nattributes removed during HTML sanitization to prevent\nremote tracking-pixel loads. Detail format: `count=N`.",
+          "type": "string"
+        },
+        {
+          "const": "html_anchor_unparsable_href",
+          "description": "An HTML anchor's `href` could not be resolved to a registrable\ndomain via the Public Suffix List, but the anchor's visible text\ncontained a URL-looking token (detected by `linkify`). This\ndistinguishes \"we checked and it's fine\" from \"we couldn't\ncheck.\" Consumers should treat the anchor with suspicion.",
+          "type": "string"
+        },
+        {
+          "const": "lookalike_mixed_script",
+          "description": "A domain label contained characters from multiple Unicode\nscripts outside the TR39 Highly Restrictive profile. Detail\nformat: `domain=<punycode>,scripts=<S1+S2>`.",
+          "type": "string"
+        },
+        {
+          "const": "lookalike_homograph_domain",
+          "description": "A domain's TR39 skeleton matched a different domain's\nskeleton, indicating a homograph attack, OR bidi-override\ncharacters were stripped from the domain before processing.\nDetail format: `domain=<punycode>,skeleton_match=<other_punycode>`\nor `domain=<punycode>,reason=bidi_pre_strip`.",
+          "type": "string"
+        },
+        {
+          "const": "lookalike_idn_punycode",
+          "description": "A domain was processed in punycode form (xn--) and the\nUnicode U-label form is reported for informational use.\nDetail format: `domain=<punycode>,ulabel=<unicode>`.",
+          "type": "string"
+        },
+        {
+          "const": "lookalike_filename_extension_spoof",
+          "description": "A filename's visible extension differs from its extension\nafter bidi-override stripping, indicating an RLO-bidi\nextension spoof. Detail format:\n`visible=<after_strip>,declared=<original>`.",
+          "type": "string"
+        },
+        {
+          "const": "server_non_atomic_move_fallback",
+          "description": "The IMAP server lacked the MOVE capability; a non-atomic\nCOPY+DELETE+EXPUNGE fallback was used. Other messages with\n`\\Deleted` flag in the source folder may have been expunged.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
+  "properties": {
+    "meta": {
+      "$ref": "#/$defs/SendEmailMeta",
+      "description": "Server-controlled metadata. Trusted."
+    },
+    "security_warnings": {
+      "description": "Structured security observations. Trusted metadata.",
+      "items": {
+        "$ref": "#/$defs/SecurityWarning"
+      },
+      "type": "array"
+    },
+    "untrusted": {
+      "description": "Sanitized content derived from email data. Untrusted.",
+      "type": "null"
+    }
+  },
+  "required": [
+    "meta"
+  ],
+  "type": "object"
+}

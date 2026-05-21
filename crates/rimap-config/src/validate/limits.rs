@@ -50,3 +50,65 @@ pub(super) fn validate_limits(limits: &LimitsConfig) -> Result<(), ConfigError> 
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::panic, reason = "test failure paths")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_pass() {
+        let limits = LimitsConfig::default();
+        assert!(validate_limits(&limits).is_ok());
+    }
+
+    #[test]
+    fn zero_commands_per_second_rejected() {
+        let limits = LimitsConfig {
+            commands_per_second: 0,
+            ..LimitsConfig::default()
+        };
+        let err = validate_limits(&limits).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidLimit { field, .. } if *field == "limits.commands_per_second")
+        );
+    }
+
+    #[test]
+    fn zero_max_append_bytes_rejected() {
+        let limits = LimitsConfig {
+            max_append_bytes: 0,
+            ..LimitsConfig::default()
+        };
+        let err = validate_limits(&limits).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidLimit { field, .. } if *field == "limits.max_append_bytes")
+        );
+    }
+
+    #[test]
+    fn max_search_results_above_cap_rejected() {
+        let base = LimitsConfig::default();
+        let limits = LimitsConfig {
+            max_search_results: base.max_search_results_cap + 1,
+            ..base
+        };
+        let err = validate_limits(&limits).unwrap_err();
+        let ConfigError::InvalidLimit { field, reason } = &err else {
+            panic!("expected InvalidLimit, got {err:?}");
+        };
+        assert_eq!(*field, "limits.max_search_results");
+        assert!(reason.contains("exceeds cap"));
+    }
+
+    #[test]
+    fn max_search_results_at_cap_accepted() {
+        let base = LimitsConfig::default();
+        let limits = LimitsConfig {
+            max_search_results: base.max_search_results_cap,
+            ..base
+        };
+        assert!(validate_limits(&limits).is_ok());
+    }
+}

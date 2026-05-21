@@ -136,3 +136,100 @@ fn require_writable_dir(dir: &Path) -> Result<(), ConfigError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::panic, reason = "test failure paths")]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn audit_with(path: PathBuf, base: Option<PathBuf>) -> AuditConfig {
+        AuditConfig {
+            path,
+            rotate_bytes: 10_485_760,
+            rotate_keep: 5,
+            retention_seconds: None,
+            provenance_window_seconds: 60,
+            fail_open: false,
+            allowed_base_dir: base,
+        }
+    }
+
+    fn audit_with_retention(retention: Option<u64>) -> AuditConfig {
+        let mut audit = audit_with(PathBuf::from("/tmp/audit.jsonl"), None);
+        audit.retention_seconds = retention;
+        audit
+    }
+
+    #[test]
+    fn audit_retention_seconds_zero_rejected() {
+        let audit = audit_with_retention(Some(0));
+        let err = validate_audit_config(&audit).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidLimit { field, .. } if *field == "audit.retention_seconds")
+        );
+    }
+
+    #[test]
+    fn audit_retention_seconds_positive_accepted() {
+        let audit = audit_with_retention(Some(3600));
+        assert!(validate_audit_config(&audit).is_ok());
+    }
+
+    #[test]
+    fn audit_retention_seconds_none_accepted() {
+        let audit = audit_with(PathBuf::from("/tmp/audit.jsonl"), None);
+        assert!(validate_audit_config(&audit).is_ok());
+    }
+
+    #[test]
+    fn require_writable_dir_rejects_missing_path() {
+        let err = require_writable_dir(Path::new("/this/path/should/never/exist/xyz")).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("does not exist"));
+    }
+
+    #[test]
+    fn require_writable_dir_rejects_non_directory_path() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("a_file");
+        std::fs::write(&file, b"").unwrap();
+        let err = require_writable_dir(&file).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("not a directory"));
+    }
+
+    #[test]
+    fn require_writable_dir_accepts_writable_dir() {
+        let tmp = TempDir::new().unwrap();
+        assert!(require_writable_dir(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn enforce_audit_containment_rejects_path_outside_base() {
+        let base_tmp = TempDir::new().unwrap();
+        let other_tmp = TempDir::new().unwrap();
+        let audit = audit_with(
+            other_tmp.path().join("audit.jsonl"),
+            Some(base_tmp.path().to_path_buf()),
+        );
+        let err = enforce_audit_containment(&audit).unwrap_err();
+        assert!(matches!(err, ConfigError::AuditPathOutsideBase { .. }));
+    }
+
+    #[test]
+    fn enforce_audit_containment_accepts_path_inside_base() {
+        let base_tmp = TempDir::new().unwrap();
+        let audit = audit_with(
+            base_tmp.path().join("audit.jsonl"),
+            Some(base_tmp.path().to_path_buf()),
+        );
+        assert!(enforce_audit_containment(&audit).is_ok());
+    }
+}

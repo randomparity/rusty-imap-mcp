@@ -13,5 +13,5 @@ fuzz_target!(|data: &[u8]| {
     // correctly classifies as non-smuggling. content_mime exercises the
     // same code path through `parse_message` for end-to-end behaviour.
     let mut warnings: Vec<SecurityWarning> = Vec::new();
-    let _ = rimap_content::testutil::scrub_header_smuggling(data, &mut warnings);
+    let _ = rimap_content::test_support::scrub_header_smuggling(data, &mut warnings);
 });

@@ -1,4 +1,4 @@
-//! Test/diagnostic label helpers. Gated on the `test-util` feature so the
+//! Test/diagnostic label helpers. Gated on the `test-support` feature so the
 //! mappings are not part of the regular public API surface.
 //!
 //! Callers decide how to treat unknown variants (both enums are
@@ -7,11 +7,11 @@
 //! the corpus test harness panics on `None` (a new variant = a harness
 //! gap that must fail loudly).
 
-/// Re-export of [`crate::html::process`] under the alias `sanitize_html`
+/// Re-export of [`crate::html::sanitize`] under the alias `sanitize_html`
 /// for fuzz harnesses and out-of-tree integration tests. Production code
-/// must continue to reach `process` through the [`crate::parse::parse_message`]
+/// must continue to reach `sanitize` through the [`crate::parse::parse_message`]
 /// pipeline.
-pub use crate::html::process as sanitize_html;
+pub use crate::html::sanitize as sanitize_html;
 
 /// Re-export of [`crate::parse::mime_scrub::scrub_header_smuggling`]
 /// for fuzz harnesses. Production code reaches this function through
@@ -206,11 +206,11 @@ mod tests {
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
-mod test_util_reexports {
+mod test_support_reexports {
     use crate::output::SecurityWarning;
 
     #[test]
-    fn fuzz_entries_are_callable_via_testutil() {
+    fn fuzz_entries_are_callable_via_test_support() {
         // sanitize_html: minimal HTML body should round-trip without panic.
         let result = super::sanitize_html(b"<p>hi</p>", Some("utf-8"))
             .expect("sanitize_html on minimal HTML must succeed");
