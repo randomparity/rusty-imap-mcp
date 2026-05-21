@@ -37,6 +37,51 @@ pub const NOT_INITIALIZED: McpCode = McpCode(-32002);
 #[must_use]
 pub fn to_mcp_error(err: &RimapError) -> ErrorData {
     let message = err.to_string();
+
+    // Variants with structured data: build `data` from typed fields
+    // and short-circuit so the generic `code()`-based mapping below
+    // doesn't lose the data argument.
+    match err {
+        RimapError::NoAccount { available } => {
+            let data = serde_json::json!({
+                "error_code": ErrorCode::NoAccount.as_str(),
+                "available": available,
+                "hint": "call use_account or pass account argument",
+            });
+            return ErrorData::invalid_params(message, Some(data));
+        }
+        RimapError::UnknownAccount { name, available } => {
+            let data = serde_json::json!({
+                "error_code": ErrorCode::UnknownAccount.as_str(),
+                "name": name,
+                "available": available,
+            });
+            return ErrorData::invalid_params(message, Some(data));
+        }
+        RimapError::UidValidityChanged {
+            folder,
+            expected,
+            actual,
+            ..
+        } => {
+            let data = serde_json::json!({
+                "error_code": ErrorCode::UidValidityChanged.as_str(),
+                "folder": folder,
+                "expected": expected,
+                "actual": actual,
+            });
+            return ErrorData::invalid_params(message, Some(data));
+        }
+        _ => {}
+    }
+
+    // Existing code-based dispatch for non-structured variants. The
+    // `NoAccount` / `UnknownAccount` / `UidValidityChanged` arms below
+    // are defensive: the dedicated `RimapError` variants are short-
+    // circuited above with structured data, so these only fire if a
+    // future `RimapError::Authz { code: ErrorCode::NoAccount, .. }`
+    // (or similar) is ever constructed by accident — they produce a
+    // correct but data-less response rather than a wrong code.
     match err.code() {
         ErrorCode::InvalidInput
         | ErrorCode::NoAccount
@@ -67,6 +112,8 @@ pub fn to_mcp_error(err: &RimapError) -> ErrorData {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::expect_used, reason = "tests")]
+
     use rimap_core::{ErrorCode, RimapError};
     use rmcp::model::ErrorCode as McpCode;
 
@@ -163,5 +210,57 @@ mod tests {
         assert!(!mcp.message.contains("Sent"));
         assert!(!mcp.message.contains("expunge_folders"));
         assert_eq!(mcp.message, "operation denied for this folder");
+    }
+
+    #[test]
+    fn no_account_carries_structured_data() {
+        let err = RimapError::NoAccount {
+            available: vec!["work".into(), "personal".into()],
+        };
+        let mcp = to_mcp_error(&err);
+        let data = mcp.data.as_ref().expect("data populated");
+        let data_value = serde_json::to_value(data).expect("data serializes");
+        assert_eq!(data_value["error_code"], "ERR_NO_ACCOUNT");
+        assert_eq!(
+            data_value["available"],
+            serde_json::json!(["work", "personal"]),
+        );
+        assert!(
+            data_value["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("use_account")),
+            "hint must mention use_account; got {data_value}",
+        );
+    }
+
+    #[test]
+    fn unknown_account_carries_structured_data() {
+        let err = RimapError::UnknownAccount {
+            name: "missing".into(),
+            available: vec!["work".into()],
+        };
+        let mcp = to_mcp_error(&err);
+        let data = mcp.data.as_ref().expect("data populated");
+        let data_value = serde_json::to_value(data).expect("data serializes");
+        assert_eq!(data_value["error_code"], "ERR_UNKNOWN_ACCOUNT");
+        assert_eq!(data_value["name"], "missing");
+        assert_eq!(data_value["available"], serde_json::json!(["work"]));
+    }
+
+    #[test]
+    fn uid_validity_changed_carries_structured_data() {
+        let err = RimapError::UidValidityChanged {
+            folder: "INBOX".into(),
+            expected: 100,
+            actual: 101,
+            source: Box::new(std::io::Error::other("test source")),
+        };
+        let mcp = to_mcp_error(&err);
+        let data = mcp.data.as_ref().expect("data populated");
+        let data_value = serde_json::to_value(data).expect("data serializes");
+        assert_eq!(data_value["error_code"], "ERR_UID_VALIDITY_CHANGED");
+        assert_eq!(data_value["folder"], "INBOX");
+        assert_eq!(data_value["expected"], 100);
+        assert_eq!(data_value["actual"], 101);
     }
 }

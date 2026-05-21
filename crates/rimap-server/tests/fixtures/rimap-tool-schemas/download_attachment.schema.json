@@ -1,5 +1,99 @@
 {
   "$defs": {
+    "DownloadAttachmentMeta": {
+      "description": "Trusted metadata for a `download_attachment` response.",
+      "properties": {
+        "folder": {
+          "description": "IMAP folder the message was fetched from.",
+          "type": "string"
+        },
+        "mime_declared": {
+          "description": "`Content-Type` declared by the MIME part (`type/subtype`).",
+          "type": "string"
+        },
+        "mime_sniffed": {
+          "description": "Magic-byte-sniffed MIME type, if any signature matched.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "part_id": {
+          "description": "IMAP part ID that was extracted.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path of the written attachment inside the sandbox.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the decoded bytes, hex-encoded.",
+          "type": "string"
+        },
+        "size_bytes": {
+          "description": "Attachment body size in bytes (post-transfer-decoding).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uid": {
+          "description": "UID of the parent message.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "folder",
+        "uid",
+        "part_id",
+        "path",
+        "size_bytes",
+        "sha256",
+        "mime_declared"
+      ],
+      "type": "object"
+    },
+    "DownloadAttachmentUntrusted": {
+      "description": "Untrusted payload for a `download_attachment` response.",
+      "properties": {
+        "filename_original": {
+          "description": "Original filename from `Content-Disposition` / `Content-Type`\nname parameter (sanitized).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SecurityWarning": {
+      "description": "A single warning emitted by the content pipeline.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/WarningCode",
+          "description": "Classification of the warning."
+        },
+        "detail": {
+          "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
     "WarningCode": {
       "description": "Classification of pipeline warnings. New variants will be added as\nnew detectors land \u2014 the enum is `#[non_exhaustive]` so matches\noutside this crate must include a wildcard arm.",
       "oneOf": [
@@ -121,115 +215,34 @@
       ]
     }
   },
-  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Trusted metadata for a `download_attachment` response.",
-      "properties": {
-        "folder": {
-          "description": "IMAP folder the message was fetched from.",
-          "type": "string"
-        },
-        "mime_declared": {
-          "description": "`Content-Type` declared by the MIME part (`type/subtype`).",
-          "type": "string"
-        },
-        "mime_sniffed": {
-          "description": "Magic-byte-sniffed MIME type, if any signature matched.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "part_id": {
-          "description": "IMAP part ID that was extracted.",
-          "type": "string"
-        },
-        "path": {
-          "description": "Absolute path of the written attachment inside the sandbox.",
-          "type": "string"
-        },
-        "sha256": {
-          "description": "SHA-256 of the decoded bytes, hex-encoded.",
-          "type": "string"
-        },
-        "size_bytes": {
-          "description": "Attachment body size in bytes (post-transfer-decoding).",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "uid": {
-          "description": "UID of the parent message.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "folder",
-        "uid",
-        "part_id",
-        "path",
-        "size_bytes",
-        "sha256",
-        "mime_declared"
-      ],
-      "title": "DownloadAttachmentMeta",
-      "type": "object"
+      "$ref": "#/$defs/DownloadAttachmentMeta",
+      "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {
+      "description": "Structured security observations. Trusted metadata.",
       "items": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "A single warning emitted by the content pipeline.",
-        "properties": {
-          "code": {
-            "$ref": "#/$defs/WarningCode",
-            "description": "Classification of the warning."
-          },
-          "detail": {
-            "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "location": {
-            "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ],
-        "title": "SecurityWarning",
-        "type": "object"
+        "$ref": "#/$defs/SecurityWarning"
       },
       "type": "array"
     },
     "untrusted": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Untrusted payload for a `download_attachment` response.",
-      "properties": {
-        "filename_original": {
-          "description": "Original filename from `Content-Disposition` / `Content-Type`\nname parameter (sanitized).",
-          "type": [
-            "string",
-            "null"
-          ]
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DownloadAttachmentUntrusted"
+        },
+        {
+          "type": "null"
         }
-      },
-      "title": "DownloadAttachmentUntrusted",
-      "type": "object"
+      ],
+      "description": "Sanitized content derived from email data. Untrusted."
     }
   },
   "required": [
-    "meta",
-    "untrusted"
+    "meta"
   ],
   "type": "object"
 }

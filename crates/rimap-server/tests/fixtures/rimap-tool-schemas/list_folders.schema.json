@@ -64,6 +64,29 @@
       ],
       "type": "object"
     },
+    "ListFoldersMeta": {
+      "description": "Trusted metadata for a `list_folders` response.",
+      "properties": {
+        "folders": {
+          "description": "All folders returned by the server.",
+          "items": {
+            "$ref": "#/$defs/FolderEntry"
+          },
+          "type": "array"
+        },
+        "security_warnings": {
+          "description": "Security warnings accumulated while sanitizing folder names and\nflags against bidi overrides, zero-width characters, and C0/C1\ncontrol bytes (#98). Serialized only when non-empty.",
+          "items": {
+            "$ref": "#/$defs/SecurityWarning"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "folders"
+      ],
+      "type": "object"
+    },
     "SecurityWarning": {
       "description": "A single warning emitted by the content pipeline.",
       "properties": {
@@ -212,64 +235,23 @@
       ]
     }
   },
-  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Trusted metadata for a `list_folders` response.",
-      "properties": {
-        "folders": {
-          "description": "All folders returned by the server.",
-          "items": {
-            "$ref": "#/$defs/FolderEntry"
-          },
-          "type": "array"
-        },
-        "security_warnings": {
-          "description": "Security warnings accumulated while sanitizing folder names and\nflags against bidi overrides, zero-width characters, and C0/C1\ncontrol bytes (#98). Serialized only when non-empty.",
-          "items": {
-            "$ref": "#/$defs/SecurityWarning"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "folders"
-      ],
-      "title": "ListFoldersMeta",
-      "type": "object"
+      "$ref": "#/$defs/ListFoldersMeta",
+      "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {
+      "description": "Structured security observations. Trusted metadata.",
       "items": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "A single warning emitted by the content pipeline.",
-        "properties": {
-          "code": {
-            "$ref": "#/$defs/WarningCode",
-            "description": "Classification of the warning."
-          },
-          "detail": {
-            "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "location": {
-            "description": "Logical location in the message (e.g. `\"header:subject\"`,\n`\"body:part[2]\"`, `\"attachment[0]\"`). `None` for crate-wide events.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ],
-        "title": "SecurityWarning",
-        "type": "object"
+        "$ref": "#/$defs/SecurityWarning"
       },
       "type": "array"
+    },
+    "untrusted": {
+      "description": "Sanitized content derived from email data. Untrusted.",
+      "type": "null"
     }
   },
   "required": [

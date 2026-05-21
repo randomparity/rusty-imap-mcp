@@ -120,8 +120,7 @@ pub struct ListLabelsInput {
 }
 
 /// Trusted metadata for `add_label` and `remove_label` responses.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct LabelsMeta {
     /// Folder the label was applied to.
     pub folder: String,
@@ -136,8 +135,7 @@ pub struct LabelsMeta {
 }
 
 /// Trusted metadata for a `list_labels` response.
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "test-support", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListLabelsMeta {
     /// Folder the labels were fetched from.
     pub folder: String,

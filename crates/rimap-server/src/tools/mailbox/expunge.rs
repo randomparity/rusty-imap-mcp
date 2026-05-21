@@ -14,7 +14,7 @@ pub struct ExpungeInput {
 }
 
 /// Trusted metadata for an `expunge` response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ExpungeMeta {
     /// Folder that was expunged.
     pub folder: String,

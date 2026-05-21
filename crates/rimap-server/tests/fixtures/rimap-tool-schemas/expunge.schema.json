@@ -1,5 +1,35 @@
 {
   "$defs": {
+    "ExpungeMeta": {
+      "description": "Trusted metadata for an `expunge` response.",
+      "properties": {
+        "deleted_uids_before_expunge": {
+          "description": "UIDs that had the `\\Deleted` flag set before expunge.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "expunged_count": {
+          "description": "Number of messages permanently removed.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "folder": {
+          "description": "Folder that was expunged.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "folder",
+        "expunged_count",
+        "deleted_uids_before_expunge"
+      ],
+      "type": "object"
+    },
     "SecurityWarning": {
       "description": "A single warning emitted by the content pipeline.",
       "properties": {
@@ -24,26 +54,6 @@
       },
       "required": [
         "code"
-      ],
-      "type": "object"
-    },
-    "UseAccountMeta": {
-      "description": "Trusted metadata for a `use_account` response.",
-      "properties": {
-        "account": {
-          "description": "The account that is now active.",
-          "type": "string"
-        },
-        "previous": {
-          "description": "The previously active account, or `None` if none was set.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "account"
       ],
       "type": "object"
     },
@@ -172,7 +182,7 @@
   "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$ref": "#/$defs/UseAccountMeta",
+      "$ref": "#/$defs/ExpungeMeta",
       "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {

@@ -1,5 +1,23 @@
 {
   "$defs": {
+    "CreateFolderMeta": {
+      "description": "Trusted metadata for a `create_folder` response.",
+      "properties": {
+        "created": {
+          "description": "Always `true` when the handler returns `Ok`.",
+          "type": "boolean"
+        },
+        "folder": {
+          "description": "Name of the created folder.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "created",
+        "folder"
+      ],
+      "type": "object"
+    },
     "SecurityWarning": {
       "description": "A single warning emitted by the content pipeline.",
       "properties": {
@@ -24,26 +42,6 @@
       },
       "required": [
         "code"
-      ],
-      "type": "object"
-    },
-    "UseAccountMeta": {
-      "description": "Trusted metadata for a `use_account` response.",
-      "properties": {
-        "account": {
-          "description": "The account that is now active.",
-          "type": "string"
-        },
-        "previous": {
-          "description": "The previously active account, or `None` if none was set.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "account"
       ],
       "type": "object"
     },
@@ -172,7 +170,7 @@
   "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$ref": "#/$defs/UseAccountMeta",
+      "$ref": "#/$defs/CreateFolderMeta",
       "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {

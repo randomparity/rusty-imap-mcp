@@ -17,7 +17,7 @@ workspace = true
 
 [dependencies]
 rimap-core = { path = "../rimap-core", version = "0.1.0" }
-schemars = { workspace = true, optional = true }
+schemars = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -41,14 +41,11 @@ phf = { workspace = true }
 phf_codegen = { workspace = true }
 
 [features]
-# Test/diagnostic helpers and JsonSchema derives for out-of-tree tests
-# and tooling. Enables `rimap_content::test_support` (label helpers and
-# fuzz re-exports for the epvme_runner binary, fuzz harnesses, and
-# integration tests) plus JsonSchema derives on the wire-facing public
-# types (SecurityWarning, WarningCode, AttachmentMeta) so rimap-server's
-# wire-conformance harness can generate schemas for the full response
-# envelope. Off in production — schemars stays out of the runtime dep graph.
-test-support = ["dep:schemars"]
+# Test/diagnostic helpers for out-of-tree tests and tooling. Enables
+# `rimap_content::test_support` (label helpers and fuzz re-exports for
+# the epvme_runner binary, fuzz harnesses, and integration tests).
+# JsonSchema derives on wire-facing types are now unconditional (D1).
+test-support = []
 
 [[bin]]
 name = "epvme_runner"
