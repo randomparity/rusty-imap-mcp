@@ -119,6 +119,33 @@ for the per-client configuration pattern.
 
 Proton Bridge uses a self-signed TLS certificate that is not in your
 system trust store. Pin the certificate fingerprint so the server can
+
+### Optional: Customize tool availability
+
+The default `draft-safe` posture allows most operations except sending,
+deleting, and advanced search. You can fine-tune this with per-tool
+overrides:
+
+```toml
+[security]
+posture = "draft-safe"
+
+[security.tools]
+mark_read = "deny"                # preserve unread state
+"search.advanced_query" = "allow" # enable body/text search
+```
+
+Valid tool names and their default availability are listed in the
+[security postures](postures.md) documentation. Common patterns:
+
+- **Preserve unread state:** `mark_read = "deny"` in draft-safe
+- **Enable advanced search:** `"search.advanced_query" = "allow"` in draft-safe
+- **Block downloads:** `download_attachment = "deny"` in readonly
+
+See [configuration.md](configuration.md#per-tool-overrides) for the
+complete reference.
+
+
 verify it.
 
 ### Recommended: capture via `--dry-run`

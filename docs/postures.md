@@ -66,6 +66,90 @@ mark_read = "deny"                # deny even though draft-safe allows it
 
 ## Tool advertisement
 
+
+### Common override patterns
+
+Real-world examples of per-tool overrides:
+
+#### Preserve unread state in draft-safe
+
+```toml
+[security]
+posture = "draft-safe"
+
+[security.tools]
+mark_read = "deny"
+```
+
+Use case: Agent can search, fetch, and compose drafts, but cannot
+accidentally mark messages as read. Useful when the agent is triaging
+or summarizing without taking action.
+
+#### Enable advanced search in draft-safe
+
+```toml
+[security]
+posture = "draft-safe"
+
+[security.tools]
+"search.advanced_query" = "allow"
+```
+
+Use case: Agent needs to search message bodies or headers but should
+not send email. The `advanced_query` escape hatch allows body/text/bcc
+searches while keeping `send_email` denied.
+
+**Security note:** Body search is classified as a "content oracle"
+because it scans untrusted adversarial message content. Enable only if
+you trust the agent not to exfiltrate search results.
+
+#### Block downloads in readonly
+
+```toml
+[security]
+posture = "readonly"
+
+[security.tools]
+download_attachment = "deny"
+```
+
+Use case: Agent can read message metadata and text but cannot write
+files to the sandbox. Useful for pure analysis workflows where
+attachment content is not needed.
+
+#### Allow HTML in draft-safe
+
+```toml
+[security]
+posture = "draft-safe"
+
+[security.tools]
+"fetch_message.include_html" = "allow"
+```
+
+Use case: Agent needs to analyze HTML structure (e.g., detecting
+phishing via link/text mismatches) but should not send email. The
+`.include_html` sub-capability is gated separately because HTML
+parsing increases attack surface.
+
+**Security note:** HTML parts are sanitized but still carry higher
+risk than plain text. Enable only if the agent's task requires HTML.
+
+#### Deny sending in full posture
+
+```toml
+[security]
+posture = "full"
+
+[security.tools]
+send_email = "deny"
+```
+
+Use case: Agent can delete messages and manage folders but cannot send
+email. Useful when SMTP credentials are not available or when you want
+the agent to clean up the mailbox without outbound access.
+
+
 Tools denied by the effective matrix (posture + overrides) are **not
 advertised** via the MCP `list_tools` response. Denial is enforced at
 both discovery and dispatch (defense in depth).
