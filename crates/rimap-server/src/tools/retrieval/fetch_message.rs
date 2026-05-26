@@ -71,15 +71,12 @@ pub struct FetchMessageUntrusted {
     pub cc: Vec<String>,
     /// `Reply-To` header.
     pub reply_to: Option<String>,
-    /// `Date` header. Serialized as a 9-element integer tuple:
-    /// `[year, ordinal, hour, minute, second, nanosecond,
-    ///   offset_whole_hours, offset_minutes_past_hour,
-    ///   offset_seconds_past_minute]`.
-    ///
-    /// Note: the `time` crate does not enable `serde-human-readable` in
-    /// this workspace, so `OffsetDateTime` always serializes as a tuple
-    /// regardless of the serializer's `is_human_readable()` flag.
-    #[schemars(schema_with = "offset_date_time_tuple_schema")]
+    /// `Date` header as an RFC 3339 / ISO 8601 timestamp in UTC, e.g.
+    /// `"2025-01-29T17:35:39Z"`; `null` when the header is absent. The
+    /// instant is normalized to UTC by the content pipeline, so the
+    /// offset is always `Z`. Mirrors `search`'s string-valued `date`.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schemars(schema_with = "rfc3339_date_time_schema")]
     pub date: Option<time::OffsetDateTime>,
     /// MIME attachment parts found in the message.
     pub attachments: Vec<rimap_content::AttachmentMeta>,
@@ -161,40 +158,61 @@ pub async fn handle(
     .with_warnings(content.security_warnings))
 }
 
-/// JSON Schema for `time::OffsetDateTime` as serialized by the `time` crate
-/// without the `serde-human-readable` feature.
+/// JSON Schema for the RFC 3339 string form of `FetchMessageUntrusted::date`.
 ///
-/// The `time` crate serializes `OffsetDateTime` as a 9-element integer tuple:
-/// `[year, day_of_year, hour, minute, second, nanosecond,
-///   offset_whole_hours, offset_minutes_past_hour, offset_seconds_past_minute]`.
-/// This matches the actual wire bytes produced by `serde_json::to_string` when
-/// the workspace does not enable `serde-human-readable` on the `time` crate.
+/// The field serializes via `time::serde::rfc3339::option`, producing a UTC
+/// timestamp string (or `null`). A plain `["string", "null"]` schema validates
+/// identically under every JSON Schema draft.
 ///
-/// Used via `#[schemars(schema_with = "offset_date_time_tuple_schema")]` on
+/// This replaces the `time` crate's default integer-tuple serialization, whose
+/// schema required Draft 2020-12 `prefixItems` + `items: false`. Draft-07
+/// validators (e.g. Ajv, the default in the official TypeScript MCP SDK) ignore
+/// `prefixItems` and read `items: false` as "the array must be empty", rejecting
+/// every element of a valid timestamp tuple and failing structured-output
+/// validation.
+///
+/// Used via `#[schemars(schema_with = "rfc3339_date_time_schema")]` on
 /// `FetchMessageUntrusted::date`.
-fn offset_date_time_tuple_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+fn rfc3339_date_time_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     use schemars::json_schema;
     json_schema!({
-        "type": ["array", "null"],
-        "description": concat!(
-            "time::OffsetDateTime as a 9-element integer tuple: ",
-            "[year, day_of_year, hour, minute, second, nanosecond, ",
-            "offset_whole_hours, offset_minutes_past_hour, ",
-            "offset_seconds_past_minute]. Null when the header is absent."
-        ),
-        "prefixItems": [
-            { "type": "integer", "description": "year" },
-            { "type": "integer", "description": "day_of_year (ordinal 1–366)" },
-            { "type": "integer", "description": "hour (0–23)" },
-            { "type": "integer", "description": "minute (0–59)" },
-            { "type": "integer", "description": "second (0–60)" },
-            { "type": "integer", "description": "nanosecond (0–999999999)" },
-            { "type": "integer", "description": "UTC offset: whole hours (-23–23)" },
-            { "type": "integer", "description": "UTC offset: minutes past hour (-59–59)" },
-            { "type": "integer", "description": "UTC offset: seconds past minute (-59–59)" }
-        ],
-        "minItems": 9,
-        "maxItems": 9,
-        "items": false
+        "type": ["string", "null"],
+        "format": "date-time"
     })
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    fn untrusted_with_date(date: Option<time::OffsetDateTime>) -> FetchMessageUntrusted {
+        FetchMessageUntrusted {
+            body_text: "hello".to_string(),
+            body_html: None,
+            subject: None,
+            from: None,
+            to: Vec::new(),
+            cc: Vec::new(),
+            reply_to: None,
+            date,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn date_serializes_as_rfc3339_utc_string() {
+        // The content pipeline normalizes the Date header to UTC, so the
+        // RFC 3339 form always carries a `Z` offset and no fractional part
+        // for whole-second timestamps.
+        let dt = time::macros::datetime!(2025-01-29 17:35:39 UTC);
+        let value = serde_json::to_value(untrusted_with_date(Some(dt))).expect("serialize");
+        assert_eq!(value["date"], serde_json::json!("2025-01-29T17:35:39Z"));
+    }
+
+    #[test]
+    fn absent_date_serializes_as_null() {
+        let value = serde_json::to_value(untrusted_with_date(None)).expect("serialize");
+        assert_eq!(value["date"], serde_json::Value::Null);
+    }
 }
