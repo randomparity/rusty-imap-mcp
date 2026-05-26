@@ -276,4 +276,82 @@ mod fixture_smoke_tests {
             );
         }
     }
+
+    /// Build a minimal, schema-valid `fetch_message` structured response
+    /// with `date` substituted into the untrusted payload. Required
+    /// fields mirror the published schema (`FetchMessageMeta`:
+    /// `folder`/`uid`/`size`/`truncated`; `FetchMessageUntrusted`:
+    /// `body_text`/`to`/`cc`/`date`/`attachments`).
+    fn fetch_message_payload(date: &Value) -> Value {
+        json!({
+            "meta": {
+                "folder": "INBOX",
+                "uid": 42u32,
+                "size": 1024u32,
+                "truncated": false,
+            },
+            "untrusted": {
+                "body_text": "hello",
+                "to": ["recipient@example.com"],
+                "cc": [],
+                "date": date.clone(),
+                "attachments": [],
+            },
+            "security_warnings": [],
+        })
+    }
+
+    /// Validate `payload` against the published `tool` schema under BOTH
+    /// the draft a strict MCP client uses (Draft-07 — the Ajv default in
+    /// the official TypeScript SDK) and the draft we advertise (2020-12).
+    ///
+    /// Forcing the draft is the entire point: `validator_for_tool_response`
+    /// auto-detects 2020-12 from the fixture's `$schema`, so it can never
+    /// reproduce how a Draft-07 client interprets the same schema. A field
+    /// that validates under 2020-12 but not Draft-07 (e.g. a `prefixItems`
+    /// tuple with `items:false`) sails past every other test and only
+    /// fails at a real client — which is exactly how the `date` tuple
+    /// regression escaped.
+    fn assert_validates_under_draft7_and_2020_12(tool: &'static str, payload: &Value) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rimap-tool-schemas")
+            .join(format!("{tool}.schema.json"));
+        let raw = std::fs::read_to_string(&path).expect("read tool schema fixture");
+        let schema: Value = serde_json::from_str(&raw).expect("parse tool schema fixture");
+        for draft in [jsonschema::Draft::Draft7, jsonschema::Draft::Draft202012] {
+            let validator = jsonschema::options()
+                .with_draft(draft)
+                .build(&schema)
+                .unwrap_or_else(|e| panic!("compile {tool} schema under {draft:?}: {e}"));
+            if !validator.is_valid(payload) {
+                let errors: Vec<String> = validator
+                    .iter_errors(payload)
+                    .map(|e| e.to_string())
+                    .collect();
+                panic!(
+                    "{tool} payload must validate under {draft:?}; errors:\n  {}\n\npayload: {payload}",
+                    errors.join("\n  ")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fetch_message_date_string_validates_under_draft7_and_2020_12() {
+        // Regression: `untrusted.date` was a 9-integer tuple described
+        // with Draft 2020-12 `prefixItems` + `items:false`. A Draft-07
+        // validator (Ajv default in the official TS MCP SDK) ignores
+        // `prefixItems` and reads `items:false` as "array must be empty",
+        // rejecting every element — the -32602 a real client hit.
+        // Serializing `date` as an RFC 3339 string validates identically
+        // under every draft.
+        let payload = fetch_message_payload(&json!("2025-01-29T17:35:39Z"));
+        assert_validates_under_draft7_and_2020_12("fetch_message", &payload);
+    }
+
+    #[test]
+    fn fetch_message_null_date_validates_under_draft7_and_2020_12() {
+        let payload = fetch_message_payload(&Value::Null);
+        assert_validates_under_draft7_and_2020_12("fetch_message", &payload);
+    }
 }

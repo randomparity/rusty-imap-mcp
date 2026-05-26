@@ -107,50 +107,10 @@
           "type": "array"
         },
         "date": {
-          "description": "`Date` header. Serialized as a 9-element integer tuple:\n`[year, ordinal, hour, minute, second, nanosecond,\n  offset_whole_hours, offset_minutes_past_hour,\n  offset_seconds_past_minute]`.\n\nNote: the `time` crate does not enable `serde-human-readable` in\nthis workspace, so `OffsetDateTime` always serializes as a tuple\nregardless of the serializer's `is_human_readable()` flag.",
-          "items": false,
-          "maxItems": 9,
-          "minItems": 9,
-          "prefixItems": [
-            {
-              "description": "year",
-              "type": "integer"
-            },
-            {
-              "description": "day_of_year (ordinal 1\u2013366)",
-              "type": "integer"
-            },
-            {
-              "description": "hour (0\u201323)",
-              "type": "integer"
-            },
-            {
-              "description": "minute (0\u201359)",
-              "type": "integer"
-            },
-            {
-              "description": "second (0\u201360)",
-              "type": "integer"
-            },
-            {
-              "description": "nanosecond (0\u2013999999999)",
-              "type": "integer"
-            },
-            {
-              "description": "UTC offset: whole hours (-23\u201323)",
-              "type": "integer"
-            },
-            {
-              "description": "UTC offset: minutes past hour (-59\u201359)",
-              "type": "integer"
-            },
-            {
-              "description": "UTC offset: seconds past minute (-59\u201359)",
-              "type": "integer"
-            }
-          ],
+          "description": "`Date` header as an RFC 3339 / ISO 8601 timestamp in UTC, e.g.\n`\"2025-01-29T17:35:39Z\"`; `null` when the header is absent. The\ninstant is normalized to UTC by the content pipeline, so the\noffset is always `Z`. Mirrors `search`'s string-valued `date`.",
+          "format": "date-time",
           "type": [
-            "array",
+            "string",
             "null"
           ]
         },
