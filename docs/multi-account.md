@@ -143,6 +143,46 @@ Each account has independent:
 - Security posture
 
 One account's rate limit or circuit breaker state does not affect
+
+## Per-account per-tool overrides
+
+In multi-account configs, `[defaults.security.tools]` sets the baseline
+for all accounts. Per-account `[[accounts]].security.tools` overrides
+merge on top:
+
+```toml
+[defaults.security]
+posture = "draft-safe"
+
+[defaults.security.tools]
+mark_read = "deny"  # baseline: preserve unread state for all accounts
+
+[[accounts]]
+name = "work"
+# ... imap/smtp config ...
+# Inherits mark_read = "deny" from defaults
+
+[[accounts]]
+name = "personal"
+# ... imap/smtp config ...
+
+[accounts.security.tools]
+mark_read = "allow"  # override: personal account can mark read
+"search.advanced_query" = "allow"  # personal account can search bodies
+```
+
+**Merge semantics:**
+- Per-account overrides replace defaults for the same tool
+- Tools not mentioned in per-account inherit from defaults
+- Per-account posture (if set) replaces default posture
+- Per-account overrides apply on top of per-account posture
+
+In the example above:
+- `work` account: `mark_read` denied (inherited from defaults)
+- `personal` account: `mark_read` allowed (per-account override),
+  `search.advanced_query` allowed (per-account override)
+
+
 another.
 
 ## Backward compatibility

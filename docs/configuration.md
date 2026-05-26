@@ -189,12 +189,54 @@ mark_read = "deny"                # deny even though draft-safe allows it
 "search.advanced_query" = "allow" # allow even though draft-safe denies it
 ```
 
-Valid tool names: `list_folders`, `search`, `search.advanced_query`,
-`fetch_message`, `fetch_message.include_html`, `list_attachments`,
-`download_attachment`, `mark_read`, `mark_unread`, `flag`, `unflag`,
-`add_label`, `remove_label`, `list_labels`, `move_message`,
-`create_draft`, `send_email`, `delete_message`, `create_folder`,
-`rename_folder`, `expunge`, `delete_folder`.
+#### Valid tool names
+
+All 24 tool capabilities recognized by `[security.tools]`:
+
+| Tool name | Description | Default posture |
+|-----------|-------------|-----------------|
+| `list_folders` | List IMAP folders | readonly+ |
+| `search` | Structured search (subject, from, to, dates, flags) | readonly+ |
+| `search.advanced_query` | Advanced search (body, text, bcc, headers) | full+ |
+| `fetch_message` | Fetch message (text parts only) | readonly+ |
+| `fetch_message.include_html` | Fetch message with HTML parts | full+ |
+| `list_attachments` | List message attachments | readonly+ |
+| `download_attachment` | Download attachment to sandbox | readonly+ |
+| `mark_read` | Mark message as read | draft-safe+ |
+| `mark_unread` | Mark message as unread | draft-safe+ |
+| `flag` | Add star/flag | draft-safe+ |
+| `unflag` | Remove star/flag | draft-safe+ |
+| `add_label` | Add label/tag | draft-safe+ |
+| `remove_label` | Remove label/tag | draft-safe+ |
+| `list_labels` | List available labels | readonly+ |
+| `move_message` | Move message to folder | draft-safe+ |
+| `create_draft` | Create draft with $PendingReview | draft-safe+ |
+| `send_email` | Send email via SMTP | full+ |
+| `delete_message` | Mark message as deleted | full+ |
+| `create_folder` | Create new folder | full+ |
+| `rename_folder` | Rename existing folder | full+ |
+| `expunge` | Permanently delete marked messages | destructive |
+| `delete_folder` | Permanently delete folder | destructive |
+| `use_account` | Switch active account (multi-account only) | always available |
+| `list_accounts` | List configured accounts (multi-account only) | always available |
+
+**Note:** "readonly+" means allowed in readonly and all higher postures.
+"draft-safe+" means allowed in draft-safe and all higher postures.
+
+Sub-capabilities (`.advanced_query`, `.include_html`) are separate
+authorization gates within their parent tool. The parent tool name
+(`search`, `fetch_message`) controls the base capability; the
+sub-capability controls the escape hatch.
+
+#### Override semantics
+
+- `"allow"` grants the tool regardless of posture
+- `"deny"` blocks the tool regardless of posture
+- An override matching the posture's default is a no-op (not an error)
+- Unknown tool names are rejected at config validation with `ERR_CONFIG`
+
+If you see `unknown tool name 'mark_as_read'`, check the spelling
+against the table above. The correct name is `mark_read`.
 
 ## `[limits]` section
 
