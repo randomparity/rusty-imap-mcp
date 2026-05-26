@@ -191,7 +191,7 @@ mark_read = "deny"                # deny even though draft-safe allows it
 
 #### Valid tool names
 
-All 24 tool capabilities recognized by `[security.tools]`:
+All 24 valid tool names for `[security.tools]`:
 
 | Tool name | Description | Default posture |
 |-----------|-------------|-----------------|
@@ -217,11 +217,17 @@ All 24 tool capabilities recognized by `[security.tools]`:
 | `rename_folder` | Rename existing folder | full+ |
 | `expunge` | Permanently delete marked messages | destructive |
 | `delete_folder` | Permanently delete folder | destructive |
-| `use_account` | Switch active account (multi-account only) | always available |
-| `list_accounts` | List configured accounts (multi-account only) | always available |
+| `use_account` | Switch active account (multi-account only) | always available (not gateable¹) |
+| `list_accounts` | List configured accounts (multi-account only) | always available (not gateable¹) |
 
 **Note:** "readonly+" means allowed in readonly and all higher postures.
 "draft-safe+" means allowed in draft-safe and all higher postures.
+
+¹ `use_account` and `list_accounts` are infrastructure tools, not
+posture-gated capabilities. They are always advertised and dispatchable,
+and `[security.tools]` cannot disable them. An `"allow"` or `"deny"`
+override targeting either name is accepted by config validation but has
+**no effect** at runtime — they remain available regardless.
 
 Sub-capabilities (`.advanced_query`, `.include_html`) are separate
 authorization gates within their parent tool. The parent tool name
@@ -234,6 +240,9 @@ sub-capability controls the escape hatch.
 - `"deny"` blocks the tool regardless of posture
 - An override matching the posture's default is a no-op (not an error)
 - Unknown tool names are rejected at config validation with `ERR_CONFIG`
+- Infrastructure tools (`use_account`, `list_accounts`) are not gated by
+  `[security.tools]`; overrides targeting them are accepted but have no
+  effect (see the note above)
 
 If you see `unknown tool name 'mark_as_read'`, check the spelling
 against the table above. The correct name is `mark_read`.
