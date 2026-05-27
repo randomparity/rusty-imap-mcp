@@ -321,6 +321,7 @@ impl ToolRedactionSchema for ToolName {
             Self::FetchMessage | Self::FetchMessageHtml => fetch_message_schema(self),
             Self::ListAttachments | Self::MarkRead | Self::MarkUnread => folder_uid_schema(self),
             Self::DownloadAttachment => download_attachment_schema(self),
+            Self::ExportMessages => export_messages_schema(self),
             Self::Flag | Self::Unflag => flag_schema(self),
             Self::MoveMessage => move_message_schema(self),
             Self::CreateDraft => create_draft_schema(self),
@@ -467,6 +468,25 @@ fn download_attachment_schema(tool: ToolName) -> RedactionSchema {
             ("folder", Verbatim(VtString)),
             ("uid", Verbatim(U64)),
             ("part", Verbatim(VtString)),
+            ("password", Forbidden),
+            ("token", Forbidden),
+        ],
+    )
+}
+
+fn export_messages_schema(tool: ToolName) -> RedactionSchema {
+    use FieldPolicy::{Forbidden, RedactString, Verbatim};
+    use VerbatimType::{Bool, String as VtString, U64, U64Array};
+    RedactionSchema::new(
+        tool,
+        &[
+            ("folder", Verbatim(VtString)),
+            ("uids", Verbatim(U64Array)),
+            ("expected_uidvalidity", Verbatim(U64)),
+            ("max_total_bytes", Verbatim(U64)),
+            ("allow_partial", Verbatim(Bool)),
+            ("dest_dir", RedactString),
+            ("filename", RedactString),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
