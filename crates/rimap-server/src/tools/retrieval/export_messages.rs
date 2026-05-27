@@ -1,6 +1,7 @@
 //! `export_messages` tool handler: bulk raw export of multiple UIDs to a
 //! single `git am`-able mbox file in the download sandbox.
 
+use rimap_imap::types::Uid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -92,6 +93,44 @@ pub struct ExportMessagesMeta {
     pub succeeded: Vec<ExportedUid>,
     /// Requested UIDs that failed, with reasons.
     pub failed: Vec<FailedUid>,
+}
+
+/// Max UIDs per export, shared with the mutation-tool batch cap.
+const MAX_EXPORT_UIDS: usize = 100;
+
+/// Validate and normalize the requested UID list: reject empty / over-cap,
+/// de-dup preserving first-seen order, and convert to `Uid`.
+///
+/// # Errors
+///
+/// `RimapError::Authz { code: InvalidInput }` for an empty list or one
+/// exceeding [`MAX_EXPORT_UIDS`].
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
+fn validate_uids(uids: Vec<core::num::NonZeroU32>) -> Result<Vec<Uid>, rimap_core::RimapError> {
+    if uids.is_empty() {
+        return Err(rimap_core::RimapError::invalid_input(
+            "uids must not be empty",
+        ));
+    }
+    if uids.len() > MAX_EXPORT_UIDS {
+        return Err(rimap_core::RimapError::invalid_input(format!(
+            "uids exceeds the maximum of {MAX_EXPORT_UIDS} per export"
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(uids.len());
+    for u in uids {
+        if seen.insert(u.get()) {
+            out.push(Uid::from(u));
+        }
+    }
+    Ok(out)
+}
+
+/// Clamp the caller-supplied aggregate byte budget to the hard ceiling.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
+fn clamp_total_bytes(requested: Option<u64>) -> u64 {
+    requested.map_or(MAX_EXPORT_TOTAL_BYTES, |n| n.min(MAX_EXPORT_TOTAL_BYTES))
 }
 
 /// Pinned mboxrd separator. `git am`/`mailsplit` use it only as a delimiter
@@ -216,6 +255,53 @@ pub async fn handle(
     Err(rimap_core::RimapError::Internal(
         "export_messages not yet implemented".into(),
     ))
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+mod input_tests {
+    use super::{MAX_EXPORT_TOTAL_BYTES, clamp_total_bytes, validate_uids};
+    use core::num::NonZeroU32;
+
+    fn nz(n: u32) -> NonZeroU32 {
+        NonZeroU32::new(n).unwrap()
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(validate_uids(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn rejects_over_100() {
+        let v: Vec<NonZeroU32> = (1..=101).map(nz).collect();
+        assert!(validate_uids(v).is_err());
+    }
+
+    #[test]
+    fn accepts_exactly_100() {
+        let v: Vec<NonZeroU32> = (1..=100).map(nz).collect();
+        assert_eq!(validate_uids(v).unwrap().len(), 100);
+    }
+
+    #[test]
+    fn dedups_preserving_first_order() {
+        let v = vec![nz(3), nz(1), nz(3), nz(2), nz(1)];
+        let out = validate_uids(v).unwrap();
+        let got: Vec<u32> = out.iter().map(|u| u.get()).collect();
+        assert_eq!(got, vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn clamp_none_is_ceiling() {
+        assert_eq!(clamp_total_bytes(None), MAX_EXPORT_TOTAL_BYTES);
+    }
+
+    #[test]
+    fn clamp_caps_oversized_request() {
+        assert_eq!(clamp_total_bytes(Some(u64::MAX)), MAX_EXPORT_TOTAL_BYTES);
+        assert_eq!(clamp_total_bytes(Some(1024)), 1024);
+    }
 }
 
 #[cfg(test)]
