@@ -3,7 +3,7 @@
 use std::sync::LazyLock;
 
 use rimap_content::{Content, ContentError, parse_message};
-use rimap_core::{ErrorCode, RimapError};
+use rimap_core::RimapError;
 use tokio::sync::Semaphore;
 
 /// Classify a [`ContentError`] into the appropriate [`RimapError`].
@@ -27,17 +27,13 @@ fn classify_content_error(err: &ContentError) -> RimapError {
     // behavior change. The `LimitExceeded` arm-delete IS a real gap
     // and is killed by `limit_exceeded_classifies_as_attachment_too_large`.
     match err {
-        // Phase 2 — structured `data` plumbing (deferred): the typed
-        // `limit_bytes`/`actual_bytes` from `ContentError::LimitExceeded`
-        // are absorbed into the message string via `err.to_string()` and
-        // lost before reaching `to_mcp_error`. Plumbing requires
-        // refactoring `ContentError` to carry typed fields. Tracked in
-        // GitHub issue #303; spec reference:
-        // docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md
-        // "Deferred work — Phase 2".
-        ContentError::LimitExceeded { .. } => RimapError::Authz {
-            code: ErrorCode::AttachmentTooLarge,
-            message: err.to_string(),
+        // The typed `kind`/`limit` from `ContentError::LimitExceeded` are
+        // carried into the dedicated `RimapError::AttachmentTooLarge` variant
+        // so they surface as structured MCP `data` (#303), rather than being
+        // absorbed into a message string.
+        ContentError::LimitExceeded { kind, limit } => RimapError::AttachmentTooLarge {
+            kind: (*kind).to_string(),
+            limit: *limit as u64,
         },
         ContentError::Malformed { .. } => RimapError::invalid_input(err.to_string()),
         // `ContentError` is `#[non_exhaustive]`: future variants fall through
@@ -112,9 +108,10 @@ where
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::unwrap_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
+    use rimap_core::ErrorCode;
 
     #[tokio::test]
     async fn parse_message_async_matches_sync() {
@@ -148,8 +145,13 @@ mod tests {
             kind: "mime_depth",
             limit: 8,
         };
-        let mapped = classify_content_error(&err);
-        assert_eq!(mapped.code(), ErrorCode::AttachmentTooLarge);
+        match classify_content_error(&err) {
+            RimapError::AttachmentTooLarge { kind, limit } => {
+                assert_eq!(kind, "mime_depth");
+                assert_eq!(limit, 8);
+            }
+            other => panic!("expected AttachmentTooLarge, got {other:?}"),
+        }
 
         // Sanity: Malformed → InvalidInput (same as `_` fallback).
         let malformed = ContentError::Malformed {
