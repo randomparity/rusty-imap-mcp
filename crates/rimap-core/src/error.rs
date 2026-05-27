@@ -270,6 +270,44 @@ pub enum RimapError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+    /// Rate limiter rejected the call. Carries the typed `retry_after_ms`
+    /// hint so MCP clients can implement programmatic backoff without
+    /// parsing prose. Routed from `AuthzError::RateLimited` by
+    /// `From<AuthzError> for RimapError`. See
+    /// `docs/superpowers/specs/2026-05-27-issue-303-structured-error-data-design.md`.
+    #[error("rate limited; retry after {retry_after_ms} ms")]
+    RateLimited {
+        /// How long the caller should wait before retrying, in milliseconds.
+        retry_after_ms: u64,
+    },
+    /// Circuit breaker is open; fast-failing. Carries the typed
+    /// `retry_after_ms` hint. `retry_after_ms == 0` means the breaker is
+    /// half-open and a probe is already in flight — back off briefly, it is
+    /// *not* "retry immediately". Routed from `AuthzError::CircuitOpen`.
+    #[error("circuit breaker open; retry after {retry_after_ms} ms")]
+    CircuitOpen {
+        /// How long the caller should wait before retrying, in milliseconds.
+        /// `0` is the half-open probe case (see variant docs).
+        retry_after_ms: u64,
+    },
+    /// A hard size/structure cap was hit. Carries the typed `kind` (which
+    /// limit) and `limit` (the cap value) so clients can choose a smaller
+    /// request. Fed by `ContentError::LimitExceeded` (content pipeline) and
+    /// `ImapError::SizeLimit` (IMAP fetch body cap, `kind = "fetch_body_bytes"`).
+    ///
+    /// Unlike `UidValidityChanged`, this variant carries no `#[source]`:
+    /// both producers are leaves whose only payload is now surfaced as the
+    /// typed `limit` field, and the content producer is classified from a
+    /// borrow and cannot supply one. This is the documented exception to the
+    /// "every IMAP-origin variant carries a source" rule on `UidValidityChanged`.
+    #[error("content limit exceeded: {kind} (limit={limit})")]
+    AttachmentTooLarge {
+        /// Which limit tripped (e.g. `"mime_depth"`, `"message_bytes"`,
+        /// `"fetch_body_bytes"`).
+        kind: String,
+        /// The cap value that was exceeded.
+        limit: u64,
+    },
 }
 
 impl RimapError {
@@ -298,6 +336,9 @@ impl RimapError {
             Self::NoAccount { .. } => ErrorCode::NoAccount,
             Self::UnknownAccount { .. } => ErrorCode::UnknownAccount,
             Self::UidValidityChanged { .. } => ErrorCode::UidValidityChanged,
+            Self::RateLimited { .. } => ErrorCode::RateLimited,
+            Self::CircuitOpen { .. } => ErrorCode::CircuitOpen,
+            Self::AttachmentTooLarge { .. } => ErrorCode::AttachmentTooLarge,
         }
     }
 }
@@ -424,6 +465,46 @@ mod tests {
             source: Box::new(std::io::Error::other("test source")),
         };
         assert_eq!(err.code(), ErrorCode::UidValidityChanged);
+    }
+
+    #[test]
+    fn rate_limited_variant_code_and_display() {
+        let err = RimapError::RateLimited {
+            retry_after_ms: 250,
+        };
+        assert_eq!(err.code(), ErrorCode::RateLimited);
+        let s = err.to_string();
+        assert!(
+            s.contains("250"),
+            "Display must include retry_after_ms; got {s}"
+        );
+        assert!(
+            !s.starts_with("ERR_"),
+            "structured variants drop the ERR_ prefix; got {s}"
+        );
+    }
+
+    #[test]
+    fn circuit_open_variant_code_and_display() {
+        let err = RimapError::CircuitOpen { retry_after_ms: 0 };
+        assert_eq!(err.code(), ErrorCode::CircuitOpen);
+        // retry_after_ms == 0 is the half-open probe case, still a valid hint.
+        assert!(err.to_string().contains('0'));
+    }
+
+    #[test]
+    fn attachment_too_large_variant_code_and_display() {
+        let err = RimapError::AttachmentTooLarge {
+            kind: "mime_depth".to_string(),
+            limit: 8,
+        };
+        assert_eq!(err.code(), ErrorCode::AttachmentTooLarge);
+        let s = err.to_string();
+        assert!(
+            s.contains("mime_depth"),
+            "Display must include kind; got {s}"
+        );
+        assert!(s.contains('8'), "Display must include limit; got {s}");
     }
 
     #[test]
