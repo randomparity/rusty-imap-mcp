@@ -1201,3 +1201,85 @@ mod source_seam_tests {
         .await;
     }
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::expect_used, reason = "tests")]
+mod git_am_tests {
+    use super::build_mbox;
+    use std::process::Command;
+
+    fn git(args: &[&str], cwd: &std::path::Path) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            // Isolate from host config so commit.gpgsign / global hooks /
+            // templates / init.defaultBranch cannot spuriously fail git am.
+            // The identity env vars above are load-bearing once global
+            // user.name/email is suppressed.
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs")
+    }
+
+    /// Emits CRLF (`\r\n`) line endings deliberately, mirroring raw RFC822
+    /// bytes; the format string mixes `\r\n` with line-continuation backslashes.
+    fn patch(n: u32, body_extra: &str) -> Vec<u8> {
+        // A minimal git-format-patch-style message: From/Subject/Date headers,
+        // then a unified diff creating file_<n>.txt.
+        format!(
+            "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\r\n\
+             From: Dev <dev@example.com>\r\n\
+             Date: Mon, 1 Jan 2024 0{n}:00:00 +0000\r\n\
+             Subject: [PATCH {n}/2] add file {n}{body_extra}\r\n\
+             \r\n\
+             ---\r\n \
+             file_{n}.txt | 1 +\r\n \
+             1 file changed, 1 insertion(+)\r\n\
+             \r\n\
+             diff --git a/file_{n}.txt b/file_{n}.txt\r\n\
+             new file mode 100644\r\n\
+             index 0000000..0000001\r\n\
+             --- /dev/null\r\n\
+             +++ b/file_{n}.txt\r\n\
+             @@ -0,0 +1 @@\r\n\
+             +content {n}\r\n\
+             -- \r\n\
+             2.40.0\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn git_am_applies_generated_mbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        assert!(git(&["init", "-q"], repo).status.success());
+
+        // A spurious `From `-leading line in the message (here in the header
+        // region) must be escaped by build_mbox, or git's mbox splitter would
+        // wrongly split the series there.
+        let mbox = build_mbox(&[patch(1, "\r\nFrom the author: note"), patch(2, "")]);
+        let mbox_path = repo.join("series.mbox");
+        std::fs::write(&mbox_path, &mbox).unwrap();
+
+        let out = git(&["am", mbox_path.to_str().unwrap()], repo);
+        assert!(
+            out.status.success(),
+            "git am failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+
+        let log = git(&["rev-list", "--count", "HEAD"], repo);
+        let count = String::from_utf8_lossy(&log.stdout).trim().to_string();
+        assert_eq!(count, "2", "expected 2 commits from a 2-patch series");
+        assert!(repo.join("file_1.txt").exists());
+        assert!(repo.join("file_2.txt").exists());
+    }
+}
