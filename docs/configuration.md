@@ -303,13 +303,38 @@ the download sandbox. Because that export is an unredacted raw-message
 oracle, the download root must be writable only by the server — the write
 authority must be separated from the agent that consumes the file.
 
-On Unix, this is enforced as a **fail-closed config precondition**: when
-`export_messages` is enabled and `[attachments].download_dir` is set,
-config validation rejects startup if the download root is group- or
-world-writable (any of mode bits `0o022` set). Use a private directory
-(e.g. mode `0o700`). An empty `download_dir` (the default per-session
-temporary directory) is created privately by the server and is not
-subject to this check.
+On Unix, this is enforced as a set of **fail-closed config preconditions**:
+when `export_messages` is enabled and `[attachments].download_dir` is set,
+config validation rejects startup if the download root
+
+- is group- or world-writable (any of mode bits `0o022` set) — use a
+  private directory (e.g. mode `0o700`);
+- is a **symlink** — the resolved path must not be redirectable by whoever
+  controls the link target; use a real directory;
+- has an **immediate parent that is group/world-writable without the sticky
+  bit** — otherwise another user could rename the root and substitute their
+  own directory. A sticky parent (the `/tmp` model, mode `0o1777`) is
+  accepted because it restricts rename/delete to each entry's owner.
+
+An empty `download_dir` (the default per-session temporary directory) is
+created privately by the server and is not subject to these checks. Only
+the **immediate** parent is validated; a writable, non-sticky *grand*parent
+is not walked — the runtime held-fd writer (below) is the backstop for
+deeper path components.
+
+These startup checks are gated on `export_messages` being enabled, because
+the raw-export oracle is the high-value asset they protect. `download_attachment`
+writes *decoded* attachments to the same root but does not, on its own,
+trigger them; it relies on the same runtime writer protections and on the
+operator keeping the download root server-private.
+
+At runtime, writes (for both `download_attachment` and `export_messages`)
+are anchored to a held directory descriptor and placed atomically (write to
+a `.rimap-tmp-*` temp, then hard-link to the final name), so a partially
+written file never appears at the final path and a rename of a path
+component cannot redirect the write. A process killed mid-write may leave a
+`0600` `.rimap-tmp-*` orphan in the download root; operators can safely
+delete stale `.rimap-tmp-*` files.
 
 ## `[limits]` section
 
