@@ -28,6 +28,7 @@ capability).
 | `fetch_message.include_html` | denied | denied | allowed | allowed |
 | `list_attachments` | allowed | allowed | allowed | allowed |
 | `download_attachment` | allowed | allowed | allowed | allowed |
+| `export_messages` | denied¹ | denied¹ | denied¹ | denied¹ |
 | `mark_read` | denied | allowed | allowed | allowed |
 | `mark_unread` | denied | allowed | allowed | allowed |
 | `flag` | denied | allowed | allowed | allowed |
@@ -46,6 +47,13 @@ capability).
 
 `use_account` and `list_accounts` are infrastructure tools that bypass
 posture checks entirely and are always available.
+
+¹ `export_messages` is denied in every posture and is enabled only by an
+explicit `export_messages = "allow"` override in `[security.tools]`. It
+writes a raw, unsanitized mbox to the download sandbox, so when enabled it
+also requires a server-private download root (config validation rejects a
+group/world-writable `download_dir` on Unix). See
+[configuration.md](configuration.md#the-export_messages-tool).
 
 ## Per-tool overrides
 

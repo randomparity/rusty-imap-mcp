@@ -241,9 +241,18 @@ to the system trust store when pinning is configured.
 | `rename_folder` | - | - | yes | yes |
 | `expunge` | - | - | - | yes |
 | `delete_folder` | - | - | - | yes |
+| `export_messages` | - | - | - | - |
 
 Per-tool overrides (`"allow"` / `"deny"`) merge on top of the base
 posture. An override that matches the posture's default is a no-op.
+
+`export_messages` is denied in every posture; it is enabled only by an
+explicit `export_messages = "allow"` override. It writes a raw,
+unsanitized mbox to the download sandbox (an unredacted raw-message
+oracle), so when enabled it requires a server-private download root:
+config validation rejects a group/world-writable `attachments.download_dir`
+on Unix. See
+[configuration.md](configuration.md#the-export_messages-tool).
 
 ## Dispatch chain
 
