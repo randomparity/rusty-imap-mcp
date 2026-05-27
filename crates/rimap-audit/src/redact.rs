@@ -1324,6 +1324,39 @@ mod tests {
         let from_advanced = Redactor::new(&advanced, &salt).apply(&sample);
         assert_eq!(from_search, from_advanced);
     }
+
+    #[test]
+    fn export_messages_schema_redacts_paths_keeps_identifiers() {
+        let salt = salt();
+        let schema = crate::redact::schemas()
+            .into_iter()
+            .find(|s| s.tool == ToolName::ExportMessages)
+            .expect("export_messages schema exists");
+        let args = json!({
+            "folder": "INBOX",
+            "uids": [101_u64, 102_u64],
+            "expected_uidvalidity": 12345_u64,
+            "dest_dir": "/home/user/secret-dir",
+            "filename": "private-series",
+            "password": "hunter2",
+            "token": "s3cr3t-token"
+        });
+        let out = Redactor::new(&schema, &salt).apply(&args);
+        // Structural fields are preserved verbatim.
+        assert_eq!(out["folder"], json!("INBOX"));
+        assert_eq!(out["expected_uidvalidity"], json!(12345_u64));
+        // Requested UID set is recorded verbatim (recoverable for audit).
+        assert_eq!(out["uids"], json!([101_u64, 102_u64]));
+        // dest_dir / filename must not appear verbatim.
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(!serialized.contains("/home/user/secret-dir"));
+        assert!(!serialized.contains("private-series"));
+        // password / token are Forbidden — keys must be absent.
+        assert!(!serialized.contains("hunter2"));
+        assert!(!out.as_object().unwrap().contains_key("password"));
+        assert!(!serialized.contains("s3cr3t-token"));
+        assert!(!out.as_object().unwrap().contains_key("token"));
+    }
 }
 
 #[cfg(test)]
