@@ -6,6 +6,7 @@ pub(crate) mod dispatch;
 pub mod error;
 pub mod preinit;
 pub mod response;
+pub(crate) mod result_provenance;
 pub mod server;
 // `tool_catalog` is `pub` (doc-hidden via the parent `#[doc(hidden)] pub mod
 // mcp` in `lib.rs`) so the binary's test-support `dump-tool-catalog`
