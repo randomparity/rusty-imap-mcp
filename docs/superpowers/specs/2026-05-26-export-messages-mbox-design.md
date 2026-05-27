@@ -296,6 +296,12 @@ address that this is a broader oracle than a single attachment (`fetch_message` 
 - **`threat-model-reviewer` sign-off is a blocking acceptance gate** — the tool does not
   merge until that review approves the gating model versus requiring a higher posture.
 
+Note: `export_messages` guarantees faithful mboxrd framing (column-0 `From ` escaping is
+tested against real `git am`), but it does NOT sanitize message content. Running
+`git am <path>` applies attacker-influenceable `From:`/`Subject:`/diff content as commit
+metadata and working-tree files — that consumption step is a trust boundary the calling
+agent/operator owns, not one this tool mediates.
+
 **The authz seat is distinct from the MCP annotation hints.** `Readonly` is the authz
 seat (no *mailbox* mutation), but the tool *writes a new file*, so — exactly like
 `download_attachment` (`read_only_hint=false`) — its `ToolName::annotation_hints` are

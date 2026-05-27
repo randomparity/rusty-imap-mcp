@@ -143,8 +143,9 @@ const MBOX_SEPARATOR: &[u8] = b"From mboxrd@rusty-imap-mcp Thu Jan  1 00:00:00 1
 /// every line matching `^>*From ` is escaped with one extra leading `>`;
 /// CRLF is preserved verbatim.
 ///
-/// Callers must pass non-empty message bodies; an empty body would emit a
-/// bare separator with no content. Task 7's handler validates this upstream.
+/// Callers pass already-fetched, non-empty message bodies. The handler never calls this
+/// with an empty slice (it short-circuits a zero-success export before building), and
+/// per-body emptiness isn't expected from a real BODY.PEEK[] fetch.
 fn build_mbox(messages: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::new();
     for msg in messages {
@@ -436,16 +437,21 @@ pub(crate) async fn run_export(
     }
     let sha256 = sandbox::sha256_hex(&mbox);
 
-    let suffix = if complete { "mbox" } else { "partial.mbox" };
-    let token = export_token();
-    let filename = format!("{prefix}-{token}.{suffix}");
-    let written = sandbox::write_attachment_async(dest, filename, mbox).await?;
-    let written = written.to_string_lossy().to_string();
-
-    let (path, partial_path) = if complete {
-        (Some(written), None)
+    // Nothing succeeded (only reachable with allow_partial=true and all UIDs
+    // failed): report the failures, write no empty artifact.
+    let (path, partial_path) = if succeeded.is_empty() {
+        (None, None)
     } else {
-        (None, Some(written))
+        let suffix = if complete { "mbox" } else { "partial.mbox" };
+        let token = export_token();
+        let filename = format!("{prefix}-{token}.{suffix}");
+        let written = sandbox::write_attachment_async(dest, filename, mbox).await?;
+        let written = written.to_string_lossy().to_string();
+        if complete {
+            (Some(written), None)
+        } else {
+            (None, Some(written))
+        }
     };
 
     Ok(ToolResponse::meta_only(ExportMessagesMeta {
@@ -999,6 +1005,7 @@ mod build_mbox_tests {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 #[expect(clippy::expect_used, reason = "tests")]
+#[expect(clippy::panic, reason = "tests")]
 mod source_seam_tests {
     use super::{ExportSource, RunPlan, run_export};
     use core::num::NonZeroU32;
@@ -1199,6 +1206,89 @@ mod source_seam_tests {
             rimap_core::RimapError::from(rimap_imap::ImapError::SizeLimit { limit: 1024 })
         })
         .await;
+    }
+
+    /// A fake that reports NO UIDs as present (empty size list), simulating
+    /// a mailbox where every requested UID is absent.
+    struct AllAbsentSource {
+        uid_validity: u32,
+    }
+
+    impl ExportSource for AllAbsentSource {
+        async fn fetch_sizes(
+            &self,
+            _folder: &str,
+            _uids: &[Uid],
+            _expected: u32,
+        ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError> {
+            // Return an empty size list: every requested UID is not present.
+            Ok((vec![], Some(self.uid_validity)))
+        }
+
+        async fn fetch_one_body(
+            &self,
+            _folder: &str,
+            _uid: Uid,
+            _expected: u32,
+        ) -> Result<Vec<u8>, rimap_core::RimapError> {
+            // Should never be called: all UIDs are classified NotFound at preflight.
+            panic!("fetch_one_body must not be called when all UIDs are absent");
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_success_partial_writes_no_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = AllAbsentSource { uid_validity: 1234 };
+
+        let result = run_export(
+            &fake,
+            plan(
+                tmp.path().to_path_buf(),
+                vec![uid(10), uid(20), uid(30)],
+                1234,
+                true, // allow_partial=true: every-UID-failed is "allowed"
+            ),
+        )
+        .await;
+
+        let resp = result.expect("zero-success partial must return Ok");
+        let meta = &resp.meta;
+
+        assert!(
+            !meta.complete,
+            "complete must be false when nothing succeeded"
+        );
+        assert!(
+            meta.path.is_none(),
+            "path must be None (no complete artifact)"
+        );
+        assert!(
+            meta.partial_path.is_none(),
+            "partial_path must be None (no empty artifact written)"
+        );
+        assert_eq!(meta.message_count, 0, "message_count must be 0");
+        assert_eq!(meta.total_bytes, 0, "total_bytes must be 0");
+        assert_eq!(meta.failed.len(), 3, "all 3 UIDs must appear in failed");
+        for f in &meta.failed {
+            assert_eq!(
+                f.reason,
+                super::ExportFailReason::NotFound,
+                "uid {} must be NotFound",
+                f.uid
+            );
+        }
+        let failed_uids: Vec<u32> = meta.failed.iter().map(|f| f.uid).collect();
+        assert!(
+            failed_uids.contains(&10) && failed_uids.contains(&20) && failed_uids.contains(&30),
+            "failed list must include all requested UIDs: {failed_uids:?}"
+        );
+
+        // No artifact may be written.
+        assert!(
+            dir_is_empty(tmp.path()),
+            "dest dir must be empty — no 0-byte artifact written"
+        );
     }
 }
 
