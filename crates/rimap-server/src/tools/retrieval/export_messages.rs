@@ -144,10 +144,25 @@ const MBOX_SEPARATOR: &[u8] = b"From mboxrd@rusty-imap-mcp Thu Jan  1 00:00:00 1
 /// CRLF is preserved verbatim.
 ///
 /// Callers pass already-fetched, non-empty message bodies. The handler never calls this
-/// with an empty slice (it short-circuits a zero-success export before building), and
+/// with an empty vec (it short-circuits a zero-success export before building), and
 /// per-body emptiness isn't expected from a real BODY.PEEK[] fetch.
-fn build_mbox(messages: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::new();
+///
+/// Takes the bodies by value and drops each as it is framed, so the raw bodies
+/// are freed while the framed buffer grows — the framed mbox is the only
+/// `max_total_bytes`-scale allocation held at once, rather than the raw bodies
+/// *plus* a separate framing copy (#318).
+fn build_mbox(messages: Vec<Vec<u8>>) -> Vec<u8> {
+    // Pre-size to one allocation: raw body bytes + a separator and a possible
+    // padding newline per message. This keeps the framed buffer a single
+    // ~`max_total_bytes` allocation, avoiding the transient ~2x spike a growing
+    // `Vec` would incur while copying the large body bytes (#318). `From`-line
+    // escaping may add a few bytes beyond this; that is negligible and at most
+    // one small growth.
+    let raw_total: usize = messages.iter().map(Vec::len).sum();
+    let framing = messages
+        .len()
+        .saturating_mul(MBOX_SEPARATOR.len().saturating_add(1));
+    let mut out = Vec::with_capacity(raw_total.saturating_add(framing).saturating_add(1));
     for msg in messages {
         // Ensure the previous message ended with a line feed so this
         // separator starts at column 0.
@@ -157,7 +172,8 @@ fn build_mbox(messages: &[Vec<u8>]) -> Vec<u8> {
             out.push(b'\n');
         }
         out.extend_from_slice(MBOX_SEPARATOR);
-        escape_from_lines_into(&mut out, msg);
+        escape_from_lines_into(&mut out, &msg);
+        // `msg` is dropped here, freeing this body before the next is framed.
     }
     // Trailing newline for a well-formed final message.
     if let Some(&last) = out.last()
@@ -258,7 +274,9 @@ pub(crate) trait ExportSource {
         expected_uidvalidity: u32,
     ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError>;
 
-    /// Fetch one message body, guarded by `expected_uidvalidity`.
+    /// Fetch one message body, guarded by `expected_uidvalidity`, with a
+    /// per-call read limit of `body_limit` bytes (the export passes the
+    /// remaining aggregate budget so the in-flight body cannot exceed it).
     ///
     /// # Errors
     ///
@@ -268,6 +286,7 @@ pub(crate) trait ExportSource {
         folder: &str,
         uid: Uid,
         expected_uidvalidity: u32,
+        body_limit: u64,
     ) -> Result<Vec<u8>, rimap_core::RimapError>;
 }
 
@@ -299,10 +318,11 @@ impl ExportSource for AccountState {
         folder: &str,
         uid: Uid,
         expected_uidvalidity: u32,
+        body_limit: u64,
     ) -> Result<Vec<u8>, rimap_core::RimapError> {
         Ok(self
             .imap
-            .fetch_body(folder, uid, Some(expected_uidvalidity))
+            .fetch_body_with_limit(folder, uid, Some(expected_uidvalidity), body_limit)
             .await?)
     }
 }
@@ -456,7 +476,9 @@ pub(crate) async fn run_export(
         } => (complete, bodies, succeeded, failed),
     };
 
-    let mbox = build_mbox(&bodies);
+    // Move `bodies` in: `build_mbox` drains it, so the raw bodies are freed as
+    // the framed mbox is built rather than lingering through the write (#318).
+    let mbox = build_mbox(bodies);
     let total_bytes = mbox.len() as u64;
     // Authoritative budget check on the *framed* output: mboxrd separators,
     // From-line escaping, and terminal padding add bytes beyond the raw bodies
@@ -591,8 +613,22 @@ async fn fetch_bodies(
             });
             continue;
         }
-        let body = source.fetch_one_body(folder, *uid, limits.expected).await?;
+        // Cap this body's read at the smaller of the per-message cap and the
+        // budget still unspent, so the single in-flight body cannot exceed the
+        // remaining budget: `running (raw bytes so far) + in-flight <= budget`
+        // pins peak heap to ~`max_total_bytes` (#318). A body that would push
+        // past it aborts mid-read with `SizeLimit` (fatal) — the same bound
+        // `fetch_message`/`download_attachment` accept per body.
+        let body_limit = limits
+            .per_msg_cap
+            .min(limits.budget.saturating_sub(running));
+        let body = source
+            .fetch_one_body(folder, *uid, limits.expected, body_limit)
+            .await?;
         running = running.saturating_add(body.len() as u64);
+        // Defense-in-depth backstop. Unreachable while `body_limit` caps each
+        // body to the remaining budget (so `running <= budget` always); kept
+        // fail-closed against future changes to the limit computation (#318).
         if running > limits.budget {
             return Err(rimap_core::RimapError::invalid_input(
                 "export exceeds max_total_bytes",
@@ -919,7 +955,7 @@ mod build_mbox_tests {
 
     #[test]
     fn single_message_gets_separator_and_trailing_newline() {
-        let out = build_mbox(&[b"Subject: hi\r\n\r\nbody".to_vec()]);
+        let out = build_mbox(vec![b"Subject: hi\r\n\r\nbody".to_vec()]);
         assert!(out.starts_with(SEP), "missing leading separator");
         assert!(out.ends_with(b"\n"), "must end with newline");
         assert!(out.ends_with(b"body\n"));
@@ -929,7 +965,7 @@ mod build_mbox_tests {
     fn missing_terminal_newline_padded_before_next_separator() {
         // First message has no trailing newline; the second separator must
         // still start at column 0.
-        let out = build_mbox(&[
+        let out = build_mbox(vec![
             b"a: 1\r\n\r\nno-newline".to_vec(),
             b"b: 2\r\n\r\nx\n".to_vec(),
         ]);
@@ -948,7 +984,7 @@ mod build_mbox_tests {
     #[test]
     fn escapes_every_from_line_including_nested_and_header_position() {
         let msg = b"From the desk of X\r\n>From already escaped\r\nFrom \r\nnormal\n".to_vec();
-        let out = build_mbox(&[msg]);
+        let out = build_mbox(vec![msg]);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(">From the desk of X"));
         assert!(text.contains(">>From already escaped"));
@@ -958,7 +994,7 @@ mod build_mbox_tests {
 
     #[test]
     fn preserves_crlf_verbatim_in_body() {
-        let out = build_mbox(&[b"H: 1\r\n\r\nline1\r\nline2\r\n".to_vec()]);
+        let out = build_mbox(vec![b"H: 1\r\n\r\nline1\r\nline2\r\n".to_vec()]);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("line1\r\nline2\r\n"));
     }
@@ -970,7 +1006,7 @@ mod build_mbox_tests {
             b"A: 1\r\n\r\nFrom space\r\nbody1\r\n".to_vec(),
             b"B: 2\r\n\r\nbody2\n".to_vec(),
         ];
-        let mbox = build_mbox(&inputs);
+        let mbox = build_mbox(inputs.clone());
         let recovered = split_and_unescape(&mbox);
         assert_eq!(recovered.len(), inputs.len());
         // Compare ignoring a single trailing newline build_mbox may add.
@@ -1064,6 +1100,7 @@ mod source_seam_tests {
         uid_validity: Option<u32>,
         body_error: Option<fn() -> rimap_core::RimapError>,
         seen_expected: RefCell<Vec<u32>>,
+        seen_body_limits: RefCell<Vec<u64>>,
     }
 
     impl FakeSource {
@@ -1073,6 +1110,7 @@ mod source_seam_tests {
                 uid_validity: Some(uid_validity),
                 body_error: None,
                 seen_expected: RefCell::new(Vec::new()),
+                seen_body_limits: RefCell::new(Vec::new()),
             }
         }
 
@@ -1085,6 +1123,7 @@ mod source_seam_tests {
                 uid_validity: Some(uid_validity),
                 body_error: Some(body_error),
                 seen_expected: RefCell::new(Vec::new()),
+                seen_body_limits: RefCell::new(Vec::new()),
             }
         }
     }
@@ -1111,8 +1150,10 @@ mod source_seam_tests {
             _folder: &str,
             uid: Uid,
             expected: u32,
+            body_limit: u64,
         ) -> Result<Vec<u8>, rimap_core::RimapError> {
             self.seen_expected.borrow_mut().push(expected);
+            self.seen_body_limits.borrow_mut().push(body_limit);
             if let Some(make_err) = self.body_error {
                 return Err(make_err());
             }
@@ -1257,6 +1298,7 @@ mod source_seam_tests {
             _folder: &str,
             _uid: Uid,
             _expected: u32,
+            _body_limit: u64,
         ) -> Result<Vec<u8>, rimap_core::RimapError> {
             // Should never be called: all UIDs are classified NotFound at preflight.
             panic!("fetch_one_body must not be called when all UIDs are absent");
@@ -1348,6 +1390,7 @@ mod source_seam_tests {
             _folder: &str,
             _uid: Uid,
             _expected: u32,
+            _body_limit: u64,
         ) -> Result<Vec<u8>, rimap_core::RimapError> {
             panic!(
                 "fetch_one_body must not run: allow_partial=false and preflight \
@@ -1378,6 +1421,119 @@ mod source_seam_tests {
             err.to_string().contains('8'),
             "error must name the missing UID 8: {err}"
         );
+        assert!(
+            dir_is_empty(tmp.path()),
+            "no artifact may be written on abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_limit_clamps_to_remaining_budget() {
+        // Budget tighter than per_msg_cap: each body's read limit is the
+        // budget still unspent, shrinking as bytes are fetched. (The framed
+        // mbox then overflows the tiny budget so the call errors — here we
+        // assert the limits threaded into each fetch, the #318 plumbing.)
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = FakeSource::happy(
+            vec![
+                Seeded {
+                    uid: 1,
+                    body: vec![b'a'; 10],
+                },
+                Seeded {
+                    uid: 2,
+                    body: vec![b'b'; 4],
+                },
+            ],
+            7,
+        );
+        let dest =
+            super::sandbox::resolve_dest_dir(None, tmp.path(), tmp.path()).expect("resolve dest");
+        let plan = RunPlan {
+            folder: "INBOX".to_string(),
+            dest,
+            prefix: "messages".to_string(),
+            uids: vec![uid(1), uid(2)],
+            expected: 7,
+            // eligible_sum = 10 + 4 = 14 <= 15 passes preflight; per_msg_cap is
+            // larger than the budget, so the remaining budget gates the limit.
+            budget: 15,
+            per_msg_cap: 80,
+            allow_partial: false,
+        };
+        let _ = run_export(&fake, plan).await;
+        // First fetch: min(80, 15 - 0) = 15. Second: min(80, 15 - 10) = 5.
+        assert_eq!(*fake.seen_body_limits.borrow(), vec![15, 5]);
+    }
+
+    /// Reports a tiny `RFC822.SIZE` but returns a far larger body, and honors
+    /// the per-call `body_limit` exactly as the real IMAP read does (aborting
+    /// with `SizeLimit` when the body would exceed it). Models the STRIDE-D
+    /// hostile-server under-reporting #318 targets.
+    struct UnderReportSource {
+        uid_validity: u32,
+        reported: u32,
+        body: Vec<u8>,
+    }
+
+    impl ExportSource for UnderReportSource {
+        async fn fetch_sizes(
+            &self,
+            _folder: &str,
+            uids: &[Uid],
+            _expected: u32,
+        ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError> {
+            let sizes = uids
+                .iter()
+                .map(|u| (u.get(), Some(self.reported)))
+                .collect();
+            Ok((sizes, Some(self.uid_validity)))
+        }
+
+        async fn fetch_one_body(
+            &self,
+            _folder: &str,
+            _uid: Uid,
+            _expected: u32,
+            body_limit: u64,
+        ) -> Result<Vec<u8>, rimap_core::RimapError> {
+            if self.body.len() as u64 > body_limit {
+                return Err(rimap_core::RimapError::from(
+                    rimap_imap::ImapError::SizeLimit { limit: body_limit },
+                ));
+            }
+            Ok(self.body.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn under_reported_body_exceeding_remaining_budget_aborts_no_artifact() {
+        // The server claims 1 byte (passes the eligible-sum preflight) but the
+        // body is 100 bytes. The read limit = min(80, 50 - 0) = 50 < 100, so
+        // the in-flight read aborts with SizeLimit before buffering it — peak
+        // stays bounded and no artifact is written.
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = UnderReportSource {
+            uid_validity: 9,
+            reported: 1,
+            body: vec![b'x'; 100],
+        };
+        let dest =
+            super::sandbox::resolve_dest_dir(None, tmp.path(), tmp.path()).expect("resolve dest");
+        let plan = RunPlan {
+            folder: "INBOX".to_string(),
+            dest,
+            prefix: "messages".to_string(),
+            uids: vec![uid(1)],
+            expected: 9,
+            budget: 50,
+            per_msg_cap: 80,
+            allow_partial: false,
+        };
+        let err = run_export(&fake, plan)
+            .await
+            .expect_err("under-reported oversize body must abort");
+        assert_eq!(err.code(), rimap_core::ErrorCode::AttachmentTooLarge);
         assert!(
             dir_is_empty(tmp.path()),
             "no artifact may be written on abort"
@@ -1447,7 +1603,7 @@ mod git_am_tests {
         // A spurious `From `-leading line in the message (here in the header
         // region) must be escaped by build_mbox, or git's mbox splitter would
         // wrongly split the series there.
-        let mbox = build_mbox(&[patch(1, "\r\nFrom the author: note"), patch(2, "")]);
+        let mbox = build_mbox(vec![patch(1, "\r\nFrom the author: note"), patch(2, "")]);
         let mbox_path = repo.join("series.mbox");
         std::fs::write(&mbox_path, &mbox).unwrap();
 

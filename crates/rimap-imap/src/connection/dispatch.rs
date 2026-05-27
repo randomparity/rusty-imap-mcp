@@ -198,8 +198,37 @@ impl Connection {
         uid: crate::types::Uid,
         expected_uidvalidity: Option<u32>,
     ) -> Result<Vec<u8>, ImapError> {
+        self.fetch_body_with_limit(
+            folder,
+            uid,
+            expected_uidvalidity,
+            self.inner.cfg.max_fetch_body_bytes,
+        )
+        .await
+    }
+
+    /// Like [`Self::fetch_body`], but with a caller-supplied byte `limit`
+    /// instead of the configured `max_fetch_body_bytes`.
+    ///
+    /// `export_messages` passes `min(max_fetch_body_bytes, remaining_budget)`
+    /// so a single in-flight body cannot exceed the export's remaining
+    /// aggregate budget, pinning peak heap to ≈ the budget (#318). The `limit`
+    /// drives both the `RFC822.SIZE` preflight and the post-parse
+    /// `project_size` read check, so an oversize body is rejected with
+    /// `ImapError::SizeLimit` — before reading when the server reports an
+    /// honest size, or mid-stream when it under-reports.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::fetch_body`], with `SizeLimit` keyed to `limit`.
+    pub async fn fetch_body_with_limit(
+        &self,
+        folder: &str,
+        uid: crate::types::Uid,
+        expected_uidvalidity: Option<u32>,
+        limit: u64,
+    ) -> Result<Vec<u8>, ImapError> {
         let dur = self.inner.cfg.command_timeout;
-        let limit = self.inner.cfg.max_fetch_body_bytes;
         let result = crate::time::with_timeout("fetch_body", dur, async {
             let mut guard = self.session().await?;
             let session =
