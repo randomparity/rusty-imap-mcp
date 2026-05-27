@@ -76,6 +76,10 @@ infer = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
+# Dir-fd-anchored sandbox writes (#317): the destination directory is held as
+# a capability `Dir` and files are created/linked fd-relative, closing the
+# resolve→write directory-swap race without `unsafe`.
+cap-std = { workspace = true }
 anyhow = { workspace = true }
 secrecy = { workspace = true }
 sha2 = { workspace = true }
@@ -93,12 +97,6 @@ tempfile = { workspace = true }
 # features) do not pull this in. The `dev-dependencies` entry below
 # remains for integration-test consumers; cargo dedupes the version.
 jsonschema = { workspace = true, optional = true }
-
-# Used only for the `O_NOFOLLOW` open flag in the attachment sandbox writer
-# (`tools::retrieval::sandbox`). Referenced as a plain constant — no `unsafe`
-# (the workspace forbids it). Unix-only; non-Unix builds use a fail-closed stub.
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

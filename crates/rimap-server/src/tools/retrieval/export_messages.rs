@@ -356,7 +356,7 @@ pub async fn handle(
 /// positional-parameter limit.
 pub(crate) struct RunPlan {
     pub folder: String,
-    pub dest: std::path::PathBuf,
+    pub dest: sandbox::DestDir,
     pub prefix: String,
     pub uids: Vec<Uid>,
     pub expected: u32,
@@ -1042,7 +1042,7 @@ mod source_seam_tests {
     use core::num::NonZeroU32;
     use rimap_imap::types::Uid;
     use std::cell::RefCell;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     fn uid(n: u32) -> Uid {
         Uid::from(NonZeroU32::new(n).unwrap())
@@ -1125,7 +1125,9 @@ mod source_seam_tests {
         }
     }
 
-    fn plan(dest: PathBuf, uids: Vec<Uid>, expected: u32, allow_partial: bool) -> RunPlan {
+    fn plan(dest_dir: &Path, uids: Vec<Uid>, expected: u32, allow_partial: bool) -> RunPlan {
+        let dest = super::sandbox::resolve_dest_dir(None, dest_dir, dest_dir)
+            .expect("resolve test dest dir");
         RunPlan {
             folder: "INBOX".to_string(),
             dest,
@@ -1158,12 +1160,9 @@ mod source_seam_tests {
             ],
             4242,
         );
-        let resp = run_export(
-            &fake,
-            plan(tmp.path().to_path_buf(), vec![uid(7), uid(9)], 4242, false),
-        )
-        .await
-        .expect("export should succeed");
+        let resp = run_export(&fake, plan(tmp.path(), vec![uid(7), uid(9)], 4242, false))
+            .await
+            .expect("export should succeed");
 
         let meta = &resp.meta;
         assert!(meta.complete);
@@ -1184,11 +1183,8 @@ mod source_seam_tests {
         for allow_partial in [false, true] {
             let tmp = tempfile::tempdir().unwrap();
             let fake = FakeSource::failing(4242, make_err);
-            let result = run_export(
-                &fake,
-                plan(tmp.path().to_path_buf(), vec![uid(1)], 4242, allow_partial),
-            )
-            .await;
+            let result =
+                run_export(&fake, plan(tmp.path(), vec![uid(1)], 4242, allow_partial)).await;
             assert!(
                 result.is_err(),
                 "body error must abort (allow_partial={allow_partial})"
@@ -1275,7 +1271,7 @@ mod source_seam_tests {
         let result = run_export(
             &fake,
             plan(
-                tmp.path().to_path_buf(),
+                tmp.path(),
                 vec![uid(10), uid(20), uid(30)],
                 1234,
                 true, // allow_partial=true: every-UID-failed is "allowed"
@@ -1370,11 +1366,7 @@ mod source_seam_tests {
             present: vec![(7, 20)],
             uid_validity: 4242,
         };
-        let result = run_export(
-            &fake,
-            plan(tmp.path().to_path_buf(), vec![uid(7), uid(8)], 4242, false),
-        )
-        .await;
+        let result = run_export(&fake, plan(tmp.path(), vec![uid(7), uid(8)], 4242, false)).await;
 
         let err = result.expect_err("missing UID + allow_partial=false must abort");
         assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);

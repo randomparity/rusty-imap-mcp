@@ -122,6 +122,15 @@ skip = [
     # Both are upstream-pinned to their latest releases; we cannot unify
     # without forking. Revisit when governor bumps to hashbrown 0.17.
     { name = "hashbrown", version = "0.16" },
+
+    # `io-lifetimes` 2.0.4 is pulled by `fs-set-times 0.20.3` (latest), a
+    # transitive dep of `cap-primitives`/`cap-std 4` (the #317 sandbox
+    # dir-fd writer). cap-std and its other Bytecode Alliance deps
+    # (`cap-primitives`, `io-extras`) already use the 3.x line; only
+    # `fs-set-times` lags on its io-lifetimes pin. All are at their latest
+    # crates.io releases — `cargo update` cannot unify across the 2.x/3.x
+    # major split. Revisit when `fs-set-times` bumps to io-lifetimes 3.
+    { name = "io-lifetimes", version = "2" },
 ]
 # Multiple `windows-sys` major lines coexist because each transitive
 # consumer (`directories`, `keyring`/`dbus-secret-service`, `rpassword`,
