@@ -209,6 +209,12 @@ pub enum ToolStatus {
 
 /// A coarse summary of what a tool returned. Structured so reviewers can
 /// reconstruct activity without reading message bodies.
+///
+/// This is the **un-redacted result-provenance sink** of the `tool_end`
+/// record: unlike `arguments_redacted`, its fields are serialized verbatim
+/// (e.g. raw `message_ids_returned`). Any field added here therefore bypasses
+/// the argument redaction schema and MUST be consciously reviewed for
+/// sensitivity before being recorded durably.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResultSummary {
     /// RFC 822 `Message-ID` values returned to the caller.
@@ -226,6 +232,27 @@ pub struct ResultSummary {
     /// the field carried when it was typed `Vec<String>`.
     #[serde(default)]
     pub security_warnings_emitted: Vec<WarningCode>,
+    /// Absolute path of a durable artifact this tool wrote (e.g.
+    /// `download_attachment`, `export_messages`), if any. Recorded so the
+    /// actual on-disk scope is reconstructable post-incident (#316). Omitted
+    /// from the on-disk record when absent, so tools that write nothing keep
+    /// their prior `tool_end` shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    /// SHA-256 (hex) of the written artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    /// Byte length of the written artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
+    /// UIDs actually exported (the `export_messages` succeeded partition), in
+    /// caller order. Empty (and omitted) for tools that do not export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uids_exported: Vec<u32>,
+    /// Requested UIDs that were not exported (the `export_messages` failed
+    /// partition). Empty (and omitted) for tools that do not export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uids_failed: Vec<u32>,
 }
 
 /// Snapshot of the provenance ring buffer at `tool_end` time.
@@ -452,6 +479,7 @@ mod tests {
                     bytes_returned: 4821,
                     truncated: false,
                     security_warnings_emitted: vec![],
+                    ..Default::default()
                 },
                 provenance: crate::record::Provenance {
                     window_seconds: 60,
@@ -466,6 +494,53 @@ mod tests {
         assert_eq!(v["status"], "ok");
         assert_eq!(v["result_summary"]["bytes_returned"], 4821);
         assert_eq!(v["provenance"]["window_seconds"], 60);
+        // Unpopulated provenance fields are omitted, so a non-artifact tool's
+        // tool_end keeps its prior on-disk shape (#316).
+        assert!(v["result_summary"].get("artifact_path").is_none());
+        assert!(v["result_summary"].get("uids_exported").is_none());
+        let back: AuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn tool_end_records_artifact_provenance_and_round_trips() {
+        // A write-producing tool's tool_end carries the artifact path/sha/bytes
+        // and the exported/failed UID partition durably (#316).
+        let rec = AuditRecord {
+            seq: Seq(13),
+            ts: Timestamp::now(),
+            process_id: ProcessId::new_now(),
+            payload: Payload::ToolEnd(crate::record::ToolEnd {
+                account: None,
+                start_seq: Seq(12),
+                tool: ToolName::ExportMessages,
+                status: crate::record::ToolStatus::Ok,
+                error_code: None,
+                duration_ms: 91,
+                result_summary: crate::record::ResultSummary {
+                    artifact_path: Some("/srv/dl/messages-abc.partial.mbox".to_string()),
+                    artifact_sha256: Some("ab".repeat(32)),
+                    artifact_bytes: Some(2048),
+                    uids_exported: vec![7, 9],
+                    uids_failed: vec![8],
+                    ..Default::default()
+                },
+                provenance: crate::record::Provenance {
+                    window_seconds: 60,
+                    message_ids_recently_read: vec![],
+                },
+            }),
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["result_summary"]["artifact_path"],
+            "/srv/dl/messages-abc.partial.mbox"
+        );
+        assert_eq!(v["result_summary"]["artifact_bytes"], 2048);
+        assert_eq!(v["result_summary"]["uids_exported"][0], 7);
+        assert_eq!(v["result_summary"]["uids_exported"][1], 9);
+        assert_eq!(v["result_summary"]["uids_failed"][0], 8);
         let back: AuditRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, rec);
     }
