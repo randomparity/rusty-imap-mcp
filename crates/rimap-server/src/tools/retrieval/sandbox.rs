@@ -46,15 +46,36 @@ pub(crate) fn resolve_dest_dir(
 /// Write `data` to `dir/filename`, de-duplicating on collision.
 /// Returns the final path.
 ///
+/// Each candidate is created with `O_CREAT | O_EXCL | O_NOFOLLOW` and mode
+/// `0600` (via [`create_new_private`]): the create is atomic and exclusive, so
+/// it never overwrites or follows a symlink at the final path component, and
+/// the resulting file is owner-only. A pre-existing name (regular file *or*
+/// symlink) yields `AlreadyExists`, and the de-dup counter advances — the
+/// reason `export_messages` (a raw-email export oracle) and
+/// `download_attachment` can share this primitive safely.
+///
+/// Containment of `dir` itself is enforced upstream by [`resolve_dest_dir`]
+/// (canonicalize + `starts_with(allowed_root)`) and by the config-time private
+/// download-root check. This writer does not hold a directory fd / create
+/// fd-relative (`openat`), because that requires `unsafe` FFI, which the
+/// workspace forbids (`unsafe_code = "forbid"`); the residual directory-swap
+/// window is bounded by that upstream canonicalization and the enforced
+/// non-group/world-writable root.
+///
 /// # Errors
 ///
 /// Returns `RimapError::Internal` if writing fails or if more than
-/// 1000 filename collisions occur.
+/// 1000 filename collisions occur. On non-Unix platforms the no-follow /
+/// private-mode semantics are unavailable, so the writer fails closed with
+/// `RimapError::Internal` rather than writing without those guarantees.
+#[cfg(unix)]
 pub(crate) fn write_attachment(
     dir: &Path,
     filename: &str,
     data: &[u8],
 ) -> Result<PathBuf, RimapError> {
+    use std::io::Write as _;
+
     // Strip path components to prevent directory traversal.
     let safe_name = Path::new(filename)
         .file_name()
@@ -68,31 +89,77 @@ pub(crate) fn write_attachment(
         .unwrap_or("attachment");
     let ext = base.extension().and_then(|s| s.to_str());
 
-    let mut path = dir.join(safe_name);
-    let mut counter = 1u32;
-    while path.exists() {
-        let new_name = match ext {
-            Some(e) => format!("{stem}_{counter}.{e}"),
-            None => format!("{stem}_{counter}"),
+    let mut counter = 0u32;
+    loop {
+        let name = if counter == 0 {
+            safe_name.to_string()
+        } else {
+            match ext {
+                Some(e) => format!("{stem}_{counter}.{e}"),
+                None => format!("{stem}_{counter}"),
+            }
         };
-        path = dir.join(new_name);
-        counter += 1;
-        if counter > 1000 {
-            return Err(RimapError::Internal("too many filename collisions".into()));
+        let path = dir.join(&name);
+        match create_new_private(&path) {
+            Ok(mut file) => {
+                file.write_all(data)
+                    .map_err(|e| RimapError::InternalSourced {
+                        message: "failed to write attachment".into(),
+                        source: Box::new(e),
+                    })?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                counter += 1;
+                if counter > 1000 {
+                    return Err(RimapError::Internal("too many filename collisions".into()));
+                }
+            }
+            Err(e) => {
+                return Err(RimapError::InternalSourced {
+                    message: "failed to create attachment file".into(),
+                    source: Box::new(e),
+                });
+            }
         }
     }
+}
 
-    // The filename has already been stripped to its final component
-    // above, so `path` is always `dir/<safe_name>`. Directory-traversal
-    // containment is enforced by `resolve_dest_dir` for the initial
-    // `dir`, not here — a re-canonicalize at this point compares `dir`
-    // against itself and cannot fail meaningfully.
-    std::fs::write(&path, data).map_err(|e| RimapError::InternalSourced {
-        message: "failed to write attachment".into(),
-        source: Box::new(e),
-    })?;
+/// Atomically create `path` for writing with `O_CREAT | O_EXCL | O_NOFOLLOW`
+/// and mode `0600`. Fails with [`std::io::ErrorKind::AlreadyExists`] if the
+/// path already exists (including as a symlink), which the caller treats as a
+/// de-dup collision. Uses only the safe [`std::os::unix::fs::OpenOptionsExt`]
+/// surface — no `unsafe`.
+#[cfg(unix)]
+fn create_new_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(path)
+}
 
-    Ok(path)
+/// Fail-closed stub for non-Unix platforms.
+///
+/// The hardened writer relies on `O_NOFOLLOW` and POSIX file modes, which are
+/// unavailable here. Rather than write raw message bytes without those
+/// guarantees, the sandbox refuses to write.
+///
+/// # Errors
+///
+/// Always returns `RimapError::Internal`.
+#[cfg(not(unix))]
+pub(crate) fn write_attachment(
+    _dir: &Path,
+    _filename: &str,
+    _data: &[u8],
+) -> Result<PathBuf, RimapError> {
+    Err(RimapError::Internal(
+        "sandboxed attachment writes require a Unix platform (O_NOFOLLOW / file-mode support)"
+            .into(),
+    ))
 }
 
 /// Async wrapper around [`resolve_dest_dir`] that runs on a
@@ -199,6 +266,7 @@ mod tests {
         assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_attachment_normal() {
         let tmp = tempfile::tempdir().unwrap();
@@ -207,6 +275,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"data");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_attachment_collision() {
         let tmp = tempfile::tempdir().unwrap();
@@ -216,6 +285,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_attachment_no_extension() {
         let tmp = tempfile::tempdir().unwrap();
@@ -224,6 +294,7 @@ mod tests {
         assert_eq!(path, tmp.path().join("readme_1"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_attachment_rejects_relative_traversal() {
         let tmp = tempfile::tempdir().unwrap();
@@ -234,6 +305,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"data");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_attachment_rejects_absolute_path() {
         let tmp = tempfile::tempdir().unwrap();
@@ -243,12 +315,51 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"data");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_attachment_handles_deep_traversal() {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_attachment(tmp.path(), "../../.ssh/authorized_keys", b"data").unwrap();
         assert!(path.starts_with(tmp.path()));
         assert_eq!(path.file_name().unwrap(), "authorized_keys");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_attachment_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_attachment(tmp.path(), "secret.mbox", b"raw email").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        // The export oracle writes raw message bytes; the file must be
+        // owner-only regardless of the process umask.
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_attachment_does_not_follow_symlink_at_final_path() {
+        // A symlink pre-planted inside the sandbox must not be followed: the
+        // exclusive create yields AlreadyExists, so the writer de-dups to a
+        // fresh name and the symlink target outside the sandbox is never
+        // created or written. Guards the raw-export escape vector.
+        let tmp = tempfile::tempdir().unwrap();
+        let sandbox = tmp.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let outside = tmp.path().join("outside-target.txt");
+        std::os::unix::fs::symlink(&outside, sandbox.join("evil.mbox")).unwrap();
+
+        let path = write_attachment(&sandbox, "evil.mbox", b"payload").unwrap();
+
+        // Wrote a de-duped sibling, not through the symlink.
+        assert_eq!(path, sandbox.join("evil_1.mbox"));
+        assert!(path.starts_with(&sandbox));
+        // The symlink target outside the sandbox was never created.
+        assert!(
+            !outside.exists(),
+            "symlink was followed: target was written"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
     }
 
     #[test]
