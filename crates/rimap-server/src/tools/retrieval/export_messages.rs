@@ -94,6 +94,72 @@ pub struct ExportMessagesMeta {
     pub failed: Vec<FailedUid>,
 }
 
+/// Pinned mboxrd separator. `git am`/`mailsplit` use it only as a delimiter
+/// and take real authorship from each message's own `From:` header.
+const MBOX_SEPARATOR: &[u8] = b"From mboxrd@rusty-imap-mcp Thu Jan  1 00:00:00 1970\n";
+
+/// Assemble raw RFC822 messages into a single mboxrd byte buffer suitable
+/// for `git am`. Each message is preceded by [`MBOX_SEPARATOR`] at column 0;
+/// every line matching `^>*From ` is escaped with one extra leading `>`;
+/// CRLF is preserved verbatim.
+///
+/// Callers must pass non-empty message bodies; an empty body would emit a
+/// bare separator with no content. Task 7's handler validates this upstream.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
+fn build_mbox(messages: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for msg in messages {
+        // Ensure the previous message ended with a line feed so this
+        // separator starts at column 0.
+        if let Some(&last) = out.last()
+            && last != b'\n'
+        {
+            out.push(b'\n');
+        }
+        out.extend_from_slice(MBOX_SEPARATOR);
+        escape_from_lines_into(&mut out, msg);
+    }
+    // Trailing newline for a well-formed final message.
+    if let Some(&last) = out.last()
+        && last != b'\n'
+    {
+        out.push(b'\n');
+    }
+    out
+}
+
+/// Append `msg` to `out`, escaping each `^>*From ` line with one extra `>`.
+fn escape_from_lines_into(out: &mut Vec<u8>, msg: &[u8]) {
+    let mut line_start = 0;
+    for i in 0..msg.len() {
+        if msg[i] == b'\n' {
+            write_mbox_line(out, &msg[line_start..=i]);
+            line_start = i + 1;
+        }
+    }
+    if line_start < msg.len() {
+        write_mbox_line(out, &msg[line_start..]);
+    }
+}
+
+/// Append `line` to `out`, prefixing it with `>` when it matches `^>*From `.
+fn write_mbox_line(out: &mut Vec<u8>, line: &[u8]) {
+    if line_is_from(line) {
+        out.push(b'>');
+    }
+    out.extend_from_slice(line);
+}
+
+/// Whether `line` (from column 0) matches `^>*From ` — any run of `>` then
+/// the literal `From `.
+fn line_is_from(line: &[u8]) -> bool {
+    let mut j = 0;
+    while j < line.len() && line[j] == b'>' {
+        j += 1;
+    }
+    line[j..].starts_with(b"From ")
+}
+
 /// Execute the `export_messages` tool.
 ///
 /// # Errors
@@ -111,4 +177,127 @@ pub async fn handle(
     Err(rimap_core::RimapError::Internal(
         "export_messages not yet implemented".into(),
     ))
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+mod build_mbox_tests {
+    use super::build_mbox;
+
+    const SEP: &[u8] = b"From mboxrd@rusty-imap-mcp Thu Jan  1 00:00:00 1970\n";
+
+    #[test]
+    fn single_message_gets_separator_and_trailing_newline() {
+        let out = build_mbox(&[b"Subject: hi\r\n\r\nbody".to_vec()]);
+        assert!(out.starts_with(SEP), "missing leading separator");
+        assert!(out.ends_with(b"\n"), "must end with newline");
+        assert!(out.ends_with(b"body\n"));
+    }
+
+    #[test]
+    fn missing_terminal_newline_padded_before_next_separator() {
+        // First message has no trailing newline; the second separator must
+        // still start at column 0.
+        let out = build_mbox(&[
+            b"a: 1\r\n\r\nno-newline".to_vec(),
+            b"b: 2\r\n\r\nx\n".to_vec(),
+        ]);
+        let text = String::from_utf8(out).unwrap();
+        // Exactly two separators, each at the start of a line.
+        let seps: Vec<_> = text.match_indices("From mboxrd@").collect();
+        assert_eq!(seps.len(), 2);
+        for (idx, _) in &seps {
+            assert!(
+                *idx == 0 || text.as_bytes()[idx - 1] == b'\n',
+                "separator not at col 0"
+            );
+        }
+    }
+
+    #[test]
+    fn escapes_every_from_line_including_nested_and_header_position() {
+        let msg = b"From the desk of X\r\n>From already escaped\r\nFrom \r\nnormal\n".to_vec();
+        let out = build_mbox(&[msg]);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(">From the desk of X"));
+        assert!(text.contains(">>From already escaped"));
+        assert!(text.contains(">From \r\n"));
+        assert!(text.contains("\nnormal"));
+    }
+
+    #[test]
+    fn preserves_crlf_verbatim_in_body() {
+        let out = build_mbox(&[b"H: 1\r\n\r\nline1\r\nline2\r\n".to_vec()]);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("line1\r\nline2\r\n"));
+    }
+
+    #[test]
+    fn split_back_round_trips_messages() {
+        // Build, then split on separator lines and un-escape; must equal inputs.
+        let inputs = vec![
+            b"A: 1\r\n\r\nFrom space\r\nbody1\r\n".to_vec(),
+            b"B: 2\r\n\r\nbody2\n".to_vec(),
+        ];
+        let mbox = build_mbox(&inputs);
+        let recovered = split_and_unescape(&mbox);
+        assert_eq!(recovered.len(), inputs.len());
+        // Compare ignoring a single trailing newline build_mbox may add.
+        for (got, want) in recovered.iter().zip(inputs.iter()) {
+            assert_eq!(trim_one_trailing_nl(got), trim_one_trailing_nl(want));
+        }
+    }
+
+    fn trim_one_trailing_nl(b: &[u8]) -> &[u8] {
+        b.strip_suffix(b"\n").unwrap_or(b)
+    }
+
+    // Test-only inverse of build_mbox's framing: split on separator lines,
+    // strip one leading '>' from each `^>+From ` line.
+    fn split_and_unescape(mbox: &[u8]) -> Vec<Vec<u8>> {
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let mut cur: Option<Vec<u8>> = None;
+        for line in split_keep_newlines(mbox) {
+            if line == SEP {
+                if let Some(c) = cur.take() {
+                    parts.push(c);
+                }
+                cur = Some(Vec::new());
+            } else if let Some(c) = cur.as_mut() {
+                c.extend_from_slice(&unescape_line(line));
+            }
+        }
+        if let Some(c) = cur.take() {
+            parts.push(c);
+        }
+        parts
+    }
+
+    fn unescape_line(line: &[u8]) -> Vec<u8> {
+        // If line is `>+From `, drop one leading '>'.
+        let mut j = 0;
+        while j < line.len() && line[j] == b'>' {
+            j += 1;
+        }
+        if j >= 1 && line[j..].starts_with(b"From ") {
+            line[1..].to_vec()
+        } else {
+            line.to_vec()
+        }
+    }
+
+    fn split_keep_newlines(b: &[u8]) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        for i in 0..b.len() {
+            if b[i] == b'\n' {
+                out.push(&b[start..=i]);
+                start = i + 1;
+            }
+        }
+        if start < b.len() {
+            out.push(&b[start..]);
+        }
+        out
+    }
 }
