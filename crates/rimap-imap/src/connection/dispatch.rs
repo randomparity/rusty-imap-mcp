@@ -116,7 +116,10 @@ impl Connection {
         .await
     }
 
-    /// `SEARCH` against `folder`. Returns matching UIDs.
+    /// `SEARCH` against `folder`. Returns matching UIDs paired with the
+    /// UIDVALIDITY observed by the same read-only SELECT (`None` if the
+    /// server omitted it). Thread the value into `export_messages`'
+    /// `expected_uidvalidity`.
     ///
     /// # Errors
     /// Propagates timeout, connection-lost, or protocol errors from the
@@ -125,7 +128,7 @@ impl Connection {
         &self,
         folder: &str,
         query: crate::types::SearchQuery,
-    ) -> Result<Vec<crate::types::Uid>, ImapError> {
+    ) -> Result<(Vec<crate::types::Uid>, Option<u32>), ImapError> {
         self.with_session("search", async |session| {
             crate::ops::search::search(session, folder, query).await
         })
@@ -159,8 +162,8 @@ impl Connection {
 
     /// Fetch the full `BODY[]` of `uid` from `folder`. Returns raw bytes
     /// (no MIME parsing — Sprint 4's `rimap-content` owns that). Drops
-    /// the connection on size-limit overflow OR connection loss so the
-    /// half-consumed response state never leaks to the next op.
+    /// the connection on size-limit overflow, connection loss, or timeout,
+    /// so the half-consumed response state never leaks to the next op.
     ///
     /// # Pre-flight size check
     ///
@@ -175,14 +178,25 @@ impl Connection {
     /// remains as defense-in-depth because servers can lie about
     /// `RFC822.SIZE`.
     ///
+    /// # UIDVALIDITY guard
+    ///
+    /// When `expected_uidvalidity` is `Some(v)`, BOTH internal read-only
+    /// SELECTs (the `RFC822.SIZE` preflight and the `BODY.PEEK[]` fetch)
+    /// verify the folder's current UIDVALIDITY against `v`, fail-closed: a
+    /// mismatch returns `ImapError::UidValidityChanged` and an omitted
+    /// server value returns `ImapError::UidValidityUnavailable`. Pass
+    /// `None` to skip the guard.
+    ///
     /// # Errors
     /// Propagates `ImapError::SizeLimit` if the body exceeds the configured
-    /// `max_fetch_body_bytes`, plus the usual timeout / protocol /
-    /// connection-lost errors.
+    /// `max_fetch_body_bytes`, `ImapError::UidValidityChanged` /
+    /// `ImapError::UidValidityUnavailable` on a failed guard, plus the usual
+    /// timeout / protocol / connection-lost errors.
     pub async fn fetch_body(
         &self,
         folder: &str,
         uid: crate::types::Uid,
+        expected_uidvalidity: Option<u32>,
     ) -> Result<Vec<u8>, ImapError> {
         let dur = self.inner.cfg.command_timeout;
         let limit = self.inner.cfg.max_fetch_body_bytes;
@@ -194,29 +208,35 @@ impl Connection {
                     .ok_or(ImapError::Protocol(async_imap::error::Error::Bad(
                         "session invariant violated: guard is None after session()".to_string(),
                     )))?;
-            let server_size = crate::ops::fetch::preflight_fetch_size(session, folder, uid).await?;
+            let server_size =
+                crate::ops::fetch::preflight_fetch_size(session, folder, uid, expected_uidvalidity)
+                    .await?;
             crate::ops::fetch::preflight_size_check(server_size, limit)?;
-            crate::ops::fetch::fetch_body(session, folder, uid, limit).await
+            crate::ops::fetch::fetch_body(session, folder, uid, limit, expected_uidvalidity).await
         })
         .await;
-        // Drop the cached session on EITHER ConnectionLost OR SizeLimit.
-        // SizeLimit means we aborted mid-stream, so the IMAP response
+        // Drop the cached session on ConnectionLost, SizeLimit, OR Timeout.
+        // SizeLimit and Timeout both abort mid-stream, so the IMAP response
         // state is half-consumed and the session cannot be reused.
+        // UidValidityUnavailable is fail-closed but the session is healthy
+        // (only mailbox identity is unverifiable), so it stays non-invalidating.
         // The match here lists every ImapError variant explicitly because
         // workspace lints ban `_ =>` wildcards.
         let should_invalidate = match &result {
-            Err(ImapError::ConnectionLost | ImapError::SizeLimit { .. }) => true,
+            Err(
+                ImapError::ConnectionLost | ImapError::SizeLimit { .. } | ImapError::Timeout { .. },
+            ) => true,
             Err(
                 ImapError::Tls { .. }
                 | ImapError::TlsHandshake(_)
                 | ImapError::Starttls { .. }
                 | ImapError::Connect(_)
-                | ImapError::Timeout { .. }
                 | ImapError::Auth { .. }
                 | ImapError::Protocol(_)
                 | ImapError::InvalidInput { .. }
                 | ImapError::BatchTooLarge { .. }
                 | ImapError::UidValidityChanged { .. }
+                | ImapError::UidValidityUnavailable { .. }
                 | ImapError::Audit { .. },
             )
             | Ok(_) => false,

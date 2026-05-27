@@ -67,6 +67,17 @@ pub enum VerbatimType {
     Bool,
     /// `Value::Array` whose every element fits in a `u64`.
     U64Array,
+    /// `Value::Array` whose every element fits in a `u64` *and* whose length
+    /// does not exceed the embedded cap. Over-cap or wrong-typed arrays fall
+    /// through to [`FieldPolicy::RedactString`] (emitting `<redacted:?>`)
+    /// instead of being copied verbatim.
+    ///
+    /// Use this — not [`Self::U64Array`] — for *caller-supplied* UID arrays
+    /// that the handler itself rejects above the same cap. `tool_start` is
+    /// emitted before argument deserialization runs, so without the cap a
+    /// rejected oversize request would still be cloned and persisted verbatim,
+    /// amplifying audit-log and memory use.
+    U64ArrayMax(usize),
     /// `Value::Array` whose every element is a `Value::String`.
     StringArray,
 }
@@ -209,6 +220,10 @@ impl<'a> Redactor<'a> {
                 .as_array()
                 .filter(|arr| arr.iter().all(serde_json::Value::is_u64))
                 .map(|_| value.clone()),
+            VerbatimType::U64ArrayMax(max) => value
+                .as_array()
+                .filter(|arr| arr.len() <= max && arr.iter().all(serde_json::Value::is_u64))
+                .map(|_| value.clone()),
             VerbatimType::StringArray => value
                 .as_array()
                 .filter(|arr| arr.iter().all(serde_json::Value::is_string))
@@ -321,6 +336,7 @@ impl ToolRedactionSchema for ToolName {
             Self::FetchMessage | Self::FetchMessageHtml => fetch_message_schema(self),
             Self::ListAttachments | Self::MarkRead | Self::MarkUnread => folder_uid_schema(self),
             Self::DownloadAttachment => download_attachment_schema(self),
+            Self::ExportMessages => export_messages_schema(self),
             Self::Flag | Self::Unflag => flag_schema(self),
             Self::MoveMessage => move_message_schema(self),
             Self::CreateDraft => create_draft_schema(self),
@@ -467,6 +483,33 @@ fn download_attachment_schema(tool: ToolName) -> RedactionSchema {
             ("folder", Verbatim(VtString)),
             ("uid", Verbatim(U64)),
             ("part", Verbatim(VtString)),
+            ("password", Forbidden),
+            ("token", Forbidden),
+        ],
+    )
+}
+
+/// Upper bound on the `uids` array copied verbatim into `tool_start` for
+/// `export_messages`. Mirrors the handler's `MAX_EXPORT_UIDS` validation cap
+/// (`crates/rimap-server/src/tools/retrieval/export_messages.rs`). The audit
+/// envelope redacts arguments *before* the handler runs that validation, so
+/// without this cap a rejected oversize request would still be cloned and
+/// persisted verbatim. Over-cap arrays fall through to `RedactString`.
+const EXPORT_UIDS_REDACT_CAP: usize = 100;
+
+fn export_messages_schema(tool: ToolName) -> RedactionSchema {
+    use FieldPolicy::{Forbidden, RedactString, Verbatim};
+    use VerbatimType::{Bool, String as VtString, U64, U64ArrayMax};
+    RedactionSchema::new(
+        tool,
+        &[
+            ("folder", Verbatim(VtString)),
+            ("uids", Verbatim(U64ArrayMax(EXPORT_UIDS_REDACT_CAP))),
+            ("expected_uidvalidity", Verbatim(U64)),
+            ("max_total_bytes", Verbatim(U64)),
+            ("allow_partial", Verbatim(Bool)),
+            ("dest_dir", RedactString),
+            ("filename", RedactString),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -1303,6 +1346,76 @@ mod tests {
         let from_search = Redactor::new(&search, &salt).apply(&sample);
         let from_advanced = Redactor::new(&advanced, &salt).apply(&sample);
         assert_eq!(from_search, from_advanced);
+    }
+
+    #[test]
+    fn export_messages_schema_redacts_paths_keeps_identifiers() {
+        let salt = salt();
+        let schema = crate::redact::schemas()
+            .into_iter()
+            .find(|s| s.tool == ToolName::ExportMessages)
+            .expect("export_messages schema exists");
+        let args = json!({
+            "folder": "INBOX",
+            "uids": [101_u64, 102_u64],
+            "expected_uidvalidity": 12345_u64,
+            "dest_dir": "/home/user/secret-dir",
+            "filename": "private-series",
+            "password": "hunter2",
+            "token": "s3cr3t-token"
+        });
+        let out = Redactor::new(&schema, &salt).apply(&args);
+        // Structural fields are preserved verbatim.
+        assert_eq!(out["folder"], json!("INBOX"));
+        assert_eq!(out["expected_uidvalidity"], json!(12345_u64));
+        // Requested UID set is recorded verbatim (recoverable for audit).
+        assert_eq!(out["uids"], json!([101_u64, 102_u64]));
+        // dest_dir / filename must not appear verbatim.
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(!serialized.contains("/home/user/secret-dir"));
+        assert!(!serialized.contains("private-series"));
+        // password / token are Forbidden — keys must be absent.
+        assert!(!serialized.contains("hunter2"));
+        assert!(!out.as_object().unwrap().contains_key("password"));
+        assert!(!serialized.contains("s3cr3t-token"));
+        assert!(!out.as_object().unwrap().contains_key("token"));
+    }
+
+    #[test]
+    fn export_messages_schema_caps_oversize_uid_array() {
+        // Codex adversarial-review regression: the audit envelope redacts
+        // arguments BEFORE the handler's 100-UID validation runs. An array
+        // over the cap must NOT be copied verbatim into `tool_start` — it
+        // falls through to RedactString so a rejected oversize request cannot
+        // bloat the audit log. A <=cap array still round-trips verbatim.
+        let salt = salt();
+        let schema = crate::redact::schemas()
+            .into_iter()
+            .find(|s| s.tool == ToolName::ExportMessages)
+            .expect("export_messages schema exists");
+        let r = Redactor::new(&schema, &salt);
+
+        // 101 numeric UIDs — one past the cap. A distinctive sentinel value
+        // lets us prove the array bytes never reach the redacted output.
+        let sentinel: u64 = 999_888_777;
+        let mut oversize: Vec<serde_json::Value> = (1..=100_u64).map(|n| json!(n)).collect();
+        oversize.push(json!(sentinel));
+        let out = r.apply(&json!({ "uids": serde_json::Value::Array(oversize) }));
+        assert_eq!(
+            out["uids"],
+            json!("<redacted:?>"),
+            "oversize uid array must fall through to RedactString",
+        );
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(
+            !serialized.contains(&sentinel.to_string()),
+            "oversize uid array leaked verbatim into audit output: {serialized}",
+        );
+
+        // Exactly at the cap (100) still passes through verbatim.
+        let at_cap: Vec<serde_json::Value> = (1..=100_u64).map(|n| json!(n)).collect();
+        let out = r.apply(&json!({ "uids": serde_json::Value::Array(at_cap.clone()) }));
+        assert_eq!(out["uids"], serde_json::Value::Array(at_cap));
     }
 }
 

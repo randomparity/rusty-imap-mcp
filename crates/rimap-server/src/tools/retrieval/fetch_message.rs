@@ -110,7 +110,7 @@ pub async fn handle(
 
     let uid = Uid::from(input.uid);
 
-    let raw = account.imap.fetch_body(&input.folder, uid).await?;
+    let raw = account.imap.fetch_body(&input.folder, uid, None).await?;
     let raw_size = raw.len();
 
     let content = crate::mcp::content::parse_message_async(raw).await?;

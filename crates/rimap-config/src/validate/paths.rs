@@ -38,6 +38,64 @@ pub(super) fn validate_paths_multi(
     Ok(())
 }
 
+/// Fail-closed precondition for `export_messages`: when the tool is
+/// enabled, the configured download root must be server-private (not
+/// group- or world-writable).
+///
+/// `export_messages` writes a raw, unsanitized mbox into the download
+/// sandbox. Because the export is an unredacted raw-message oracle, the
+/// design requires the download root be writable only by the server
+/// (write authority separated from the consuming agent). This turns that
+/// requirement into a hard startup check: enabling the tool with a
+/// group/world-writable download root rejects the config.
+///
+/// The check fires only when `export_enabled` is true and a download root
+/// is configured (a non-empty `attachments.download_dir`). An empty
+/// `download_dir` means per-session tempdir, which the server creates with
+/// private permissions and is out of operator control. On non-Unix
+/// platforms the permission concept does not apply and the check is a
+/// no-op.
+pub(super) fn validate_export_download_root(
+    attachments: &AttachmentsConfig,
+    export_enabled: bool,
+) -> Result<(), ConfigError> {
+    if !export_enabled || attachments.download_dir.is_empty() {
+        return Ok(());
+    }
+    check_export_download_root_private(Path::new(&attachments.download_dir))
+}
+
+#[cfg(unix)]
+fn check_export_download_root_private(download_root: &Path) -> Result<(), ConfigError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = std::fs::metadata(download_root)
+        .map_err(|e| ConfigError::PathNotWritable {
+            path: download_root.to_path_buf(),
+            reason: format!("cannot stat download root: {e}"),
+        })?
+        .permissions()
+        .mode();
+    // 0o022 = group-write (0o020) | other-write (0o002)
+    if mode & 0o022 != 0 {
+        return Err(ConfigError::PathNotWritable {
+            path: download_root.to_path_buf(),
+            reason: format!(
+                "export_messages is enabled but the download root is \
+                 group/world-writable (mode {:o}); export_messages requires \
+                 a server-private download root",
+                mode & 0o777,
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_export_download_root_private(_download_root: &Path) -> Result<(), ConfigError> {
+    Ok(())
+}
+
 /// Compute the default audit base when `audit.allowed_base_dir` is unset.
 /// Returns `$XDG_STATE_HOME/rusty-imap-mcp/` on platforms where
 /// `directories::ProjectDirs` resolves; returns `None` otherwise (which
@@ -231,5 +289,58 @@ mod tests {
             Some(base_tmp.path().to_path_buf()),
         );
         assert!(enforce_audit_containment(&audit).is_ok());
+    }
+
+    #[cfg(unix)]
+    fn attachments_with(download_dir: &Path) -> AttachmentsConfig {
+        AttachmentsConfig {
+            download_dir: download_dir.to_string_lossy().into_owned(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_world_writable_rejected_when_enabled() {
+        let tmp = TempDir::new().unwrap();
+        set_mode(tmp.path(), 0o777);
+        let attachments = attachments_with(tmp.path());
+        let err = validate_export_download_root(&attachments, true).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("group/world-writable"), "reason: {reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_private_accepted_when_enabled() {
+        let tmp = TempDir::new().unwrap();
+        set_mode(tmp.path(), 0o700);
+        let attachments = attachments_with(tmp.path());
+        assert!(validate_export_download_root(&attachments, true).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_world_writable_ignored_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        set_mode(tmp.path(), 0o777);
+        let attachments = attachments_with(tmp.path());
+        assert!(validate_export_download_root(&attachments, false).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_empty_download_dir_skips_check() {
+        let attachments = AttachmentsConfig {
+            download_dir: String::new(),
+        };
+        assert!(validate_export_download_root(&attachments, true).is_ok());
     }
 }

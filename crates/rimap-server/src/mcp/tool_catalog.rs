@@ -103,6 +103,7 @@ fn output_schema(name: ToolName) -> Option<serde_json::Map<String, serde_json::V
         },
         retrieval::{
             download_attachment::{DownloadAttachmentMeta, DownloadAttachmentUntrusted},
+            export_messages::ExportMessagesMeta,
             fetch_message::{FetchMessageMeta, FetchMessageUntrusted},
             list_attachments::{ListAttachmentsMeta, ListAttachmentsUntrusted},
             search::{SearchMeta, SearchUntrusted},
@@ -123,6 +124,7 @@ fn output_schema(name: ToolName) -> Option<serde_json::Map<String, serde_json::V
         ToolName::DownloadAttachment => {
             envelope_schema::<ToolResponse<DownloadAttachmentMeta, DownloadAttachmentUntrusted>>()
         }
+        ToolName::ExportMessages => envelope_schema::<ToolResponse<ExportMessagesMeta, ()>>(),
         ToolName::MarkRead | ToolName::MarkUnread | ToolName::Flag | ToolName::Unflag => {
             envelope_schema::<ToolResponse<FlagsMeta, ()>>()
         }
@@ -148,7 +150,7 @@ fn output_schema(name: ToolName) -> Option<serde_json::Map<String, serde_json::V
 /// (e.g. `SearchAdvanced`, `FetchMessageHtml`).
 #[expect(
     clippy::too_many_lines,
-    reason = "single match over 24 ToolName variants; splitting would create two parallel matches"
+    reason = "single match over 25 ToolName variants; splitting would create two parallel matches"
 )]
 fn tool_spec(name: ToolName) -> Option<ToolSpec> {
     use crate::tools::admin::accounts::UseAccountInput;
@@ -163,6 +165,7 @@ fn tool_spec(name: ToolName) -> Option<ToolSpec> {
     use crate::tools::mailbox::labels::{LabelInput, ListLabelsInput};
     use crate::tools::mailbox::move_message::MoveMessageInput;
     use crate::tools::retrieval::download_attachment::DownloadAttachmentInput;
+    use crate::tools::retrieval::export_messages::ExportMessagesInput;
     use crate::tools::retrieval::fetch_message::FetchMessageInput;
     use crate::tools::retrieval::list_attachments::ListAttachmentsInput;
     use crate::tools::retrieval::search::SearchInput;
@@ -191,6 +194,13 @@ fn tool_spec(name: ToolName) -> Option<ToolSpec> {
             "Download Attachment",
             "Download an attachment to the sandbox directory",
             envelope_schema::<DownloadAttachmentInput>(),
+        ),
+        ToolName::ExportMessages => (
+            "Export Messages",
+            "Export multiple messages by UID as a single git am-able mbox \
+             file in the download sandbox. Discover UIDs with `search` and \
+             pass its uid_validity. Disabled unless enabled in [security.tools].",
+            envelope_schema::<ExportMessagesInput>(),
         ),
         ToolName::MarkRead => (
             "Mark Messages Read",
@@ -513,7 +523,7 @@ mod tests {
         // `ToolName → (MetaType, UntrustedType)` tables disagree. The wire
         // test `wire_published_output_schema_matches_fixture` only
         // exercises 2 tools in the zero-account harness; this unit test
-        // covers all 22 without docker.
+        // covers all 23 without docker.
         use std::path::Path;
         for def in ToolName::all()
             .into_iter()

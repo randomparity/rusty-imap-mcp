@@ -2459,6 +2459,7 @@ dependencies = [
  "hex",
  "infer",
  "jsonschema",
+ "libc",
  "mail-builder",
  "mail-parser",
  "predicates",

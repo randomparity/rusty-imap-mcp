@@ -74,6 +74,16 @@ fn connect_io_error_maps_to_err_connection_lost() {
 }
 
 #[test]
+fn uid_validity_unavailable_maps_to_err_uid_validity_changed() {
+    let err = ImapError::UidValidityUnavailable {
+        folder: "INBOX".to_string(),
+    };
+    let rimap: RimapError = err.into();
+    assert_eq!(rimap.code(), ErrorCode::UidValidityChanged);
+    assert!(rimap.source().is_some());
+}
+
+#[test]
 fn audit_variant_maps_to_internal_error_code() {
     let err = ImapError::Audit {
         op: "emit_auth",

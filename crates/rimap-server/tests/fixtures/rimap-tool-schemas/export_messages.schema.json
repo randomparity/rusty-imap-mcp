@@ -1,135 +1,122 @@
 {
   "$defs": {
-    "SearchMeta": {
-      "description": "Trusted metadata for a `search` response.",
+    "ExportFailReason": {
+      "description": "Reason a requested UID was not exported. Both are determined at the size\npreflight, before any body fetch \u2014 a UID that reaches the body fetch is\nknown-present and in-bounds, and any error there is fatal (never per-UID),\nso there is no `FetchError` variant.",
+      "enum": [
+        "not_found",
+        "oversize"
+      ],
+      "type": "string"
+    },
+    "ExportMessagesMeta": {
+      "description": "Trusted metadata for an `export_messages` response.",
       "properties": {
-        "folder": {
-          "description": "Folder that was searched.",
-          "type": "string"
-        },
-        "returned": {
-          "description": "Number of messages returned in this response.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "total_matched": {
-          "description": "Total number of messages matching the query (before pagination).",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "truncated": {
-          "description": "Whether there are more results beyond this page.",
+        "complete": {
+          "description": "True iff every requested UID was exported.",
           "type": "boolean"
         },
-        "uid_validity": {
-          "description": "UIDVALIDITY observed for the searched folder, from the same\nEXAMINE/UID SEARCH operation. Thread into `export_messages`'\n`expected_uidvalidity`. `None` if the server omitted it.",
-          "format": "uint32",
+        "failed": {
+          "description": "Requested UIDs that failed, with reasons.",
+          "items": {
+            "$ref": "#/$defs/FailedUid"
+          },
+          "type": "array"
+        },
+        "folder": {
+          "description": "Folder the messages were exported from.",
+          "type": "string"
+        },
+        "message_count": {
+          "description": "Number of messages written to the artifact.",
+          "format": "uint",
           "minimum": 0,
+          "type": "integer"
+        },
+        "partial_path": {
+          "description": "Path of a `.partial.mbox` artifact. Present only on a partial\nexport; omitted otherwise.",
           "type": [
-            "integer",
+            "string",
             "null"
           ]
+        },
+        "path": {
+          "description": "`git am`-ready mbox path. Present only on a complete export;\nomitted from the response otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "description": "SHA-256 of the written mbox, hex-encoded.",
+          "type": "string"
+        },
+        "succeeded": {
+          "description": "Exported UIDs, in mbox order, with sizes.",
+          "items": {
+            "$ref": "#/$defs/ExportedUid"
+          },
+          "type": "array"
+        },
+        "total_bytes": {
+          "description": "Total bytes written.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uid_validity": {
+          "description": "UIDVALIDITY the export was pinned to.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
         "folder",
-        "total_matched",
-        "returned",
-        "truncated"
+        "complete",
+        "sha256",
+        "message_count",
+        "total_bytes",
+        "uid_validity",
+        "succeeded",
+        "failed"
       ],
       "type": "object"
     },
-    "SearchResultEntry": {
-      "description": "A single message entry in a `search` untrusted payload.",
+    "ExportedUid": {
+      "description": "One successfully exported message.",
       "properties": {
-        "cc": {
-          "description": "Cc addresses, sanitized. Omitted when empty.\n\nNote: `bcc` is intentionally absent \u2014 exposing BCC recipients\nviolates the privacy boundary enforced at the `SearchInput` and\noutput layers. See the spec's Privacy subsection.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "date": {
-          "description": "Date header, sanitized.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "flags": {
-          "description": "IMAP flags on the message, if fetched.",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "from": {
-          "description": "From addresses, sanitized. Omitted when empty.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "message_id": {
-          "description": "RFC 2822 `Message-ID`, sanitized.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "size": {
-          "description": "Message size in bytes, if fetched.",
-          "format": "uint32",
+        "size_bytes": {
+          "format": "uint",
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "subject": {
-          "description": "Subject header, sanitized.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "to": {
-          "description": "To addresses, sanitized. Omitted when empty.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+          "type": "integer"
         },
         "uid": {
-          "description": "UID of the message.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         }
       },
       "required": [
-        "uid"
+        "uid",
+        "size_bytes"
       ],
       "type": "object"
     },
-    "SearchUntrusted": {
-      "description": "Untrusted payload for a `search` response.",
+    "FailedUid": {
+      "description": "One requested UID that failed.",
       "properties": {
-        "messages": {
-          "description": "Matching messages with sanitized header fields.",
-          "items": {
-            "$ref": "#/$defs/SearchResultEntry"
-          },
-          "type": "array"
+        "reason": {
+          "$ref": "#/$defs/ExportFailReason"
+        },
+        "uid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [
-        "messages"
+        "uid",
+        "reason"
       ],
       "type": "object"
     },
@@ -285,7 +272,7 @@
   "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$ref": "#/$defs/SearchMeta",
+      "$ref": "#/$defs/ExportMessagesMeta",
       "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {
@@ -296,15 +283,8 @@
       "type": "array"
     },
     "untrusted": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/SearchUntrusted"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Sanitized content derived from email data. Untrusted."
+      "description": "Sanitized content derived from email data. Untrusted.",
+      "type": "null"
     }
   },
   "required": [

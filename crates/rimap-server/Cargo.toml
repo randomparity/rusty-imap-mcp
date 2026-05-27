@@ -94,6 +94,12 @@ tempfile = { workspace = true }
 # remains for integration-test consumers; cargo dedupes the version.
 jsonschema = { workspace = true, optional = true }
 
+# Used only for the `O_NOFOLLOW` open flag in the attachment sandbox writer
+# (`tools::retrieval::sandbox`). Referenced as a plain constant — no `unsafe`
+# (the workspace forbids it). Unix-only; non-Unix builds use a fail-closed stub.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

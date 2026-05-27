@@ -202,7 +202,7 @@ pub(crate) async fn apply_threading_headers<'a>(
     let folder = in_reply_to_folder.unwrap_or("INBOX");
     let uid = rimap_imap::types::Uid::from(reply_uid);
 
-    let raw = account.imap.fetch_body(folder, uid).await?;
+    let raw = account.imap.fetch_body(folder, uid, None).await?;
     let headers = rimap_content::extract_threading_headers(&raw);
 
     let Some(msg_id) = headers.message_id else {

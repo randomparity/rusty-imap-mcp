@@ -56,6 +56,7 @@ pub(super) fn refine_tool_name(
         | ToolName::FetchMessageHtml
         | ToolName::ListAttachments
         | ToolName::DownloadAttachment
+        | ToolName::ExportMessages
         | ToolName::MarkRead
         | ToolName::MarkUnread
         | ToolName::Flag

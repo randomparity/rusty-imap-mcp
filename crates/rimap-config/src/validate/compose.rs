@@ -112,12 +112,32 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
 
     paths::validate_audit_config(&config.audit)?;
     paths::validate_paths_multi(&config.audit, &config.attachments)?;
+    paths::validate_export_download_root(
+        &config.attachments,
+        export_messages_enabled(accounts.values()),
+    )?;
 
     Ok(ValidatedMultiConfig {
         accounts,
         audit: config.audit,
         attachments: config.attachments,
     })
+}
+
+/// Whether `export_messages` is effectively enabled for any account.
+///
+/// `export_messages` is base-DENY across every posture (see the posture
+/// matrix), so it is enabled only when an account carries an explicit
+/// `Allow` override in `[security.tools]`. The download root is a global
+/// setting, so a single enabled account is enough to require a private
+/// root.
+fn export_messages_enabled<'a>(accounts: impl Iterator<Item = &'a ValidatedAccountConfig>) -> bool {
+    for account in accounts {
+        if account.tool_overrides.get(&ToolName::ExportMessages) == Some(&Verdict::Allow) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Convert a legacy flat config into a `ValidatedMultiConfig` with a
@@ -139,6 +159,10 @@ pub fn validate_legacy_as_multi(config: Config) -> Result<ValidatedMultiConfig, 
     })?;
     paths::validate_audit_config(&config.audit)?;
     paths::validate_paths_multi(&config.audit, &config.attachments)?;
+    paths::validate_export_download_root(
+        &config.attachments,
+        export_messages_enabled(std::iter::once(&account)),
+    )?;
 
     let mut accounts = BTreeMap::new();
     accounts.insert(id, account);
@@ -954,5 +978,100 @@ allowed_base_dir = "{}"
                 ..
             }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // export_messages private-download-root enforcement (Unix only)
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_messages_enabled_with_world_writable_root_fails() {
+        let audit_dir = TempDir::new().unwrap();
+        let download_dir = TempDir::new().unwrap();
+        set_mode(download_dir.path(), 0o777);
+
+        let mut cfg = base_config(audit_dir.path());
+        cfg.attachments = AttachmentsConfig {
+            download_dir: download_dir.path().to_string_lossy().into_owned(),
+        };
+        cfg.security
+            .tools
+            .insert("export_messages".into(), Verdict::Allow);
+
+        let err = validate(cfg).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("group/world-writable"), "reason: {reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_messages_enabled_with_private_root_passes() {
+        let audit_dir = TempDir::new().unwrap();
+        let download_dir = TempDir::new().unwrap();
+        set_mode(download_dir.path(), 0o700);
+
+        let mut cfg = base_config(audit_dir.path());
+        cfg.attachments = AttachmentsConfig {
+            download_dir: download_dir.path().to_string_lossy().into_owned(),
+        };
+        cfg.security
+            .tools
+            .insert("export_messages".into(), Verdict::Allow);
+
+        validate(cfg).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_messages_disabled_does_not_check_world_writable_root() {
+        let audit_dir = TempDir::new().unwrap();
+        let download_dir = TempDir::new().unwrap();
+        set_mode(download_dir.path(), 0o777);
+
+        let mut cfg = base_config(audit_dir.path());
+        cfg.attachments = AttachmentsConfig {
+            download_dir: download_dir.path().to_string_lossy().into_owned(),
+        };
+
+        validate(cfg).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multi_account_export_messages_enabled_with_world_writable_root_fails() {
+        // Drives the multi-account entry point (`validate_multi` ->
+        // `validate_multi_inner`) so the export private-root check stays
+        // wired to that path, not just the legacy wrapper.
+        let audit_dir = TempDir::new().unwrap();
+        let download_dir = TempDir::new().unwrap();
+        set_mode(download_dir.path(), 0o777);
+
+        let mut exporter = raw_account("work");
+        let mut tools = std::collections::BTreeMap::new();
+        tools.insert("export_messages".into(), Verdict::Allow);
+        exporter.security = Some(SecurityConfig {
+            tools,
+            ..SecurityConfig::default()
+        });
+
+        let mut cfg = base_multi_config(audit_dir.path(), vec![exporter, raw_account("personal")]);
+        cfg.attachments = AttachmentsConfig {
+            download_dir: download_dir.path().to_string_lossy().into_owned(),
+        };
+
+        let err = validate_multi(cfg).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("group/world-writable"), "reason: {reason}");
     }
 }

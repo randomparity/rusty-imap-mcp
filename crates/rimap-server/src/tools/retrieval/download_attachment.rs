@@ -105,7 +105,7 @@ pub async fn handle(
     let dest =
         sandbox::resolve_dest_dir_async(input.dest_dir, Arc::clone(&account.download_dir)).await?;
 
-    let raw = account.imap.fetch_body(&input.folder, uid).await?;
+    let raw = account.imap.fetch_body(&input.folder, uid, None).await?;
 
     let parts = crate::mcp::content::walk_attachment_parts_async(raw).await?;
 
