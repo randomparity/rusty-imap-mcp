@@ -1,12 +1,15 @@
 //! `export_messages` tool handler: bulk raw export of multiple UIDs to a
 //! single `git am`-able mbox file in the download sandbox.
 
-use rimap_imap::types::Uid;
+use std::sync::Arc;
+
+use rimap_imap::types::{FetchSpec, Uid};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
+use crate::tools::retrieval::sandbox;
 
 /// Hard ceiling on the aggregate export size, regardless of the
 /// caller-supplied `max_total_bytes`.
@@ -105,7 +108,6 @@ const MAX_EXPORT_UIDS: usize = 100;
 ///
 /// `RimapError::Authz { code: InvalidInput }` for an empty list or one
 /// exceeding [`MAX_EXPORT_UIDS`].
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
 fn validate_uids(uids: Vec<core::num::NonZeroU32>) -> Result<Vec<Uid>, rimap_core::RimapError> {
     if uids.is_empty() {
         return Err(rimap_core::RimapError::invalid_input(
@@ -128,7 +130,6 @@ fn validate_uids(uids: Vec<core::num::NonZeroU32>) -> Result<Vec<Uid>, rimap_cor
 }
 
 /// Clamp the caller-supplied aggregate byte budget to the hard ceiling.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
 fn clamp_total_bytes(requested: Option<u64>) -> u64 {
     requested.map_or(MAX_EXPORT_TOTAL_BYTES, |n| n.min(MAX_EXPORT_TOTAL_BYTES))
 }
@@ -144,7 +145,6 @@ const MBOX_SEPARATOR: &[u8] = b"From mboxrd@rusty-imap-mcp Thu Jan  1 00:00:00 1
 ///
 /// Callers must pass non-empty message bodies; an empty body would emit a
 /// bare separator with no content. Task 7's handler validates this upstream.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
 fn build_mbox(messages: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::new();
     for msg in messages {
@@ -214,7 +214,6 @@ fn line_is_from(line: &[u8]) -> bool {
 /// `RimapError::Authz { code: InvalidInput }` if the prefix is empty after
 /// trimming, longer than 64 bytes, or contains any character outside the
 /// grammar.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
 fn sanitize_filename_prefix(prefix: Option<&str>) -> Result<String, rimap_core::RimapError> {
     let Some(raw) = prefix else {
         return Ok("messages".to_string());
@@ -238,23 +237,351 @@ fn sanitize_filename_prefix(prefix: Option<&str>) -> Result<String, rimap_core::
     Ok(trimmed.to_string())
 }
 
+/// The IMAP operations `export_messages` depends on. The handler calls this
+/// trait instead of `account.imap` directly so the orchestration — that every
+/// body fetch carries the pinned `expected_uidvalidity`, and that any
+/// body-fetch error is fatal-with-no-artifact — is deterministically testable
+/// against a hand-written fake without a live server.
+pub(crate) trait ExportSource {
+    /// Preflight: for each requested uid that exists, the `(uid, RFC822.SIZE)`
+    /// pair (size `None` when the server omitted it), plus the folder's
+    /// observed UIDVALIDITY (`None` when the server omitted it).
+    ///
+    /// # Errors
+    ///
+    /// Propagates IMAP failures (including a UIDVALIDITY mismatch).
+    async fn fetch_sizes(
+        &self,
+        folder: &str,
+        uids: &[Uid],
+        expected_uidvalidity: u32,
+    ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError>;
+
+    /// Fetch one message body, guarded by `expected_uidvalidity`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates IMAP failures; the handler treats every error as fatal.
+    async fn fetch_one_body(
+        &self,
+        folder: &str,
+        uid: Uid,
+        expected_uidvalidity: u32,
+    ) -> Result<Vec<u8>, rimap_core::RimapError>;
+}
+
+impl ExportSource for AccountState {
+    async fn fetch_sizes(
+        &self,
+        folder: &str,
+        uids: &[Uid],
+        expected_uidvalidity: u32,
+    ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError> {
+        let (msgs, uid_validity) = self
+            .imap
+            .fetch(
+                folder,
+                uids,
+                FetchSpec {
+                    size: true,
+                    ..FetchSpec::default()
+                },
+                Some(expected_uidvalidity),
+            )
+            .await?;
+        let sizes = msgs.iter().map(|m| (m.uid.get(), m.size)).collect();
+        Ok((sizes, uid_validity))
+    }
+
+    async fn fetch_one_body(
+        &self,
+        folder: &str,
+        uid: Uid,
+        expected_uidvalidity: u32,
+    ) -> Result<Vec<u8>, rimap_core::RimapError> {
+        Ok(self
+            .imap
+            .fetch_body(folder, uid, Some(expected_uidvalidity))
+            .await?)
+    }
+}
+
 /// Execute the `export_messages` tool.
+///
+/// Validates input, resolves the sandbox destination, then delegates the
+/// preflight/fetch/build/write orchestration to [`run_export`] over the
+/// account's [`ExportSource`].
 ///
 /// # Errors
 ///
-/// Returns `RimapError::Internal` — not yet implemented (filled in Task 7).
-#[expect(
-    clippy::unused_async,
-    reason = "inert handler; dispatch awaits this future and the real \
-              implementation (Task 7) performs IMAP I/O"
-)]
+/// - `RimapError::Authz { code: InvalidInput }` for an empty/over-cap UID
+///   list or an unsafe `filename`.
+/// - `RimapError::UidValidityChanged` if the folder's UIDVALIDITY no longer
+///   matches `expected_uidvalidity`.
+/// - `RimapError::Authz { code: InvalidInput }` (all-or-nothing default)
+///   listing failed UIDs when `allow_partial` is false and any UID fails.
+/// - `RimapError::Imap { ... }` for connection-dropping fetch failures.
+/// - `RimapError::Internal` for filesystem/hashing failures.
 pub async fn handle(
-    _account: &AccountState,
-    _input: ExportMessagesInput,
+    account: &AccountState,
+    input: ExportMessagesInput,
 ) -> Result<ToolResponse<ExportMessagesMeta, ()>, rimap_core::RimapError> {
-    Err(rimap_core::RimapError::Internal(
-        "export_messages not yet implemented".into(),
-    ))
+    crate::tools::validation::validate_folder_input("folder", &input.folder)?;
+
+    let prefix = sanitize_filename_prefix(input.filename.as_deref())?;
+    let uids = validate_uids(input.uids)?;
+    let budget = clamp_total_bytes(input.max_total_bytes);
+    let allow_partial = input.allow_partial.unwrap_or(false);
+    let expected = input.expected_uidvalidity.get();
+    let per_msg_cap = account.imap.max_fetch_body_bytes();
+
+    let dest =
+        sandbox::resolve_dest_dir_async(input.dest_dir, Arc::clone(&account.download_dir)).await?;
+
+    let plan = RunPlan {
+        folder: input.folder,
+        dest,
+        prefix,
+        uids,
+        expected,
+        budget,
+        per_msg_cap,
+        allow_partial,
+    };
+    run_export(account, plan).await
+}
+
+/// Inputs to [`run_export`], grouped so the orchestrator stays within the
+/// positional-parameter limit.
+pub(crate) struct RunPlan {
+    pub folder: String,
+    pub dest: std::path::PathBuf,
+    pub prefix: String,
+    pub uids: Vec<Uid>,
+    pub expected: u32,
+    pub budget: u64,
+    pub per_msg_cap: u64,
+    pub allow_partial: bool,
+}
+
+/// The size/identity bounds threaded through the preflight and fetch loop:
+/// the pinned UIDVALIDITY, the per-message body cap, and the aggregate byte
+/// budget. Grouped so the helpers stay within the positional-parameter limit.
+#[derive(Debug, Clone, Copy)]
+struct FetchLimits {
+    expected: u32,
+    per_msg_cap: u64,
+    budget: u64,
+}
+
+/// Preflight → classify+fetch → frame → write. Generic over [`ExportSource`]
+/// so handler wiring is testable against a fake. `dest` is the already-resolved
+/// sandbox directory.
+///
+/// # Errors
+///
+/// See [`handle`]. Notably: a missing UIDVALIDITY in the preflight, an
+/// over-budget eligible-size sum or framed output, an all-or-nothing abort, and
+/// any body-fetch error are all returned `Err` before anything is written.
+pub(crate) async fn run_export(
+    source: &impl ExportSource,
+    plan: RunPlan,
+) -> Result<ToolResponse<ExportMessagesMeta, ()>, rimap_core::RimapError> {
+    let RunPlan {
+        folder,
+        dest,
+        prefix,
+        uids,
+        expected,
+        budget,
+        per_msg_cap,
+        allow_partial,
+    } = plan;
+
+    let limits = FetchLimits {
+        expected,
+        per_msg_cap,
+        budget,
+    };
+
+    let size_by_uid = preflight_sizes(source, &folder, &uids, limits).await?;
+
+    let outcomes = fetch_bodies(source, &folder, &uids, &size_by_uid, limits).await?;
+
+    let (complete, bodies, succeeded, failed) = match plan_outcome(outcomes, allow_partial) {
+        Outcome::Abort { failed } => {
+            let failed_uids: Vec<String> = failed.iter().map(|f| f.uid.to_string()).collect();
+            return Err(rimap_core::RimapError::invalid_input(format!(
+                "export incomplete (set allow_partial=true to override); failed UIDs: {}",
+                failed_uids.join(", ")
+            )));
+        }
+        Outcome::Proceed {
+            complete,
+            bodies,
+            succeeded,
+            failed,
+        } => (complete, bodies, succeeded, failed),
+    };
+
+    let mbox = build_mbox(&bodies);
+    let total_bytes = mbox.len() as u64;
+    // Authoritative budget check on the *framed* output: mboxrd separators,
+    // From-line escaping, and terminal padding add bytes beyond the raw bodies
+    // counted during fetch. Reject before writing anything.
+    if total_bytes > budget {
+        return Err(rimap_core::RimapError::invalid_input(
+            "framed mbox exceeds max_total_bytes",
+        ));
+    }
+    let sha256 = sandbox::sha256_hex(&mbox);
+
+    let suffix = if complete { "mbox" } else { "partial.mbox" };
+    let token = export_token();
+    let filename = format!("{prefix}-{token}.{suffix}");
+    let written = sandbox::write_attachment_async(dest, filename, mbox).await?;
+    let written = written.to_string_lossy().to_string();
+
+    let (path, partial_path) = if complete {
+        (Some(written), None)
+    } else {
+        (None, Some(written))
+    };
+
+    Ok(ToolResponse::meta_only(ExportMessagesMeta {
+        folder,
+        complete,
+        path,
+        partial_path,
+        sha256,
+        message_count: succeeded.len(),
+        total_bytes,
+        // `expected`, not the preflight-observed value: the guarded fetch
+        // fail-closes on any UIDVALIDITY mismatch/omission (preflight rejects
+        // None; fetch/fetch_body error on mismatch), so observed == expected is
+        // provable whenever we reach the manifest.
+        uid_validity: expected,
+        succeeded,
+        failed,
+    }))
+}
+
+/// Preflight: fetch reported sizes, reject an absent UIDVALIDITY, and run the
+/// advisory eligible-sum budget pre-check. Returns a `uid -> reported size`
+/// map (absence from the map means the UID is not present in the folder).
+///
+/// # Errors
+///
+/// Propagates IMAP failures; returns `InvalidInput` when the server omits
+/// UIDVALIDITY or the eligible reported-size sum exceeds `budget`.
+async fn preflight_sizes(
+    source: &impl ExportSource,
+    folder: &str,
+    uids: &[Uid],
+    limits: FetchLimits,
+) -> Result<std::collections::BTreeMap<u32, Option<u32>>, rimap_core::RimapError> {
+    let (sizes, uid_validity_opt) = source.fetch_sizes(folder, uids, limits.expected).await?;
+    // The shared guard only *warns* on an omitted UIDVALIDITY; export refuses
+    // to run unguarded, so reject an absent value.
+    if uid_validity_opt.is_none() {
+        return Err(rimap_core::RimapError::invalid_input(
+            "server omitted UIDVALIDITY; export_messages requires it to guard the mailbox",
+        ));
+    }
+
+    let mut size_by_uid: std::collections::BTreeMap<u32, Option<u32>> =
+        std::collections::BTreeMap::new();
+    for (uid, size) in sizes {
+        size_by_uid.insert(uid, size);
+    }
+
+    // Advisory aggregate pre-check, summed over ONLY the UIDs that may be
+    // written — present and within the per-message cap. Excluding NotFound and
+    // known-Oversize UIDs means they cannot block an `allow_partial` export of
+    // the writable messages. (A present-but-size-unknown UID counts 0 here; the
+    // running actual-bytes check during fetch is its real guard.) The framed
+    // size check later is the final authority.
+    let eligible_sum: u64 = uids
+        .iter()
+        .filter_map(|u| match size_by_uid.get(&u.get()) {
+            Some(Some(sz)) if u64::from(*sz) <= limits.per_msg_cap => Some(u64::from(*sz)),
+            _ => None,
+        })
+        .sum();
+    if eligible_sum > limits.budget {
+        return Err(rimap_core::RimapError::invalid_input(
+            "export exceeds max_total_bytes",
+        ));
+    }
+    Ok(size_by_uid)
+}
+
+/// Classify + fetch in caller order. Missing and known-oversize UIDs are
+/// per-UID failures resolved at preflight (no body fetch). `running` is the
+/// authoritative bound on *actual* transferred bytes — the reported-size
+/// pre-check can be defeated by a server that omits/under-reports RFC822.SIZE,
+/// so abort the moment real bytes exceed the budget.
+///
+/// # Errors
+///
+/// ANY body-fetch error is fatal — never downgraded to a per-UID failure.
+/// Per-UID absence/oversize is already resolved at preflight, so a UID that
+/// reaches the body fetch is known-present and in-bounds; an error here
+/// (UIDVALIDITY change/omission, `SizeLimit`, `Timeout`, connection loss, or a
+/// BODY-stream protocol error) means the session or the returned bytes are
+/// untrustworthy. Aborting prevents a corrupt/stale body landing in an
+/// artifact. Also returns `InvalidInput` if the running actual-byte total
+/// exceeds `budget`.
+async fn fetch_bodies(
+    source: &impl ExportSource,
+    folder: &str,
+    uids: &[Uid],
+    size_by_uid: &std::collections::BTreeMap<u32, Option<u32>>,
+    limits: FetchLimits,
+) -> Result<Vec<FetchOutcome>, rimap_core::RimapError> {
+    let mut outcomes = Vec::with_capacity(uids.len());
+    let mut running: u64 = 0;
+    for uid in uids {
+        let n = uid.get();
+        // Preflight-driven per-UID decision (pure, unit-tested). Skips never
+        // attempt a body fetch, so oversize never triggers SizeLimit.
+        if let UidPlan::Skip(reason) =
+            classify_uid(size_by_uid.get(&n).copied(), limits.per_msg_cap)
+        {
+            outcomes.push(FetchOutcome {
+                uid: n,
+                result: Err(reason),
+            });
+            continue;
+        }
+        let body = source.fetch_one_body(folder, *uid, limits.expected).await?;
+        running = running.saturating_add(body.len() as u64);
+        if running > limits.budget {
+            return Err(rimap_core::RimapError::invalid_input(
+                "export exceeds max_total_bytes",
+            ));
+        }
+        outcomes.push(FetchOutcome {
+            uid: n,
+            result: Ok(body),
+        });
+    }
+    Ok(outcomes)
+}
+
+/// Short token making concurrent exports' filenames distinct. Uses wall-clock
+/// nanos plus a process-local counter so two exports in the same instant still
+/// differ; `write_attachment`'s de-dup is the correctness backstop.
+fn export_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:016x}{seq:04x}")
 }
 
 /// Per-UID fetch result fed into [`plan_outcome`].
@@ -264,7 +591,6 @@ pub(crate) struct FetchOutcome {
 }
 
 /// Decision produced by [`plan_outcome`].
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
 pub(crate) enum Outcome {
     /// Default all-or-nothing path with failures: write nothing, error out.
     Abort { failed: Vec<FailedUid> },
@@ -280,7 +606,6 @@ pub(crate) enum Outcome {
 /// Partition per-UID outcomes into an export decision. With failures and
 /// `allow_partial == false`, returns [`Outcome::Abort`]; otherwise
 /// [`Outcome::Proceed`] with `complete == failed.is_empty()`.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
 fn plan_outcome(outcomes: Vec<FetchOutcome>, allow_partial: bool) -> Outcome {
     let mut bodies = Vec::new();
     let mut succeeded = Vec::new();
@@ -325,7 +650,6 @@ pub(crate) enum UidPlan {
 /// The `Option<Option<u32>>` signature intentionally encodes three distinct
 /// states: absent, present-size-unknown, and present-size-known. A custom enum
 /// would be clearer but would require plumbing changes in Task 6's IMAP fetch.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
 #[expect(
     clippy::option_option,
     reason = "three-state encoding: absent / present-unknown / present-known"
@@ -669,5 +993,211 @@ mod build_mbox_tests {
             out.push(&b[start..]);
         }
         out
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::expect_used, reason = "tests")]
+mod source_seam_tests {
+    use super::{ExportSource, RunPlan, run_export};
+    use core::num::NonZeroU32;
+    use rimap_imap::types::Uid;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    fn uid(n: u32) -> Uid {
+        Uid::from(NonZeroU32::new(n).unwrap())
+    }
+
+    /// A single seeded body for the happy fake.
+    struct Seeded {
+        uid: u32,
+        body: Vec<u8>,
+    }
+
+    /// Hand-written fake `ExportSource`. `bodies` seeds the present UIDs (in any
+    /// order) with their raw bytes; `uid_validity` is what the preflight
+    /// reports; `body_error`, when set, makes EVERY `fetch_one_body` fail with a
+    /// freshly-built clone of that error. `seen_expected` records the `expected`
+    /// each fetch was called with so tests can assert it never drifts.
+    struct FakeSource {
+        bodies: Vec<Seeded>,
+        uid_validity: Option<u32>,
+        body_error: Option<fn() -> rimap_core::RimapError>,
+        seen_expected: RefCell<Vec<u32>>,
+    }
+
+    impl FakeSource {
+        fn happy(bodies: Vec<Seeded>, uid_validity: u32) -> Self {
+            Self {
+                bodies,
+                uid_validity: Some(uid_validity),
+                body_error: None,
+                seen_expected: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn failing(uid_validity: u32, body_error: fn() -> rimap_core::RimapError) -> Self {
+            Self {
+                bodies: vec![Seeded {
+                    uid: 1,
+                    body: b"Subject: x\r\n\r\nbody\r\n".to_vec(),
+                }],
+                uid_validity: Some(uid_validity),
+                body_error: Some(body_error),
+                seen_expected: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ExportSource for FakeSource {
+        async fn fetch_sizes(
+            &self,
+            _folder: &str,
+            uids: &[Uid],
+            _expected: u32,
+        ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError> {
+            let requested: std::collections::BTreeSet<u32> = uids.iter().map(|u| u.get()).collect();
+            let sizes = self
+                .bodies
+                .iter()
+                .filter(|s| requested.contains(&s.uid))
+                .map(|s| (s.uid, Some(u32::try_from(s.body.len()).unwrap())))
+                .collect();
+            Ok((sizes, self.uid_validity))
+        }
+
+        async fn fetch_one_body(
+            &self,
+            _folder: &str,
+            uid: Uid,
+            expected: u32,
+        ) -> Result<Vec<u8>, rimap_core::RimapError> {
+            self.seen_expected.borrow_mut().push(expected);
+            if let Some(make_err) = self.body_error {
+                return Err(make_err());
+            }
+            let found = self
+                .bodies
+                .iter()
+                .find(|s| s.uid == uid.get())
+                .expect("fetch_one_body called for an unseeded uid");
+            Ok(found.body.clone())
+        }
+    }
+
+    fn plan(dest: PathBuf, uids: Vec<Uid>, expected: u32, allow_partial: bool) -> RunPlan {
+        RunPlan {
+            folder: "INBOX".to_string(),
+            dest,
+            prefix: "messages".to_string(),
+            uids,
+            expected,
+            budget: super::MAX_EXPORT_TOTAL_BYTES,
+            per_msg_cap: 5_242_880,
+            allow_partial,
+        }
+    }
+
+    fn dir_is_empty(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir).expect("read_dir").next().is_none()
+    }
+
+    #[tokio::test]
+    async fn happy_path_writes_artifact_and_pins_expected_on_every_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = FakeSource::happy(
+            vec![
+                Seeded {
+                    uid: 7,
+                    body: b"Subject: a\r\n\r\nalpha\r\n".to_vec(),
+                },
+                Seeded {
+                    uid: 9,
+                    body: b"Subject: b\r\n\r\nbeta\r\n".to_vec(),
+                },
+            ],
+            4242,
+        );
+        let resp = run_export(
+            &fake,
+            plan(tmp.path().to_path_buf(), vec![uid(7), uid(9)], 4242, false),
+        )
+        .await
+        .expect("export should succeed");
+
+        let meta = &resp.meta;
+        assert!(meta.complete);
+        assert_eq!(meta.message_count, 2);
+        assert_eq!(meta.uid_validity, 4242);
+        // succeeded preserves caller (mbox) order.
+        let order: Vec<u32> = meta.succeeded.iter().map(|s| s.uid).collect();
+        assert_eq!(order, vec![7, 9]);
+        let path = meta.path.as_deref().expect("complete export has path");
+        assert!(meta.partial_path.is_none());
+        let on_disk = std::fs::read(path).expect("artifact exists");
+        assert_eq!(super::sandbox::sha256_hex(&on_disk), meta.sha256);
+        // Every body fetch carried the same pinned UIDVALIDITY.
+        assert_eq!(*fake.seen_expected.borrow(), vec![4242, 4242]);
+    }
+
+    async fn assert_body_error_aborts_with_no_artifact(make_err: fn() -> rimap_core::RimapError) {
+        for allow_partial in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let fake = FakeSource::failing(4242, make_err);
+            let result = run_export(
+                &fake,
+                plan(tmp.path().to_path_buf(), vec![uid(1)], 4242, allow_partial),
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "body error must abort (allow_partial={allow_partial})"
+            );
+            assert!(
+                dir_is_empty(tmp.path()),
+                "no artifact may be written on a body-fetch error \
+                 (allow_partial={allow_partial})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn uid_validity_changed_body_error_aborts_no_artifact() {
+        assert_body_error_aborts_with_no_artifact(|| {
+            rimap_core::RimapError::from(rimap_imap::ImapError::UidValidityChanged {
+                folder: "INBOX".to_string(),
+                expected: 4242,
+                actual: 9999,
+            })
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn uid_validity_unavailable_body_error_aborts_no_artifact() {
+        assert_body_error_aborts_with_no_artifact(|| {
+            rimap_core::RimapError::from(rimap_imap::ImapError::UidValidityUnavailable {
+                folder: "INBOX".to_string(),
+            })
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timeout_body_error_aborts_no_artifact() {
+        assert_body_error_aborts_with_no_artifact(|| {
+            rimap_core::RimapError::from(rimap_imap::ImapError::Timeout { op: "fetch_body" })
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn size_limit_body_error_aborts_no_artifact() {
+        assert_body_error_aborts_with_no_artifact(|| {
+            rimap_core::RimapError::from(rimap_imap::ImapError::SizeLimit { limit: 1024 })
+        })
+        .await;
     }
 }

@@ -73,7 +73,7 @@ impl CredentialStore for StaticCreds {
 // ── Server builder ──────────────────────────────────────────────────
 
 struct TestEnv {
-    _harness: DovecotHarness,
+    harness: DovecotHarness,
     _audit_dir: TempDir,
     _download_dir: TempDir,
     server: ImapMcpServer,
@@ -118,7 +118,7 @@ fn build_test_env(harness: DovecotHarness) -> TestEnv {
     let server = ImapMcpServer::new(registry, audit, cancellation_sender);
 
     TestEnv {
-        _harness: harness,
+        harness,
         _audit_dir: audit_dir,
         _download_dir: download_dir,
         server,
@@ -143,7 +143,16 @@ fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
             ..SecurityConfig::default()
         },
         limits: LimitsConfig::default(),
-        tool_overrides: BTreeMap::new(),
+        // Enable the default-deny `export_messages` tool — the equivalent of
+        // `[security.tools] export_messages = true` in a real config.
+        tool_overrides: {
+            let mut o = BTreeMap::new();
+            o.insert(
+                rimap_core::tool::ToolName::ExportMessages,
+                rimap_config::model::Verdict::Allow,
+            );
+            o
+        },
         tls_fingerprint: Some(*harness.fingerprint()),
         fallback_mode: rimap_config::model::FallbackMode::default(),
     }
@@ -245,6 +254,9 @@ async fn e2e_full_session() {
     assert_mark_read(server, uid).await;
     assert_create_draft(server, uid).await;
     assert_create_draft_uses_special_use_when_available(server).await;
+    assert_export_happy_path(server, &env.harness).await;
+    assert_export_partial_success(server, uid).await;
+    assert_export_uidvalidity_change(server, &env.harness).await;
     assert_move_and_gone(server, uid).await;
 }
 
@@ -370,6 +382,247 @@ async fn assert_create_draft_uses_special_use_when_available(server: &ImapMcpSer
     .await
     .expect("create_draft failed");
     assert_eq!(result["meta"]["folder"].as_str().unwrap(), expected);
+}
+
+// ── export_messages ─────────────────────────────────────────────────
+
+/// A `git format-patch`-style email: exporting it to mbox must apply cleanly
+/// with `git am`. Adds a single file `hello.txt` on top of an empty base repo.
+fn patch_message() -> Vec<u8> {
+    concat!(
+        "From 1234567890abcdef1234567890abcdef12345678 Mon Sep 17 00:00:00 2001\r\n",
+        "From: Patch Author <author@example.com>\r\n",
+        "Date: Sat, 12 Apr 2026 11:00:00 +0000\r\n",
+        "Subject: [PATCH] add hello.txt\r\n",
+        "Message-ID: <e2e-patch-001@example.com>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "Content-Transfer-Encoding: 8bit\r\n",
+        "\r\n",
+        "Adds a greeting file.\r\n",
+        "---\r\n",
+        " hello.txt | 1 +\r\n",
+        " 1 file changed, 1 insertion(+)\r\n",
+        " create mode 100644 hello.txt\r\n",
+        "\r\n",
+        "diff --git a/hello.txt b/hello.txt\r\n",
+        "new file mode 100644\r\n",
+        "index 0000000..ce01362\r\n",
+        "--- /dev/null\r\n",
+        "+++ b/hello.txt\r\n",
+        "@@ -0,0 +1 @@\r\n",
+        "+hello\r\n",
+        "-- \r\n",
+        "2.40.0\r\n",
+    )
+    .as_bytes()
+    .to_vec()
+}
+
+/// Search a folder by subject and return `(first_uid, uid_validity)`.
+async fn search_uid_and_validity(
+    server: &ImapMcpServer,
+    folder: &str,
+    subject: &str,
+) -> (u32, u32) {
+    let result = call_tool(
+        server,
+        "search",
+        serde_json::json!({"folder": folder, "subject": subject}),
+    )
+    .await
+    .expect("search failed");
+    let messages = result["untrusted"]["messages"]
+        .as_array()
+        .expect("messages array");
+    let uid = json_u32(&messages[0]["uid"]);
+    let uid_validity = json_u32(&result["meta"]["uid_validity"]);
+    (uid, uid_validity)
+}
+
+/// Happy path: seed a `git format-patch`-style message in a dedicated folder,
+/// export it, and assert the artifact exists, its SHA-256 matches the file
+/// bytes, `message_count` is correct, and the file applies cleanly with
+/// `git am` in a throwaway repo.
+async fn assert_export_happy_path(server: &ImapMcpServer, harness: &DovecotHarness) {
+    let folder = "PatchExport";
+    harness.create_mailbox(folder);
+    let account = server.registry.resolve(None).expect("resolve account");
+    account
+        .imap
+        .append_message(folder, &patch_message(), &[], &[])
+        .await
+        .expect("APPEND patch message failed");
+
+    let (uid, uid_validity) = search_uid_and_validity(server, folder, "add hello.txt").await;
+    let result = call_tool(
+        server,
+        "export_messages",
+        serde_json::json!({
+            "folder": folder,
+            "uids": [uid],
+            "expected_uidvalidity": uid_validity,
+            "filename": "patch",
+        }),
+    )
+    .await
+    .expect("export_messages failed");
+
+    assert!(result["meta"]["complete"].as_bool().unwrap());
+    assert_eq!(result["meta"]["message_count"].as_u64().unwrap(), 1);
+    assert!(
+        result["meta"]["partial_path"].is_null(),
+        "complete export must not carry partial_path",
+    );
+    let path = result["meta"]["path"].as_str().expect("path");
+    let bytes = std::fs::read(path).expect("artifact exists on disk");
+    let expected_sha = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&bytes))
+    };
+    assert_eq!(
+        result["meta"]["sha256"].as_str().unwrap(),
+        expected_sha,
+        "manifest sha256 must match file bytes",
+    );
+    assert_git_am_applies(path);
+}
+
+/// Partial success: request the present UID plus a non-existent one with
+/// `allow_partial=true`; assert a `.partial.mbox` is written, the present UID
+/// succeeds, and the missing UID is reported `not_found`. Then assert
+/// `allow_partial=false` errors and writes no `path`.
+async fn assert_export_partial_success(server: &ImapMcpServer, present_uid: u32) {
+    let (_uid, uid_validity) = search_uid_and_validity(server, "INBOX", "e2e-test-smoke").await;
+    let missing_uid = present_uid + 100_000;
+
+    let result = call_tool(
+        server,
+        "export_messages",
+        serde_json::json!({
+            "folder": "INBOX",
+            "uids": [present_uid, missing_uid],
+            "expected_uidvalidity": uid_validity,
+            "allow_partial": true,
+        }),
+    )
+    .await
+    .expect("partial export should succeed");
+
+    assert!(!result["meta"]["complete"].as_bool().unwrap());
+    assert!(result["meta"]["path"].is_null(), "partial must omit path");
+    let partial_path = result["meta"]["partial_path"]
+        .as_str()
+        .expect("partial_path present");
+    assert!(partial_path.ends_with(".partial.mbox"));
+    assert!(std::path::Path::new(partial_path).exists());
+    assert_eq!(result["meta"]["message_count"].as_u64().unwrap(), 1);
+    let failed = result["meta"]["failed"].as_array().expect("failed array");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(json_u32(&failed[0]["uid"]), missing_uid);
+    assert_eq!(failed[0]["reason"].as_str().unwrap(), "not_found");
+
+    // allow_partial defaults to false: the same request must error and write
+    // no artifact.
+    let err = call_tool(
+        server,
+        "export_messages",
+        serde_json::json!({
+            "folder": "INBOX",
+            "uids": [present_uid, missing_uid],
+            "expected_uidvalidity": uid_validity,
+        }),
+    )
+    .await;
+    assert!(
+        err.is_err(),
+        "all-or-nothing export with a missing UID must error",
+    );
+}
+
+/// UIDVALIDITY change: seed a dedicated folder, capture its UIDVALIDITY,
+/// delete+recreate it (forcing a new UIDVALIDITY), then export with the STALE
+/// value. The preflight must abort with a UIDVALIDITY error under both
+/// `allow_partial` settings, writing no artifact.
+async fn assert_export_uidvalidity_change(server: &ImapMcpServer, harness: &DovecotHarness) {
+    let folder = "UidValidityExport";
+    harness.create_mailbox(folder);
+    let account = server.registry.resolve(None).expect("resolve account");
+    account
+        .imap
+        .append_message(folder, &test_message(), &[], &[])
+        .await
+        .expect("APPEND failed");
+
+    let (uid, stale_validity) = search_uid_and_validity(server, folder, "e2e-test-smoke").await;
+
+    // Force a new UIDVALIDITY by deleting and recreating the mailbox.
+    harness.delete_mailbox(folder);
+    harness.create_mailbox(folder);
+
+    // Snapshot the sandbox dir: a preflight UIDVALIDITY abort must not write a
+    // new artifact. Earlier export steps wrote files here, so compare counts
+    // rather than asserting empty.
+    let dest = account.download_dir.as_ref();
+    let before = dir_entry_count(dest);
+
+    for allow_partial in [false, true] {
+        let result = call_tool(
+            server,
+            "export_messages",
+            serde_json::json!({
+                "folder": folder,
+                "uids": [uid],
+                "expected_uidvalidity": stale_validity,
+                "allow_partial": allow_partial,
+            }),
+        )
+        .await;
+        let err = result.expect_err("stale UIDVALIDITY must abort the export");
+        // `execute_tool_for_test` flattens MCP errors to `Internal`, preserving
+        // the original message as a string. Match on the typed message text.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UIDVALIDITY changed"),
+            "expected UIDVALIDITY error (allow_partial={allow_partial}), got {msg}",
+        );
+    }
+
+    assert_eq!(
+        dir_entry_count(dest),
+        before,
+        "preflight UIDVALIDITY abort must write no artifact to the sandbox",
+    );
+}
+
+/// Count entries directly under `dir`.
+fn dir_entry_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir).expect("read_dir").count()
+}
+
+/// Apply an exported mbox file with `git am` in a fresh throwaway repo. Panics
+/// if `git am` rejects the file.
+fn assert_git_am_applies(mbox_path: &str) {
+    use std::process::Command;
+    let repo = TempDir::new().expect("git repo tempdir");
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .expect("git invocation failed");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "e2e@example.com"]);
+    run(&["config", "user.name", "e2e"]);
+    run(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let status = Command::new("git")
+        .args(["am", mbox_path])
+        .current_dir(repo.path())
+        .status()
+        .expect("git am invocation failed");
+    assert!(status.success(), "git am {mbox_path} did not apply cleanly");
 }
 
 async fn assert_move_and_gone(server: &ImapMcpServer, uid: u32) {
