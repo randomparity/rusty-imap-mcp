@@ -257,6 +257,184 @@ pub async fn handle(
     ))
 }
 
+/// Per-UID fetch result fed into [`plan_outcome`].
+pub(crate) struct FetchOutcome {
+    pub uid: u32,
+    pub result: Result<Vec<u8>, ExportFailReason>,
+}
+
+/// Decision produced by [`plan_outcome`].
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
+pub(crate) enum Outcome {
+    /// Default all-or-nothing path with failures: write nothing, error out.
+    Abort { failed: Vec<FailedUid> },
+    /// Write the bodies (in order) and report the manifest.
+    Proceed {
+        complete: bool,
+        bodies: Vec<Vec<u8>>,
+        succeeded: Vec<ExportedUid>,
+        failed: Vec<FailedUid>,
+    },
+}
+
+/// Partition per-UID outcomes into an export decision. With failures and
+/// `allow_partial == false`, returns [`Outcome::Abort`]; otherwise
+/// [`Outcome::Proceed`] with `complete == failed.is_empty()`.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
+fn plan_outcome(outcomes: Vec<FetchOutcome>, allow_partial: bool) -> Outcome {
+    let mut bodies = Vec::new();
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for o in outcomes {
+        match o.result {
+            Ok(body) => {
+                succeeded.push(ExportedUid {
+                    uid: o.uid,
+                    size_bytes: body.len(),
+                });
+                bodies.push(body);
+            }
+            Err(reason) => failed.push(FailedUid { uid: o.uid, reason }),
+        }
+    }
+    if !failed.is_empty() && !allow_partial {
+        return Outcome::Abort { failed };
+    }
+    Outcome::Proceed {
+        complete: failed.is_empty(),
+        bodies,
+        succeeded,
+        failed,
+    }
+}
+
+/// What to do with one requested UID, decided from its preflight size entry.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UidPlan {
+    /// Resolved at preflight without a body fetch (`NotFound` / `Oversize`).
+    Skip(ExportFailReason),
+    /// Present and in-bounds: fetch the body.
+    Fetch,
+}
+
+/// Classify a UID from its preflight size entry (`None` = absent from the
+/// folder; `Some(None)` = present, size unknown; `Some(Some(n))` = present,
+/// reported size `n`). Pure, so the security-critical NotFound/Oversize
+/// decision is unit-testable without a live IMAP server.
+///
+/// The `Option<Option<u32>>` signature intentionally encodes three distinct
+/// states: absent, present-size-unknown, and present-size-known. A custom enum
+/// would be clearer but would require plumbing changes in Task 6's IMAP fetch.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
+#[expect(
+    clippy::option_option,
+    reason = "three-state encoding: absent / present-unknown / present-known"
+)]
+fn classify_uid(reported: Option<Option<u32>>, per_msg_cap: u64) -> UidPlan {
+    match reported {
+        None => UidPlan::Skip(ExportFailReason::NotFound),
+        Some(Some(sz)) if u64::from(sz) > per_msg_cap => UidPlan::Skip(ExportFailReason::Oversize),
+        Some(Some(_) | None) => UidPlan::Fetch,
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::panic,
+    reason = "tests use panic! for assertion failures in match arms"
+)]
+mod outcome_tests {
+    use super::{ExportFailReason, FetchOutcome, Outcome, plan_outcome};
+
+    fn ok(uid: u32, body: &[u8]) -> FetchOutcome {
+        FetchOutcome {
+            uid,
+            result: Ok(body.to_vec()),
+        }
+    }
+    fn err(uid: u32, reason: ExportFailReason) -> FetchOutcome {
+        FetchOutcome {
+            uid,
+            result: Err(reason),
+        }
+    }
+
+    #[test]
+    fn all_success_is_complete() {
+        let out = plan_outcome(vec![ok(1, b"a"), ok(2, b"b")], false);
+        match out {
+            Outcome::Proceed {
+                complete,
+                bodies,
+                succeeded,
+                failed,
+            } => {
+                assert!(complete);
+                assert_eq!(bodies.len(), 2);
+                assert_eq!(succeeded.len(), 2);
+                assert!(failed.is_empty());
+                assert_eq!(succeeded[0].uid, 1);
+                assert_eq!(succeeded[1].uid, 2);
+                assert_eq!(bodies[0], b"a");
+                assert_eq!(bodies[1], b"b");
+            }
+            Outcome::Abort { .. } => panic!("expected Proceed"),
+        }
+    }
+
+    #[test]
+    fn failure_without_allow_partial_aborts() {
+        let out = plan_outcome(vec![ok(1, b"a"), err(2, ExportFailReason::NotFound)], false);
+        match out {
+            Outcome::Abort { failed } => {
+                assert_eq!(failed.len(), 1);
+                assert_eq!(failed[0].uid, 2);
+            }
+            Outcome::Proceed { .. } => panic!("expected Abort"),
+        }
+    }
+
+    #[test]
+    fn failure_with_allow_partial_proceeds_incomplete() {
+        let out = plan_outcome(vec![ok(1, b"a"), err(2, ExportFailReason::Oversize)], true);
+        match out {
+            Outcome::Proceed {
+                complete,
+                bodies,
+                succeeded,
+                failed,
+            } => {
+                assert!(!complete);
+                assert_eq!(bodies.len(), 1);
+                assert_eq!(succeeded.len(), 1);
+                assert_eq!(failed.len(), 1);
+            }
+            Outcome::Abort { .. } => panic!("expected Abort"),
+        }
+    }
+
+    #[test]
+    fn classify_uid_cases() {
+        use super::{ExportFailReason, UidPlan, classify_uid};
+        assert_eq!(
+            classify_uid(None, 100),
+            UidPlan::Skip(ExportFailReason::NotFound)
+        );
+        assert_eq!(
+            classify_uid(Some(Some(200)), 100),
+            UidPlan::Skip(ExportFailReason::Oversize)
+        );
+        assert_eq!(classify_uid(Some(Some(50)), 100), UidPlan::Fetch);
+        assert_eq!(classify_uid(Some(None), 100), UidPlan::Fetch); // present, size unknown
+        // Exact boundary: size == cap is in-bounds (Fetch); one over is Oversize.
+        assert_eq!(classify_uid(Some(Some(100)), 100), UidPlan::Fetch);
+        assert_eq!(
+            classify_uid(Some(Some(101)), 100),
+            UidPlan::Skip(ExportFailReason::Oversize)
+        );
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod input_tests {
