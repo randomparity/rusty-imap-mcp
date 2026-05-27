@@ -14,15 +14,9 @@ pub enum AuthzError {
     PostureDenied(ToolName),
     /// Rate limiter rejected the call; `retry_after_ms` is a hint.
     ///
-    /// # Phase 2: structured `data` plumbing (deferred)
-    ///
-    /// Today `to_mcp_error` produces `ErrorData` with `data: None` for this
-    /// code; the typed `retry_after_ms` is absorbed into the message string
-    /// by `From<AuthzError> for RimapError` and lost. Plumbing it through
-    /// requires either extending `RimapError::Authz` with a data field or
-    /// introducing a dedicated variant. Tracked in GitHub issue #303; spec
-    /// reference: `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
-    /// "Deferred work — Phase 2".
+    /// `From<AuthzError> for RimapError` routes this into the dedicated
+    /// `RimapError::RateLimited { retry_after_ms }` variant, which surfaces
+    /// the typed hint as structured MCP `data` (#303).
     #[error("rate limited; retry after {retry_after_ms} ms")]
     RateLimited {
         /// Hint for how long the caller should wait before retrying.
@@ -41,15 +35,9 @@ pub enum AuthzError {
     ///   off briefly and try again once the probe resolves." A short fixed
     ///   delay (e.g. tens of milliseconds) is the intended caller behavior.
     ///
-    /// # Phase 2: structured `data` plumbing (deferred)
-    ///
-    /// Today `to_mcp_error` produces `ErrorData` with `data: None` for this
-    /// code; the typed `retry_after_ms` is absorbed into the message string
-    /// by `From<AuthzError> for RimapError` and lost. Plumbing it through
-    /// requires either extending `RimapError::Authz` with a data field or
-    /// introducing a dedicated variant. Tracked in GitHub issue #303; spec
-    /// reference: `docs/superpowers/specs/2026-05-20-mcp-tool-catalog-richness-design.md`
-    /// "Deferred work — Phase 2".
+    /// `From<AuthzError> for RimapError` routes this into the dedicated
+    /// `RimapError::CircuitOpen { retry_after_ms }` variant, which surfaces
+    /// the typed hint as structured MCP `data` (#303).
     #[error("circuit breaker open; retry after {retry_after_ms} ms")]
     CircuitOpen {
         /// Hint for how long the caller should wait before retrying. See the
@@ -107,9 +95,21 @@ impl AuthzError {
 
 impl From<AuthzError> for RimapError {
     fn from(err: AuthzError) -> Self {
-        RimapError::Authz {
-            code: err.code(),
-            message: err.to_string(),
+        // RateLimited / CircuitOpen get dedicated RimapError variants so the
+        // typed retry hint survives into structured MCP `data` (#303),
+        // mirroring the UidValidityChanged routing in `From<ImapError>`.
+        // Everything else flattens through the generic `Authz` arm.
+        match err {
+            AuthzError::RateLimited { retry_after_ms } => {
+                RimapError::RateLimited { retry_after_ms }
+            }
+            AuthzError::CircuitOpen { retry_after_ms } => {
+                RimapError::CircuitOpen { retry_after_ms }
+            }
+            other => RimapError::Authz {
+                code: other.code(),
+                message: other.to_string(),
+            },
         }
     }
 }
@@ -122,13 +122,45 @@ mod tests {
     use rimap_core::tool::ToolName;
 
     #[test]
-    fn from_impl_preserves_code_and_message() {
+    fn rate_limited_routes_to_typed_variant() {
         let err = AuthzError::RateLimited { retry_after_ms: 42 };
+        let display = err.to_string();
+        let mapped: RimapError = err.into();
+        match mapped {
+            RimapError::RateLimited { retry_after_ms } => {
+                assert_eq!(retry_after_ms, 42);
+            }
+            other => panic!("expected RimapError::RateLimited, got {other:?}"),
+        }
+        // Display wording is preserved (only the ERR_ prefix differs upstream).
+        assert_eq!(
+            RimapError::RateLimited { retry_after_ms: 42 }.to_string(),
+            display
+        );
+    }
+
+    #[test]
+    fn circuit_open_routes_to_typed_variant() {
+        let err = AuthzError::CircuitOpen {
+            retry_after_ms: 15_000,
+        };
+        let mapped: RimapError = err.into();
+        match mapped {
+            RimapError::CircuitOpen { retry_after_ms } => {
+                assert_eq!(retry_after_ms, 15_000);
+            }
+            other => panic!("expected RimapError::CircuitOpen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn posture_denied_still_flattens_to_authz() {
+        let err = AuthzError::PostureDenied(ToolName::CreateDraft);
         let msg = err.to_string();
         let mapped: RimapError = err.into();
         match mapped {
             RimapError::Authz { code, message } => {
-                assert_eq!(code, ErrorCode::RateLimited);
+                assert_eq!(code, ErrorCode::PostureDenied);
                 assert_eq!(message, msg);
             }
             other => panic!("expected Authz variant, got {other:?}"),
