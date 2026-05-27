@@ -33,14 +33,14 @@
           "type": "integer"
         },
         "partial_path": {
-          "description": "Path of a `.partial.mbox` artifact; non-null only on a partial export.",
+          "description": "Path of a `.partial.mbox` artifact. Present only on a partial\nexport; omitted otherwise.",
           "type": [
             "string",
             "null"
           ]
         },
         "path": {
-          "description": "`git am`-ready mbox path; `null` when `complete` is false.",
+          "description": "`git am`-ready mbox path. Present only on a complete export;\nomitted from the response otherwise.",
           "type": [
             "string",
             "null"

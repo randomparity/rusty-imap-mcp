@@ -81,6 +81,14 @@ pub enum ImapError {
         /// The UIDVALIDITY value the server reported.
         actual: u32,
     },
+    /// A guarded fetch required UIDVALIDITY but the server omitted it.
+    /// Distinct from `UidValidityChanged` (which carries a concrete
+    /// mismatch); here the guard simply could not be verified.
+    #[error("server omitted UIDVALIDITY for folder {folder} on a guarded fetch")]
+    UidValidityUnavailable {
+        /// The folder that was selected.
+        folder: String,
+    },
     /// Audit-subsystem failure during a tool call. The IMAP transport may
     /// be healthy; this variant exists so audit-write failures stay
     /// distinguishable from network failures in metrics and observability.
@@ -198,7 +206,9 @@ impl ImapError {
             Self::SizeLimit { .. } => ErrorCode::AttachmentTooLarge,
             Self::Protocol(_) => ErrorCode::ImapProtocol,
             Self::InvalidInput { .. } | Self::BatchTooLarge { .. } => ErrorCode::InvalidInput,
-            Self::UidValidityChanged { .. } => ErrorCode::UidValidityChanged,
+            Self::UidValidityChanged { .. } | Self::UidValidityUnavailable { .. } => {
+                ErrorCode::UidValidityChanged
+            }
             Self::Audit { .. } => ErrorCode::Internal,
         }
     }
@@ -212,6 +222,10 @@ impl From<ImapError> for RimapError {
         // through the generic `Imap` arm. Both arms preserve the
         // original `ImapError` as a `#[source]` so reporters that walk
         // `error.source().chain()` see consistent depth.
+        // UidValidityUnavailable has no concrete mismatch to surface, so it
+        // intentionally flows through the generic Imap arm below — same
+        // client-visible code() (UidValidityChanged) but no structured
+        // expected/actual fields.
         if let ImapError::UidValidityChanged {
             folder,
             expected,

@@ -22,6 +22,15 @@
         "truncated": {
           "description": "Whether there are more results beyond this page.",
           "type": "boolean"
+        },
+        "uid_validity": {
+          "description": "UIDVALIDITY observed for the searched folder, from the same\nEXAMINE/UID SEARCH operation. Thread into `export_messages`'\n`expected_uidvalidity`. `None` if the server omitted it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
