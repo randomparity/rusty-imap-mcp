@@ -160,6 +160,45 @@ fn line_is_from(line: &[u8]) -> bool {
     line[j..].starts_with(b"From ")
 }
 
+/// Sanitize the advisory `filename` prefix to a safe single basename, or
+/// return the default `"messages"` when absent.
+///
+/// Uses a conservative **allowlist** grammar — `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`
+/// — because the prefix ends up in the `path` returned to the agent and the
+/// documented flow is `git am <path>`. The allowlist rejects path separators,
+/// `..` traversal, shell metacharacters, whitespace, quotes, and all non-ASCII
+/// (so bidi / zero-width / tag display-spoofing codepoints cannot appear), and
+/// the alphanumeric-first rule rejects leading `.`/`-`.
+///
+/// # Errors
+///
+/// `RimapError::Authz { code: InvalidInput }` if the prefix is empty after
+/// trimming, longer than 64 bytes, or contains any character outside the
+/// grammar.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired into handle in Task 7"))]
+fn sanitize_filename_prefix(prefix: Option<&str>) -> Result<String, rimap_core::RimapError> {
+    let Some(raw) = prefix else {
+        return Ok("messages".to_string());
+    };
+    let trimmed = raw.trim();
+    let valid = !trimmed.is_empty()
+        && trimmed.len() <= 64
+        && trimmed
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if !valid {
+        return Err(rimap_core::RimapError::invalid_input(
+            "filename prefix must match [A-Za-z0-9][A-Za-z0-9._-]{0,63} \
+             (conservative ASCII basename)",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Execute the `export_messages` tool.
 ///
 /// # Errors
@@ -177,6 +216,73 @@ pub async fn handle(
     Err(rimap_core::RimapError::Internal(
         "export_messages not yet implemented".into(),
     ))
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+mod sanitize_tests {
+    use super::sanitize_filename_prefix;
+
+    #[test]
+    fn default_when_absent() {
+        assert_eq!(sanitize_filename_prefix(None).unwrap(), "messages");
+    }
+
+    #[test]
+    fn accepts_plain_basename() {
+        assert_eq!(
+            sanitize_filename_prefix(Some("dpdk-series")).unwrap(),
+            "dpdk-series"
+        );
+    }
+
+    #[test]
+    fn rejects_everything_outside_the_allowlist() {
+        for bad in [
+            "../escape",
+            "/abs/path",
+            "a/b",
+            "a\\b",
+            "",
+            "  ",
+            "a\u{0}b",
+            "a\nb", // separators/control
+            "a;b",
+            "a b",
+            "a'b",
+            "a\"b",
+            "a$b",
+            "a|b",
+            "a&b",
+            "a`b", // shell metachars/spaces/quotes
+            "-lead",
+            ".hidden", // leading dash/dot
+            "a\u{202E}b",
+            "a\u{200B}b",
+            "a\u{E0001}b", // bidi / zero-width / tag
+        ] {
+            assert!(
+                sanitize_filename_prefix(Some(bad)).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+        // Overlong (> 64 chars) is rejected.
+        let long = "a".repeat(65);
+        assert!(sanitize_filename_prefix(Some(&long)).is_err());
+        // Exactly 64 chars is the accepted boundary.
+        let max = "a".repeat(64);
+        assert!(sanitize_filename_prefix(Some(&max)).is_ok());
+    }
+
+    #[test]
+    fn accepts_conservative_ascii_basenames() {
+        for ok in ["messages", "dpdk-series", "patch_set.v2", "AB12"] {
+            assert!(
+                sanitize_filename_prefix(Some(ok)).is_ok(),
+                "should accept {ok:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
