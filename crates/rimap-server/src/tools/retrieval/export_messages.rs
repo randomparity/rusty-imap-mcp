@@ -384,6 +384,20 @@ struct FetchLimits {
 /// See [`handle`]. Notably: a missing UIDVALIDITY in the preflight, an
 /// over-budget eligible-size sum or framed output, an all-or-nothing abort, and
 /// any body-fetch error are all returned `Err` before anything is written.
+/// All-or-nothing abort error naming the UIDs that cannot be exported. Shared
+/// by the preflight short-circuit and the post-fetch [`Outcome::Abort`] path so
+/// both report the identical message shape.
+fn incomplete_export_error(failed_uids: &[u32]) -> rimap_core::RimapError {
+    let mut rendered: Vec<String> = Vec::with_capacity(failed_uids.len());
+    for uid in failed_uids {
+        rendered.push(uid.to_string());
+    }
+    rimap_core::RimapError::invalid_input(format!(
+        "export incomplete (set allow_partial=true to override); failed UIDs: {}",
+        rendered.join(", ")
+    ))
+}
+
 pub(crate) async fn run_export(
     source: &impl ExportSource,
     plan: RunPlan,
@@ -407,15 +421,32 @@ pub(crate) async fn run_export(
 
     let size_by_uid = preflight_sizes(source, &folder, &uids, limits).await?;
 
+    // All-or-nothing: if preflight already classifies any requested UID as a
+    // failure (NotFound / Oversize), abort before fetching ANY body. Without
+    // this, one missing/oversize UID would still pull every other body up to
+    // the byte budget only to discard all of them at `plan_outcome`.
+    if !allow_partial {
+        let mut preflight_failed: Vec<u32> = Vec::new();
+        for u in &uids {
+            match classify_uid(size_by_uid.get(&u.get()).copied(), per_msg_cap) {
+                UidPlan::Skip(_) => preflight_failed.push(u.get()),
+                UidPlan::Fetch => {}
+            }
+        }
+        if !preflight_failed.is_empty() {
+            return Err(incomplete_export_error(&preflight_failed));
+        }
+    }
+
     let outcomes = fetch_bodies(source, &folder, &uids, &size_by_uid, limits).await?;
 
     let (complete, bodies, succeeded, failed) = match plan_outcome(outcomes, allow_partial) {
         Outcome::Abort { failed } => {
-            let failed_uids: Vec<String> = failed.iter().map(|f| f.uid.to_string()).collect();
-            return Err(rimap_core::RimapError::invalid_input(format!(
-                "export incomplete (set allow_partial=true to override); failed UIDs: {}",
-                failed_uids.join(", ")
-            )));
+            let mut failed_uids: Vec<u32> = Vec::with_capacity(failed.len());
+            for f in &failed {
+                failed_uids.push(f.uid);
+            }
+            return Err(incomplete_export_error(&failed_uids));
         }
         Outcome::Proceed {
             complete,
@@ -1288,6 +1319,76 @@ mod source_seam_tests {
         assert!(
             dir_is_empty(tmp.path()),
             "dest dir must be empty — no 0-byte artifact written"
+        );
+    }
+
+    /// Reports a set of present UIDs at preflight but panics if any body fetch
+    /// is attempted — used to prove the all-or-nothing short-circuit aborts
+    /// BEFORE `fetch_one_body` when preflight already found a failed UID.
+    struct PreflightFailNoFetchSource {
+        present: Vec<(u32, u32)>,
+        uid_validity: u32,
+    }
+
+    impl ExportSource for PreflightFailNoFetchSource {
+        async fn fetch_sizes(
+            &self,
+            _folder: &str,
+            uids: &[Uid],
+            _expected: u32,
+        ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError> {
+            let requested: std::collections::BTreeSet<u32> = uids.iter().map(|u| u.get()).collect();
+            let sizes = self
+                .present
+                .iter()
+                .filter(|(u, _)| requested.contains(u))
+                .map(|(u, sz)| (*u, Some(*sz)))
+                .collect();
+            Ok((sizes, Some(self.uid_validity)))
+        }
+
+        async fn fetch_one_body(
+            &self,
+            _folder: &str,
+            _uid: Uid,
+            _expected: u32,
+        ) -> Result<Vec<u8>, rimap_core::RimapError> {
+            panic!(
+                "fetch_one_body must not run: allow_partial=false and preflight \
+                 already found a failed UID"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn all_or_nothing_aborts_before_any_body_fetch_on_preflight_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        // UID 7 is present; UID 8 is absent → NotFound at preflight. With
+        // allow_partial=false the export must abort before fetching UID 7's
+        // body (the fake panics if it does).
+        let fake = PreflightFailNoFetchSource {
+            present: vec![(7, 20)],
+            uid_validity: 4242,
+        };
+        let result = run_export(
+            &fake,
+            plan(tmp.path().to_path_buf(), vec![uid(7), uid(8)], 4242, false),
+        )
+        .await;
+
+        let err = result.expect_err("missing UID + allow_partial=false must abort");
+        assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);
+        assert!(
+            err.to_string().contains("export incomplete"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains('8'),
+            "error must name the missing UID 8: {err}"
+        );
+        assert!(
+            dir_is_empty(tmp.path()),
+            "no artifact may be written on abort"
         );
     }
 }

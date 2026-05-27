@@ -74,8 +74,6 @@ pub(crate) fn write_attachment(
     filename: &str,
     data: &[u8],
 ) -> Result<PathBuf, RimapError> {
-    use std::io::Write as _;
-
     // Strip path components to prevent directory traversal.
     let safe_name = Path::new(filename)
         .file_name()
@@ -101,14 +99,7 @@ pub(crate) fn write_attachment(
         };
         let path = dir.join(&name);
         match create_new_private(&path) {
-            Ok(mut file) => {
-                file.write_all(data)
-                    .map_err(|e| RimapError::InternalSourced {
-                        message: "failed to write attachment".into(),
-                        source: Box::new(e),
-                    })?;
-                return Ok(path);
-            }
+            Ok(file) => return finish_write(file, path, data),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 counter += 1;
                 if counter > 1000 {
@@ -139,6 +130,29 @@ fn create_new_private(path: &Path) -> std::io::Result<std::fs::File> {
         .custom_flags(libc::O_NOFOLLOW)
         .mode(0o600)
         .open(path)
+}
+
+/// Write `data` to the exclusively-created `file`, then return its `path`. If
+/// the write fails partway (short write, disk-full, I/O error), the file is
+/// removed so a failed download/export never leaves a partial artifact at the
+/// final path. The original write error is reported regardless of whether the
+/// cleanup unlink succeeds.
+#[cfg(unix)]
+fn finish_write(
+    mut file: std::fs::File,
+    path: PathBuf,
+    data: &[u8],
+) -> Result<PathBuf, RimapError> {
+    use std::io::Write as _;
+    if let Err(e) = file.write_all(data) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(RimapError::InternalSourced {
+            message: "failed to write attachment".into(),
+            source: Box::new(e),
+        });
+    }
+    Ok(path)
 }
 
 /// Fail-closed stub for non-Unix platforms.
@@ -334,6 +348,24 @@ mod tests {
         // The export oracle writes raw message bytes; the file must be
         // owner-only regardless of the process umask.
         assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finish_write_removes_partial_file_on_write_error() {
+        // Reopen the just-created target read-only so write_all fails (EBADF),
+        // then assert the file is unlinked rather than left as a partial
+        // raw-email artifact at its final path.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("partial.mbox");
+        std::fs::write(&path, b"placeholder").unwrap();
+        let read_only = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
+        let err = finish_write(read_only, path.clone(), b"raw email bytes").unwrap_err();
+        assert_eq!(err.code(), rimap_core::ErrorCode::Internal);
+        assert!(
+            !path.exists(),
+            "partial file must be removed on write error"
+        );
     }
 
     #[cfg(unix)]
