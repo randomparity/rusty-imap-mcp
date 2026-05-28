@@ -27,12 +27,12 @@ fn dump_tool_catalog_emits_object_schemas() {
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
-    // 24 ToolName variants minus 2 sub-capabilities (SearchAdvanced,
-    // FetchMessageHtml) that share schemas with their parents = 22 defs.
+    // 25 ToolName variants minus 2 sub-capabilities (SearchAdvanced,
+    // FetchMessageHtml) that share schemas with their parents = 23 defs.
     assert_eq!(
         lines.len(),
-        22,
-        "expected 22 tool defs (24 ToolName variants - 2 sub-capabilities); got {}",
+        23,
+        "expected 23 tool defs (25 ToolName variants - 2 sub-capabilities); got {}",
         lines.len(),
     );
 

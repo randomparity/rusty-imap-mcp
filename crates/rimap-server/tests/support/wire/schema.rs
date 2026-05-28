@@ -179,12 +179,12 @@ mod fixture_smoke_tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".schema.json"))
             .collect();
-        // Pin to the current 22-tool set. Update when adding or removing
+        // Pin to the current 23-tool set. Update when adding or removing
         // tools from `build_schemas()` in cli/dump_tool_schemas.rs.
         assert_eq!(
             entries.len(),
-            22,
-            "expected exactly 22 tool schema fixtures (pinned), found {}",
+            23,
+            "expected exactly 23 tool schema fixtures (pinned), found {}",
             entries.len()
         );
 

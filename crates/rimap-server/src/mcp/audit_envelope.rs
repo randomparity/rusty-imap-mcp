@@ -21,6 +21,15 @@ use rmcp::model::{CallToolResult, ErrorData};
 use crate::mcp::dispatch::{DispatchTicket, PostureContext};
 use crate::mcp::server::ImapMcpServer;
 
+/// The terminal outcome of a tool call, bundled so `emit_tool_end` stays
+/// within the positional-parameter limit: the status, the error code (on
+/// failure), and the derived durable [`ResultSummary`] (#316).
+struct ToolOutcome {
+    status: ToolStatus,
+    error_code: Option<rimap_core::ErrorCode>,
+    result_summary: ResultSummary,
+}
+
 impl ImapMcpServer {
     /// Wrap an inner dispatch `body` in the full audit envelope:
     /// redact+hash args, emit `tool_start`, time the body, emit
@@ -71,19 +80,24 @@ impl ImapMcpServer {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        let (status, error_code) = match &result {
-            Ok(_) => (ToolStatus::Ok, None),
-            Err(e) => (ToolStatus::Error, Some(e.code())),
+        // Derive the durable result provenance from the successful result so
+        // the actual on-disk scope (artifact path/sha/bytes, exported/failed
+        // UIDs) is reconstructable post-incident; a failed call wrote no
+        // artifact, so it records the default summary (#316).
+        let outcome = match &result {
+            Ok(value) => ToolOutcome {
+                status: ToolStatus::Ok,
+                error_code: None,
+                result_summary: crate::mcp::result_provenance::result_provenance(tool, value),
+            },
+            Err(e) => ToolOutcome {
+                status: ToolStatus::Error,
+                error_code: Some(e.code()),
+                result_summary: ResultSummary::default(),
+            },
         };
-        self.emit_tool_end(
-            start_seq,
-            tool,
-            audit_account,
-            status,
-            error_code,
-            duration_ms,
-        )
-        .await;
+        self.emit_tool_end(start_seq, tool, audit_account, duration_ms, outcome)
+            .await;
 
         match result {
             Ok(value) => Ok(CallToolResult::structured(value)),
@@ -152,9 +166,8 @@ impl ImapMcpServer {
         start_seq: rimap_audit::Seq,
         tool: ToolName,
         account: Option<String>,
-        status: ToolStatus,
-        error_code: Option<rimap_core::ErrorCode>,
         duration_ms: u64,
+        outcome: ToolOutcome,
     ) {
         let audit = self.audit.clone();
         // The provenance ring buffer is not yet wired for multi-account.
@@ -164,15 +177,14 @@ impl ImapMcpServer {
             window_seconds: 60,
             message_ids_recently_read: Vec::new(),
         };
-        let summary = ResultSummary::default();
         let inputs = rimap_audit::ToolEndInputs {
             start_seq,
             tool,
             account,
-            status,
-            error_code,
+            status: outcome.status,
+            error_code: outcome.error_code,
             duration_ms,
-            result_summary: summary,
+            result_summary: outcome.result_summary,
             provenance,
         };
         let join = tokio::task::spawn_blocking(move || audit.log_tool_end(inputs)).await;
@@ -476,5 +488,65 @@ mod tests {
             !contents.contains(r#""status":"cancelled""#),
             "disarmed guard must not write a cancellation record: {contents}",
         );
+    }
+
+    /// End-to-end wiring (#316): a successful export-shaped result drives
+    /// `run_with_audit_envelope` → `result_provenance` → `emit_tool_end`, and
+    /// the durable `tool_end` record carries the artifact path/sha/bytes and
+    /// the exported/failed UID partition.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_end_records_export_provenance_from_result() {
+        use std::sync::Arc;
+
+        use rimap_core::tool::ToolName;
+
+        use crate::mcp::dispatch::PostureContext;
+        use crate::mcp::server::ImapMcpServer;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let writer = test_writer(path.clone());
+        let (tx, _rx) = cancellation_channel();
+        let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx));
+
+        let args = serde_json::Map::new();
+        let result = server
+            .run_with_audit_envelope(
+                ToolName::ExportMessages,
+                None,
+                PostureContext::Infrastructure,
+                &args,
+                |_ticket| async {
+                    Ok(serde_json::json!({
+                        "meta": {
+                            "path": "/srv/dl/messages-xyz.mbox",
+                            "sha256": "ab",
+                            "total_bytes": 4096,
+                            "succeeded": [{ "uid": 7 }, { "uid": 9 }],
+                            "failed": [{ "uid": 8 }]
+                        }
+                    }))
+                },
+            )
+            .await;
+        assert!(result.is_ok(), "envelope should surface the Ok result");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let tool_end = contents
+            .lines()
+            .find(|l| l.contains(r#""kind":"tool_end""#))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(tool_end).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(
+            v["result_summary"]["artifact_path"],
+            "/srv/dl/messages-xyz.mbox"
+        );
+        assert_eq!(v["result_summary"]["artifact_bytes"], 4096);
+        assert_eq!(
+            v["result_summary"]["uids_exported"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(v["result_summary"]["uids_failed"], serde_json::json!([8]));
     }
 }

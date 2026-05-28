@@ -81,6 +81,14 @@ pub enum ImapError {
         /// The UIDVALIDITY value the server reported.
         actual: u32,
     },
+    /// A guarded fetch required UIDVALIDITY but the server omitted it.
+    /// Distinct from `UidValidityChanged` (which carries a concrete
+    /// mismatch); here the guard simply could not be verified.
+    #[error("server omitted UIDVALIDITY for folder {folder} on a guarded fetch")]
+    UidValidityUnavailable {
+        /// The folder that was selected.
+        folder: String,
+    },
     /// Audit-subsystem failure during a tool call. The IMAP transport may
     /// be healthy; this variant exists so audit-write failures stay
     /// distinguishable from network failures in metrics and observability.
@@ -198,7 +206,9 @@ impl ImapError {
             Self::SizeLimit { .. } => ErrorCode::AttachmentTooLarge,
             Self::Protocol(_) => ErrorCode::ImapProtocol,
             Self::InvalidInput { .. } | Self::BatchTooLarge { .. } => ErrorCode::InvalidInput,
-            Self::UidValidityChanged { .. } => ErrorCode::UidValidityChanged,
+            Self::UidValidityChanged { .. } | Self::UidValidityUnavailable { .. } => {
+                ErrorCode::UidValidityChanged
+            }
             Self::Audit { .. } => ErrorCode::Internal,
         }
     }
@@ -208,10 +218,17 @@ impl From<ImapError> for RimapError {
     fn from(err: ImapError) -> Self {
         // UIDVALIDITY-change errors get a dedicated RimapError variant
         // so MCP clients receive the typed `folder`/`expected`/`actual`
-        // fields via structured `data`. Every other ImapError flattens
-        // through the generic `Imap` arm. Both arms preserve the
-        // original `ImapError` as a `#[source]` so reporters that walk
-        // `error.source().chain()` see consistent depth.
+        // fields via structured `data`. SizeLimit likewise gets the dedicated
+        // AttachmentTooLarge variant so its typed `limit` reaches structured
+        // `data` (#303). Every other ImapError flattens through the generic
+        // `Imap` arm, which preserves the original `ImapError` as a `#[source]`
+        // so reporters that walk `error.source().chain()` see consistent depth.
+        // SizeLimit is the documented exception: it is a leaf whose payload is
+        // now the typed `limit`, so it keeps no source.
+        // UidValidityUnavailable has no concrete mismatch to surface, so it
+        // intentionally flows through the generic Imap arm below — same
+        // client-visible code() (UidValidityChanged) but no structured
+        // expected/actual fields.
         if let ImapError::UidValidityChanged {
             folder,
             expected,
@@ -223,6 +240,15 @@ impl From<ImapError> for RimapError {
                 expected: *expected,
                 actual: *actual,
                 source: Box::new(err),
+            }
+        } else if let ImapError::SizeLimit { limit } = &err {
+            // SizeLimit routes to the dedicated AttachmentTooLarge variant so
+            // its typed `limit` reaches structured MCP `data` (#303). It is a
+            // leaf, so no source is kept — the documented exception on
+            // RimapError::AttachmentTooLarge.
+            RimapError::AttachmentTooLarge {
+                kind: "fetch_body_bytes".to_string(),
+                limit: *limit,
             }
         } else {
             let code = err.code();
@@ -331,6 +357,21 @@ mod tests {
             }
             #[expect(clippy::panic, reason = "intentional test assertion failure path")]
             other => panic!("expected RimapError::UidValidityChanged, got {other:?}",),
+        }
+    }
+
+    #[test]
+    fn size_limit_routes_to_attachment_too_large() {
+        use rimap_core::RimapError;
+        let imap_err = ImapError::SizeLimit { limit: 26_214_400 };
+        let mapped: RimapError = imap_err.into();
+        match mapped {
+            RimapError::AttachmentTooLarge { kind, limit } => {
+                assert_eq!(kind, "fetch_body_bytes");
+                assert_eq!(limit, 26_214_400);
+            }
+            #[expect(clippy::panic, reason = "intentional test assertion failure path")]
+            other => panic!("expected RimapError::AttachmentTooLarge, got {other:?}"),
         }
     }
 }

@@ -207,6 +207,21 @@ impl DovecotHarness {
         assert!(status.success(), "doveadm mailbox create {name} failed",);
     }
 
+    pub fn delete_mailbox(&self, name: &str) {
+        let status = Command::new(runtime())
+            .arg("exec")
+            .arg(container_name(&self.project))
+            .arg("doveadm")
+            .arg("mailbox")
+            .arg("delete")
+            .arg("-u")
+            .arg("rimap-test")
+            .arg(name)
+            .status()
+            .expect("doveadm exec failed");
+        assert!(status.success(), "doveadm mailbox delete {name} failed",);
+    }
+
     pub fn fingerprint(&self) -> &TlsFingerprint {
         &self.fingerprint
     }
@@ -323,4 +338,19 @@ fn is_port_collision(stderr: &str) -> bool {
     s.contains("port is already allocated")
         || s.contains("address already in use")
         || s.contains("bind for 127.0.0.1")
+}
+
+/// Per-binary dead-code suppression for items only some e2e binaries use.
+/// `delete_mailbox` is exercised by `e2e.rs` but not by `e2e_wire.rs` /
+/// `e2e_wire_cancellation.rs`; referencing it in a never-called function marks
+/// it used in every compilation unit (the same pattern as `fixtures.rs`'s
+/// `force_use_for_dead_code_link`). `clippy::allow_attributes = "deny"` forbids
+/// a bare `#[allow]`, and a `#![expect(dead_code)]` would be unfulfilled in the
+/// binaries that do call it.
+#[expect(
+    dead_code,
+    reason = "type-link to suppress per-binary dead-code for delete_mailbox"
+)]
+fn force_use_for_dead_code_link(h: &DovecotHarness) {
+    h.delete_mailbox("");
 }

@@ -1,8 +1,11 @@
 //! Round-trip tests for `From<rimap_imap::ImapError> for RimapError` — assert
-//! the source chain is preserved through `ImapError::source()`.
+//! the source chain is preserved through `ImapError::source()`. `SizeLimit` is
+//! the documented exception (#303): it routes to the source-less
+//! `RimapError::AttachmentTooLarge` variant, which surfaces the typed `limit`
+//! instead of a source chain.
 
 #![expect(clippy::unwrap_used, reason = "tests")]
-#![expect(clippy::expect_used, reason = "tests")]
+#![expect(clippy::panic, reason = "tests")]
 
 use std::error::Error as _;
 
@@ -54,8 +57,25 @@ fn size_limit_maps_to_err_attachment_too_large() {
     let err = ImapError::SizeLimit { limit: 1024 };
     let rimap: RimapError = err.into();
     assert_eq!(rimap.code(), ErrorCode::AttachmentTooLarge);
-    let chain = rimap.source().expect("source preserved");
-    assert!(chain.to_string().contains("1024"));
+    // SizeLimit routes to the dedicated, source-less AttachmentTooLarge variant
+    // (#303): the typed `limit` replaces the source chain so the cap value
+    // reaches MCP `data` as a structured field rather than as prose.
+    match rimap {
+        RimapError::AttachmentTooLarge { kind, limit } => {
+            assert_eq!(kind, "fetch_body_bytes");
+            assert_eq!(limit, 1024);
+        }
+        other => panic!("expected AttachmentTooLarge, got {other:?}"),
+    }
+    assert!(
+        RimapError::AttachmentTooLarge {
+            kind: "fetch_body_bytes".to_string(),
+            limit: 1024,
+        }
+        .source()
+        .is_none(),
+        "AttachmentTooLarge is intentionally source-less (#303)"
+    );
 }
 
 #[test]
@@ -71,6 +91,16 @@ fn connect_io_error_maps_to_err_connection_lost() {
     let err = ImapError::Connect(io);
     let rimap: RimapError = err.into();
     assert_eq!(rimap.code(), ErrorCode::ConnectionLost);
+}
+
+#[test]
+fn uid_validity_unavailable_maps_to_err_uid_validity_changed() {
+    let err = ImapError::UidValidityUnavailable {
+        folder: "INBOX".to_string(),
+    };
+    let rimap: RimapError = err.into();
+    assert_eq!(rimap.code(), ErrorCode::UidValidityChanged);
+    assert!(rimap.source().is_some());
 }
 
 #[test]
