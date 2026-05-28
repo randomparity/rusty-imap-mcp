@@ -96,6 +96,15 @@ The pinning test `from_impl_preserves_code_and_message` currently asserts
 (typed variant, preserved `retry_after_ms`, unchanged Display) — this is the
 intended contract change, not a regression.
 
+**Second `RateLimited` producer.** The infrastructure-tool limiter
+(`AccountRegistry::check_infrastructure_rate` →
+`infra_rate_limited`, `crates/rimap-server/src/boot/registry.rs`) does **not**
+go through `AuthzError`; it built `RimapError::Authz { code: RateLimited }`
+directly and stringified the retry hint. For the same wire-code-consistency
+reason as the dual `AttachmentTooLarge` producers (Delta 3), it is rerouted to
+return `RimapError::RateLimited { retry_after_ms }` so every `-32003` carries
+the typed hint regardless of which limiter tripped.
+
 ### Delta 3 — typed fields for `AttachmentTooLarge` (both producers)
 
 `ErrorCode::AttachmentTooLarge` has **two** producers and both must carry
