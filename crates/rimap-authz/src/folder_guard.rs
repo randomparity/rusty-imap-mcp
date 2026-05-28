@@ -209,4 +209,78 @@ mod tests {
         let g = guard();
         assert!(g.check_rename("Old", "New").is_ok());
     }
+
+    #[test]
+    fn protected_non_ascii_folder_rejected_in_both_mutf7_and_decoded_forms() {
+        // "Café" — the é forces a Modified-UTF-7 base64 run.
+        let decoded = "Caf\u{00e9}";
+        let encoded = utf7_imap::encode_utf7_imap(decoded.to_string());
+        assert_ne!(
+            encoded, decoded,
+            "test input must actually be mUTF-7 encoded"
+        );
+
+        // Configured in WIRE (encoded) form; request arrives DECODED.
+        let g = FolderGuard::new(std::slice::from_ref(&encoded), &[]);
+        assert!(
+            matches!(
+                g.check_protected(decoded, "delete"),
+                Err(AuthzError::ProtectedFolder { .. })
+            ),
+            "decoded form must match an encoded protected entry",
+        );
+        assert!(
+            matches!(
+                g.check_protected(&encoded, "delete"),
+                Err(AuthzError::ProtectedFolder { .. })
+            ),
+            "encoded form must match an encoded protected entry",
+        );
+
+        // Configured in DECODED form; request arrives ENCODED (and vice versa).
+        let g2 = FolderGuard::new(&[decoded.to_string()], &[]);
+        assert!(
+            matches!(
+                g2.check_protected(&encoded, "delete"),
+                Err(AuthzError::ProtectedFolder { .. })
+            ),
+            "encoded form must match a decoded protected entry",
+        );
+        assert!(
+            matches!(
+                g2.check_protected(decoded, "rename"),
+                Err(AuthzError::ProtectedFolder { .. })
+            ),
+            "decoded form must match a decoded protected entry",
+        );
+    }
+
+    #[test]
+    fn expunge_allowlist_matches_across_mutf7_forms() {
+        let decoded = "Caf\u{00e9}";
+        let encoded = utf7_imap::encode_utf7_imap(decoded.to_string());
+        let g = FolderGuard::new(&[], std::slice::from_ref(&encoded));
+        // Allowlisted in encoded form; both request forms must be allowed.
+        assert!(g.check_expunge(decoded).is_ok());
+        assert!(g.check_expunge(&encoded).is_ok());
+        // A different non-ASCII folder must still be denied.
+        assert!(matches!(
+            g.check_expunge("Sp\u{00e4}m"),
+            Err(AuthzError::ExpungeDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_mutf7_does_not_panic_and_does_not_bypass() {
+        // A dangling shift sequence ("&" with no terminating "-") is
+        // malformed mUTF-7. normalize() must not panic, and such a name
+        // must not be treated as an unlisted (allowed) folder when it is
+        // in fact the protected one in encoded form.
+        let g = FolderGuard::new(&["Drafts".into()], &[]);
+        let _ = g.check_protected("&malformed", "delete");
+        assert!(
+            g.check_protected("Drafts", "delete").is_err(),
+            "plain protected name must remain protected after a malformed probe",
+        );
+    }
 }

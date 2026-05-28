@@ -8,6 +8,8 @@ extend-ignore-re = [
 # Intentional project vocabulary. Add sparingly with a comment.
 imap = "imap"
 rimap = "rimap"
+# French word stem used in mUTF-7 test fixture ("Café")
+caf = "caf"
 # CVE Numbering Authority — a recognized industry acronym; typos incorrectly suggests "CAN"
 CNA = "CNA"
 # STRIDE table uses bold-letter notation (**I**nformation). Typos sees "nformation" as a fragment.
