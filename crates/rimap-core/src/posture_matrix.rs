@@ -9,9 +9,9 @@ use crate::tool::ToolName;
 
 /// Compile-time truth table. `true` = allowed by base posture.
 ///
-/// Layout: outer by [`ToolName`] (22 tools),
+/// Layout: outer by [`ToolName`] (23 tools),
 /// inner `[readonly, draft_safe, full, destructive]`.
-pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 22] = [
+pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 23] = [
     (ToolName::ListFolders, [true, true, true, true]),
     (ToolName::Search, [true, true, true, true]),
     (ToolName::SearchAdvanced, [false, false, true, true]),
@@ -19,6 +19,9 @@ pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 22] = [
     (ToolName::FetchMessageHtml, [false, false, true, true]),
     (ToolName::ListAttachments, [true, true, true, true]),
     (ToolName::DownloadAttachment, [true, true, true, true]),
+    // export_messages: default-DENY at every posture. Reachable only via
+    // an explicit [security.tools].export_messages = "allow" override.
+    (ToolName::ExportMessages, [false, false, false, false]),
     (ToolName::MarkRead, [false, true, true, true]),
     (ToolName::MarkUnread, [false, true, true, true]),
     (ToolName::Flag, [false, true, true, true]),

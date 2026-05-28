@@ -132,7 +132,7 @@ impl ImapMcpServer {
             delete_message, expunge, flags, folder_management, labels, move_message,
         };
         use crate::tools::retrieval::{
-            download_attachment, fetch_message, list_attachments, search,
+            download_attachment, export_messages, fetch_message, list_attachments, search,
         };
         let resp = match tool {
             ToolName::ListFolders => ser(Box::pin(list_folders::handle(account)).await?)?,
@@ -160,6 +160,9 @@ impl ImapMcpServer {
             }
             ToolName::DownloadAttachment => {
                 ser(Box::pin(download_attachment::handle(account, parse_args(args)?)).await?)?
+            }
+            ToolName::ExportMessages => {
+                ser(Box::pin(export_messages::handle(account, parse_args(args)?)).await?)?
             }
             ToolName::CreateDraft => {
                 ser(Box::pin(create_draft::handle(account, parse_args(args)?)).await?)?
@@ -245,6 +248,7 @@ impl ImapMcpServer {
                     | ToolName::FetchMessageHtml
                     | ToolName::ListAttachments
                     | ToolName::DownloadAttachment
+                    | ToolName::ExportMessages
                     | ToolName::MarkRead
                     | ToolName::MarkUnread
                     | ToolName::Flag

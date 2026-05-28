@@ -38,6 +38,124 @@ pub(super) fn validate_paths_multi(
     Ok(())
 }
 
+/// Fail-closed precondition for `export_messages`: when the tool is
+/// enabled, the configured download root must be server-private (not
+/// group- or world-writable).
+///
+/// `export_messages` writes a raw, unsanitized mbox into the download
+/// sandbox. Because the export is an unredacted raw-message oracle, the
+/// design requires the download root be writable only by the server
+/// (write authority separated from the consuming agent). This turns that
+/// requirement into a hard startup check: enabling the tool with a
+/// group/world-writable download root rejects the config.
+///
+/// The check fires only when `export_enabled` is true and a download root
+/// is configured (a non-empty `attachments.download_dir`). An empty
+/// `download_dir` means per-session tempdir, which the server creates with
+/// private permissions and is out of operator control. On non-Unix
+/// platforms the permission concept does not apply and the check is a
+/// no-op.
+pub(super) fn validate_export_download_root(
+    attachments: &AttachmentsConfig,
+    export_enabled: bool,
+) -> Result<(), ConfigError> {
+    if !export_enabled || attachments.download_dir.is_empty() {
+        return Ok(());
+    }
+    check_export_download_root_private(Path::new(&attachments.download_dir))
+}
+
+#[cfg(unix)]
+fn check_export_download_root_private(download_root: &Path) -> Result<(), ConfigError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // A symlinked root means the operator-named path and the path the writer
+    // resolves differ; whoever controls the link target controls the export
+    // destination. Reject before any metadata call (which follows the link).
+    let link_meta =
+        std::fs::symlink_metadata(download_root).map_err(|e| ConfigError::PathNotWritable {
+            path: download_root.to_path_buf(),
+            reason: format!("cannot stat download root: {e}"),
+        })?;
+    if link_meta.file_type().is_symlink() {
+        return Err(ConfigError::PathNotWritable {
+            path: download_root.to_path_buf(),
+            reason: "export_messages download root is a symlink; it must be a real \
+                     directory so its resolved path cannot be redirected to an \
+                     attacker-writable target"
+                .to_string(),
+        });
+    }
+
+    // Not a symlink, so `link_meta` already describes the directory itself —
+    // no second (link-following) stat needed. The root must not be
+    // group/world-writable. 0o022 = group-write (0o020) | other-write (0o002).
+    let mode = link_meta.permissions().mode();
+    if mode & 0o022 != 0 {
+        return Err(ConfigError::PathNotWritable {
+            path: download_root.to_path_buf(),
+            reason: format!(
+                "export_messages is enabled but the download root is \
+                 group/world-writable (mode {:o}); export_messages requires \
+                 a server-private download root",
+                mode & 0o777,
+            ),
+        });
+    }
+
+    check_export_download_root_parent(download_root)
+}
+
+/// Reject a download root whose immediate parent lets another user swap the
+/// root inode out from under the resolver.
+///
+/// Renaming/replacing a directory entry requires write+execute on its parent,
+/// so a group/world-writable parent permits the swap — *unless* the sticky bit
+/// is set, which restricts rename/delete to each entry's owner (the `/tmp`
+/// model). Only the immediate parent is checked; deeper ancestors are out of
+/// scope (the runtime held-fd writer is the backstop).
+#[cfg(unix)]
+fn check_export_download_root_parent(download_root: &Path) -> Result<(), ConfigError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let canonical =
+        std::fs::canonicalize(download_root).map_err(|e| ConfigError::PathNotWritable {
+            path: download_root.to_path_buf(),
+            reason: format!("canonicalize download root: {e}"),
+        })?;
+    let Some(parent) = canonical.parent() else {
+        // The root is the filesystem root `/`: no parent can swap it.
+        return Ok(());
+    };
+    let mode = std::fs::metadata(parent)
+        .map_err(|e| ConfigError::PathNotWritable {
+            path: parent.to_path_buf(),
+            reason: format!("cannot stat download-root parent: {e}"),
+        })?
+        .permissions()
+        .mode();
+    let group_or_world_writable = mode & 0o022 != 0;
+    let sticky = mode & 0o1000 != 0;
+    if group_or_world_writable && !sticky {
+        return Err(ConfigError::PathNotWritable {
+            path: parent.to_path_buf(),
+            reason: format!(
+                "export_messages download root's parent {} is group/world-writable \
+                 without the sticky bit (mode {:o}); another user could swap the \
+                 download root. Use a server-private parent or set the sticky bit",
+                parent.display(),
+                mode & 0o7777,
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_export_download_root_private(_download_root: &Path) -> Result<(), ConfigError> {
+    Ok(())
+}
+
 /// Compute the default audit base when `audit.allowed_base_dir` is unset.
 /// Returns `$XDG_STATE_HOME/rusty-imap-mcp/` on platforms where
 /// `directories::ProjectDirs` resolves; returns `None` otherwise (which
@@ -231,5 +349,118 @@ mod tests {
             Some(base_tmp.path().to_path_buf()),
         );
         assert!(enforce_audit_containment(&audit).is_ok());
+    }
+
+    #[cfg(unix)]
+    fn attachments_with(download_dir: &Path) -> AttachmentsConfig {
+        AttachmentsConfig {
+            download_dir: download_dir.to_string_lossy().into_owned(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_world_writable_rejected_when_enabled() {
+        let tmp = TempDir::new().unwrap();
+        set_mode(tmp.path(), 0o777);
+        let attachments = attachments_with(tmp.path());
+        let err = validate_export_download_root(&attachments, true).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("group/world-writable"), "reason: {reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_private_accepted_when_enabled() {
+        let tmp = TempDir::new().unwrap();
+        set_mode(tmp.path(), 0o700);
+        let attachments = attachments_with(tmp.path());
+        assert!(validate_export_download_root(&attachments, true).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_world_writable_ignored_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        set_mode(tmp.path(), 0o777);
+        let attachments = attachments_with(tmp.path());
+        assert!(validate_export_download_root(&attachments, false).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_empty_download_dir_skips_check() {
+        let attachments = AttachmentsConfig {
+            download_dir: String::new(),
+        };
+        assert!(validate_export_download_root(&attachments, true).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_symlink_rejected_when_enabled() {
+        // A symlinked root must be rejected even when its target is private:
+        // the resolved path can be redirected by whoever controls the link.
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        set_mode(&real, 0o700);
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let attachments = attachments_with(&link);
+        let err = validate_export_download_root(&attachments, true).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("symlink"), "reason: {reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_parent_world_writable_rejected_when_enabled() {
+        // A private root under a world-writable, non-sticky parent is
+        // rejected: another user could rename the root and substitute their
+        // own directory.
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let root = parent.join("root");
+        std::fs::create_dir(&root).unwrap();
+        set_mode(&root, 0o700);
+        set_mode(&parent, 0o777); // world-writable, no sticky bit
+
+        let attachments = attachments_with(&root);
+        let err = validate_export_download_root(&attachments, true).unwrap_err();
+        let ConfigError::PathNotWritable { reason, .. } = &err else {
+            panic!("expected PathNotWritable, got {err:?}");
+        };
+        assert!(reason.contains("swap the"), "reason: {reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_root_sticky_parent_accepted_when_enabled() {
+        // A world-writable parent WITH the sticky bit (the `/tmp` model) does
+        // not permit swapping another user's entry, so a private root under it
+        // is accepted.
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let root = parent.join("root");
+        std::fs::create_dir(&root).unwrap();
+        set_mode(&root, 0o700);
+        set_mode(&parent, 0o1777); // sticky + world-writable
+
+        let attachments = attachments_with(&root);
+        assert!(validate_export_download_root(&attachments, true).is_ok());
     }
 }

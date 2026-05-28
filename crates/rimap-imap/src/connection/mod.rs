@@ -187,6 +187,12 @@ impl Connection {
         &self.inner.cfg.username
     }
 
+    /// Maximum bytes a single `fetch_body` will accept (config cap).
+    #[must_use]
+    pub fn max_fetch_body_bytes(&self) -> u64 {
+        self.inner.cfg.max_fetch_body_bytes
+    }
+
     /// Acquire the session lock; lazy-connect if needed. The returned guard
     /// holds the tokio mutex; drop it before any other method on `Connection`.
     pub(crate) async fn session(
@@ -375,6 +381,12 @@ mod tests {
                     folder: "INBOX".to_string(),
                     expected: 100,
                     actual: 101,
+                },
+                "ERR_UID_VALIDITY_CHANGED",
+            ),
+            (
+                ImapError::UidValidityUnavailable {
+                    folder: "INBOX".to_string(),
                 },
                 "ERR_UID_VALIDITY_CHANGED",
             ),

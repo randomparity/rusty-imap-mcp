@@ -19,23 +19,22 @@ use rimap_authz::{DispatchGuard, FolderGuard};
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::RimapError;
 use rimap_core::account::AccountId;
-use rimap_core::error::ErrorCode;
 use rimap_imap::{Connection, ConnectionConfig, SpecialUseMap};
 use rimap_smtp::SmtpClient;
 
 /// In-memory, unkeyed governor limiter used for infrastructure tools.
 type InfrastructureLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
-/// Translate a `governor` rejection into [`RimapError::Authz`] with a
-/// rate-limited error code and a human-readable retry hint. The
-/// underlying ms math is shared with the per-account governor via
-/// [`retry_after_ms`]; this wrapper adds the infrastructure-tool
-/// framing and skips the intermediate `AuthzError`.
+/// Translate a `governor` rejection into the dedicated
+/// [`RimapError::RateLimited`] variant so the typed `retry_after_ms` reaches
+/// MCP `data` (#303) — the same structured contract the per-account limiter
+/// gets via `From<AuthzError>`. The underlying ms math is shared with the
+/// per-account governor via [`retry_after_ms`]; this wrapper skips the
+/// intermediate `AuthzError` but lands on the same `RimapError` variant.
 fn infra_rate_limited(not_until: &NotUntil<DefaultInstant>, clock: &DefaultClock) -> RimapError {
     let wait_ms = retry_after_ms(not_until, clock);
-    RimapError::Authz {
-        code: ErrorCode::RateLimited,
-        message: format!("infrastructure tool rate limit exceeded; retry in {wait_ms}ms"),
+    RimapError::RateLimited {
+        retry_after_ms: wait_ms,
     }
 }
 
@@ -118,9 +117,9 @@ impl AccountRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`RimapError::Authz`] with
-    /// [`ErrorCode::RateLimited`] when the limit is exceeded. The
-    /// error message includes a retry hint in milliseconds.
+    /// Returns [`RimapError::RateLimited`] carrying the typed
+    /// `retry_after_ms` hint when the limit is exceeded, so the retry
+    /// timing reaches MCP `data` as a structured field (#303).
     pub fn check_infrastructure_rate(&self) -> Result<(), RimapError> {
         self.infrastructure_limiter
             .check()
@@ -315,10 +314,12 @@ mod tests {
             match reg.check_infrastructure_rate() {
                 Ok(()) => admitted += 1,
                 Err(err) => {
-                    // First rejection: confirm it's the expected variant.
+                    // First rejection: confirm it's the dedicated RateLimited
+                    // variant carrying the typed retry hint (#303), not a
+                    // stringified Authz error.
                     assert!(
-                        matches!(err, RimapError::Authz { code, .. } if code == ErrorCode::RateLimited),
-                        "expected rate-limited Authz error, got {err:?}",
+                        matches!(err, RimapError::RateLimited { .. }),
+                        "expected RimapError::RateLimited, got {err:?}",
                     );
                     rejected_with_rate_limited = true;
                     break;

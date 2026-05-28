@@ -72,6 +72,28 @@ pub fn to_mcp_error(err: &RimapError) -> ErrorData {
             });
             return ErrorData::invalid_params(message, Some(data));
         }
+        RimapError::RateLimited { retry_after_ms } => {
+            let data = serde_json::json!({
+                "error_code": ErrorCode::RateLimited.as_str(),
+                "retry_after_ms": retry_after_ms,
+            });
+            return ErrorData::new(RATE_LIMITED, message, Some(data));
+        }
+        RimapError::CircuitOpen { retry_after_ms } => {
+            let data = serde_json::json!({
+                "error_code": ErrorCode::CircuitOpen.as_str(),
+                "retry_after_ms": retry_after_ms,
+            });
+            return ErrorData::new(CIRCUIT_OPEN, message, Some(data));
+        }
+        RimapError::AttachmentTooLarge { kind, limit } => {
+            let data = serde_json::json!({
+                "error_code": ErrorCode::AttachmentTooLarge.as_str(),
+                "kind": kind,
+                "limit": limit,
+            });
+            return ErrorData::new(ATTACHMENT_TOO_LARGE, message, Some(data));
+        }
         _ => {}
     }
 
@@ -245,6 +267,46 @@ mod tests {
         assert_eq!(data_value["error_code"], "ERR_UNKNOWN_ACCOUNT");
         assert_eq!(data_value["name"], "missing");
         assert_eq!(data_value["available"], serde_json::json!(["work"]));
+    }
+
+    #[test]
+    fn rate_limited_carries_structured_data() {
+        let err = RimapError::RateLimited {
+            retry_after_ms: 250,
+        };
+        let mcp = to_mcp_error(&err);
+        assert_eq!(mcp.code, super::RATE_LIMITED);
+        let data = mcp.data.as_ref().expect("data populated");
+        let v = serde_json::to_value(data).expect("data serializes");
+        assert_eq!(v["error_code"], "ERR_RATE_LIMITED");
+        assert_eq!(v["retry_after_ms"], 250);
+    }
+
+    #[test]
+    fn circuit_open_carries_structured_data() {
+        let err = RimapError::CircuitOpen { retry_after_ms: 0 };
+        let mcp = to_mcp_error(&err);
+        assert_eq!(mcp.code, super::CIRCUIT_OPEN);
+        let data = mcp.data.as_ref().expect("data populated");
+        let v = serde_json::to_value(data).expect("data serializes");
+        assert_eq!(v["error_code"], "ERR_CIRCUIT_OPEN");
+        // 0 is the half-open probe value and must round-trip, not be omitted.
+        assert_eq!(v["retry_after_ms"], 0);
+    }
+
+    #[test]
+    fn attachment_too_large_carries_structured_data() {
+        let err = RimapError::AttachmentTooLarge {
+            kind: "message_bytes".to_string(),
+            limit: 26_214_400,
+        };
+        let mcp = to_mcp_error(&err);
+        assert_eq!(mcp.code, super::ATTACHMENT_TOO_LARGE);
+        let data = mcp.data.as_ref().expect("data populated");
+        let v = serde_json::to_value(data).expect("data serializes");
+        assert_eq!(v["error_code"], "ERR_ATTACHMENT_TOO_LARGE");
+        assert_eq!(v["kind"], "message_bytes");
+        assert_eq!(v["limit"], 26_214_400);
     }
 
     #[test]

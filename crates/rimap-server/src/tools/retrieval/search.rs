@@ -165,6 +165,11 @@ pub struct SearchMeta {
     pub returned: usize,
     /// Whether there are more results beyond this page.
     pub truncated: bool,
+    /// UIDVALIDITY observed for the searched folder, from the same
+    /// EXAMINE/UID SEARCH operation. Thread into `export_messages`'
+    /// `expected_uidvalidity`. `None` if the server omitted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid_validity: Option<u32>,
 }
 
 /// Untrusted payload for a `search` response.
@@ -191,7 +196,7 @@ pub async fn handle(
 
     let query = build_query(&input)?;
 
-    let uids = Box::pin(account.imap.search(&input.folder, query)).await?;
+    let (uids, uid_validity) = Box::pin(account.imap.search(&input.folder, query)).await?;
     let total_matched = uids.len();
 
     let offset = input.offset.unwrap_or(0);
@@ -227,6 +232,7 @@ pub async fn handle(
         total_matched,
         returned: messages.len(),
         truncated,
+        uid_validity,
     })
     .with_untrusted(SearchUntrusted { messages }))
 }
@@ -853,5 +859,18 @@ mod tests {
         assert_eq!(s.answered, Some(true));
         assert_eq!(s.flagged, Some(false));
         assert_eq!(s.draft, Some(true));
+    }
+
+    #[test]
+    fn search_meta_serializes_uid_validity() {
+        let meta = SearchMeta {
+            folder: "INBOX".to_string(),
+            total_matched: 0,
+            returned: 0,
+            truncated: false,
+            uid_validity: Some(12345),
+        };
+        let v = serde_json::to_value(meta).unwrap();
+        assert_eq!(v["uid_validity"], serde_json::json!(12345));
     }
 }

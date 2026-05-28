@@ -191,7 +191,7 @@ mark_read = "deny"                # deny even though draft-safe allows it
 
 #### Valid tool names
 
-All 24 valid tool names for `[security.tools]`:
+All 25 valid tool names for `[security.tools]`:
 
 | Tool name | Description | Default posture |
 |-----------|-------------|-----------------|
@@ -202,6 +202,7 @@ All 24 valid tool names for `[security.tools]`:
 | `fetch_message.include_html` | Fetch message with HTML parts | full+ |
 | `list_attachments` | List message attachments | readonly+ |
 | `download_attachment` | Download attachment to sandbox | readonly+ |
+| `export_messages` | Export raw messages to a `git am`-able mbox | disabled by default² |
 | `mark_read` | Mark message as read | draft-safe+ |
 | `mark_unread` | Mark message as unread | draft-safe+ |
 | `flag` | Add star/flag | draft-safe+ |
@@ -229,6 +230,11 @@ and `[security.tools]` cannot disable them. An `"allow"` or `"deny"`
 override targeting either name is accepted by config validation but has
 **no effect** at runtime — they remain available regardless.
 
+² `export_messages` is **denied in every posture** and is only available
+when explicitly enabled via `[security.tools]` with
+`export_messages = "allow"`. See
+[The `export_messages` tool](#the-export_messages-tool) below.
+
 Sub-capabilities (`.advanced_query`, `.include_html`) are separate
 authorization gates within their parent tool. The parent tool name
 (`search`, `fetch_message`) controls the base capability; the
@@ -246,6 +252,89 @@ sub-capability controls the escape hatch.
 
 If you see `unknown tool name 'mark_as_read'`, check the spelling
 against the table above. The correct name is `mark_read`.
+
+### The `export_messages` tool
+
+`export_messages` exports one or more raw messages from a folder into a
+single mbox file in the download sandbox. The mbox uses `mboxrd` framing
+and is consumable directly by `git am`, which makes it the bridge for
+turning emailed patches into local commits.
+
+#### Workflow
+
+```
+search → read uid_validity → export_messages → git am <path>
+```
+
+1. `search` for the messages to export and note the `uid_validity`
+   reported alongside the matching UIDs.
+2. Call `export_messages` with those UIDs and pass the observed
+   `uid_validity` as `expected_uidvalidity`. The server re-checks the
+   folder's UIDVALIDITY before fetching; if it changed (mailbox renumbered),
+   the call fails rather than exporting the wrong messages.
+3. Apply the resulting mbox with `git am <path>`.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `folder` | string | yes | IMAP folder containing the messages. |
+| `uids` | list of int | yes | UIDs to export, in mbox/patch order. Non-empty, max 100, de-duplicated. |
+| `expected_uidvalidity` | int | yes | UIDVALIDITY observed when the UIDs were discovered. Pins mailbox identity across `search`→`export_messages`; a mismatch fails the call. |
+| `dest_dir` | string | no | Destination directory. Must resolve inside the download root. Defaults to the download root. |
+| `filename` | string | no | Advisory basename prefix; sanitized before use. |
+| `max_total_bytes` | int | no | Aggregate byte cap for the export. Clamped to the hard ceiling of 100 MiB regardless of the value supplied. |
+| `allow_partial` | bool | no | Default `false` = all-or-nothing: if any requested UID is missing or oversize the whole call fails and no `.mbox` is written. `true` = best-effort: successes are written to a `.partial.mbox` artifact and the failures are reported in the response. |
+
+#### Default-disabled and how to enable
+
+`export_messages` is denied in **every** posture. It is enabled only by an
+explicit override:
+
+```toml
+[security.tools]
+export_messages = "allow"
+```
+
+#### Required: a server-private download root
+
+`export_messages` writes a **raw, unsanitized** copy of message bytes to
+the download sandbox. Because that export is an unredacted raw-message
+oracle, the download root must be writable only by the server — the write
+authority must be separated from the agent that consumes the file.
+
+On Unix, this is enforced as a set of **fail-closed config preconditions**:
+when `export_messages` is enabled and `[attachments].download_dir` is set,
+config validation rejects startup if the download root
+
+- is group- or world-writable (any of mode bits `0o022` set) — use a
+  private directory (e.g. mode `0o700`);
+- is a **symlink** — the resolved path must not be redirectable by whoever
+  controls the link target; use a real directory;
+- has an **immediate parent that is group/world-writable without the sticky
+  bit** — otherwise another user could rename the root and substitute their
+  own directory. A sticky parent (the `/tmp` model, mode `0o1777`) is
+  accepted because it restricts rename/delete to each entry's owner.
+
+An empty `download_dir` (the default per-session temporary directory) is
+created privately by the server and is not subject to these checks. Only
+the **immediate** parent is validated; a writable, non-sticky *grand*parent
+is not walked — the runtime held-fd writer (below) is the backstop for
+deeper path components.
+
+These startup checks are gated on `export_messages` being enabled, because
+the raw-export oracle is the high-value asset they protect. `download_attachment`
+writes *decoded* attachments to the same root but does not, on its own,
+trigger them; it relies on the same runtime writer protections and on the
+operator keeping the download root server-private.
+
+At runtime, writes (for both `download_attachment` and `export_messages`)
+are anchored to a held directory descriptor and placed atomically (write to
+a `.rimap-tmp-*` temp, then hard-link to the final name), so a partially
+written file never appears at the final path and a rename of a path
+component cannot redirect the write. A process killed mid-write may leave a
+`0600` `.rimap-tmp-*` orphan in the download root; operators can safely
+delete stale `.rimap-tmp-*` files.
 
 ## `[limits]` section
 
@@ -287,7 +376,12 @@ Global (shared across all accounts).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `download_dir` | string | `""` | Directory for downloaded attachments. Empty string means a per-session temporary directory. |
+| `download_dir` | string | `""` | Directory for downloaded attachments and `export_messages` output. Empty string means a per-session temporary directory. |
+
+When `export_messages` is enabled, `download_dir` must be server-private
+on Unix: config validation rejects a group- or world-writable directory
+at startup. See
+[The `export_messages` tool](#the-export_messages-tool).
 
 ## `[defaults]` section (multi-account only)
 

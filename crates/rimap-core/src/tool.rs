@@ -28,6 +28,10 @@ pub enum ToolName {
     ListAttachments,
     /// `download_attachment`
     DownloadAttachment,
+    /// `export_messages` — bulk raw export of multiple UIDs to a
+    /// `git am`-able mbox in the download sandbox. Default-denied in the
+    /// base posture matrix; enabled only via `[security.tools]`.
+    ExportMessages,
     /// `mark_read`
     MarkRead,
     /// `mark_unread`
@@ -80,6 +84,7 @@ impl ToolName {
             Self::FetchMessageHtml => "fetch_message.include_html",
             Self::ListAttachments => "list_attachments",
             Self::DownloadAttachment => "download_attachment",
+            Self::ExportMessages => "export_messages",
             Self::MarkRead => "mark_read",
             Self::MarkUnread => "mark_unread",
             Self::Flag => "flag",
@@ -127,6 +132,7 @@ impl ToolName {
             | Self::FetchMessageHtml
             | Self::ListAttachments
             | Self::DownloadAttachment
+            | Self::ExportMessages
             | Self::MarkRead
             | Self::MarkUnread
             | Self::Flag
@@ -160,6 +166,7 @@ impl ToolName {
             | Self::FetchMessageHtml
             | Self::ListAttachments
             | Self::DownloadAttachment
+            | Self::ExportMessages
             | Self::MarkRead
             | Self::MarkUnread
             | Self::Flag
@@ -194,6 +201,7 @@ impl ToolName {
             | Self::FetchMessageHtml
             | Self::ListAttachments
             | Self::DownloadAttachment
+            | Self::ExportMessages
             | Self::MarkRead
             | Self::MarkUnread
             | Self::Flag
@@ -283,10 +291,15 @@ impl ToolName {
 
             // Non-idempotent, non-destructive mutations. `CreateFolder`
             // also falls here: same name fails the second call per IMAP
-            // semantics.
-            Self::MoveMessage | Self::CreateDraft | Self::RenameFolder | Self::CreateFolder => {
-                (false, false, false, true)
-            }
+            // semantics. `ExportMessages` writes a new sandbox file per
+            // call (write_attachment de-dups, never overwrites) and reads
+            // from IMAP, so it is non-idempotent + open-world like the
+            // rest of this group.
+            Self::MoveMessage
+            | Self::CreateDraft
+            | Self::RenameFolder
+            | Self::CreateFolder
+            | Self::ExportMessages => (false, false, false, true),
 
             // Destructive, irreversible.
             Self::SendEmail | Self::DeleteMessage | Self::Expunge | Self::DeleteFolder => {
@@ -350,9 +363,9 @@ mod tests {
     use strum::IntoEnumIterator;
 
     #[test]
-    fn all_has_exactly_twenty_four_variants() {
-        assert_eq!(ToolName::all().len(), 24);
-        assert_eq!(ToolName::iter().count(), 24);
+    fn all_has_exactly_twenty_five_variants() {
+        assert_eq!(ToolName::all().len(), 25);
+        assert_eq!(ToolName::iter().count(), 25);
     }
 
     #[test]
@@ -501,5 +514,25 @@ mod annotation_tests {
         assert!(h.idempotent, "same UID+part_id yields identical bytes");
         assert!(!h.destructive, "no irreversible server-side mutation");
         assert!(h.open_world, "fetches from the IMAP server");
+    }
+
+    #[test]
+    fn export_messages_is_non_idempotent_open_world_write() {
+        // Pins ExportMessages to (read_only, destructive, idempotent,
+        // open_world) = (false, false, false, true). Without this, a future
+        // edit could silently fold the variant into a different
+        // annotation_hints match arm (e.g. the idempotent
+        // download_attachment group) and change the advertised hints.
+        let h = ToolName::ExportMessages.annotation_hints();
+        assert!(
+            !h.read_only,
+            "export_messages writes a sandbox file; must not advertise read_only_hint",
+        );
+        assert!(!h.destructive, "no irreversible server-side mutation");
+        assert!(
+            !h.idempotent,
+            "writes a new artifact per call; not idempotent"
+        );
+        assert!(h.open_world, "reads from the IMAP server");
     }
 }

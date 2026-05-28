@@ -103,6 +103,29 @@ pub(crate) fn check_uidvalidity(
     }
 }
 
+/// Like [`check_uidvalidity`] but **fail-closed**: when `expected` is set,
+/// an absent observed UIDVALIDITY is an error, not a warning.
+pub(crate) fn require_uidvalidity(
+    folder: &str,
+    expected: Option<u32>,
+    observed: Option<u32>,
+) -> Result<(), ImapError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    match observed {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(ImapError::UidValidityChanged {
+            folder: folder.to_owned(),
+            expected,
+            actual,
+        }),
+        None => Err(ImapError::UidValidityUnavailable {
+            folder: folder.to_owned(),
+        }),
+    }
+}
+
 pub(crate) async fn fetch(
     session: &mut ImapSession,
     folder: &str,
@@ -190,11 +213,10 @@ pub(crate) async fn fetch_body(
     folder: &str,
     uid: Uid,
     limit: u64,
+    expected_uidvalidity: Option<u32>,
 ) -> Result<Vec<u8>, ImapError> {
-    session
-        .examine(folder)
-        .await
-        .map_err(super::folders::map_err)?;
+    let selected = super::folders::select(session, folder, true).await?;
+    require_uidvalidity(folder, expected_uidvalidity, selected.uid_validity)?;
 
     let mut stream = session
         .uid_fetch(uid.get().to_string(), "BODY.PEEK[]")
@@ -256,11 +278,10 @@ pub(crate) async fn preflight_fetch_size(
     session: &mut ImapSession,
     folder: &str,
     uid: Uid,
+    expected_uidvalidity: Option<u32>,
 ) -> Result<Option<u32>, ImapError> {
-    session
-        .examine(folder)
-        .await
-        .map_err(super::folders::map_err)?;
+    let selected = super::folders::select(session, folder, true).await?;
+    require_uidvalidity(folder, expected_uidvalidity, selected.uid_validity)?;
 
     let mut stream = session
         .uid_fetch(uid.get().to_string(), "RFC822.SIZE")
@@ -444,7 +465,7 @@ fn convert_flag(f: &async_imap::types::Flag<'_>) -> crate::types::Flag {
 mod tests {
     use super::{
         MAX_BODYSTRUCTURE_DEPTH, check_uidvalidity, compress_uid_set, convert_bs_inner,
-        preflight_size_check, project_size,
+        preflight_size_check, project_size, require_uidvalidity,
     };
     use crate::error::ImapError;
     use crate::types::tests::uid;
@@ -803,6 +824,23 @@ mod tests {
     fn check_uidvalidity_server_omitted_is_not_error() {
         // Server omitted UIDVALIDITY (None) → warn and proceed, no error.
         check_uidvalidity("INBOX", Some(42), None).unwrap();
+    }
+
+    #[test]
+    fn require_uidvalidity_strict() {
+        // expected=None: no-op (download_attachment path).
+        assert!(require_uidvalidity("INBOX", None, None).is_ok());
+        assert!(require_uidvalidity("INBOX", None, Some(7)).is_ok());
+        // expected=Some: match ok, mismatch and ABSENT both error.
+        assert!(require_uidvalidity("INBOX", Some(7), Some(7)).is_ok());
+        assert!(matches!(
+            require_uidvalidity("INBOX", Some(7), Some(8)),
+            Err(crate::error::ImapError::UidValidityChanged { .. })
+        ));
+        assert!(matches!(
+            require_uidvalidity("INBOX", Some(7), None),
+            Err(crate::error::ImapError::UidValidityUnavailable { .. })
+        ));
     }
 
     // NOTE: The round-trip parser in this proptest is a SIMPLIFIED model.

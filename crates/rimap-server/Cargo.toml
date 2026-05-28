@@ -76,6 +76,10 @@ infer = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
+# Dir-fd-anchored sandbox writes (#317): the destination directory is held as
+# a capability `Dir` and files are created/linked fd-relative, closing the
+# resolve→write directory-swap race without `unsafe`.
+cap-std = { workspace = true }
 anyhow = { workspace = true }
 secrecy = { workspace = true }
 sha2 = { workspace = true }

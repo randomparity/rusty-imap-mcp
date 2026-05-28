@@ -43,6 +43,7 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
         },
         retrieval::{
             download_attachment::{DownloadAttachmentMeta, DownloadAttachmentUntrusted},
+            export_messages::ExportMessagesMeta,
             fetch_message::{FetchMessageMeta, FetchMessageUntrusted},
             list_attachments::{ListAttachmentsMeta, ListAttachmentsUntrusted},
             search::{SearchMeta, SearchUntrusted},
@@ -70,6 +71,7 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
     out.insert("create_folder", tool_envelope::<CreateFolderMeta, ()>());
     out.insert("rename_folder", tool_envelope::<RenameFolderMeta, ()>());
     out.insert("delete_folder", tool_envelope::<DeleteFolderMeta, ()>());
+    out.insert("export_messages", tool_envelope::<ExportMessagesMeta, ()>());
 
     // meta + untrusted tools
     out.insert("search", tool_envelope::<SearchMeta, SearchUntrusted>());
@@ -134,6 +136,7 @@ mod tests {
             "create_folder",
             "rename_folder",
             "delete_folder",
+            "export_messages",
             "search",
             "fetch_message",
             "list_attachments",
@@ -150,8 +153,8 @@ mod tests {
 
         assert_eq!(
             parsed.len(),
-            22,
-            "expected exactly 22 tool schemas, found {}",
+            23,
+            "expected exactly 23 tool schemas, found {}",
             parsed.len()
         );
     }

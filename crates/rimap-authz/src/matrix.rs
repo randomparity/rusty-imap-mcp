@@ -137,6 +137,7 @@ mod tests {
             ToolName::CreateFolder,
             ToolName::RenameFolder,
             ToolName::DeleteFolder,
+            ToolName::ExportMessages,
         ] {
             assert!(!base_allows(Posture::Readonly, t), "{t} should be denied");
         }
@@ -153,6 +154,7 @@ mod tests {
             ToolName::CreateFolder,
             ToolName::RenameFolder,
             ToolName::DeleteFolder,
+            ToolName::ExportMessages,
         ];
         for t in &denied {
             assert!(!base_allows(Posture::DraftSafe, *t), "{t} expected denied");
@@ -167,7 +169,11 @@ mod tests {
 
     #[test]
     fn base_full_allows_except_destructive() {
-        let denied = [ToolName::Expunge, ToolName::DeleteFolder];
+        let denied = [
+            ToolName::Expunge,
+            ToolName::DeleteFolder,
+            ToolName::ExportMessages,
+        ];
         for t in ToolName::all() {
             if t.is_infrastructure() {
                 assert!(
@@ -195,6 +201,11 @@ mod tests {
                 assert!(
                     !base_allows(Posture::Destructive, t),
                     "{t} infrastructure tool should not be in posture matrix"
+                );
+            } else if t == ToolName::ExportMessages {
+                assert!(
+                    !base_allows(Posture::Destructive, t),
+                    "export_messages is default-deny at every base posture"
                 );
             } else {
                 assert!(
@@ -277,6 +288,11 @@ mod tests {
                     !allowed,
                     "{tool} infrastructure tool should be denied in matrix"
                 );
+            } else if *tool == ToolName::ExportMessages {
+                assert!(
+                    !allowed,
+                    "export_messages is default-deny at every base posture"
+                );
             } else {
                 assert!(allowed, "{tool} should be allowed at destructive");
             }
@@ -287,5 +303,22 @@ mod tests {
     fn posture_accessor_returns_construction_value() {
         let m = EffectiveMatrix::build(Posture::DraftSafe, &BTreeMap::new());
         assert_eq!(m.posture(), Posture::DraftSafe);
+    }
+
+    #[test]
+    fn export_messages_denied_by_default_enabled_only_by_override() {
+        // No override: denied at every posture.
+        for p in Posture::all() {
+            let m = EffectiveMatrix::build(p, &BTreeMap::new());
+            assert!(
+                m.check(ToolName::ExportMessages).is_err(),
+                "export_messages must be default-denied at {p:?}"
+            );
+        }
+        // Explicit allow override enables it.
+        let mut overrides = BTreeMap::new();
+        overrides.insert(ToolName::ExportMessages, Verdict::Allow);
+        let m = EffectiveMatrix::build(Posture::Readonly, &overrides);
+        assert!(m.check(ToolName::ExportMessages).is_ok());
     }
 }

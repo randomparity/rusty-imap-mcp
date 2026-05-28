@@ -10,13 +10,11 @@ pub(crate) async fn search(
     session: &mut ImapSession,
     folder: &str,
     query: SearchQuery,
-) -> Result<Vec<Uid>, ImapError> {
-    // Caller should have sent SELECT via the public API; this is a defensive
-    // re-EXAMINE to keep the search scoped to the requested folder.
-    session
-        .examine(folder)
-        .await
-        .map_err(super::folders::map_err)?;
+) -> Result<(Vec<Uid>, Option<u32>), ImapError> {
+    // Read-only SELECT (EXAMINE) so the UID set and its UIDVALIDITY come
+    // from the same selected-mailbox operation.
+    let selected = super::folders::select(session, folder, true).await?;
+    let uid_validity = selected.uid_validity;
 
     let key = match query {
         SearchQuery::Structured(s) => structured_to_key(&s)?,
@@ -27,7 +25,10 @@ pub(crate) async fn search(
         .uid_search(&key)
         .await
         .map_err(super::folders::map_err)?;
-    Ok(uids.into_iter().filter_map(Uid::new).collect())
+    Ok((
+        uids.into_iter().filter_map(Uid::new).collect(),
+        uid_validity,
+    ))
 }
 
 fn structured_to_key(q: &StructuredQuery) -> Result<String, ImapError> {
