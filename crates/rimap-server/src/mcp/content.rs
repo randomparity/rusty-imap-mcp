@@ -53,9 +53,10 @@ static PARSE_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8)
 /// - `ContentError::Malformed` surfaces as `RimapError::Authz { code:
 ///   InvalidInput, ... }` — the caller-supplied bytes are syntactically
 ///   broken.
-/// - `ContentError::LimitExceeded` surfaces as `RimapError::Authz { code:
-///   AttachmentTooLarge, ... }` — a hard content-pipeline cap (message
-///   bytes, MIME depth/parts, header count, HTML size) was exceeded.
+/// - `ContentError::LimitExceeded` surfaces as
+///   `RimapError::AttachmentTooLarge { kind, limit }` — a hard content-pipeline
+///   cap (message bytes, MIME depth/parts, header count, HTML size) was
+///   exceeded; `kind`/`limit` are surfaced as structured MCP `data` (#303).
 /// - Panics from the blocking task or a closed acquisition semaphore
 ///   surface as `RimapError::Internal` — those are infrastructure
 ///   failures, not content defects, and should trip the circuit breaker
@@ -77,7 +78,7 @@ pub async fn parse_message_async(raw: Vec<u8>) -> Result<Content, RimapError> {
 ///
 /// - `RimapError::Authz { code: InvalidInput, ... }` for
 ///   `ContentError::Malformed` (malformed RFC 5322).
-/// - `RimapError::Authz { code: AttachmentTooLarge, ... }` for
+/// - `RimapError::AttachmentTooLarge { kind, limit }` for
 ///   `ContentError::LimitExceeded` (hard content-pipeline cap hit).
 /// - `RimapError::Internal` for panics or a closed semaphore.
 pub async fn walk_attachment_parts_async(

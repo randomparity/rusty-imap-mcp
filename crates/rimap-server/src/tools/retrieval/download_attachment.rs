@@ -82,9 +82,9 @@ pub struct DownloadAttachmentUntrusted {
 ///   not present in the message.
 /// - Propagates `RimapError::Imap { ... }` from SELECT / UID FETCH.
 /// - `RimapError::Authz { code: InvalidInput, ... }` for malformed MIME
-///   bodies and `RimapError::Authz { code: AttachmentTooLarge, ... }`
+///   bodies and `RimapError::AttachmentTooLarge { kind, limit }`
 ///   when a content-pipeline cap (MIME depth/parts, header count, body
-///   size) is exceeded during parse.
+///   size) is exceeded during parse (`kind`/`limit` surface as MCP `data`).
 /// - `RimapError::Internal` for unrecoverable filesystem or hashing
 ///   failures while writing the attachment bytes.
 pub async fn handle(
