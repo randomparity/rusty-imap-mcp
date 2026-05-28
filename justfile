@@ -56,6 +56,8 @@ setup:
             H_ZIZMOR='cargo install --locked zizmor'
             H_TYPOS='cargo install --locked typos-cli'
             H_PNPM='npm install -g pnpm@11.1.1'
+            H_PKGCONFIG='sudo dnf install pkgconf-pkg-config'
+            H_DBUS='sudo dnf install dbus-devel'
             ;;
         debian)
             H_JUST='sudo apt install just'
@@ -66,6 +68,8 @@ setup:
             H_ZIZMOR='cargo install --locked zizmor'
             H_TYPOS='cargo install --locked typos-cli'
             H_PNPM='npm install -g pnpm@11.1.1'
+            H_PKGCONFIG='sudo apt install pkg-config'
+            H_DBUS='sudo apt install libdbus-1-dev'
             ;;
         arch)
             H_JUST='sudo pacman -S just'
@@ -76,6 +80,8 @@ setup:
             H_ZIZMOR='cargo install --locked zizmor'
             H_TYPOS='cargo install --locked typos-cli'
             H_PNPM='sudo pacman -S pnpm'
+            H_PKGCONFIG='sudo pacman -S pkgconf'
+            H_DBUS='sudo pacman -S dbus'
             ;;
         suse)
             H_JUST='sudo zypper install just'
@@ -86,6 +92,8 @@ setup:
             H_ZIZMOR='cargo install --locked zizmor'
             H_TYPOS='cargo install --locked typos-cli'
             H_PNPM='npm install -g pnpm@11.1.1'
+            H_PKGCONFIG='sudo zypper install pkg-config'
+            H_DBUS='sudo zypper install dbus-1-devel'
             ;;
         *)
             H_JUST='cargo install --locked just'
@@ -96,6 +104,8 @@ setup:
             H_ZIZMOR='cargo install --locked zizmor'
             H_TYPOS='cargo install --locked typos-cli'
             H_PNPM='npm install -g pnpm@11.1.1'
+            H_PKGCONFIG='install pkg-config via your package manager'
+            H_DBUS='install libdbus-1 development headers via your package manager'
             ;;
     esac
     missing=()
@@ -115,6 +125,16 @@ setup:
     need typos      "$H_TYPOS"
     need node       "install Node 22 LTS via your package manager or nvm"
     need pnpm       "$H_PNPM"
+    # Linux only: `keyring` pulls in `dbus-secret-service`, which links
+    # against `libdbus-1` at build time via pkg-config. macOS uses the
+    # Security framework instead, so no system headers are required there.
+    if [ "$os" = "Linux" ]; then
+        if ! command -v pkg-config >/dev/null 2>&1; then
+            missing+=("pkg-config ($H_PKGCONFIG)")
+        elif ! pkg-config --exists 'dbus-1 >= 1.6' 2>/dev/null; then
+            missing+=("libdbus-1 development headers ($H_DBUS)")
+        fi
+    fi
     if [ "${#missing[@]}" -ne 0 ]; then
         echo "Missing required tools:"
         printf '  - %s\n' "${missing[@]}"
