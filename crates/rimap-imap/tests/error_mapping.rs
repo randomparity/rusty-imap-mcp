@@ -5,7 +5,6 @@
 //! instead of a source chain.
 
 #![expect(clippy::unwrap_used, reason = "tests")]
-#![expect(clippy::expect_used, reason = "tests")]
 #![expect(clippy::panic, reason = "tests")]
 
 use std::error::Error as _;
