@@ -127,33 +127,50 @@ mod tests {
     }
 
     #[test]
-    fn breaker_failure_feedback_eventually_blocks_allowed_tool() {
-        let g = guard(Posture::DraftSafe);
-        g.pre_dispatch(ToolName::ListFolders).unwrap();
-        g.on_failure(FailureReason::Timeout);
-        g.on_failure(FailureReason::Timeout);
-        let err = g.pre_dispatch(ToolName::ListFolders).unwrap_err();
-        assert!(matches!(err, AuthzError::CircuitOpen { .. }));
-    }
-
-    #[test]
-    fn on_success_after_probe_closes_breaker() {
-        let g = guard(Posture::DraftSafe);
-        g.on_failure(FailureReason::Timeout);
-        g.on_failure(FailureReason::Timeout);
-        assert!(matches!(
-            g.pre_dispatch(ToolName::ListFolders),
-            Err(AuthzError::CircuitOpen { .. })
-        ));
-        g.breaker().clock.advance(Duration::from_secs(5));
-        g.pre_dispatch(ToolName::ListFolders).unwrap(); // HalfOpen probe
-        g.on_success();
-        g.pre_dispatch(ToolName::ListFolders).unwrap();
-    }
-
-    #[test]
     fn matrix_accessor_returns_effective_matrix() {
         let g = guard(Posture::Full);
         assert_eq!(g.matrix().posture(), Posture::Full);
+    }
+
+    #[test]
+    fn timeout_threshold_trips_breaker_then_probe_success_closes_it() {
+        let g = guard(Posture::DraftSafe);
+
+        // A tool that DraftSafe permits, so admission is gated only by the breaker.
+        g.pre_dispatch(ToolName::ListFolders).unwrap();
+
+        // One non-auth service failure is below threshold (2): still Closed.
+        g.on_failure(FailureReason::Timeout);
+        g.pre_dispatch(ToolName::ListFolders).unwrap(); // one failure is below the threshold; breaker stays Closed
+
+        // Second non-auth failure reaches threshold → Open.
+        g.on_failure(FailureReason::Timeout);
+        assert!(
+            matches!(
+                g.pre_dispatch(ToolName::ListFolders),
+                Err(AuthzError::CircuitOpen { .. })
+            ),
+            "two service failures must trip the breaker Open",
+        );
+
+        // After cooldown, a probe + success closes it again.
+        g.breaker().clock.advance(Duration::from_secs(5));
+        g.pre_dispatch(ToolName::ListFolders).unwrap(); // HalfOpen probe
+        g.on_success();
+        g.pre_dispatch(ToolName::ListFolders).unwrap(); // on_success after a half-open probe must close the breaker
+    }
+
+    #[test]
+    fn single_auth_failure_trips_breaker_immediately() {
+        let g = guard(Posture::DraftSafe);
+        g.pre_dispatch(ToolName::ListFolders).unwrap();
+        g.on_failure(FailureReason::Auth);
+        assert!(
+            matches!(
+                g.pre_dispatch(ToolName::ListFolders),
+                Err(AuthzError::CircuitOpen { .. })
+            ),
+            "a single Auth failure must trip the breaker Open immediately",
+        );
     }
 }

@@ -282,35 +282,57 @@ mod tests {
     use super::rimap_error_to_breaker_reason;
 
     #[test]
-    fn breaker_reason_maps_service_failures() {
+    fn breaker_reason_maps_every_error_code() {
         use rimap_authz::breaker::FailureReason;
         use rimap_core::{ErrorCode, RimapError};
-        let err = RimapError::Imap {
-            code: ErrorCode::Timeout,
-            message: "x".into(),
-            source: None,
-        };
+
+        // Pins the SEMANTICS for all 20 current ErrorCode variants (service
+        // failures trip, user/policy/internal errors do not). Exhaustiveness
+        // is enforced upstream: the mapping fn's own `match` is
+        // compile-exhaustive, so a new ErrorCode breaks THAT build and forces
+        // a classification decision before this table matters.
+        let cases: &[(ErrorCode, Option<FailureReason>)] = &[
+            (
+                ErrorCode::ConnectionLost,
+                Some(FailureReason::ConnectionLost),
+            ),
+            (ErrorCode::Auth, Some(FailureReason::Auth)),
+            (ErrorCode::Timeout, Some(FailureReason::Timeout)),
+            (ErrorCode::ImapProtocol, Some(FailureReason::Protocol)),
+            (ErrorCode::SmtpProtocol, Some(FailureReason::Protocol)),
+            (ErrorCode::Tls, Some(FailureReason::Tls)),
+            (ErrorCode::InvalidInput, None),
+            (ErrorCode::PostureDenied, None),
+            (ErrorCode::RateLimited, None),
+            (ErrorCode::CircuitOpen, None),
+            (ErrorCode::NotFound, None),
+            (ErrorCode::AttachmentTooLarge, None),
+            (ErrorCode::ProtectedFolder, None),
+            (ErrorCode::ExpungeDenied, None),
+            (ErrorCode::Config, None),
+            (ErrorCode::Internal, None),
+            (ErrorCode::NoAccount, None),
+            (ErrorCode::UnknownAccount, None),
+            (ErrorCode::Cancelled, None),
+            (ErrorCode::UidValidityChanged, None),
+        ];
+
+        for (code, expected) in cases {
+            let err = RimapError::Imap {
+                code: *code,
+                message: "x".into(),
+                source: None,
+            };
+            assert_eq!(
+                rimap_error_to_breaker_reason(&err),
+                *expected,
+                "mapping mismatch for {code:?}",
+            );
+        }
         assert_eq!(
-            rimap_error_to_breaker_reason(&err),
-            Some(FailureReason::Timeout),
-        );
-        let auth = RimapError::Imap {
-            code: ErrorCode::Auth,
-            message: "x".into(),
-            source: None,
-        };
-        assert_eq!(
-            rimap_error_to_breaker_reason(&auth),
-            Some(FailureReason::Auth),
-        );
-        let tls = RimapError::Imap {
-            code: ErrorCode::Tls,
-            message: "x".into(),
-            source: None,
-        };
-        assert_eq!(
-            rimap_error_to_breaker_reason(&tls),
-            Some(FailureReason::Tls)
+            cases.len(),
+            20,
+            "table must list all variants (6 service + 14 user)"
         );
     }
 
@@ -338,19 +360,6 @@ mod tests {
             Some(Posture::Readonly),
         );
         assert_eq!(PostureContext::Infrastructure.posture(), None);
-    }
-
-    #[test]
-    fn breaker_reason_ignores_user_errors() {
-        use rimap_core::RimapError;
-        assert_eq!(
-            rimap_error_to_breaker_reason(&RimapError::invalid_input("bad")),
-            None,
-        );
-        assert_eq!(
-            rimap_error_to_breaker_reason(&RimapError::Internal("bug".into())),
-            None,
-        );
     }
 
     #[tokio::test]
