@@ -20,7 +20,7 @@ pub struct SendEnvelope {
     pub to: Vec<String>,
 }
 
-/// SMTP client built from config. Each `send()` call opens a fresh
+/// SMTP client built from config. Each `send_raw` call opens a fresh
 /// connection — no persistent session or connection pool.
 pub struct SmtpClient {
     transport: AsyncSmtpTransport<Tokio1Executor>,
@@ -56,25 +56,6 @@ impl SmtpClient {
         Ok(Self { transport })
     }
 
-    /// Send a pre-built message via SMTP.
-    ///
-    /// Returns the SMTP response string on success (typically "250 OK").
-    ///
-    /// # Errors
-    ///
-    /// Returns `SmtpError` variants for auth, TLS, rejection, timeout,
-    /// or transport failures. SMTP server banners and detailed rejection
-    /// reasons are captured in the error but should NOT be forwarded to
-    /// MCP clients — log them to audit only.
-    pub async fn send(&self, message: &lettre::Message) -> Result<String, SmtpError> {
-        let response = self
-            .transport
-            .send(message.clone())
-            .await
-            .map_err(classify_smtp_error)?;
-        Ok(format_response(&response))
-    }
-
     /// Send raw RFC 5322 bytes with an explicit envelope.
     ///
     /// Use this when the message is already serialized (e.g. from
@@ -83,8 +64,8 @@ impl SmtpClient {
     ///
     /// # Errors
     ///
-    /// Returns `SmtpError` variants for auth, TLS, rejection, timeout,
-    /// or transport failures.
+    /// Returns `SmtpError` variants for TLS, rejection, timeout, or
+    /// transport failures.
     pub async fn send_raw(&self, envelope: &SendEnvelope, raw: &[u8]) -> Result<String, SmtpError> {
         let lettre_env = build_lettre_envelope(envelope)?;
         let response = self
@@ -138,16 +119,27 @@ fn format_response(response: &lettre::transport::smtp::response::Response) -> St
 enum SmtpErrorShape {
     /// Server replied with a 4xx/5xx response code.
     Response,
+    /// The operation exceeded the configured timeout.
+    Timeout,
+    /// TLS handshake / certificate failure.
+    Tls,
     /// Client-side / protocol-setup failure.
     Client,
-    /// Anything else (network, connection, TLS, timeout, shutdown).
+    /// Anything else (network, connection, shutdown).
     Other,
 }
 
 impl SmtpErrorShape {
     fn of(err: &lettre::transport::smtp::Error) -> Self {
+        // Order matters: timeout and TLS are checked before the broader
+        // `is_client` so they map to their specific taxonomy entries
+        // rather than collapsing into Connection/Transport.
         if err.is_response() {
             Self::Response
+        } else if err.is_timeout() {
+            Self::Timeout
+        } else if err.is_tls() {
+            Self::Tls
         } else if err.is_client() {
             Self::Client
         } else {
@@ -162,6 +154,8 @@ fn classify_smtp_error(err: lettre::transport::smtp::Error) -> SmtpError {
         SmtpErrorShape::Response => SmtpError::Rejected {
             reason: err.to_string(),
         },
+        SmtpErrorShape::Timeout => SmtpError::Timeout,
+        SmtpErrorShape::Tls => SmtpError::Tls(err),
         SmtpErrorShape::Client => SmtpError::Connection(err),
         SmtpErrorShape::Other => SmtpError::Transport(err),
     }
@@ -175,6 +169,8 @@ fn classify_smtp_error(err: lettre::transport::smtp::Error) -> SmtpError {
 fn shape_to_variant_name(shape: SmtpErrorShape) -> &'static str {
     match shape {
         SmtpErrorShape::Response => "Rejected",
+        SmtpErrorShape::Timeout => "Timeout",
+        SmtpErrorShape::Tls => "Tls",
         SmtpErrorShape::Client => "Connection",
         SmtpErrorShape::Other => "Transport",
     }
@@ -280,5 +276,15 @@ mod tests {
     #[test]
     fn shape_other_maps_to_transport_variant() {
         assert_eq!(shape_to_variant_name(SmtpErrorShape::Other), "Transport");
+    }
+
+    #[test]
+    fn shape_timeout_maps_to_timeout_variant() {
+        assert_eq!(shape_to_variant_name(SmtpErrorShape::Timeout), "Timeout");
+    }
+
+    #[test]
+    fn shape_tls_maps_to_tls_variant() {
+        assert_eq!(shape_to_variant_name(SmtpErrorShape::Tls), "Tls");
     }
 }

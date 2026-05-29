@@ -10,9 +10,6 @@ pub enum SmtpError {
     /// Cannot reach the SMTP server.
     #[error("SMTP connection failed")]
     Connection(#[source] lettre::transport::smtp::Error),
-    /// SMTP authentication failed.
-    #[error("SMTP authentication failed")]
-    Auth(#[source] lettre::transport::smtp::Error),
     /// TLS handshake failed.
     #[error("SMTP TLS handshake failed")]
     Tls(#[source] lettre::transport::smtp::Error),
@@ -38,7 +35,6 @@ impl From<SmtpError> for RimapError {
         let message = err.to_string();
         let code = match &err {
             SmtpError::Connection(_) => ErrorCode::ConnectionLost,
-            SmtpError::Auth(_) => ErrorCode::Auth,
             SmtpError::Tls(_) => ErrorCode::Tls,
             SmtpError::Rejected { .. } => ErrorCode::SmtpProtocol,
             SmtpError::Timeout => ErrorCode::Timeout,
