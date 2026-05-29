@@ -61,6 +61,20 @@ pub fn load_from_path(path: &Path) -> Result<Config, ConfigError> {
     })
 }
 
+/// Read and classify `path`, then validate it with `validate_multi_fn` for
+/// the multi-account arm and `validate_legacy_as_multi` for the legacy arm.
+/// The two public entry points differ only in which multi-account validator
+/// they pass.
+fn load_and_validate_with(
+    path: &Path,
+    validate_multi_fn: impl FnOnce(MultiAccountConfig) -> Result<ValidatedMultiConfig, ConfigError>,
+) -> Result<ValidatedMultiConfig, ConfigError> {
+    match classify_format(path)? {
+        DetectedFormat::Multi(config) => validate_multi_fn(config),
+        DetectedFormat::Legacy(config) => validate_legacy_as_multi(config),
+    }
+}
+
 /// Load a config file and validate it, producing a `ValidatedMultiConfig`.
 ///
 /// Detects format by scanning for `[[accounts]]` (multi-account) vs `[imap]`
@@ -70,10 +84,7 @@ pub fn load_from_path(path: &Path) -> Result<Config, ConfigError> {
 /// # Errors
 /// Returns `ConfigError` on read, parse, or validation failure.
 pub fn load_and_validate(path: &Path) -> Result<ValidatedMultiConfig, ConfigError> {
-    match classify_format(path)? {
-        DetectedFormat::Multi(config) => validate_multi(config),
-        DetectedFormat::Legacy(config) => validate_legacy_as_multi(config),
-    }
+    load_and_validate_with(path, validate_multi)
 }
 
 /// Variant of [`load_and_validate`] that, for multi-account format,
@@ -86,10 +97,7 @@ pub fn load_and_validate(path: &Path) -> Result<ValidatedMultiConfig, ConfigErro
 /// for empty multi-account configs.
 #[cfg(feature = "test-support")]
 pub fn load_and_validate_allowing_empty(path: &Path) -> Result<ValidatedMultiConfig, ConfigError> {
-    match classify_format(path)? {
-        DetectedFormat::Multi(config) => validate_multi_allowing_empty(config),
-        DetectedFormat::Legacy(config) => validate_legacy_as_multi(config),
-    }
+    load_and_validate_with(path, validate_multi_allowing_empty)
 }
 
 /// Detected on-disk config shape after reading + parsing the file.
