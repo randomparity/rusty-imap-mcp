@@ -19,6 +19,15 @@ fn normalize(folder: &str) -> String {
     decoded.to_lowercase()
 }
 
+/// Validate `folder`'s structure, then return its normalized comparison
+/// key. The validate-then-normalize ordering is load-bearing security
+/// code: a name that fails [`FolderName`] validation must be rejected
+/// before it is ever compared against the protected/expunge lists.
+fn validate_and_normalize(folder: &str) -> Result<String, AuthzError> {
+    FolderName::new(folder)?;
+    Ok(normalize(folder))
+}
+
 impl FolderGuard {
     /// Build from config values. Both lists are normalized (Modified
     /// UTF-7 decoded, then lowercased) for IMAP-aware case-insensitive
@@ -40,8 +49,7 @@ impl FolderGuard {
     /// Returns [`AuthzError::ProtectedFolder`] if the folder is INBOX
     /// or appears in the protected list.
     pub fn check_protected(&self, folder: &str, operation: &'static str) -> Result<(), AuthzError> {
-        FolderName::new(folder)?;
-        let norm = normalize(folder);
+        let norm = validate_and_normalize(folder)?;
         if norm == "inbox" || self.protected.contains(&norm) {
             return Err(AuthzError::ProtectedFolder {
                 folder: folder.to_string(),
@@ -73,8 +81,7 @@ impl FolderGuard {
     /// Returns [`AuthzError::ExpungeDenied`] if the folder is not in
     /// the expunge allowlist.
     pub fn check_expunge(&self, folder: &str) -> Result<(), AuthzError> {
-        FolderName::new(folder)?;
-        let norm = normalize(folder);
+        let norm = validate_and_normalize(folder)?;
         if !self.expunge_allowed.contains(&norm) {
             return Err(AuthzError::ExpungeDenied {
                 folder: folder.to_string(),
