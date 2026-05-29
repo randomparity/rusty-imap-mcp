@@ -67,12 +67,18 @@ pub async fn probe_preflight(cfg: &ConnectionConfig) -> Result<PreflightInfo, Im
     let total_deadline = cfg.connect_timeout;
     let started = Instant::now();
 
+    // Map an elapsed per-step timeout to ImapError::Timeout { op }. Factors
+    // the repeated timeout arm without wrapping the (large) step futures in
+    // another async layer. Local to this fn because the error shape differs
+    // from the handshake's `(error, None)` (#351).
+    let timeout_err = |op: &'static str| move |_| ImapError::Timeout { op };
+
     let tcp = timeout(
         total_deadline,
         TcpStream::connect((cfg.host.as_str(), cfg.port)),
     )
     .await
-    .map_err(|_| ImapError::Timeout { op: "tcp_connect" })?
+    .map_err(timeout_err("tcp_connect"))?
     .map_err(ImapError::Connect)?;
 
     let remaining = total_deadline.saturating_sub(started.elapsed());
@@ -86,18 +92,14 @@ pub async fn probe_preflight(cfg: &ConnectionConfig) -> Result<PreflightInfo, Im
         ImapEncryption::Tls => {
             let s = timeout(remaining, tls_handshake(tcp, &bundle, &cfg.host))
                 .await
-                .map_err(|_| ImapError::Timeout {
-                    op: "tls_handshake",
-                })?
+                .map_err(timeout_err("tls_handshake"))?
                 .map_err(enrich)?;
             (s, false)
         }
         ImapEncryption::Starttls => {
             let s = timeout(remaining, starttls_upgrade(tcp, &bundle, &cfg.host))
                 .await
-                .map_err(|_| ImapError::Timeout {
-                    op: "starttls_upgrade",
-                })?
+                .map_err(timeout_err("starttls_upgrade"))?
                 .map_err(enrich)?;
             (s, true)
         }
@@ -115,9 +117,7 @@ pub async fn probe_preflight(cfg: &ConnectionConfig) -> Result<PreflightInfo, Im
     if !already_greeted {
         timeout(greeting_budget, client.read_response())
             .await
-            .map_err(|_| ImapError::Timeout {
-                op: "imap_greeting",
-            })?
+            .map_err(timeout_err("imap_greeting"))?
             .map_err(ImapError::Connect)?
             .ok_or(ImapError::Connect(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -131,9 +131,7 @@ pub async fn probe_preflight(cfg: &ConnectionConfig) -> Result<PreflightInfo, Im
         client.run_command_and_check_ok("CAPABILITY", Some(tx)),
     )
     .await
-    .map_err(|_| ImapError::Timeout {
-        op: "imap_capability",
-    })?
+    .map_err(timeout_err("imap_capability"))?
     .map_err(ImapError::Protocol)?;
 
     // Extract capabilities using the same pattern as `capability_advertised`
