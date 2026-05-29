@@ -25,7 +25,6 @@ pub use crate::redact::{
     FieldPolicy, RedactionSalt, RedactionSchema, Redactor, ToolRedactionSchema, VerbatimType,
     hash_arguments, redact, schemas,
 };
-pub use crate::writer::provenance::ProvenanceBuffer;
 pub use crate::writer::self_check::{TrailingState, current_inode, read_trailing_state};
 pub use crate::writer::{
     AuditOptions, AuditWriter, ProcessStartInputs, ToolEndInputs, ToolStartInputs,

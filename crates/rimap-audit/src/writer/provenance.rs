@@ -14,6 +14,15 @@
 //! `String` cannot represent non-UTF-8 bytes. Per-entry length is capped at
 //! `MAX_MESSAGE_ID_LEN` bytes (truncated with a `…[truncated]` suffix);
 //! entry count is capped at `MAX_BUFFER_ENTRIES` (oldest evicted).
+// ProvenanceBuffer is unwired scaffolding: the fetch_message / search
+// feeders that populate it land in a future sprint (see the module doc).
+// It is exercised only by this module's own tests, so the `expect` is
+// scoped to non-test builds — when the feeders are wired, the expectation
+// becomes unfulfilled and prompts its removal.
+#![cfg_attr(
+    not(test),
+    expect(dead_code, reason = "feeders wired in a future sprint; see module doc")
+)]
 
 use std::collections::VecDeque;
 
@@ -36,7 +45,7 @@ const TRUNCATED_SUFFIX: &str = "\u{2026}[truncated]";
 /// Ring buffer of observed Message-IDs with timestamps. Not thread-safe on
 /// its own; the caller holds a `Mutex<ProvenanceBuffer>` if needed.
 #[derive(Debug, Clone)]
-pub struct ProvenanceBuffer {
+pub(crate) struct ProvenanceBuffer {
     window: std::time::Duration,
     entries: VecDeque<Entry>,
 }
