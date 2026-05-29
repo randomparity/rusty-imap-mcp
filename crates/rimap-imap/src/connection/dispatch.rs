@@ -36,7 +36,14 @@ impl Connection {
             body(session).await
         })
         .await;
-        if let Err(ImapError::ConnectionLost | ImapError::Timeout { .. }) = &result {
+        // SizeLimit aborts a fetch mid-stream, leaving the IMAP response
+        // half-consumed, so the session must be dropped. (`append` is the
+        // only other SizeLimit producer; it checks size before sending, so
+        // invalidating a healthy session there is a harmless reconnect.)
+        if let Err(
+            ImapError::ConnectionLost | ImapError::SizeLimit { .. } | ImapError::Timeout { .. },
+        ) = &result
+        {
             self.invalidate().await;
         }
         result
@@ -225,52 +232,14 @@ impl Connection {
         expected_uidvalidity: Option<u32>,
         limit: u64,
     ) -> Result<Vec<u8>, ImapError> {
-        let dur = self.inner.cfg.command_timeout;
-        let result = crate::time::with_timeout("fetch_body", dur, async {
-            let mut guard = self.session().await?;
-            let session =
-                guard
-                    .as_mut()
-                    .ok_or(ImapError::Protocol(async_imap::error::Error::Bad(
-                        "session invariant violated: guard is None after session()".to_string(),
-                    )))?;
+        self.with_session("fetch_body", async |session| {
             let server_size =
                 crate::ops::fetch::preflight_fetch_size(session, folder, uid, expected_uidvalidity)
                     .await?;
             crate::ops::fetch::preflight_size_check(server_size, limit)?;
             crate::ops::fetch::fetch_body(session, folder, uid, limit, expected_uidvalidity).await
         })
-        .await;
-        // Drop the cached session on ConnectionLost, SizeLimit, OR Timeout.
-        // SizeLimit and Timeout both abort mid-stream, so the IMAP response
-        // state is half-consumed and the session cannot be reused.
-        // UidValidityUnavailable is fail-closed but the session is healthy
-        // (only mailbox identity is unverifiable), so it stays non-invalidating.
-        // The match here lists every ImapError variant explicitly because
-        // workspace lints ban `_ =>` wildcards.
-        let should_invalidate = match &result {
-            Err(
-                ImapError::ConnectionLost | ImapError::SizeLimit { .. } | ImapError::Timeout { .. },
-            ) => true,
-            Err(
-                ImapError::Tls { .. }
-                | ImapError::TlsHandshake(_)
-                | ImapError::Starttls { .. }
-                | ImapError::Connect(_)
-                | ImapError::Auth { .. }
-                | ImapError::Protocol(_)
-                | ImapError::InvalidInput { .. }
-                | ImapError::BatchTooLarge { .. }
-                | ImapError::UidValidityChanged { .. }
-                | ImapError::UidValidityUnavailable { .. }
-                | ImapError::Audit { .. },
-            )
-            | Ok(_) => false,
-        };
-        if should_invalidate {
-            self.invalidate().await;
-        }
-        result
+        .await
     }
 
     /// `UID STORE` — add or remove flags on messages.
