@@ -314,6 +314,19 @@ makes this host-runnable today.
 > any **auth-provenance variant not yet in `dovecot.rs`** (`LOGINDISABLED`,
 > resolver-error → `CredentialUnavailable`), which should be added to the existing harness.
 
+> **Known residual gap (folder-wide `EXPUNGE`).** The folder-wide `EXPUNGE`
+> runtime path — taken only when the server advertises neither MOVE nor
+> UIDPLUS — remains untested **by design**: the supporting TLS mock is
+> deferred. Dovecot always advertises UIDPLUS, so CI exercises the scoped
+> `UID EXPUNGE` path exclusively. What is now in place: the data-loss
+> predicate (`fallback_uses_folder_wide_expunge`) and the warning mapping
+> (`fallback_security_warnings`) are pure and unit-tested, and both the
+> `delete_message` and `move_message` tools surface `used_fallback`
+> (`ServerNonAtomicMoveFallback`) and `folder_wide_expunge`
+> (`ServerFolderWideExpungeDataLoss`) to callers. The live wire behavior is
+> tracked by the `#[ignore]`d placeholder `tests/expunge_folder_wide_gap.rs`,
+> whose ignore reason names the intended harness.
+
 **TLS pin mismatch → typed Tls error + exactly one AuthEvent; matching pin → Success once**
 *(already covered by `case_02`/`case_22`/`starttls_with_wrong_pin` — listed for completeness, not as new work)*
 - Steps: stand up an in-process rustls/rcgen TLS server; compute the leaf fingerprint; mismatch run asserts ImapError::Tls{observed,expected} and exactly one AuthEvent (Failure, error_code=Tls, fingerprint_match=false, credential_source=None); matching run asserts success and exactly one AuthEvent (Success, fingerprint_match=true, source=EnvVar).

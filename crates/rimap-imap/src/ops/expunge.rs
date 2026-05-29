@@ -20,6 +20,13 @@ pub(crate) enum ExpungeStrategy {
     /// Plain `EXPUNGE` (RFC 3501): removes ALL `\Deleted` messages in the
     /// selected folder. Data-loss risk when other messages are flagged
     /// `\Deleted` by concurrent clients.
+    ///
+    /// This branch runs only against a server advertising neither MOVE nor
+    /// UIDPLUS. The integration suite is **not exercised** against such a
+    /// server — Dovecot (the only integration target) always advertises
+    /// UIDPLUS, so CI reaches [`ExpungeStrategy::Scoped`] exclusively.
+    /// Closing this gap requires an in-process TLS mock that advertises
+    /// neither capability; see `tests/expunge_folder_wide_gap.rs`.
     FolderWide,
 }
 
@@ -43,6 +50,11 @@ pub(crate) fn fallback_uses_folder_wide_expunge(has_move: bool, has_uidplus: boo
 /// Execute the chosen EXPUNGE against the currently selected mailbox,
 /// draining the response stream. Emits a `warn!` on the folder-wide
 /// (data-loss) path so operators can see when the unsafe fallback ran.
+///
+/// The folder-wide branch (and its `warn!` / `used_fallback=true` /
+/// `folder_wide_expunge=true` surface) is not exercised by the Dovecot
+/// integration suite, which always advertises UIDPLUS. See
+/// [`ExpungeStrategy::FolderWide`] and `tests/expunge_folder_wide_gap.rs`.
 pub(crate) async fn run_expunge(
     session: &mut ImapSession,
     uid_set: &str,
