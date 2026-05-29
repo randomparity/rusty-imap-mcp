@@ -46,11 +46,7 @@ fuzz_target!(|data: &[u8]| {
         };
 
         for (name, value_in) in map_in {
-            let policy = schema
-                .policies
-                .get(name.as_str())
-                .copied()
-                .unwrap_or(rimap_audit::FieldPolicy::RedactString);
+            let policy = schema.policy_for(name.as_str());
             if matches!(policy, rimap_audit::FieldPolicy::Verbatim(_)) {
                 continue;
             }
