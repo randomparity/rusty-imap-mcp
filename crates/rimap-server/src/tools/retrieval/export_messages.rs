@@ -367,7 +367,11 @@ async fn run_export(
     if !allow_partial {
         let mut preflight_failed: Vec<u32> = Vec::new();
         for u in &uids {
-            match classify_uid(size_by_uid.get(&u.get()).copied(), per_msg_cap) {
+            let size = size_by_uid
+                .get(&u.get())
+                .copied()
+                .unwrap_or(PreflightSize::Absent);
+            match classify_uid(size, per_msg_cap) {
                 UidPlan::Skip(_) => preflight_failed.push(u.get()),
                 UidPlan::Fetch => {}
             }
@@ -445,8 +449,9 @@ async fn run_export(
 }
 
 /// Preflight: fetch reported sizes, reject an absent UIDVALIDITY, and run the
-/// advisory eligible-sum budget pre-check. Returns a `uid -> reported size`
-/// map (absence from the map means the UID is not present in the folder).
+/// advisory eligible-sum budget pre-check. Returns a `uid -> ` [`PreflightSize`]
+/// map holding only present UIDs (`PresentUnknown` / `Present`); absence from
+/// the map means the UID is not present in the folder.
 ///
 /// # Errors
 ///
@@ -457,7 +462,7 @@ async fn preflight_sizes(
     folder: &str,
     uids: &[Uid],
     limits: FetchLimits,
-) -> Result<std::collections::BTreeMap<u32, Option<u32>>, rimap_core::RimapError> {
+) -> Result<std::collections::BTreeMap<u32, PreflightSize>, rimap_core::RimapError> {
     let (sizes, uid_validity_opt) = source.fetch_sizes(folder, uids, limits.expected).await?;
     // The shared guard only *warns* on an omitted UIDVALIDITY; export refuses
     // to run unguarded, so reject an absent value.
@@ -467,10 +472,13 @@ async fn preflight_sizes(
         ));
     }
 
-    let mut size_by_uid: std::collections::BTreeMap<u32, Option<u32>> =
+    let mut size_by_uid: std::collections::BTreeMap<u32, PreflightSize> =
         std::collections::BTreeMap::new();
     for (uid, size) in sizes {
-        size_by_uid.insert(uid, size);
+        size_by_uid.insert(
+            uid,
+            size.map_or(PreflightSize::PresentUnknown, PreflightSize::Present),
+        );
     }
 
     // Advisory aggregate pre-check, summed over ONLY the UIDs that may be
@@ -482,7 +490,9 @@ async fn preflight_sizes(
     let eligible_sum: u64 = uids
         .iter()
         .filter_map(|u| match size_by_uid.get(&u.get()) {
-            Some(Some(sz)) if u64::from(*sz) <= limits.per_msg_cap => Some(u64::from(*sz)),
+            Some(&PreflightSize::Present(sz)) if u64::from(sz) <= limits.per_msg_cap => {
+                Some(u64::from(sz))
+            }
             _ => None,
         })
         .sum();
@@ -514,7 +524,7 @@ async fn fetch_bodies(
     source: &impl ExportSource,
     folder: &str,
     uids: &[Uid],
-    size_by_uid: &std::collections::BTreeMap<u32, Option<u32>>,
+    size_by_uid: &std::collections::BTreeMap<u32, PreflightSize>,
     limits: FetchLimits,
 ) -> Result<Vec<FetchOutcome>, rimap_core::RimapError> {
     let mut outcomes = Vec::with_capacity(uids.len());
@@ -523,9 +533,11 @@ async fn fetch_bodies(
         let n = uid.get();
         // Preflight-driven per-UID decision (pure, unit-tested). Skips never
         // attempt a body fetch, so oversize never triggers SizeLimit.
-        if let UidPlan::Skip(reason) =
-            classify_uid(size_by_uid.get(&n).copied(), limits.per_msg_cap)
-        {
+        let size = size_by_uid
+            .get(&n)
+            .copied()
+            .unwrap_or(PreflightSize::Absent);
+        if let UidPlan::Skip(reason) = classify_uid(size, limits.per_msg_cap) {
             outcomes.push(FetchOutcome {
                 uid: n,
                 result: Err(reason),
@@ -634,23 +646,27 @@ enum UidPlan {
     Fetch,
 }
 
-/// Classify a UID from its preflight size entry (`None` = absent from the
-/// folder; `Some(None)` = present, size unknown; `Some(Some(n))` = present,
-/// reported size `n`). Pure, so the security-critical NotFound/Oversize
-/// decision is unit-testable without a live IMAP server.
-///
-/// The `Option<Option<u32>>` signature intentionally encodes three distinct
-/// states: absent, present-size-unknown, and present-size-known. A custom enum
-/// would be clearer but would require plumbing changes in Task 6's IMAP fetch.
-#[expect(
-    clippy::option_option,
-    reason = "three-state encoding: absent / present-unknown / present-known"
-)]
-fn classify_uid(reported: Option<Option<u32>>, per_msg_cap: u64) -> UidPlan {
-    match reported {
-        None => UidPlan::Skip(ExportFailReason::NotFound),
-        Some(Some(sz)) if u64::from(sz) > per_msg_cap => UidPlan::Skip(ExportFailReason::Oversize),
-        Some(Some(_) | None) => UidPlan::Fetch,
+/// A requested UID's preflight size state, resolved before any body fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreflightSize {
+    /// Not present in the folder (the server returned no entry for the UID).
+    Absent,
+    /// Present, but the server omitted `RFC822.SIZE`.
+    PresentUnknown,
+    /// Present with a reported `RFC822.SIZE`.
+    Present(u32),
+}
+
+/// Classify a UID from its preflight [`PreflightSize`]. Pure, so the
+/// security-critical NotFound/Oversize decision is unit-testable without a
+/// live IMAP server.
+fn classify_uid(size: PreflightSize, per_msg_cap: u64) -> UidPlan {
+    match size {
+        PreflightSize::Absent => UidPlan::Skip(ExportFailReason::NotFound),
+        PreflightSize::Present(sz) if u64::from(sz) > per_msg_cap => {
+            UidPlan::Skip(ExportFailReason::Oversize)
+        }
+        PreflightSize::Present(_) | PreflightSize::PresentUnknown => UidPlan::Fetch,
     }
 }
 
@@ -731,21 +747,31 @@ mod outcome_tests {
 
     #[test]
     fn classify_uid_cases() {
-        use super::{ExportFailReason, UidPlan, classify_uid};
+        use super::{ExportFailReason, PreflightSize, UidPlan, classify_uid};
         assert_eq!(
-            classify_uid(None, 100),
+            classify_uid(PreflightSize::Absent, 100),
             UidPlan::Skip(ExportFailReason::NotFound)
         );
         assert_eq!(
-            classify_uid(Some(Some(200)), 100),
+            classify_uid(PreflightSize::Present(200), 100),
             UidPlan::Skip(ExportFailReason::Oversize)
         );
-        assert_eq!(classify_uid(Some(Some(50)), 100), UidPlan::Fetch);
-        assert_eq!(classify_uid(Some(None), 100), UidPlan::Fetch); // present, size unknown
-        // Exact boundary: size == cap is in-bounds (Fetch); one over is Oversize.
-        assert_eq!(classify_uid(Some(Some(100)), 100), UidPlan::Fetch);
         assert_eq!(
-            classify_uid(Some(Some(101)), 100),
+            classify_uid(PreflightSize::Present(50), 100),
+            UidPlan::Fetch
+        );
+        // present, size unknown
+        assert_eq!(
+            classify_uid(PreflightSize::PresentUnknown, 100),
+            UidPlan::Fetch
+        );
+        // Exact boundary: size == cap is in-bounds (Fetch); one over is Oversize.
+        assert_eq!(
+            classify_uid(PreflightSize::Present(100), 100),
+            UidPlan::Fetch
+        );
+        assert_eq!(
+            classify_uid(PreflightSize::Present(101), 100),
             UidPlan::Skip(ExportFailReason::Oversize)
         );
     }
