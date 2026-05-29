@@ -44,11 +44,13 @@ pub enum AuthzError {
         /// variant docs for the special `0` case (half-open probe in flight).
         retry_after_ms: u64,
     },
-    /// Config-time error during matrix build (e.g. unknown override tool).
-    /// Wrapped as a string because we don't want `rimap-authz` to depend on
-    /// the full `ConfigError` variant surface just for display.
-    #[error("authz matrix build failed: {0}")]
-    MatrixBuild(String),
+    /// Config-time error while constructing an authz component — currently
+    /// the governor refusing a degenerate zero-rate limiter (validation
+    /// should have rejected it first). Wrapped as a string because we don't
+    /// want `rimap-authz` to depend on the full `ConfigError` variant surface
+    /// just for display.
+    #[error("authz config build failed: {0}")]
+    ConfigBuild(String),
     /// Folder is in the `protected_folders` list.
     #[error(
         "folder `{folder}` is protected and cannot be {operation}d; \
@@ -85,7 +87,7 @@ impl AuthzError {
             Self::PostureDenied(_) => ErrorCode::PostureDenied,
             Self::RateLimited { .. } => ErrorCode::RateLimited,
             Self::CircuitOpen { .. } => ErrorCode::CircuitOpen,
-            Self::MatrixBuild(_) => ErrorCode::Config,
+            Self::ConfigBuild(_) => ErrorCode::Config,
             Self::ProtectedFolder { .. } => ErrorCode::ProtectedFolder,
             Self::ExpungeDenied { .. } => ErrorCode::ExpungeDenied,
             Self::InvalidFolderName { .. } => ErrorCode::InvalidInput,
@@ -188,7 +190,7 @@ mod tests {
             ErrorCode::CircuitOpen
         );
         assert_eq!(
-            AuthzError::MatrixBuild("x".into()).code(),
+            AuthzError::ConfigBuild("x".into()).code(),
             ErrorCode::Config
         );
         assert_eq!(
