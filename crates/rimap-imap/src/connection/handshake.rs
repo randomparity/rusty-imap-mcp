@@ -37,47 +37,38 @@ impl Connection {
         let total_deadline = cfg.connect_timeout;
         let started = std::time::Instant::now();
 
+        // Map an elapsed per-step timeout to this function's `(error, None)`
+        // error shape. Factors the repeated timeout arm without wrapping the
+        // (large) step futures in another async layer. Kept local to this fn
+        // because the `(error, None)` shape differs from preflight's (#351).
+        let timeout_err = |op: &'static str| move |_| (ImapError::Timeout { op }, None);
+
         // Step 1: TCP connect. Pre-resolve; failures carry `None`.
         let tcp = timeout(
             total_deadline,
             TcpStream::connect((cfg.host.as_str(), cfg.port)),
         )
         .await
-        .map_err(|_| (ImapError::Timeout { op: "tcp_connect" }, None))?
+        .map_err(timeout_err("tcp_connect"))?
         .map_err(|e| (ImapError::Connect(e), None))?;
 
         // Step 2: TLS establishment. Branches on encryption mode.
         // The `already_greeted` flag tracks whether the plaintext greeting was
         // already consumed during STARTTLS negotiation (true) or must be read
         // from the TLS stream (false).
-        let elapsed = started.elapsed();
-        let remaining = total_deadline.saturating_sub(elapsed);
+        let remaining = total_deadline.saturating_sub(started.elapsed());
         let (tls_stream, already_greeted): (TlsStream<TcpStream>, bool) = match cfg.encryption {
             ImapEncryption::Tls => {
                 let s = timeout(remaining, tls_handshake(tcp, bundle, &cfg.host))
                     .await
-                    .map_err(|_| {
-                        (
-                            ImapError::Timeout {
-                                op: "tls_handshake",
-                            },
-                            None,
-                        )
-                    })?
+                    .map_err(timeout_err("tls_handshake"))?
                     .map_err(|e| (e, None))?;
                 (s, false)
             }
             ImapEncryption::Starttls => {
                 let s = timeout(remaining, starttls_upgrade(tcp, bundle, &cfg.host))
                     .await
-                    .map_err(|_| {
-                        (
-                            ImapError::Timeout {
-                                op: "starttls_upgrade",
-                            },
-                            None,
-                        )
-                    })?
+                    .map_err(timeout_err("starttls_upgrade"))?
                     .map_err(|e| (e, None))?;
                 (s, true)
             }
@@ -87,11 +78,10 @@ impl Connection {
         // may return a credential source on both success and certain failures.
         // STARTTLS already consumed the plaintext greeting during negotiation;
         // `imap_login` must skip the greeting read in that case.
-        let elapsed = started.elapsed();
-        let remaining = total_deadline.saturating_sub(elapsed);
+        let remaining = total_deadline.saturating_sub(started.elapsed());
         timeout(remaining, self.imap_login(tls_stream, already_greeted))
             .await
-            .map_err(|_| (ImapError::Timeout { op: "imap_login" }, None))?
+            .map_err(timeout_err("imap_login"))?
     }
 }
 
