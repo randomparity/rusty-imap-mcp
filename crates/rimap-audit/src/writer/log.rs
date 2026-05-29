@@ -92,7 +92,14 @@ impl AuditWriter {
         // design. `PostureEffective` serializes as the historical on-disk
         // strings (`"infrastructure"` or the kebab-case posture) so readers
         // can distinguish these records from per-account tool calls.
-        self.emit(crate::record::Payload::ToolStart(inputs.into()))
+        let seq = self.emit(crate::record::Payload::ToolStart(inputs.into()))?;
+        // One increment per dispatched tool call; read at shutdown to fill
+        // `ProcessEnd::total_tool_calls`. `Relaxed` is sufficient — the
+        // count is a monotonic process-lifetime metric, not a happens-before
+        // signal.
+        self.tool_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(seq)
     }
 
     /// Build a `tool_end` record, allocate a seq, and write it.
