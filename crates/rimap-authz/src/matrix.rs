@@ -1,5 +1,6 @@
-//! Posture matrix: compile-time `const` truth table for v1 tools × postures,
-//! plus the runtime `EffectiveMatrix` that merges per-tool overrides.
+//! Runtime `EffectiveMatrix`: merges the base posture truth table (the
+//! compile-time `const` table and `base_allows` live in `rimap_core`) with
+//! per-tool overrides, then answers per-tool authorization lookups.
 //!
 //! Derived from design spec §4 "Posture matrix".
 
