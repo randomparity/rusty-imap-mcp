@@ -5,7 +5,7 @@
 //! minimal counterexamples.
 
 use proptest::prelude::*;
-use rimap_content::unicode;
+use rimap_content::{decode, filter_codepoints, normalize_nfkc, truncate_graphemes};
 
 fn config() -> ProptestConfig {
     ProptestConfig {
@@ -21,8 +21,8 @@ proptest! {
     /// NFKC is idempotent: normalizing twice gives the same result.
     #[test]
     fn nfkc_stable(input in any::<String>()) {
-        let once = unicode::normalize_nfkc(&input);
-        let twice = unicode::normalize_nfkc(&once);
+        let once = normalize_nfkc(&input);
+        let twice = normalize_nfkc(&once);
         prop_assert_eq!(once, twice);
     }
 
@@ -30,7 +30,7 @@ proptest! {
     /// the strip set.
     #[test]
     fn no_stripped_codepoints_in_output(input in any::<String>()) {
-        let result = unicode::filter_codepoints(&input);
+        let result = filter_codepoints(&input);
         for ch in result.text.chars() {
             let c = ch as u32;
             prop_assert!(!is_zero_width(ch), "zero-width {c:#x} in output");
@@ -42,7 +42,7 @@ proptest! {
     /// except tab and newline, and no C1 controls at all.
     #[test]
     fn no_c0_c1_controls_except_tab_newline(input in any::<String>()) {
-        let result = unicode::filter_codepoints(&input);
+        let result = filter_codepoints(&input);
         for ch in result.text.chars() {
             let c = ch as u32;
             if c <= 0x1F {
@@ -55,7 +55,7 @@ proptest! {
     /// decode on any byte slice returns valid UTF-8.
     #[test]
     fn utf8_preserved(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        let out = unicode::decode(&bytes, Some("utf-8"));
+        let out = decode(&bytes, Some("utf-8"));
         // Rust String is UTF-8 by construction, so this is trivially
         // true — but verify the re-encoded bytes also parse.
         let reencoded = out.as_bytes();
@@ -69,7 +69,7 @@ proptest! {
         input in any::<String>(),
         max_bytes in 0usize..8192,
     ) {
-        let out = unicode::truncate_graphemes(&input, max_bytes);
+        let out = truncate_graphemes(&input, max_bytes);
         prop_assert!(
             out.len() <= max_bytes || max_bytes == 0,
             "out.len()={} max_bytes={}",

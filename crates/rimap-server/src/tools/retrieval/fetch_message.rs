@@ -1,6 +1,6 @@
 //! `fetch_message` tool handler.
 
-use rimap_content::unicode::truncate_graphemes_in_place;
+use rimap_content::truncate_graphemes_in_place;
 use rimap_imap::types::Uid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
