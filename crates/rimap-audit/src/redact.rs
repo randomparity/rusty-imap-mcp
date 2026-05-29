@@ -94,9 +94,9 @@ const DATE_STRING_MAX_BYTES: usize = 32;
 pub struct RedactionSchema {
     /// Tool identifier. Audit records render this via [`ToolName::as_str`];
     /// tracing spans attach the same string.
-    pub tool: ToolName,
+    tool: ToolName,
     /// Policies keyed by field name.
-    pub policies: BTreeMap<&'static str, FieldPolicy>,
+    policies: BTreeMap<&'static str, FieldPolicy>,
 }
 
 impl RedactionSchema {
@@ -108,6 +108,25 @@ impl RedactionSchema {
             policies.insert(*name, *policy);
         }
         Self { tool, policies }
+    }
+
+    /// Tool this schema applies to.
+    #[must_use]
+    pub fn tool(&self) -> ToolName {
+        self.tool
+    }
+
+    /// Policy for the top-level field `name`, folding in the conservative
+    /// [`FieldPolicy::RedactString`] default for unknown fields. This is the
+    /// only read path callers need; the field map is private so a holder
+    /// cannot downgrade a [`FieldPolicy::Forbidden`] entry after
+    /// construction.
+    #[must_use]
+    pub fn policy_for(&self, name: &str) -> FieldPolicy {
+        self.policies
+            .get(name)
+            .copied()
+            .unwrap_or(FieldPolicy::RedactString)
     }
 }
 
@@ -168,12 +187,7 @@ impl<'a> Redactor<'a> {
         };
         let mut out = Map::new();
         for (name, value) in map {
-            let policy = self
-                .schema
-                .policies
-                .get(name.as_str())
-                .copied()
-                .unwrap_or(FieldPolicy::RedactString);
+            let policy = self.schema.policy_for(name.as_str());
             match policy {
                 FieldPolicy::Verbatim(vt) => match Self::verbatim_check(value, vt) {
                     Some(v) => {
@@ -191,7 +205,7 @@ impl<'a> Redactor<'a> {
                 }
                 FieldPolicy::Forbidden => {
                     tracing::warn!(
-                        tool = self.schema.tool.as_str(),
+                        tool = self.schema.tool().as_str(),
                         field = name.as_str(),
                         "forbidden field present in tool arguments; dropped",
                     );
