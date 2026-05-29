@@ -66,7 +66,7 @@ impl<M: Serialize, U: Serialize> ToolResponse<M, U> {
 /// `title` so dumped/published schemas don't leak Rust type names.
 ///
 /// This is the SINGLE SOURCE OF TRUTH for the per-tool output
-/// envelope. Both runtime publication (`tool_catalog::output_schema`)
+/// envelope. Both runtime publication (`tool_catalog::tool_def_parts`)
 /// and the test-support fixture dump (`cli::dump_tool_schemas::tool_envelope`)
 /// MUST call this so the dumped fixtures and the published `outputSchema`
 /// are byte-identical.

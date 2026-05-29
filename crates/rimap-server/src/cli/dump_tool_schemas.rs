@@ -94,7 +94,7 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
 /// Produce the JSON Schema for a tool's full response envelope by
 /// deriving it from `ToolResponse<M, U>`. Delegates to
 /// `rimap_server::mcp::response::envelope_schema`, the single source
-/// of truth shared with `tool_catalog::output_schema`, so fixtures and
+/// of truth shared with `tool_catalog::tool_def_parts`, so fixtures and
 /// the published `outputSchema` are byte-identical.
 fn tool_envelope<M, U>() -> Value
 where
