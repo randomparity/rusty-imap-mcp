@@ -178,7 +178,7 @@ fn sanitize_filename_prefix(prefix: Option<&str>) -> Result<String, rimap_core::
 /// body fetch carries the pinned `expected_uidvalidity`, and that any
 /// body-fetch error is fatal-with-no-artifact — is deterministically testable
 /// against a hand-written fake without a live server.
-pub(crate) trait ExportSource {
+trait ExportSource {
     /// Preflight: for each requested uid that exists, the `(uid, RFC822.SIZE)`
     /// pair (size `None` when the server omitted it), plus the folder's
     /// observed UIDVALIDITY (`None` when the server omitted it).
@@ -249,8 +249,8 @@ impl ExportSource for AccountState {
 /// Execute the `export_messages` tool.
 ///
 /// Validates input, resolves the sandbox destination, then delegates the
-/// preflight/fetch/build/write orchestration to [`run_export`] over the
-/// account's [`ExportSource`].
+/// preflight/fetch/build/write orchestration to `run_export` over the
+/// account's `ExportSource`.
 ///
 /// # Errors
 ///
@@ -293,7 +293,7 @@ pub async fn handle(
 
 /// Inputs to [`run_export`], grouped so the orchestrator stays within the
 /// positional-parameter limit.
-pub(crate) struct RunPlan {
+struct RunPlan {
     pub folder: String,
     pub dest: sandbox::DestDir,
     pub prefix: String,
@@ -337,7 +337,7 @@ fn incomplete_export_error(failed_uids: &[u32]) -> rimap_core::RimapError {
     ))
 }
 
-pub(crate) async fn run_export(
+async fn run_export(
     source: &impl ExportSource,
     plan: RunPlan,
 ) -> Result<ToolResponse<ExportMessagesMeta, ()>, rimap_core::RimapError> {
@@ -577,13 +577,13 @@ fn export_token() -> String {
 }
 
 /// Per-UID fetch result fed into [`plan_outcome`].
-pub(crate) struct FetchOutcome {
+struct FetchOutcome {
     pub uid: u32,
     pub result: Result<Vec<u8>, ExportFailReason>,
 }
 
 /// Decision produced by [`plan_outcome`].
-pub(crate) enum Outcome {
+enum Outcome {
     /// Default all-or-nothing path with failures: write nothing, error out.
     Abort { failed: Vec<FailedUid> },
     /// Write the bodies (in order) and report the manifest.
@@ -627,7 +627,7 @@ fn plan_outcome(outcomes: Vec<FetchOutcome>, allow_partial: bool) -> Outcome {
 
 /// What to do with one requested UID, decided from its preflight size entry.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum UidPlan {
+enum UidPlan {
     /// Resolved at preflight without a body fetch (`NotFound` / `Oversize`).
     Skip(ExportFailReason),
     /// Present and in-bounds: fetch the body.
