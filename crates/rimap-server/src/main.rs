@@ -296,11 +296,9 @@ fn emit_process_end(audit: &rimap_audit::AuditWriter, mcp_result: &anyhow::Resul
         Ok(()) => rimap_audit::ProcessEndReason::Eof,
         Err(_) => rimap_audit::ProcessEndReason::Error,
     };
-    // total_tool_calls is not tracked yet — use 0 as placeholder.
-    // A future PR can add an AtomicU64 counter to ImapMcpServer.
     let process_end = rimap_audit::ProcessEnd {
         reason,
-        total_tool_calls: 0,
+        total_tool_calls: audit.total_tool_calls(),
     };
     match audit.log_process_end(process_end) {
         Ok(seq) => tracing::info!(seq = %seq, "process_end audit record written"),

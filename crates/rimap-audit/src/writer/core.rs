@@ -66,6 +66,7 @@ pub struct AuditWriter {
     pub(super) fail_open: bool,
     pub(super) process_id: crate::record::ids::ProcessId,
     pub(super) suppressed_failures: Arc<AtomicU64>,
+    pub(super) tool_calls: Arc<AtomicU64>,
     pub(super) inner: Arc<Mutex<Inner>>,
     #[cfg(any(test, feature = "test-injection"))]
     pub(super) failure_injection: Arc<FailureInjection>,
@@ -141,6 +142,7 @@ impl AuditWriter {
             fail_open: opts.fail_open,
             process_id: crate::record::ids::ProcessId::new_now(),
             suppressed_failures: Arc::new(AtomicU64::new(0)),
+            tool_calls: Arc::new(AtomicU64::new(0)),
             inner: Arc::new(Mutex::new(Inner {
                 buf: BufWriter::new(file),
                 bytes_written,
@@ -187,6 +189,17 @@ impl AuditWriter {
     #[must_use]
     pub fn suppressed_failures(&self) -> u64 {
         self.suppressed_failures.load(Ordering::Relaxed)
+    }
+
+    /// Number of tool calls dispatched in this process — incremented once
+    /// per successful [`AuditWriter::log_tool_start`]. Counts every call
+    /// whose `tool_start` was accepted, including those whose write was
+    /// later suppressed under `fail_open = true`; a `fail_open = false`
+    /// write failure aborts the call and is not counted. Read at shutdown
+    /// to populate `ProcessEnd::total_tool_calls`.
+    #[must_use]
+    pub fn total_tool_calls(&self) -> u64 {
+        self.tool_calls.load(Ordering::Relaxed)
     }
 
     /// Test-only: cause the next `write_record_inner` call to fail with
@@ -761,6 +774,47 @@ mod tests {
         assert_eq!(v["kind"], "process_end");
         assert_eq!(v["reason"], "eof");
         assert_eq!(v["total_tool_calls"], 42);
+    }
+
+    #[test]
+    fn total_tool_calls_counts_each_tool_start() {
+        use crate::writer::ToolStartInputs;
+
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::open(&AuditOptions {
+            path: dir.path().join("audit.jsonl"),
+            rotate_bytes: 0,
+            rotate_keep: 0,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: crate::record::ids::Seq::FIRST,
+        })
+        .unwrap();
+
+        assert_eq!(writer.total_tool_calls(), 0);
+
+        let inputs = || ToolStartInputs {
+            tool: rimap_core::tool::ToolName::Search,
+            account: Some("a".to_string()),
+            posture_effective: Some(rimap_core::Posture::DraftSafe),
+            arguments_redacted: serde_json::Value::Object(serde_json::Map::new()),
+            arguments_hash_sha256: "0".repeat(64),
+        };
+        writer.log_tool_start(inputs()).unwrap();
+        writer.log_tool_start(inputs()).unwrap();
+        assert_eq!(writer.total_tool_calls(), 2);
+
+        // A non-tool_start record must not bump the counter.
+        writer
+            .log_process_end(crate::record::ProcessEnd {
+                reason: crate::record::ProcessEndReason::Eof,
+                total_tool_calls: writer.total_tool_calls(),
+            })
+            .unwrap();
+        assert_eq!(writer.total_tool_calls(), 2);
+
+        // Clones share the counter.
+        assert_eq!(writer.clone().total_tool_calls(), 2);
     }
 
     #[test]
