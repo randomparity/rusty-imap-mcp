@@ -215,6 +215,11 @@ fn is_connection_lost(err: &async_imap::error::Error) -> bool {
     false
 }
 
+#[expect(
+    clippy::match_like_matches_macro,
+    reason = "explicit match names the dead-TCP kinds for documentation; \
+              ErrorKind is #[non_exhaustive] so the open arm is required anyway"
+)]
 fn is_dead_tcp_kind(kind: std::io::ErrorKind) -> bool {
     use std::io::ErrorKind;
     match kind {
@@ -223,22 +228,7 @@ fn is_dead_tcp_kind(kind: std::io::ErrorKind) -> bool {
         | ErrorKind::BrokenPipe
         | ErrorKind::UnexpectedEof
         | ErrorKind::NotConnected => true,
-        ErrorKind::NotFound
-        | ErrorKind::PermissionDenied
-        | ErrorKind::ConnectionRefused
-        | ErrorKind::AddrInUse
-        | ErrorKind::AddrNotAvailable
-        | ErrorKind::AlreadyExists
-        | ErrorKind::WouldBlock
-        | ErrorKind::InvalidInput
-        | ErrorKind::InvalidData
-        | ErrorKind::TimedOut
-        | ErrorKind::WriteZero
-        | ErrorKind::Interrupted
-        | ErrorKind::Unsupported
-        | ErrorKind::OutOfMemory
-        | ErrorKind::Other
-        | _ => false,
+        _ => false,
     }
 }
 
