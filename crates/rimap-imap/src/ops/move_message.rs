@@ -20,6 +20,12 @@ pub struct MoveOutcome {
     /// instead of the atomic UID MOVE command. Callers should surface a
     /// security warning when this is `true`.
     pub used_fallback: bool,
+    /// `true` only when the fallback ran AND the server lacked UIDPLUS, so
+    /// the EXPUNGE was folder-wide (RFC 3501) — removing every `\Deleted`
+    /// message in the source folder, not just the moved UIDs. This is the
+    /// distinct data-loss condition (`!has_move && !has_uidplus`); callers
+    /// should surface `ServerFolderWideExpungeDataLoss`.
+    pub folder_wide_expunge: bool,
     /// Source-folder UIDVALIDITY observed at the guard STATUS probe, or
     /// `None` if no guard was requested or the server omitted it.
     pub source_uid_validity: Option<u32>,
@@ -68,6 +74,7 @@ pub(crate) async fn move_messages(
         return Ok(MoveOutcome {
             results: Vec::new(),
             used_fallback: false,
+            folder_wide_expunge: false,
             source_uid_validity: None,
             destination_uid_validity: None,
         });
@@ -111,6 +118,10 @@ pub(crate) async fn move_messages(
         return Ok(MoveOutcome {
             results,
             used_fallback: true,
+            folder_wide_expunge: crate::ops::expunge::fallback_uses_folder_wide_expunge(
+                false,
+                has_uidplus,
+            ),
             source_uid_validity,
             destination_uid_validity,
         });
@@ -123,6 +134,7 @@ pub(crate) async fn move_messages(
         Ok(()) => Ok(MoveOutcome {
             results: build_results(uids),
             used_fallback: false,
+            folder_wide_expunge: false,
             source_uid_validity,
             destination_uid_validity: None,
         }),

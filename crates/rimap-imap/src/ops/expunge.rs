@@ -32,6 +32,14 @@ pub(crate) fn expunge_strategy(has_uidplus: bool) -> ExpungeStrategy {
     }
 }
 
+/// `true` when the COPY+EXPUNGE fallback path ran AND it had to issue a
+/// folder-wide EXPUNGE (server lacks both MOVE and UIDPLUS) — the data-loss
+/// condition. Distinct from `used_fallback` (`!has_move`), which is also
+/// true on the safe scoped-UID-EXPUNGE path.
+pub(crate) fn fallback_uses_folder_wide_expunge(has_move: bool, has_uidplus: bool) -> bool {
+    !has_move && !has_uidplus
+}
+
 /// Execute the chosen EXPUNGE against the currently selected mailbox,
 /// draining the response stream. Emits a `warn!` on the folder-wide
 /// (data-loss) path so operators can see when the unsafe fallback ran.
@@ -113,7 +121,7 @@ pub(crate) async fn expunge(session: &mut ImapSession) -> Result<u32, ImapError>
 
 #[cfg(test)]
 mod tests {
-    use super::{ExpungeStrategy, expunge_strategy};
+    use super::{ExpungeStrategy, expunge_strategy, fallback_uses_folder_wide_expunge};
 
     #[test]
     fn uidplus_present_selects_scoped() {
@@ -123,5 +131,25 @@ mod tests {
     #[test]
     fn uidplus_absent_selects_folder_wide() {
         assert_eq!(expunge_strategy(false), ExpungeStrategy::FolderWide);
+    }
+
+    #[test]
+    fn folder_wide_expunge_only_when_no_move_and_no_uidplus() {
+        // The data-loss condition is exactly (!has_move && !has_uidplus).
+        assert!(fallback_uses_folder_wide_expunge(false, false));
+    }
+
+    #[test]
+    fn move_capable_never_uses_folder_wide_expunge() {
+        // With MOVE the fallback path never runs, regardless of UIDPLUS.
+        assert!(!fallback_uses_folder_wide_expunge(true, false));
+        assert!(!fallback_uses_folder_wide_expunge(true, true));
+    }
+
+    #[test]
+    fn uidplus_fallback_is_scoped_not_folder_wide() {
+        // No MOVE but UIDPLUS present: the fallback runs but scopes the
+        // EXPUNGE to the targeted UIDs — safe, not the data-loss path.
+        assert!(!fallback_uses_folder_wide_expunge(false, true));
     }
 }

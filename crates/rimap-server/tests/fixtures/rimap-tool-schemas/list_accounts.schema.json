@@ -183,7 +183,12 @@
         },
         {
           "const": "server_non_atomic_move_fallback",
-          "description": "The IMAP server lacked the MOVE capability; a non-atomic\nCOPY+DELETE+EXPUNGE fallback was used. Other messages with\n`\\Deleted` flag in the source folder may have been expunged.",
+          "description": "The IMAP server lacked the MOVE capability, so a non-atomic\nCOPY+DELETE+EXPUNGE fallback was used instead of an atomic\n`UID MOVE`. The operation is not atomic: a crash or connection\ndrop between the COPY and the EXPUNGE can leave the message\nduplicated in both folders. This signals non-atomicity only;\nthe folder-wide data-loss risk is reported separately by\n`ServerFolderWideExpungeDataLoss`.",
+          "type": "string"
+        },
+        {
+          "const": "server_folder_wide_expunge_data_loss",
+          "description": "The IMAP server lacked UIDPLUS, so the COPY+DELETE fallback issued a\nfolder-wide `EXPUNGE` (RFC 3501) that removes EVERY `\\Deleted` message\nin the source folder, not only the targeted UIDs. Messages another\nclient flagged `\\Deleted` may have been permanently destroyed.",
           "type": "string"
         }
       ]

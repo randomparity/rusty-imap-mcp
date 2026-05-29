@@ -106,10 +106,19 @@ pub enum WarningCode {
     /// extension spoof. Detail format:
     /// `visible=<after_strip>,declared=<original>`.
     LookalikeFilenameExtensionSpoof,
-    /// The IMAP server lacked the MOVE capability; a non-atomic
-    /// COPY+DELETE+EXPUNGE fallback was used. Other messages with
-    /// `\Deleted` flag in the source folder may have been expunged.
+    /// The IMAP server lacked the MOVE capability, so a non-atomic
+    /// COPY+DELETE+EXPUNGE fallback was used instead of an atomic
+    /// `UID MOVE`. The operation is not atomic: a crash or connection
+    /// drop between the COPY and the EXPUNGE can leave the message
+    /// duplicated in both folders. This signals non-atomicity only;
+    /// the folder-wide data-loss risk is reported separately by
+    /// `ServerFolderWideExpungeDataLoss`.
     ServerNonAtomicMoveFallback,
+    /// The IMAP server lacked UIDPLUS, so the COPY+DELETE fallback issued a
+    /// folder-wide `EXPUNGE` (RFC 3501) that removes EVERY `\Deleted` message
+    /// in the source folder, not only the targeted UIDs. Messages another
+    /// client flagged `\Deleted` may have been permanently destroyed.
+    ServerFolderWideExpungeDataLoss,
 }
 
 /// Severity classification for [`WarningCode`] variants. Posture rules
@@ -155,6 +164,7 @@ impl WarningCode {
             | WarningCode::HtmlScriptStripped
             | WarningCode::LookalikeMixedScript
             | WarningCode::LookalikeHomographDomain
+            | WarningCode::ServerFolderWideExpungeDataLoss
             | WarningCode::LookalikeFilenameExtensionSpoof => WarningSeverity::Adversarial,
             WarningCode::ParseBodyTruncated
             | WarningCode::HtmlStyleStripped
@@ -195,6 +205,27 @@ mod tests {
         assert_eq!(
             WarningCode::ParseHeaderSmugglingBlocked.severity(),
             WarningSeverity::Adversarial
+        );
+    }
+
+    #[test]
+    fn folder_wide_expunge_data_loss_is_adversarial() {
+        // The folder-wide EXPUNGE fallback can permanently destroy messages
+        // another client flagged `\Deleted`; that is a realized data-loss
+        // event, not a benign informational signal.
+        assert_eq!(
+            WarningCode::ServerFolderWideExpungeDataLoss.severity(),
+            WarningSeverity::Adversarial
+        );
+    }
+
+    #[test]
+    fn non_atomic_move_fallback_stays_informational() {
+        // Non-atomicity (possible duplicates on a crash) is an operational
+        // caveat, distinct from the data-loss variant above.
+        assert_eq!(
+            WarningCode::ServerNonAtomicMoveFallback.severity(),
+            WarningSeverity::Informational
         );
     }
 }

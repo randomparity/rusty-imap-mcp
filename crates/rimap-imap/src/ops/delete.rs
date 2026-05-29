@@ -38,6 +38,7 @@ pub(crate) async fn delete_message(
             uid,
             moved_to_trash: false,
             used_fallback: false,
+            folder_wide_expunge: false,
         });
     }
 
@@ -63,6 +64,10 @@ pub(crate) async fn delete_message(
         uid,
         moved_to_trash: true,
         used_fallback: !has_move,
+        folder_wide_expunge: super::expunge::fallback_uses_folder_wide_expunge(
+            has_move,
+            has_uidplus,
+        ),
     })
 }
 
@@ -81,4 +86,10 @@ pub struct DeleteResult {
     /// fallback issues a folder-wide EXPUNGE (data-loss risk); callers
     /// should surface a security warning. Mirrors `MoveOutcome::used_fallback`.
     pub used_fallback: bool,
+    /// `true` only when the fallback ran AND the server lacked UIDPLUS, so
+    /// the EXPUNGE was folder-wide (RFC 3501) — removing every `\Deleted`
+    /// message in the source folder, not just the targeted UID. This is the
+    /// distinct data-loss condition (`!has_move && !has_uidplus`); callers
+    /// should surface `ServerFolderWideExpungeDataLoss`.
+    pub folder_wide_expunge: bool,
 }
