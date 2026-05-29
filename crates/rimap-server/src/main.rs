@@ -459,21 +459,10 @@ async fn build_registry(
             .await
             .with_context(|| format!("listing folders for account {}", id.as_str()))?;
         let special_use = rimap_server::boot::discovery::resolve_special_use(&folders);
-
-        // Expand the config-supplied protected-folders list with any
-        // server-declared RFC 6154 names (e.g. Gmail's `[Gmail]/Sent Mail`).
-        // The merge is case-insensitive so user-configured literals
-        // (`"Sent"`) are not duplicated when the server also reports
-        // `"Sent"` on the same mailbox.
-        let mut protected = acfg.security.protected_folders.clone();
-        for discovered in special_use.all_discovered() {
-            if !protected
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(&discovered))
-            {
-                protected.push(discovered);
-            }
-        }
+        let protected = rimap_server::boot::discovery::merge_protected_folders(
+            &acfg.security.protected_folders,
+            special_use.all_discovered(),
+        );
 
         let smtp = build_smtp_client(acfg, credentials)?;
 
