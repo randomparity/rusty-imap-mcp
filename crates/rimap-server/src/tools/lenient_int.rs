@@ -215,25 +215,28 @@ const U32_MAX_AS_U64: u64 = u32::MAX as u64;
 /// Callers needing larger values must use the digit-string branch; pinning
 /// the schema ceiling keeps host-side pre-flight validation aligned with
 /// what the deserializer will actually accept (issue #292).
+/// Build a lenient `oneOf` schema accepting an integer in
+/// `[minimum, maximum]`, a digit-string matching `pattern`, and (when
+/// `nullable`) JSON null. Single source for the `schema_*` entry points
+/// below, which differ only in these four parameters.
+fn lenient_schema(minimum: u64, maximum: u64, pattern: &str, nullable: bool) -> schemars::Schema {
+    let mut variants = vec![
+        serde_json::json!({ "type": "integer", "minimum": minimum, "maximum": maximum }),
+        serde_json::json!({ "type": "string", "pattern": pattern }),
+    ];
+    if nullable {
+        variants.push(serde_json::json!({ "type": "null" }));
+    }
+    schemars::json_schema!({ "oneOf": variants })
+}
+
 pub fn schema_opt_usize(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "oneOf": [
-            { "type": "integer", "minimum": 0, "maximum": I64_MAX_AS_U64 },
-            { "type": "string", "pattern": "^[0-9]+$" },
-            { "type": "null" }
-        ]
-    })
+    lenient_schema(0, I64_MAX_AS_U64, "^[0-9]+$", true)
 }
 
 /// Schema for `Option<u32>` accepted as integer, digit-string, or null.
 pub fn schema_opt_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "oneOf": [
-            { "type": "integer", "minimum": 0, "maximum": U32_MAX_AS_U64 },
-            { "type": "string", "pattern": "^[0-9]+$" },
-            { "type": "null" }
-        ]
-    })
+    lenient_schema(0, U32_MAX_AS_U64, "^[0-9]+$", true)
 }
 
 /// Schema for `Option<u64>` accepted as integer, digit-string, or null.
@@ -246,36 +249,19 @@ pub fn schema_opt_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
 /// branch; the deserializer's rustdoc says the same thing. Keeping schema
 /// and runtime in sync is the whole point of issue #292.
 pub fn schema_opt_u64(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "oneOf": [
-            { "type": "integer", "minimum": 0, "maximum": I64_MAX_AS_U64 },
-            { "type": "string", "pattern": "^[0-9]+$" },
-            { "type": "null" }
-        ]
-    })
+    lenient_schema(0, I64_MAX_AS_U64, "^[0-9]+$", true)
 }
 
 /// Schema for `NonZeroU32` accepted as positive integer or
 /// positive-integer-string. No null branch — the field is required.
 pub fn schema_nonzero_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "oneOf": [
-            { "type": "integer", "minimum": 1, "maximum": U32_MAX_AS_U64 },
-            { "type": "string", "pattern": "^[1-9][0-9]*$" }
-        ]
-    })
+    lenient_schema(1, U32_MAX_AS_U64, "^[1-9][0-9]*$", false)
 }
 
 /// Schema for `Option<NonZeroU32>` accepted as positive integer,
 /// positive-integer-string, or null.
 pub fn schema_opt_nonzero_u32(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "oneOf": [
-            { "type": "integer", "minimum": 1, "maximum": U32_MAX_AS_U64 },
-            { "type": "string", "pattern": "^[1-9][0-9]*$" },
-            { "type": "null" }
-        ]
-    })
+    lenient_schema(1, U32_MAX_AS_U64, "^[1-9][0-9]*$", true)
 }
 
 #[cfg(test)]
