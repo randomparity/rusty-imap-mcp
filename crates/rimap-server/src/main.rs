@@ -46,7 +46,7 @@ fn main() -> ExitCode {
             e.exit();
         }
     };
-    match run(cli) {
+    match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e:#}");
@@ -56,29 +56,33 @@ fn main() -> ExitCode {
 }
 
 /// Disambiguates the failure source of the init-phase `tokio::select!`
-/// in `run`: either a validator bridge errored before init completed,
-/// or rmcp's `serve_server` returned an init failure. `Rmcp` is boxed
-/// because `ServerInitializeError` is significantly larger than the
-/// `io::Result<()>` variant (`clippy::large_enum_variant`).
+/// in `serve_mcp`: either a validator bridge errored before init
+/// completed, or rmcp's `serve_server` returned an init failure. `Rmcp`
+/// is boxed because `ServerInitializeError` is significantly larger than
+/// the `io::Result<()>` variant (`clippy::large_enum_variant`).
 enum InitOutcome {
     Bridge(std::io::Result<()>),
     Rmcp(Box<ServerInitializeError>),
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Server mode setup + init-phase select! race against \
-              validator bridges (#277). Splitting further would obscure \
-              the lifecycle ordering that's the whole point."
-)]
-fn run(cli: Cli) -> anyhow::Result<()> {
+fn run(cli: &Cli) -> anyhow::Result<()> {
+    if let Some(result) = dispatch_subcommand(cli) {
+        return result;
+    }
+    run_server(cli)
+}
+
+/// Route the non-server invocations. Returns `Some(result)` when a
+/// subcommand or `--dry-run` handled the request; `None` when the caller
+/// should fall through and start the MCP server.
+fn dispatch_subcommand(cli: &Cli) -> Option<anyhow::Result<()>> {
     if let Some(Command::Login {
         account,
         host,
         username,
     }) = &cli.command
     {
-        return run_login_command(account, username, host);
+        return Some(run_login_command(account, username, host));
     }
 
     if let Some(Command::MigrateKeyring {
@@ -87,7 +91,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         username,
     }) = &cli.command
     {
-        return run_migrate_keyring(account, username, host);
+        return Some(run_migrate_keyring(account, username, host));
     }
 
     if let Some(Command::Audit {
@@ -101,10 +105,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 process,
                 account,
             },
-    }) = cli.command
+    }) = &cli.command
     {
-        return cli::audit_merge::run(
-            &path,
+        return Some(cli::audit_merge::run(
+            path,
             cli::audit_merge::RunArgs {
                 since: since.as_deref(),
                 until: until.as_deref(),
@@ -113,24 +117,35 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 process: process.as_deref(),
                 account: account.as_deref(),
             },
-        );
+        ));
     }
 
     #[cfg(feature = "test-support")]
-    if let Some(result) = run_test_support_subcommands(&cli) {
-        return result;
+    if let Some(result) = run_test_support_subcommands(cli) {
+        return Some(result);
     }
 
     if cli.dry_run {
-        let path = resolve_cli_config_path(&cli)?;
-        let mut stdout = std::io::stdout().lock();
-        let rt = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
-        return rt.block_on(cli::dry_run::run(&path, &mut stdout));
+        return Some(run_dry_run(cli));
     }
 
-    // Server mode: load config, build subsystems, run MCP transport.
-    let config_path = resolve_cli_config_path(&cli)?;
-    let multi = load_validated_multi(&cli, &config_path)?;
+    None
+}
+
+/// Execute `--dry-run`: validate the config and print the resolved plan.
+fn run_dry_run(cli: &Cli) -> anyhow::Result<()> {
+    let path = resolve_cli_config_path(cli)?;
+    let mut stdout = std::io::stdout().lock();
+    let rt = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
+    rt.block_on(cli::dry_run::run(&path, &mut stdout))
+}
+
+/// Assemble the server subsystems and own the tokio runtime lifecycle.
+/// Loading, audit-writer and credential wiring live here; the
+/// load-bearing transport choreography is delegated to [`serve_mcp`].
+fn run_server(cli: &Cli) -> anyhow::Result<()> {
+    let config_path = resolve_cli_config_path(cli)?;
+    let multi = load_validated_multi(cli, &config_path)?;
     let audit = audit_init::init_audit_writer_multi(&multi, &config_path)
         .with_context(|| format!("opening audit log at {}", multi.audit.path.display()))?;
 
@@ -141,109 +156,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let download_dir: Arc<std::path::Path> =
         Arc::from(resolve_download_dir_multi(&multi)?.into_boxed_path());
 
-    let audit_for_shutdown = audit.clone();
     let rt = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
 
-    let mcp_result: anyhow::Result<()> = rt.block_on(async {
-        let registry = build_registry(&multi, &audit, &credentials, &download_dir)
-            .await
-            .context("building account registry")?;
+    let mcp_result = rt.block_on(serve_mcp(&multi, &audit, &credentials, &download_dir));
 
-        let (cancellation_tx, cancellation_rx) = rimap_audit::cancellation_channel();
-        let drainer_handle = rimap_audit::spawn_drainer(cancellation_rx, audit.clone());
-
-        let mcp_server = server::ImapMcpServer::new(registry, audit, cancellation_tx);
-        // Wrap stdio with #277 envelope validator: rejects malformed frames
-        // before rmcp sees them. Destructure so `supervisor` is its own
-        // binding (its methods take `&mut self` / consume `self`).
-        let rimap_server::mcp::wire_validator::ValidatedStdio {
-            transport,
-            stdout,
-            mut supervisor,
-        } = rimap_server::mcp::wire_validator::stdio_with_validation();
-        let stdout_for_preinit = std::sync::Arc::clone(&stdout);
-
-        let mut init_fut = Box::pin(rmcp::serve_server(mcp_server, transport));
-        let init_result: Result<_, InitOutcome> = tokio::select! {
-            biased;
-            bridge = supervisor.watch_for_error() => Err(InitOutcome::Bridge(bridge)),
-            result = &mut init_fut => match result {
-                Ok(svc) => Ok(svc),
-                Err(e) => Err(InitOutcome::Rmcp(Box::new(e))),
-            },
-        };
-        drop(init_fut);
-
-        let service = match init_result {
-            Ok(svc) => svc,
-            Err(InitOutcome::Bridge(bridge_result)) => {
-                let primary = bridge_result.err().map_or_else(
-                    || anyhow::anyhow!("validator bridges exited before init completed"),
-                    |e| anyhow::anyhow!("validator bridge during init: {e}"),
-                );
-                let _ = supervisor.shutdown_after_failure().await;
-                return Err(primary);
-            }
-            Err(InitOutcome::Rmcp(boxed)) => {
-                return handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
-            }
-        };
-        // waiting() takes ownership of service, consuming it and dropping the
-        // ImapMcpServer (including all cancellation sender clones) when it
-        // returns. The drainer task exits once all senders have dropped.
-        //
-        // Phase 1: race service against bridge errors so a validator
-        // BrokenPipe (e.g. closed stdout) during normal operation
-        // surfaces as a non-zero exit rather than silently leaving rmcp
-        // wedged on an unwritable transport.
-        let mut service_fut = Box::pin(service.waiting());
-        let service_outcome: anyhow::Result<()> = tokio::select! {
-            biased;
-            bridge = supervisor.watch_for_error() => match bridge {
-                Err(e) => Err(anyhow::anyhow!("validator bridge: {e}")),
-                Ok(()) => {
-                    // Both bridges exited cleanly while service is still
-                    // running (exotic). Let service finish — it'll see EOF.
-                    (&mut service_fut)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
-                }
-            },
-            result = &mut service_fut =>
-                result.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
-        };
-
-        // Phase 2: drop service future to release rmcp's transport ends,
-        // then shut down the supervisor. On success, `drain()` awaits
-        // both bridges (inbound already saw EOF via rmcp); on failure,
-        // `shutdown_after_failure()` aborts inbound first because the
-        // client may keep stdin open while waiting for the error
-        // response.
-        drop(service_fut);
-        let shutdown_outcome = match &service_outcome {
-            Ok(()) => supervisor.drain().await,
-            Err(_) => supervisor.shutdown_after_failure().await,
-        }
-        .map_err(|e| anyhow::anyhow!("validator bridge shutdown: {e}"));
-
-        let mcp_result: anyhow::Result<()> = match (service_outcome, shutdown_outcome) {
-            // Race-phase failure dominates; otherwise shutdown-phase
-            // surfaces. The `|` arm collapses both Err shapes because
-            // the resulting `Err(e)` has identical type.
-            (Err(e), _) | (Ok(()), Err(e)) => Err(e),
-            (Ok(()), Ok(())) => Ok(()),
-        };
-
-        // All senders dropped above. Wait for the drainer to flush any
-        // remaining queued cancellation records before the runtime exits.
-        if let Err(e) = drainer_handle.await {
-            tracing::error!(error = %e, "cancellation drainer join error");
-        }
-        mcp_result
-    });
-
-    emit_process_end(&audit_for_shutdown, &mcp_result);
+    emit_process_end(&audit, &mcp_result);
 
     // Shut down the runtime without waiting for blocking tasks. The
     // validator's `validate_inbound` bridge owns a `tokio::io::stdin()`
@@ -258,6 +175,115 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     // the OS reaps the threads when the process terminates.
     rt.shutdown_background();
 
+    mcp_result
+}
+
+/// Build the account registry, wrap stdio with the #277 envelope
+/// validator, and drive the two-phase init/serve race against the
+/// validator bridges. The `select!` / `drop` / supervisor-shutdown /
+/// drainer-join ordering here is load-bearing (#277) and must not be
+/// reordered.
+async fn serve_mcp(
+    multi: &rimap_config::validate::ValidatedMultiConfig,
+    audit: &rimap_audit::AuditWriter,
+    credentials: &Arc<dyn CredentialStore>,
+    download_dir: &Arc<std::path::Path>,
+) -> anyhow::Result<()> {
+    let registry = build_registry(multi, audit, credentials, download_dir)
+        .await
+        .context("building account registry")?;
+
+    let (cancellation_tx, cancellation_rx) = rimap_audit::cancellation_channel();
+    let drainer_handle = rimap_audit::spawn_drainer(cancellation_rx, audit.clone());
+
+    let mcp_server = server::ImapMcpServer::new(registry, audit.clone(), cancellation_tx);
+    // Wrap stdio with #277 envelope validator: rejects malformed frames
+    // before rmcp sees them. Destructure so `supervisor` is its own
+    // binding (its methods take `&mut self` / consume `self`).
+    let rimap_server::mcp::wire_validator::ValidatedStdio {
+        transport,
+        stdout,
+        mut supervisor,
+    } = rimap_server::mcp::wire_validator::stdio_with_validation();
+    let stdout_for_preinit = std::sync::Arc::clone(&stdout);
+
+    let mut init_fut = Box::pin(rmcp::serve_server(mcp_server, transport));
+    let init_result: Result<_, InitOutcome> = tokio::select! {
+        biased;
+        bridge = supervisor.watch_for_error() => Err(InitOutcome::Bridge(bridge)),
+        result = &mut init_fut => match result {
+            Ok(svc) => Ok(svc),
+            Err(e) => Err(InitOutcome::Rmcp(Box::new(e))),
+        },
+    };
+    drop(init_fut);
+
+    let service = match init_result {
+        Ok(svc) => svc,
+        Err(InitOutcome::Bridge(bridge_result)) => {
+            let primary = bridge_result.err().map_or_else(
+                || anyhow::anyhow!("validator bridges exited before init completed"),
+                |e| anyhow::anyhow!("validator bridge during init: {e}"),
+            );
+            let _ = supervisor.shutdown_after_failure().await;
+            return Err(primary);
+        }
+        Err(InitOutcome::Rmcp(boxed)) => {
+            return handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
+        }
+    };
+    // waiting() takes ownership of service, consuming it and dropping the
+    // ImapMcpServer (including all cancellation sender clones) when it
+    // returns. The drainer task exits once all senders have dropped.
+    //
+    // Phase 1: race service against bridge errors so a validator
+    // BrokenPipe (e.g. closed stdout) during normal operation
+    // surfaces as a non-zero exit rather than silently leaving rmcp
+    // wedged on an unwritable transport.
+    let mut service_fut = Box::pin(service.waiting());
+    let service_outcome: anyhow::Result<()> = tokio::select! {
+        biased;
+        bridge = supervisor.watch_for_error() => match bridge {
+            Err(e) => Err(anyhow::anyhow!("validator bridge: {e}")),
+            Ok(()) => {
+                // Both bridges exited cleanly while service is still
+                // running (exotic). Let service finish — it'll see EOF.
+                (&mut service_fut)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
+            }
+        },
+        result = &mut service_fut =>
+            result.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
+    };
+
+    // Phase 2: drop service future to release rmcp's transport ends,
+    // then shut down the supervisor. On success, `drain()` awaits
+    // both bridges (inbound already saw EOF via rmcp); on failure,
+    // `shutdown_after_failure()` aborts inbound first because the
+    // client may keep stdin open while waiting for the error
+    // response.
+    drop(service_fut);
+    let shutdown_outcome = match &service_outcome {
+        Ok(()) => supervisor.drain().await,
+        Err(_) => supervisor.shutdown_after_failure().await,
+    }
+    .map_err(|e| anyhow::anyhow!("validator bridge shutdown: {e}"));
+
+    let mcp_result: anyhow::Result<()> = match (service_outcome, shutdown_outcome) {
+        // Race-phase failure dominates; otherwise shutdown-phase
+        // surfaces. The `|` arm collapses both Err shapes because
+        // the resulting `Err(e)` has identical type.
+        (Err(e), _) | (Ok(()), Err(e)) => Err(e),
+        (Ok(()), Ok(())) => Ok(()),
+    };
+
+    // All senders dropped above. Wait for the drainer to flush any
+    // remaining queued cancellation records before the runtime exits.
+    if let Err(e) = drainer_handle.await {
+        tracing::error!(error = %e, "cancellation drainer join error");
+    }
     mcp_result
 }
 
