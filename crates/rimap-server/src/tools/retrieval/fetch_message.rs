@@ -115,7 +115,7 @@ pub async fn handle(
     let raw = account.imap.fetch_body(&input.folder, uid, None).await?;
     let raw_size = raw.len();
 
-    let content = crate::mcp::content::parse_message_async(raw).await?;
+    let content = crate::tools::content_parse::parse_message_async(raw).await?;
 
     let mut body_text = content.untrusted.body_text;
     let mut body_html = if include_html {

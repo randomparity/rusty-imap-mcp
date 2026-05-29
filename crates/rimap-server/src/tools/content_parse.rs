@@ -88,7 +88,7 @@ pub async fn walk_attachment_parts_async(
 }
 
 /// Classifies `ContentError` via [`classify_content_error`] and panics
-/// via [`spawn_blocking_panic_error`]. Acquires `PARSE_SEMAPHORE`.
+/// via [`crate::mcp::spawn_blocking_panic_error`]. Acquires `PARSE_SEMAPHORE`.
 async fn run_on_blocking_pool<F, T>(work: F) -> Result<T, RimapError>
 where
     F: FnOnce() -> Result<T, ContentError> + Send + 'static,
