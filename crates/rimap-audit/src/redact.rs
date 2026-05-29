@@ -369,77 +369,51 @@ fn list_folders_schema(tool: ToolName) -> RedactionSchema {
 // conservative choice (less leakage, no correlation by design) and
 // still records the byte length for unusual-payload detection.
 // Decision recorded in #22.
+//
+// `search` and `search_advanced` take the identical argument set, so this
+// single security-critical table is shared by both schemas — a one-sided
+// edit is now impossible. A `const` cannot use the per-fn `use` shorthands,
+// so the variants are spelled out in full.
+const SEARCH_POLICIES: &[(&str, FieldPolicy)] = &[
+    ("folder", FieldPolicy::Verbatim(VerbatimType::String)),
+    ("limit", FieldPolicy::Verbatim(VerbatimType::U64)),
+    ("offset", FieldPolicy::Verbatim(VerbatimType::U64)),
+    ("larger", FieldPolicy::Verbatim(VerbatimType::U64)),
+    ("smaller", FieldPolicy::Verbatim(VerbatimType::U64)),
+    ("since", FieldPolicy::Verbatim(VerbatimType::DateString)),
+    ("before", FieldPolicy::Verbatim(VerbatimType::DateString)),
+    (
+        "sent_since",
+        FieldPolicy::Verbatim(VerbatimType::DateString),
+    ),
+    (
+        "sent_before",
+        FieldPolicy::Verbatim(VerbatimType::DateString),
+    ),
+    ("seen", FieldPolicy::Verbatim(VerbatimType::Bool)),
+    ("answered", FieldPolicy::Verbatim(VerbatimType::Bool)),
+    ("flagged", FieldPolicy::Verbatim(VerbatimType::Bool)),
+    ("draft", FieldPolicy::Verbatim(VerbatimType::Bool)),
+    ("has_attachment", FieldPolicy::Verbatim(VerbatimType::Bool)),
+    ("from", FieldPolicy::RedactString),
+    ("to", FieldPolicy::RedactString),
+    ("cc", FieldPolicy::RedactString),
+    ("bcc", FieldPolicy::RedactString),
+    ("subject", FieldPolicy::RedactString),
+    ("body", FieldPolicy::RedactString),
+    ("text", FieldPolicy::RedactString),
+    ("advanced_query", FieldPolicy::RedactString),
+    ("headers", FieldPolicy::SaltedHash),
+    ("password", FieldPolicy::Forbidden),
+    ("token", FieldPolicy::Forbidden),
+];
+
 fn search_schema(tool: ToolName) -> RedactionSchema {
-    use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
-    use VerbatimType::{Bool, DateString, String as VtString, U64};
-    RedactionSchema::new(
-        tool,
-        &[
-            ("folder", Verbatim(VtString)),
-            ("limit", Verbatim(U64)),
-            ("offset", Verbatim(U64)),
-            ("larger", Verbatim(U64)),
-            ("smaller", Verbatim(U64)),
-            ("since", Verbatim(DateString)),
-            ("before", Verbatim(DateString)),
-            ("sent_since", Verbatim(DateString)),
-            ("sent_before", Verbatim(DateString)),
-            ("seen", Verbatim(Bool)),
-            ("answered", Verbatim(Bool)),
-            ("flagged", Verbatim(Bool)),
-            ("draft", Verbatim(Bool)),
-            ("has_attachment", Verbatim(Bool)),
-            ("from", RedactString),
-            ("to", RedactString),
-            ("cc", RedactString),
-            ("bcc", RedactString),
-            ("subject", RedactString),
-            ("body", RedactString),
-            ("text", RedactString),
-            ("advanced_query", RedactString),
-            ("headers", SaltedHash),
-            ("password", Forbidden),
-            ("token", Forbidden),
-        ],
-    )
+    RedactionSchema::new(tool, SEARCH_POLICIES)
 }
 
-// Mirrors `search_schema` so a refinement-routing change cannot regress
-// redaction. See [`search_schema`] for the RedactString rationale (#22)
-// and the `headers` SaltedHash rationale.
 fn search_advanced_schema(tool: ToolName) -> RedactionSchema {
-    use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
-    use VerbatimType::{Bool, DateString, String as VtString, U64};
-    RedactionSchema::new(
-        tool,
-        &[
-            ("folder", Verbatim(VtString)),
-            ("limit", Verbatim(U64)),
-            ("offset", Verbatim(U64)),
-            ("larger", Verbatim(U64)),
-            ("smaller", Verbatim(U64)),
-            ("since", Verbatim(DateString)),
-            ("before", Verbatim(DateString)),
-            ("sent_since", Verbatim(DateString)),
-            ("sent_before", Verbatim(DateString)),
-            ("seen", Verbatim(Bool)),
-            ("answered", Verbatim(Bool)),
-            ("flagged", Verbatim(Bool)),
-            ("draft", Verbatim(Bool)),
-            ("has_attachment", Verbatim(Bool)),
-            ("from", RedactString),
-            ("to", RedactString),
-            ("cc", RedactString),
-            ("bcc", RedactString),
-            ("subject", RedactString),
-            ("body", RedactString),
-            ("text", RedactString),
-            ("advanced_query", RedactString),
-            ("headers", SaltedHash),
-            ("password", Forbidden),
-            ("token", Forbidden),
-        ],
-    )
+    RedactionSchema::new(tool, SEARCH_POLICIES)
 }
 
 fn fetch_message_schema(tool: ToolName) -> RedactionSchema {
