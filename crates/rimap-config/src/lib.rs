@@ -31,4 +31,3 @@ pub use crate::validate::validate_multi_allowing_empty;
 pub use crate::validate::{
     ValidatedAccountConfig, ValidatedMultiConfig, validate_legacy_as_multi, validate_multi,
 };
-pub use rimap_core::tls::{FingerprintParseError, TlsFingerprint};
