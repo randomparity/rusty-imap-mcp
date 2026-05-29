@@ -286,53 +286,77 @@ mod tests {
         use rimap_authz::breaker::FailureReason;
         use rimap_core::{ErrorCode, RimapError};
 
-        // Pins the SEMANTICS for all 20 current ErrorCode variants (service
-        // failures trip, user/policy/internal errors do not). Exhaustiveness
-        // is enforced upstream: the mapping fn's own `match` is
-        // compile-exhaustive, so a new ErrorCode breaks THAT build and forces
-        // a classification decision before this table matters.
-        let cases: &[(ErrorCode, Option<FailureReason>)] = &[
-            (
-                ErrorCode::ConnectionLost,
-                Some(FailureReason::ConnectionLost),
-            ),
-            (ErrorCode::Auth, Some(FailureReason::Auth)),
-            (ErrorCode::Timeout, Some(FailureReason::Timeout)),
-            (ErrorCode::ImapProtocol, Some(FailureReason::Protocol)),
-            (ErrorCode::SmtpProtocol, Some(FailureReason::Protocol)),
-            (ErrorCode::Tls, Some(FailureReason::Tls)),
-            (ErrorCode::InvalidInput, None),
-            (ErrorCode::PostureDenied, None),
-            (ErrorCode::RateLimited, None),
-            (ErrorCode::CircuitOpen, None),
-            (ErrorCode::NotFound, None),
-            (ErrorCode::AttachmentTooLarge, None),
-            (ErrorCode::ProtectedFolder, None),
-            (ErrorCode::ExpungeDenied, None),
-            (ErrorCode::Config, None),
-            (ErrorCode::Internal, None),
-            (ErrorCode::NoAccount, None),
-            (ErrorCode::UnknownAccount, None),
-            (ErrorCode::Cancelled, None),
-            (ErrorCode::UidValidityChanged, None),
+        // The expected classification is a `match` with NO wildcard arm, so a
+        // newly added `ErrorCode` fails THIS test build until its breaker
+        // classification is declared here — mirroring the no-wildcard intent
+        // of the production mapping fn. Service failures trip the breaker;
+        // user / policy / internal errors do not.
+        fn expected_reason(code: ErrorCode) -> Option<FailureReason> {
+            match code {
+                ErrorCode::ConnectionLost => Some(FailureReason::ConnectionLost),
+                ErrorCode::Auth => Some(FailureReason::Auth),
+                ErrorCode::Timeout => Some(FailureReason::Timeout),
+                ErrorCode::ImapProtocol | ErrorCode::SmtpProtocol => Some(FailureReason::Protocol),
+                ErrorCode::Tls => Some(FailureReason::Tls),
+                ErrorCode::InvalidInput
+                | ErrorCode::PostureDenied
+                | ErrorCode::RateLimited
+                | ErrorCode::CircuitOpen
+                | ErrorCode::NotFound
+                | ErrorCode::AttachmentTooLarge
+                | ErrorCode::ProtectedFolder
+                | ErrorCode::ExpungeDenied
+                | ErrorCode::Config
+                | ErrorCode::Internal
+                | ErrorCode::NoAccount
+                | ErrorCode::UnknownAccount
+                | ErrorCode::Cancelled
+                | ErrorCode::UidValidityChanged => None,
+            }
+        }
+
+        // The explicit variant list is also enforced by the no-wildcard match
+        // above (a forgotten entry leaves `expected_reason` non-exhaustive),
+        // and the length assert below catches a list entry dropped here.
+        const ALL: &[ErrorCode] = &[
+            ErrorCode::ConnectionLost,
+            ErrorCode::Auth,
+            ErrorCode::Timeout,
+            ErrorCode::ImapProtocol,
+            ErrorCode::SmtpProtocol,
+            ErrorCode::Tls,
+            ErrorCode::InvalidInput,
+            ErrorCode::PostureDenied,
+            ErrorCode::RateLimited,
+            ErrorCode::CircuitOpen,
+            ErrorCode::NotFound,
+            ErrorCode::AttachmentTooLarge,
+            ErrorCode::ProtectedFolder,
+            ErrorCode::ExpungeDenied,
+            ErrorCode::Config,
+            ErrorCode::Internal,
+            ErrorCode::NoAccount,
+            ErrorCode::UnknownAccount,
+            ErrorCode::Cancelled,
+            ErrorCode::UidValidityChanged,
         ];
 
-        for (code, expected) in cases {
+        for &code in ALL {
             let err = RimapError::Imap {
-                code: *code,
+                code,
                 message: "x".into(),
                 source: None,
             };
             assert_eq!(
                 rimap_error_to_breaker_reason(&err),
-                *expected,
+                expected_reason(code),
                 "mapping mismatch for {code:?}",
             );
         }
         assert_eq!(
-            cases.len(),
+            ALL.len(),
             20,
-            "table must list all variants (6 service + 14 user)"
+            "list must enumerate all variants (6 service + 14 user)"
         );
     }
 
