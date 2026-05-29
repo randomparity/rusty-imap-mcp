@@ -143,28 +143,21 @@ impl Connection {
             }
         };
 
-        // Post-login: probe CAPABILITY for MOVE (RFC 6851),
-        // UIDPLUS (RFC 4315), and LIST-STATUS (RFC 5819).
-        let (has_move, has_uidplus, has_list_status) = match session.capabilities().await {
-            Ok(caps) => (
-                caps.has_str("MOVE"),
-                caps.has_str("UIDPLUS"),
-                caps.has_str("LIST-STATUS"),
-            ),
+        // Post-login: probe CAPABILITY for MOVE (RFC 6851) and
+        // UIDPLUS (RFC 4315).
+        let (has_move, has_uidplus) = match session.capabilities().await {
+            Ok(caps) => (caps.has_str("MOVE"), caps.has_str("UIDPLUS")),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "post-login CAPABILITY probe failed; \
-                     assuming no MOVE/UIDPLUS/LIST-STATUS support",
+                     assuming no MOVE/UIDPLUS support",
                 );
-                (false, false, false)
+                (false, false)
             }
         };
         self.inner.has_move.store(has_move, Ordering::Relaxed);
         self.inner.has_uidplus.store(has_uidplus, Ordering::Relaxed);
-        self.inner
-            .has_list_status
-            .store(has_list_status, Ordering::Relaxed);
 
         Ok((session, credential_source))
     }

@@ -5,8 +5,6 @@
 //! `pub async fn` here is a one-liner that delegates to an op module
 //! under the timeout guard.
 
-use std::sync::atomic::Ordering;
-
 use crate::error::ImapError;
 
 use super::{Connection, ImapSession};
@@ -77,9 +75,8 @@ impl Connection {
         &self,
         pattern: &str,
     ) -> Result<Vec<(crate::types::Folder, Option<crate::types::FolderStatus>)>, ImapError> {
-        let has_list_status = self.inner.has_list_status.load(Ordering::Relaxed);
         self.with_session("list_folders_with_status", async move |session| {
-            crate::ops::folders::list_with_status(session, pattern, has_list_status).await
+            crate::ops::folders::list_with_status(session, pattern).await
         })
         .await
     }

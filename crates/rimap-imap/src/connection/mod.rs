@@ -107,12 +107,6 @@ pub(super) struct ConnectionInner {
     /// Server advertised UIDPLUS capability (RFC 4315) after login.
     /// Reset to `false` on `invalidate()`.
     pub(super) has_uidplus: AtomicBool,
-    /// Server advertised LIST-STATUS capability (RFC 5819) after login.
-    /// Currently informational: async-imap does not yet expose the
-    /// extended LIST command, so `list_folders_with_status` always takes
-    /// the per-folder STATUS fallback path. Once async-imap surfaces
-    /// LIST-STATUS, the fallback can gate on this flag.
-    pub(super) has_list_status: AtomicBool,
 }
 
 impl std::fmt::Debug for Connection {
@@ -169,7 +163,6 @@ impl Connection {
                 session: Mutex::new(None),
                 has_move: AtomicBool::new(false),
                 has_uidplus: AtomicBool::new(false),
-                has_list_status: AtomicBool::new(false),
             }),
         }
     }
@@ -218,23 +211,12 @@ impl Connection {
         self.inner.has_uidplus.load(Ordering::Relaxed)
     }
 
-    /// Whether the server advertises LIST-STATUS (RFC 5819).
-    ///
-    /// Currently informational — `list_folders_with_status` always uses
-    /// the LIST-then-STATUS-per-folder fallback regardless. A future
-    /// async-imap release may expose the extended LIST command.
-    #[must_use]
-    pub fn has_list_status_capability(&self) -> bool {
-        self.inner.has_list_status.load(Ordering::Relaxed)
-    }
-
     /// Drop any current session. Called by ops on connection-lost errors.
     pub(crate) async fn invalidate(&self) {
         let mut guard = self.inner.session.lock().await;
         *guard = None;
         self.inner.has_move.store(false, Ordering::Relaxed);
         self.inner.has_uidplus.store(false, Ordering::Relaxed);
-        self.inner.has_list_status.store(false, Ordering::Relaxed);
     }
 
     /// The full connect/handshake/login/CAPABILITY flow. Emits exactly one
