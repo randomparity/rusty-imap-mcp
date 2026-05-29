@@ -474,7 +474,7 @@ impl ServerHandler for ImapMcpServer {
         // a property of the *parsed* (parent) name, not the refined
         // sub-capability. Sub-capabilities (`SearchAdvanced`,
         // `FetchMessageHtml`) intentionally have no `TOOL_DEFS` entry
-        // (see `tool_spec` in `crates/rimap-server/src/mcp/tool_catalog.rs`); they
+        // (see `tool_def_parts` in `crates/rimap-server/src/mcp/tool_catalog.rs`); they
         // share the parent's schema. Running this check on the
         // post-refinement name would short-circuit every refined
         // sub-capability call with RESOURCE_NOT_FOUND, defeating

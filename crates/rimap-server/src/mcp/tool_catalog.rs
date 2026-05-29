@@ -4,7 +4,7 @@
 //! Centralises the mapping from [`ToolName`] to MCP `Tool` advertisement
 //! metadata. Sub-capabilities that share a wire name with a parent
 //! (`SearchAdvanced`, `FetchMessageHtml`) intentionally return `None`
-//! from [`tool_spec`] — they are surfaced via the parent tool.
+//! from [`tool_def_parts`] — they are surfaced via the parent tool.
 //!
 //! Also hosts the argument-serialization helpers ([`ser`], [`parse_args`])
 //! used by the dispatch pipeline.
@@ -17,13 +17,14 @@ use rmcp::model::{Tool, ToolAnnotations};
 
 use crate::mcp::response::{ToolResponse, envelope_schema};
 
-/// Type alias for tool spec tuples — `(title, description, schema)`. The wire
-/// name comes from `ToolName::as_str()` so there is a single source of
-/// truth for tool names.
-type ToolSpec = (
+/// Type alias for tool definition tuples — `(title, description, input
+/// schema, output schema)`. The wire name comes from `ToolName::as_str()`
+/// so there is a single source of truth for tool names.
+type ToolDef = (
     &'static str,                               // title (Title Case, human-readable)
     &'static str,                               // description
     serde_json::Map<String, serde_json::Value>, // input schema
+    serde_json::Map<String, serde_json::Value>, // output (envelope) schema
 );
 
 /// Serialize a typed response to `serde_json::Value`.
@@ -82,118 +83,76 @@ fn build_annotations(title: &'static str, name: ToolName) -> ToolAnnotations {
     )
 }
 
-/// Per-tool output-envelope JSON Schema, byte-identical to what
-/// `crates/rimap-server/src/cli/dump_tool_schemas.rs::tool_envelope`
-/// dumps for the fixture set. Returns `None` for sub-capability
-/// variants that share an MCP wire name with their parent.
-fn output_schema(name: ToolName) -> Option<serde_json::Map<String, serde_json::Value>> {
-    use crate::tools::{
-        admin::{
-            accounts::{ListAccountsMeta, UseAccountMeta},
-            list_folders::ListFoldersMeta,
-        },
-        compose::{create_draft::CreateDraftMeta, send_email::SendEmailMeta},
-        mailbox::{
-            delete_message::DeleteMessageMeta,
-            expunge::ExpungeMeta,
-            flags::FlagsMeta,
-            folder_management::{CreateFolderMeta, DeleteFolderMeta, RenameFolderMeta},
-            labels::{LabelsMeta, ListLabelsMeta},
-            move_message::MoveMessageMeta,
-        },
-        retrieval::{
-            download_attachment::{DownloadAttachmentMeta, DownloadAttachmentUntrusted},
-            export_messages::ExportMessagesMeta,
-            fetch_message::{FetchMessageMeta, FetchMessageUntrusted},
-            list_attachments::{ListAttachmentsMeta, ListAttachmentsUntrusted},
-            search::{SearchMeta, SearchUntrusted},
-        },
-    };
-
-    let schema = match name {
-        ToolName::ListAccounts => envelope_schema::<ToolResponse<ListAccountsMeta, ()>>(),
-        ToolName::UseAccount => envelope_schema::<ToolResponse<UseAccountMeta, ()>>(),
-        ToolName::ListFolders => envelope_schema::<ToolResponse<ListFoldersMeta, ()>>(),
-        ToolName::Search => envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>(),
-        ToolName::FetchMessage => {
-            envelope_schema::<ToolResponse<FetchMessageMeta, FetchMessageUntrusted>>()
-        }
-        ToolName::ListAttachments => {
-            envelope_schema::<ToolResponse<ListAttachmentsMeta, ListAttachmentsUntrusted>>()
-        }
-        ToolName::DownloadAttachment => {
-            envelope_schema::<ToolResponse<DownloadAttachmentMeta, DownloadAttachmentUntrusted>>()
-        }
-        ToolName::ExportMessages => envelope_schema::<ToolResponse<ExportMessagesMeta, ()>>(),
-        ToolName::MarkRead | ToolName::MarkUnread | ToolName::Flag | ToolName::Unflag => {
-            envelope_schema::<ToolResponse<FlagsMeta, ()>>()
-        }
-        ToolName::AddLabel | ToolName::RemoveLabel => {
-            envelope_schema::<ToolResponse<LabelsMeta, ()>>()
-        }
-        ToolName::ListLabels => envelope_schema::<ToolResponse<ListLabelsMeta, ()>>(),
-        ToolName::MoveMessage => envelope_schema::<ToolResponse<MoveMessageMeta, ()>>(),
-        ToolName::CreateDraft => envelope_schema::<ToolResponse<CreateDraftMeta, ()>>(),
-        ToolName::SendEmail => envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
-        ToolName::DeleteMessage => envelope_schema::<ToolResponse<DeleteMessageMeta, ()>>(),
-        ToolName::Expunge => envelope_schema::<ToolResponse<ExpungeMeta, ()>>(),
-        ToolName::CreateFolder => envelope_schema::<ToolResponse<CreateFolderMeta, ()>>(),
-        ToolName::RenameFolder => envelope_schema::<ToolResponse<RenameFolderMeta, ()>>(),
-        ToolName::DeleteFolder => envelope_schema::<ToolResponse<DeleteFolderMeta, ()>>(),
-        ToolName::SearchAdvanced | ToolName::FetchMessageHtml => return None,
-    };
-    Some(schema)
-}
-
-/// Return (title, description, schema) for the given `ToolName`, or `None`
-/// for sub-capabilities that share an MCP tool name with a parent
-/// (e.g. `SearchAdvanced`, `FetchMessageHtml`).
+/// Return the title, description, input schema, and output-envelope
+/// schema for the given `ToolName`, or `None` for sub-capabilities that
+/// share an MCP tool name with a parent (e.g. `SearchAdvanced`,
+/// `FetchMessageHtml`) — those are advertised under the parent entry and
+/// have no standalone definition.
+///
+/// A single match keeps the input and output schemas for each tool on the
+/// same arm, so there is no cross-function invariant to keep in sync. The
+/// output-envelope schemas are byte-identical to what
+/// `crates/rimap-server/src/cli/dump_tool_schemas.rs::tool_envelope` dumps
+/// for the fixture set.
 #[expect(
     clippy::too_many_lines,
-    reason = "single match over 25 ToolName variants; splitting would create two parallel matches"
+    reason = "single match over every ToolName variant; the alternative is two parallel matches with a cross-function invariant"
 )]
-fn tool_spec(name: ToolName) -> Option<ToolSpec> {
-    use crate::tools::admin::accounts::UseAccountInput;
-    use crate::tools::compose::create_draft::CreateDraftInput;
-    use crate::tools::compose::send_email::SendEmailInput;
-    use crate::tools::mailbox::delete_message::DeleteMessageInput;
-    use crate::tools::mailbox::expunge::ExpungeInput;
-    use crate::tools::mailbox::flags::FlagInput;
+fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
+    use crate::tools::admin::accounts::{ListAccountsMeta, UseAccountInput, UseAccountMeta};
+    use crate::tools::admin::list_folders::ListFoldersMeta;
+    use crate::tools::compose::create_draft::{CreateDraftInput, CreateDraftMeta};
+    use crate::tools::compose::send_email::{SendEmailInput, SendEmailMeta};
+    use crate::tools::mailbox::delete_message::{DeleteMessageInput, DeleteMessageMeta};
+    use crate::tools::mailbox::expunge::{ExpungeInput, ExpungeMeta};
+    use crate::tools::mailbox::flags::{FlagInput, FlagsMeta};
     use crate::tools::mailbox::folder_management::{
-        CreateFolderInput, DeleteFolderInput, RenameFolderInput,
+        CreateFolderInput, CreateFolderMeta, DeleteFolderInput, DeleteFolderMeta,
+        RenameFolderInput, RenameFolderMeta,
     };
-    use crate::tools::mailbox::labels::{LabelInput, ListLabelsInput};
-    use crate::tools::mailbox::move_message::MoveMessageInput;
-    use crate::tools::retrieval::download_attachment::DownloadAttachmentInput;
-    use crate::tools::retrieval::export_messages::ExportMessagesInput;
-    use crate::tools::retrieval::fetch_message::FetchMessageInput;
-    use crate::tools::retrieval::list_attachments::ListAttachmentsInput;
-    use crate::tools::retrieval::search::SearchInput;
-    let tuple = match name {
+    use crate::tools::mailbox::labels::{LabelInput, LabelsMeta, ListLabelsInput, ListLabelsMeta};
+    use crate::tools::mailbox::move_message::{MoveMessageInput, MoveMessageMeta};
+    use crate::tools::retrieval::download_attachment::{
+        DownloadAttachmentInput, DownloadAttachmentMeta, DownloadAttachmentUntrusted,
+    };
+    use crate::tools::retrieval::export_messages::{ExportMessagesInput, ExportMessagesMeta};
+    use crate::tools::retrieval::fetch_message::{
+        FetchMessageInput, FetchMessageMeta, FetchMessageUntrusted,
+    };
+    use crate::tools::retrieval::list_attachments::{
+        ListAttachmentsInput, ListAttachmentsMeta, ListAttachmentsUntrusted,
+    };
+    use crate::tools::retrieval::search::{SearchInput, SearchMeta, SearchUntrusted};
+    let parts = match name {
         ToolName::ListFolders => (
             "List IMAP Folders",
             "List all IMAP folders",
             no_args_schema(),
+            envelope_schema::<ToolResponse<ListFoldersMeta, ()>>(),
         ),
         ToolName::Search => (
             "Search Messages",
             "Search messages with structured query",
             envelope_schema::<SearchInput>(),
+            envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>(),
         ),
         ToolName::FetchMessage => (
             "Fetch Message",
             "Fetch message metadata and text body",
             envelope_schema::<FetchMessageInput>(),
+            envelope_schema::<ToolResponse<FetchMessageMeta, FetchMessageUntrusted>>(),
         ),
         ToolName::ListAttachments => (
             "List Message Attachments",
             "List attachments on a message",
             envelope_schema::<ListAttachmentsInput>(),
+            envelope_schema::<ToolResponse<ListAttachmentsMeta, ListAttachmentsUntrusted>>(),
         ),
         ToolName::DownloadAttachment => (
             "Download Attachment",
             "Download an attachment to the sandbox directory",
             envelope_schema::<DownloadAttachmentInput>(),
+            envelope_schema::<ToolResponse<DownloadAttachmentMeta, DownloadAttachmentUntrusted>>(),
         ),
         ToolName::ExportMessages => (
             "Export Messages",
@@ -201,125 +160,132 @@ fn tool_spec(name: ToolName) -> Option<ToolSpec> {
              file in the download sandbox. Discover UIDs with `search` and \
              pass its uid_validity. Disabled unless enabled in [security.tools].",
             envelope_schema::<ExportMessagesInput>(),
+            envelope_schema::<ToolResponse<ExportMessagesMeta, ()>>(),
         ),
         ToolName::MarkRead => (
             "Mark Messages Read",
             "Mark messages as read",
             envelope_schema::<FlagInput>(),
+            envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::MarkUnread => (
             "Mark Messages Unread",
             "Mark messages as unread",
             envelope_schema::<FlagInput>(),
+            envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::Flag => (
             "Flag Messages",
             "Add the flagged flag to messages",
             envelope_schema::<FlagInput>(),
+            envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::Unflag => (
             "Unflag Messages",
             "Remove the flagged flag from messages",
             envelope_schema::<FlagInput>(),
+            envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::MoveMessage => (
             "Move Messages",
             "Move messages to another folder",
             envelope_schema::<MoveMessageInput>(),
+            envelope_schema::<ToolResponse<MoveMessageMeta, ()>>(),
         ),
         ToolName::CreateDraft => (
             "Create Draft Email",
             "Create a draft email with $PendingReview flag",
             envelope_schema::<CreateDraftInput>(),
+            envelope_schema::<ToolResponse<CreateDraftMeta, ()>>(),
         ),
         ToolName::SendEmail => (
             "Send Email",
             "Send an email via SMTP",
             envelope_schema::<SendEmailInput>(),
+            envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
         ),
         ToolName::DeleteMessage => (
             "Delete Message",
             "Delete a message (move to Trash)",
             envelope_schema::<DeleteMessageInput>(),
+            envelope_schema::<ToolResponse<DeleteMessageMeta, ()>>(),
         ),
         ToolName::Expunge => (
             "Expunge Folder",
             "Permanently remove deleted messages from a folder",
             envelope_schema::<ExpungeInput>(),
+            envelope_schema::<ToolResponse<ExpungeMeta, ()>>(),
         ),
         ToolName::CreateFolder => (
             "Create IMAP Folder",
             "Create a new IMAP folder",
             envelope_schema::<CreateFolderInput>(),
+            envelope_schema::<ToolResponse<CreateFolderMeta, ()>>(),
         ),
         ToolName::RenameFolder => (
             "Rename IMAP Folder",
             "Rename an IMAP folder",
             envelope_schema::<RenameFolderInput>(),
+            envelope_schema::<ToolResponse<RenameFolderMeta, ()>>(),
         ),
         ToolName::DeleteFolder => (
             "Delete IMAP Folder",
             "Delete an IMAP folder and all its contents",
             envelope_schema::<DeleteFolderInput>(),
+            envelope_schema::<ToolResponse<DeleteFolderMeta, ()>>(),
         ),
         ToolName::AddLabel => (
             "Add Label to Messages",
             "Add a keyword label to messages",
             envelope_schema::<LabelInput>(),
+            envelope_schema::<ToolResponse<LabelsMeta, ()>>(),
         ),
         ToolName::RemoveLabel => (
             "Remove Label from Messages",
             "Remove a keyword label from messages",
             envelope_schema::<LabelInput>(),
+            envelope_schema::<ToolResponse<LabelsMeta, ()>>(),
         ),
         ToolName::ListLabels => (
             "List Labels on Message",
             "List keyword labels on a message",
             envelope_schema::<ListLabelsInput>(),
+            envelope_schema::<ToolResponse<ListLabelsMeta, ()>>(),
         ),
         ToolName::UseAccount => (
             "Select Active Account",
             "Set the active account for subsequent tool calls",
             envelope_schema::<UseAccountInput>(),
+            envelope_schema::<ToolResponse<UseAccountMeta, ()>>(),
         ),
         ToolName::ListAccounts => (
             "List Email Accounts",
             "List all configured email accounts",
             no_args_schema(),
+            envelope_schema::<ToolResponse<ListAccountsMeta, ()>>(),
         ),
         // Sub-capabilities that share an MCP tool name with a parent
         // (e.g. `SearchAdvanced` shares `search`; `FetchMessageHtml`
         // shares `fetch_message`) are advertised under the parent entry,
-        // so they have no standalone spec.
+        // so they have no standalone definition.
         ToolName::SearchAdvanced | ToolName::FetchMessageHtml => return None,
     };
-    Some(tuple)
+    Some(parts)
 }
 
 /// Build the complete map of tool definitions. Called once by `TOOL_DEFS`.
-///
-/// `expect` is load-bearing: every `tool_spec`-positive `ToolName` is also
-/// `output_schema`-positive. Both functions return `None` for the same two
-/// sub-capability variants (`SearchAdvanced`, `FetchMessageHtml`), so the
-/// `continue` guard above means we never reach the `expect` for those.
-#[expect(
-    clippy::expect_used,
-    reason = "output_schema returns None exactly for the same variants tool_spec returns None for; \
-              the continue guard above means we never reach expect for those variants"
-)]
 fn build_tool_defs() -> HashMap<ToolName, Tool> {
     let mut map = HashMap::new();
     for tn in ToolName::all() {
-        let Some((title, description, schema)) = tool_spec(tn) else {
+        let Some((title, description, input_schema, output_schema)) = tool_def_parts(tn) else {
             continue;
         };
-        let out_schema = output_schema(tn).expect("every catalog tool has an output schema");
         map.insert(
             tn,
-            Tool::new(tn.as_str(), description, Arc::new(schema))
+            Tool::new(tn.as_str(), description, Arc::new(input_schema))
                 .with_title(title)
                 .with_annotations(build_annotations(title, tn))
-                .with_raw_output_schema(Arc::new(out_schema)),
+                .with_raw_output_schema(Arc::new(output_schema)),
         );
     }
     map
@@ -518,7 +484,7 @@ mod tests {
         reason = "test fixture I/O failures should panic with a clear message"
     )]
     fn every_tool_output_schema_matches_fixture() {
-        // Catches drift between this file's `output_schema(name)` match
+        // Catches drift between this file's `tool_def_parts(name)` match
         // and `cli/dump_tool_schemas.rs::build_schemas` if their parallel
         // `ToolName → (MetaType, UntrustedType)` tables disagree. The wire
         // test `wire_published_output_schema_matches_fixture` only
@@ -544,7 +510,7 @@ mod tests {
             assert_eq!(
                 published_value, fixture_value,
                 "tool {} output_schema diverges from fixture {fixture_path:?}.\n\
-                 Run `just regen-tool-schemas` AND audit `tool_catalog::output_schema` \
+                 Run `just regen-tool-schemas` AND audit `tool_catalog::tool_def_parts` \
                  vs `dump_tool_schemas::build_schemas` for type-pair drift.",
                 def.name,
             );
