@@ -20,7 +20,7 @@ pub struct SendEnvelope {
     pub to: Vec<String>,
 }
 
-/// SMTP client built from config. Each `send()` call opens a fresh
+/// SMTP client built from config. Each `send_raw` call opens a fresh
 /// connection — no persistent session or connection pool.
 pub struct SmtpClient {
     transport: AsyncSmtpTransport<Tokio1Executor>,
@@ -54,25 +54,6 @@ impl SmtpClient {
         let transport = builder.credentials(creds).timeout(Some(timeout)).build();
 
         Ok(Self { transport })
-    }
-
-    /// Send a pre-built message via SMTP.
-    ///
-    /// Returns the SMTP response string on success (typically "250 OK").
-    ///
-    /// # Errors
-    ///
-    /// Returns `SmtpError` variants for auth, TLS, rejection, timeout,
-    /// or transport failures. SMTP server banners and detailed rejection
-    /// reasons are captured in the error but should NOT be forwarded to
-    /// MCP clients — log them to audit only.
-    pub async fn send(&self, message: &lettre::Message) -> Result<String, SmtpError> {
-        let response = self
-            .transport
-            .send(message.clone())
-            .await
-            .map_err(classify_smtp_error)?;
-        Ok(format_response(&response))
     }
 
     /// Send raw RFC 5322 bytes with an explicit envelope.
