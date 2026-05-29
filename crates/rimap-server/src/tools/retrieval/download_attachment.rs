@@ -107,7 +107,7 @@ pub async fn handle(
 
     let raw = account.imap.fetch_body(&input.folder, uid, None).await?;
 
-    let parts = crate::mcp::content::walk_attachment_parts_async(raw).await?;
+    let parts = crate::tools::content_parse::walk_attachment_parts_async(raw).await?;
 
     let part = parts
         .into_iter()

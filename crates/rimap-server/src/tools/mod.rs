@@ -9,6 +9,7 @@
 
 pub mod admin;
 pub mod compose;
+pub(crate) mod content_parse;
 pub(crate) mod fetch_by_uid;
 pub(crate) mod lenient_int;
 pub mod mailbox;
