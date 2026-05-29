@@ -25,12 +25,68 @@ pub fn resolve_special_use(folders: &[Folder]) -> SpecialUseMap {
     SpecialUseMap::from_folders(folders)
 }
 
+/// Expand the config-supplied protected-folders list with any
+/// server-declared RFC 6154 special-use names (e.g. Gmail's
+/// `[Gmail]/Sent Mail`), preserving the configured order and appending
+/// only names not already present.
+///
+/// The dedup is case-insensitive so a user-configured literal (`"Sent"`)
+/// is not duplicated when the server also reports `"Sent"` for the same
+/// mailbox. Kept pure — `discovered` is the output of
+/// [`rimap_imap::SpecialUseMap::all_discovered`] — so the security-relevant
+/// merge is unit-testable without a live IMAP connection.
+#[must_use]
+pub fn merge_protected_folders(configured: &[String], discovered: Vec<String>) -> Vec<String> {
+    let mut protected = configured.to_vec();
+    for name in discovered {
+        if !protected.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+            protected.push(name);
+        }
+    }
+    protected
+}
+
 #[cfg(test)]
 mod tests {
     use rimap_imap::SpecialUse;
     use rimap_imap::types::Folder;
 
-    use super::resolve_special_use;
+    use super::{merge_protected_folders, resolve_special_use};
+
+    fn owned(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn merge_appends_discovered_names_after_configured() {
+        let merged = merge_protected_folders(&owned(&["INBOX"]), owned(&["[Gmail]/Sent Mail"]));
+        assert_eq!(merged, owned(&["INBOX", "[Gmail]/Sent Mail"]));
+    }
+
+    #[test]
+    fn merge_dedups_case_insensitively() {
+        // A configured literal must not be duplicated when the server
+        // reports the same name in a different case.
+        let merged = merge_protected_folders(&owned(&["Sent"]), owned(&["sent", "Trash"]));
+        assert_eq!(merged, owned(&["Sent", "Trash"]));
+    }
+
+    #[test]
+    fn merge_preserves_configured_order_and_keeps_empties() {
+        let merged = merge_protected_folders(&owned(&["a", "b"]), Vec::new());
+        assert_eq!(merged, owned(&["a", "b"]));
+
+        let merged = merge_protected_folders(&[], owned(&["x"]));
+        assert_eq!(merged, owned(&["x"]));
+    }
+
+    #[test]
+    fn merge_dedups_within_discovered_against_running_result() {
+        // Two discovered names that collide case-insensitively with each
+        // other: the second is dropped because the first was appended.
+        let merged = merge_protected_folders(&[], owned(&["Archive", "archive"]));
+        assert_eq!(merged, owned(&["Archive"]));
+    }
 
     fn folder(name: &str, special: Option<SpecialUse>) -> Folder {
         Folder {
