@@ -280,7 +280,7 @@ impl Drop for AuditEnvelopeGuard {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use rimap_audit::writer::AuditOptions;
     use rimap_audit::{AuditWriter, Seq, ToolStartInputs, cancellation_channel, spawn_drainer};
@@ -296,6 +296,18 @@ mod tests {
             rotate_keep: 5,
             retention_seconds: None,
             fail_open: false,
+            initial_seq: Seq::FIRST,
+        })
+        .unwrap()
+    }
+
+    fn test_writer_fail_open(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
+        AuditWriter::open(&AuditOptions {
+            path,
+            rotate_bytes: 10 * 1024 * 1024,
+            rotate_keep: 5,
+            retention_seconds: None,
+            fail_open,
             initial_seq: Seq::FIRST,
         })
         .unwrap()
@@ -548,5 +560,116 @@ mod tests {
             serde_json::json!([7, 9])
         );
         assert_eq!(v["result_summary"]["uids_failed"], serde_json::json!([8]));
+    }
+
+    /// `fail_open` = false: an injected `tool_start` write failure must abort
+    /// the call with an "audit write failed" error, never run the body, and
+    /// leave ZERO records on disk (no orphan `tool_start`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_start_failure_fail_closed_aborts_with_no_orphan() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use rimap_core::tool::ToolName;
+
+        use crate::mcp::dispatch::PostureContext;
+        use crate::mcp::server::ImapMcpServer;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let writer = test_writer_fail_open(path.clone(), false);
+        writer.force_next_write_failure();
+
+        let (tx, _rx) = cancellation_channel();
+        let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx));
+
+        let body_ran = Arc::new(AtomicBool::new(false));
+        let body_ran_clone = Arc::clone(&body_ran);
+        let args = serde_json::Map::new();
+        let result = server
+            .run_with_audit_envelope(
+                ToolName::ListAccounts,
+                None,
+                PostureContext::Infrastructure,
+                &args,
+                |_ticket| async move {
+                    body_ran_clone.store(true, Ordering::SeqCst);
+                    Ok(serde_json::Value::Null)
+                },
+            )
+            .await;
+
+        let err = result.expect_err("fail-closed audit failure must abort the call");
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "fail-closed audit failure must surface as an MCP internal error",
+        );
+        assert!(
+            err.message.contains("audit write failed"),
+            "expected audit-write-failed error, got: {}",
+            err.message,
+        );
+        assert!(
+            !body_ran.load(Ordering::SeqCst),
+            "body must not run when tool_start fails fail-closed",
+        );
+
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            contents.lines().count(),
+            0,
+            "a failed tool_start must leave zero records on disk (no orphan):\n{contents}",
+        );
+    }
+
+    /// `fail_open` = true: the injected `tool_start` write failure is
+    /// suppressed (counted), the body runs, and the call succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_start_failure_fail_open_proceeds_and_counts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use rimap_core::tool::ToolName;
+
+        use crate::mcp::dispatch::PostureContext;
+        use crate::mcp::server::ImapMcpServer;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let writer = test_writer_fail_open(path.clone(), true);
+        writer.force_next_write_failure();
+        // Hold a clone so we can read the suppressed-failure counter after.
+        let writer_probe = writer.clone();
+
+        let (tx, _rx) = cancellation_channel();
+        let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx));
+
+        let body_ran = Arc::new(AtomicBool::new(false));
+        let body_ran_clone = Arc::clone(&body_ran);
+        let args = serde_json::Map::new();
+        let result = server
+            .run_with_audit_envelope(
+                ToolName::ListAccounts,
+                None,
+                PostureContext::Infrastructure,
+                &args,
+                |_ticket| async move {
+                    body_ran_clone.store(true, Ordering::SeqCst);
+                    Ok(serde_json::Value::Null)
+                },
+            )
+            .await;
+
+        assert!(result.is_ok(), "fail-open must let the call succeed");
+        assert!(
+            body_ran.load(Ordering::SeqCst),
+            "body must run when the tool_start failure is suppressed",
+        );
+        assert_eq!(
+            writer_probe.suppressed_failures(),
+            1,
+            "fail-open must increment the suppressed-failure counter exactly once",
+        );
     }
 }

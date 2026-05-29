@@ -282,35 +282,81 @@ mod tests {
     use super::rimap_error_to_breaker_reason;
 
     #[test]
-    fn breaker_reason_maps_service_failures() {
+    fn breaker_reason_maps_every_error_code() {
         use rimap_authz::breaker::FailureReason;
         use rimap_core::{ErrorCode, RimapError};
-        let err = RimapError::Imap {
-            code: ErrorCode::Timeout,
-            message: "x".into(),
-            source: None,
-        };
+
+        // The expected classification is a `match` with NO wildcard arm, so a
+        // newly added `ErrorCode` fails THIS test build until its breaker
+        // classification is declared here — mirroring the no-wildcard intent
+        // of the production mapping fn. Service failures trip the breaker;
+        // user / policy / internal errors do not.
+        fn expected_reason(code: ErrorCode) -> Option<FailureReason> {
+            match code {
+                ErrorCode::ConnectionLost => Some(FailureReason::ConnectionLost),
+                ErrorCode::Auth => Some(FailureReason::Auth),
+                ErrorCode::Timeout => Some(FailureReason::Timeout),
+                ErrorCode::ImapProtocol | ErrorCode::SmtpProtocol => Some(FailureReason::Protocol),
+                ErrorCode::Tls => Some(FailureReason::Tls),
+                ErrorCode::InvalidInput
+                | ErrorCode::PostureDenied
+                | ErrorCode::RateLimited
+                | ErrorCode::CircuitOpen
+                | ErrorCode::NotFound
+                | ErrorCode::AttachmentTooLarge
+                | ErrorCode::ProtectedFolder
+                | ErrorCode::ExpungeDenied
+                | ErrorCode::Config
+                | ErrorCode::Internal
+                | ErrorCode::NoAccount
+                | ErrorCode::UnknownAccount
+                | ErrorCode::Cancelled
+                | ErrorCode::UidValidityChanged => None,
+            }
+        }
+
+        // The explicit variant list is also enforced by the no-wildcard match
+        // above (a forgotten entry leaves `expected_reason` non-exhaustive),
+        // and the length assert below catches a list entry dropped here.
+        const ALL: &[ErrorCode] = &[
+            ErrorCode::ConnectionLost,
+            ErrorCode::Auth,
+            ErrorCode::Timeout,
+            ErrorCode::ImapProtocol,
+            ErrorCode::SmtpProtocol,
+            ErrorCode::Tls,
+            ErrorCode::InvalidInput,
+            ErrorCode::PostureDenied,
+            ErrorCode::RateLimited,
+            ErrorCode::CircuitOpen,
+            ErrorCode::NotFound,
+            ErrorCode::AttachmentTooLarge,
+            ErrorCode::ProtectedFolder,
+            ErrorCode::ExpungeDenied,
+            ErrorCode::Config,
+            ErrorCode::Internal,
+            ErrorCode::NoAccount,
+            ErrorCode::UnknownAccount,
+            ErrorCode::Cancelled,
+            ErrorCode::UidValidityChanged,
+        ];
+
+        for &code in ALL {
+            let err = RimapError::Imap {
+                code,
+                message: "x".into(),
+                source: None,
+            };
+            assert_eq!(
+                rimap_error_to_breaker_reason(&err),
+                expected_reason(code),
+                "mapping mismatch for {code:?}",
+            );
+        }
         assert_eq!(
-            rimap_error_to_breaker_reason(&err),
-            Some(FailureReason::Timeout),
-        );
-        let auth = RimapError::Imap {
-            code: ErrorCode::Auth,
-            message: "x".into(),
-            source: None,
-        };
-        assert_eq!(
-            rimap_error_to_breaker_reason(&auth),
-            Some(FailureReason::Auth),
-        );
-        let tls = RimapError::Imap {
-            code: ErrorCode::Tls,
-            message: "x".into(),
-            source: None,
-        };
-        assert_eq!(
-            rimap_error_to_breaker_reason(&tls),
-            Some(FailureReason::Tls)
+            ALL.len(),
+            20,
+            "list must enumerate all variants (6 service + 14 user)"
         );
     }
 
@@ -338,19 +384,6 @@ mod tests {
             Some(Posture::Readonly),
         );
         assert_eq!(PostureContext::Infrastructure.posture(), None);
-    }
-
-    #[test]
-    fn breaker_reason_ignores_user_errors() {
-        use rimap_core::RimapError;
-        assert_eq!(
-            rimap_error_to_breaker_reason(&RimapError::invalid_input("bad")),
-            None,
-        );
-        assert_eq!(
-            rimap_error_to_breaker_reason(&RimapError::Internal("bug".into())),
-            None,
-        );
     }
 
     #[tokio::test]

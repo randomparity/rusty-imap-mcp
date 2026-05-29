@@ -1,8 +1,6 @@
 //! UID MOVE with COPY+DELETE fallback for servers without the MOVE
 //! extension (RFC 6851).
 
-use futures_util::StreamExt;
-
 use crate::connection::ImapSession;
 use crate::error::ImapError;
 use crate::ops::store;
@@ -22,6 +20,12 @@ pub struct MoveOutcome {
     /// instead of the atomic UID MOVE command. Callers should surface a
     /// security warning when this is `true`.
     pub used_fallback: bool,
+    /// `true` only when the fallback ran AND the server lacked UIDPLUS, so
+    /// the EXPUNGE was folder-wide (RFC 3501) — removing every `\Deleted`
+    /// message in the source folder, not just the moved UIDs. This is the
+    /// distinct data-loss condition (`!has_move && !has_uidplus`); callers
+    /// should surface `ServerFolderWideExpungeDataLoss`.
+    pub folder_wide_expunge: bool,
     /// Source-folder UIDVALIDITY observed at the guard STATUS probe, or
     /// `None` if no guard was requested or the server omitted it.
     pub source_uid_validity: Option<u32>,
@@ -70,6 +74,7 @@ pub(crate) async fn move_messages(
         return Ok(MoveOutcome {
             results: Vec::new(),
             used_fallback: false,
+            folder_wide_expunge: false,
             source_uid_validity: None,
             destination_uid_validity: None,
         });
@@ -109,10 +114,14 @@ pub(crate) async fn move_messages(
 
     if !has_move {
         let (results, destination_uid_validity) =
-            copy_delete_fallback(session, dest_folder, uids, has_uidplus).await?;
+            copy_delete_fallback(session, src_folder, dest_folder, uids, has_uidplus).await?;
         return Ok(MoveOutcome {
             results,
             used_fallback: true,
+            folder_wide_expunge: crate::ops::expunge::fallback_uses_folder_wide_expunge(
+                false,
+                has_uidplus,
+            ),
             source_uid_validity,
             destination_uid_validity,
         });
@@ -125,6 +134,7 @@ pub(crate) async fn move_messages(
         Ok(()) => Ok(MoveOutcome {
             results: build_results(uids),
             used_fallback: false,
+            folder_wide_expunge: false,
             source_uid_validity,
             destination_uid_validity: None,
         }),
@@ -134,15 +144,15 @@ pub(crate) async fn move_messages(
 
 /// Fallback: COPY + STORE \Deleted + EXPUNGE. Not atomic.
 ///
-/// When `has_uidplus` is true, UID EXPUNGE (RFC 4315) is used to remove only
-/// the flagged UIDs. Otherwise plain EXPUNGE removes all `\Deleted` messages,
-/// which is a known data-loss risk for concurrent operations.
-/// Servers that support MOVE never reach this path.
+/// EXPUNGE selection (scoped UID EXPUNGE vs folder-wide) is delegated to
+/// [`crate::ops::expunge::run_expunge`]. Servers that support MOVE never
+/// reach this path.
 ///
 /// Returns `(results, destination_uid_validity)`. The destination UIDVALIDITY
 /// is probed via STATUS after the COPY succeeds so the caller can surface it.
 async fn copy_delete_fallback(
     session: &mut ImapSession,
+    src_folder: &str,
     dest_folder: &str,
     uids: &[Uid],
     has_uidplus: bool,
@@ -176,26 +186,8 @@ async fn copy_delete_fallback(
     store::store(session, uids, &[Flag::Deleted], FlagAction::Add).await?;
 
     // Step 4: Remove the flagged messages from the source folder.
-    if has_uidplus {
-        // UID EXPUNGE (RFC 4315): only expunge the UIDs we flagged.
-        let stream = session
-            .uid_expunge(&uid_set)
-            .await
-            .map_err(super::folders::map_err)?;
-        futures_util::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-            let _uid = item.map_err(super::folders::map_err)?;
-        }
-    } else {
-        // Plain EXPUNGE: removes ALL \Deleted messages. Known data-loss
-        // risk with concurrent \Deleted flags. Servers without both MOVE
-        // and UIDPLUS are rare in practice.
-        let stream = session.expunge().await.map_err(super::folders::map_err)?;
-        futures_util::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-            let _seq = item.map_err(super::folders::map_err)?;
-        }
-    }
+    let strategy = crate::ops::expunge::expunge_strategy(has_uidplus);
+    crate::ops::expunge::run_expunge(session, &uid_set, strategy, src_folder).await?;
 
     Ok((build_results(uids), destination_uid_validity))
 }

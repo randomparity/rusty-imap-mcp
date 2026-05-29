@@ -119,14 +119,8 @@ pub async fn handle(
         })
         .collect();
 
-    let mut warnings: Vec<rimap_content::SecurityWarning> = Vec::new();
-    if outcome.used_fallback {
-        warnings.push(rimap_content::SecurityWarning::new(
-            rimap_content::WarningCode::ServerNonAtomicMoveFallback,
-            None,
-            None,
-        ));
-    }
+    let warnings =
+        super::fallback_security_warnings(outcome.used_fallback, outcome.folder_wide_expunge);
 
     Ok(ToolResponse::meta_only(MoveMessageMeta {
         folder: input.folder,

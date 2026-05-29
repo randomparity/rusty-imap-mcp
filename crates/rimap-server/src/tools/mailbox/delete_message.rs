@@ -75,13 +75,17 @@ pub async fn handle(
         .delete_message(&input.folder, uid, TRASH_FOLDER)
         .await?;
 
+    let warnings =
+        super::fallback_security_warnings(result.used_fallback, result.folder_wide_expunge);
+
     Ok(ToolResponse::meta_only(DeleteMessageMeta {
         deleted: true,
         folder: input.folder,
         uid: input.uid.get(),
         moved_to_trash: result.moved_to_trash,
         destination: TRASH_FOLDER,
-    }))
+    })
+    .with_warnings(warnings))
 }
 
 #[cfg(test)]
