@@ -16,5 +16,5 @@ fuzz_target!(|data: &[u8]| {
     let body = &data[1 + label_len..];
 
     let label = std::str::from_utf8(label_bytes).ok();
-    let _ = rimap_content::unicode::decode(body, label);
+    let _ = rimap_content::decode(body, label);
 });

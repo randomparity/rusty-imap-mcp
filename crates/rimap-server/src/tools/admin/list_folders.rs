@@ -35,7 +35,7 @@ fn sanitize_folder_entry(
     folder: &rimap_imap::types::Folder,
     warnings: &mut Vec<SecurityWarning>,
 ) -> (String, Option<String>, Vec<String>) {
-    let (clean_name, name_warnings) = rimap_content::unicode::sanitize(
+    let (clean_name, name_warnings) = rimap_content::sanitize(
         folder.name.as_bytes(),
         None,
         MAX_FOLDER_NAME_BYTES,
@@ -53,8 +53,7 @@ fn sanitize_folder_entry(
     let name_wire = if clean_name == folder.name {
         None
     } else {
-        let capped =
-            rimap_content::unicode::truncate_graphemes(&folder.name, MAX_FOLDER_NAME_BYTES * 4);
+        let capped = rimap_content::truncate_graphemes(&folder.name, MAX_FOLDER_NAME_BYTES * 4);
         Some(escape_wire_name(&capped))
     };
     warnings.extend(name_warnings);
@@ -64,12 +63,8 @@ fn sanitize_folder_entry(
         .iter()
         .map(|attr| {
             let raw = attr.as_wire_str();
-            let (clean, flag_warnings) = rimap_content::unicode::sanitize(
-                raw.as_bytes(),
-                None,
-                MAX_FOLDER_NAME_BYTES,
-                "folder.flag",
-            );
+            let (clean, flag_warnings) =
+                rimap_content::sanitize(raw.as_bytes(), None, MAX_FOLDER_NAME_BYTES, "folder.flag");
             warnings.extend(flag_warnings);
             clean
         })
@@ -120,7 +115,7 @@ pub struct ListFoldersMeta {
 /// MCP response. Returns the sanitized `FolderEntry` list and the
 /// accumulated security warnings.
 ///
-/// Folder names and flags are run through `rimap_content::unicode::sanitize`
+/// Folder names and flags are run through `rimap_content::sanitize`
 /// so server-controlled bidi overrides, zero-width characters, and C0/C1
 /// stripping are surfaced as structured warnings rather than riding
 /// unfiltered under the trusted `meta` envelope (#98).

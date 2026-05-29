@@ -9,10 +9,10 @@
 pub mod error;
 pub mod output;
 pub mod parse;
-pub mod unicode;
 
 mod html;
 mod lookalike;
+pub(crate) mod unicode;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -24,6 +24,14 @@ pub use output::{
 };
 pub use parse::parse_message;
 pub use parse::{RawPart, ThreadingHeaders, extract_threading_headers, walk_attachment_parts};
+// Sanctioned text-sanitization surface. The `unicode` module is crate-private;
+// handlers reach these named entry points at the crate root rather than into
+// the module internals, so the "sanitize every untrusted byte before it
+// reaches the agent" policy is exposed as one curated set.
+pub use unicode::{
+    FilterResult, decode, filter_codepoints, normalize_line_endings, normalize_nfkc, sanitize,
+    truncate_graphemes, truncate_graphemes_in_place,
+};
 
 /// Extract the `Message-ID` header from raw RFC 5322 bytes.
 ///

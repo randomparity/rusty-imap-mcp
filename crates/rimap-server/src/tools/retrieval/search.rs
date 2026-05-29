@@ -358,7 +358,7 @@ fn parse_iso_date(s: &str) -> Result<time::Date, rimap_core::RimapError> {
 /// `unicode::sanitize` entry point — the input is already valid
 /// UTF-8 and envelope snippets do not surface `SecurityWarning`.
 fn sanitize_for_output(s: &str) -> String {
-    use rimap_content::unicode::{
+    use rimap_content::{
         filter_codepoints, normalize_line_endings, normalize_nfkc, truncate_graphemes,
     };
     let normalized = normalize_nfkc(s);
