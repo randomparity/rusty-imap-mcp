@@ -64,7 +64,7 @@ impl Governor {
     /// Build from numeric limits.
     ///
     /// # Errors
-    /// Returns `AuthzError::MatrixBuild` if either rate is zero (validation
+    /// Returns `AuthzError::ConfigBuild` if either rate is zero (validation
     /// should have caught this already, but we refuse to build a degenerate
     /// limiter).
     pub fn new(
@@ -73,12 +73,12 @@ impl Governor {
         sends_per_minute: u32,
     ) -> Result<Self, AuthzError> {
         let cps = NonZeroU32::new(commands_per_second).ok_or_else(|| {
-            AuthzError::MatrixBuild("commands_per_second must be > 0".to_string())
+            AuthzError::ConfigBuild("commands_per_second must be > 0".to_string())
         })?;
         let dpm = NonZeroU32::new(drafts_per_minute)
-            .ok_or_else(|| AuthzError::MatrixBuild("drafts_per_minute must be > 0".to_string()))?;
+            .ok_or_else(|| AuthzError::ConfigBuild("drafts_per_minute must be > 0".to_string()))?;
         let spm = NonZeroU32::new(sends_per_minute)
-            .ok_or_else(|| AuthzError::MatrixBuild("sends_per_minute must be > 0".to_string()))?;
+            .ok_or_else(|| AuthzError::ConfigBuild("sends_per_minute must be > 0".to_string()))?;
         let burst = NonZeroU32::new(commands_per_second.saturating_mul(2).max(1))
             .unwrap_or(NonZeroU32::MIN);
         let global_quota = Quota::per_second(cps).allow_burst(burst);
