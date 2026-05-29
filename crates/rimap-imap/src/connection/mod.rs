@@ -280,15 +280,6 @@ impl Connection {
     }
 }
 
-/// Map a connect/login error to its stable short error code for the
-/// audit log. Kept for the test harness that pins the complete
-/// [`ImapError`] -> [`rimap_core::ErrorCode`] mapping; production
-/// callers pass `err.code()` directly through [`ImapError::code`].
-#[cfg(test)]
-fn error_code_for(err: &ImapError) -> &'static str {
-    err.code().as_str()
-}
-
 #[cfg(test)]
 #[expect(clippy::panic, reason = "tests")]
 #[expect(clippy::expect_used, reason = "tests")]
@@ -296,8 +287,6 @@ mod tests {
     use rimap_core::TlsFingerprint;
 
     use crate::error::{AuthFailure, ImapError};
-
-    use super::error_code_for;
 
     fn fp_zeros() -> TlsFingerprint {
         TlsFingerprint::from_hex(&"00".repeat(32)).expect("valid 32-byte hex literal")
@@ -382,7 +371,7 @@ mod tests {
             ),
         ];
         for (err, expected) in &cases {
-            assert_eq!(error_code_for(err), *expected, "for {err:?}");
+            assert_eq!(err.code().as_str(), *expected, "for {err:?}");
         }
     }
 
