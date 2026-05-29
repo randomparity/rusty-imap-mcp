@@ -44,7 +44,8 @@ pub fn resolve_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// Load and deserialize a config file from the given path. Does **not**
-/// validate semantic constraints — that's [`crate::validate::validate`].
+/// validate semantic constraints — that's [`crate::validate::validate_multi`]
+/// (reached via [`load_and_validate`]).
 ///
 /// # Errors
 /// Returns `ConfigError::Read` if the file cannot be read, or

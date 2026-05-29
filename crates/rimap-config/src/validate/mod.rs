@@ -8,15 +8,15 @@
 //!   - Attachment download dir, if non-empty, is writable.
 //!   - All numeric limits are positive and cap/default invariants hold.
 //!
-//! Submodules group helpers by concern:
-//!   - [`compose`]  — multi-account composition pipeline and per-account
+//! Submodules group helpers by concern (all private):
+//!   - `compose`  — multi-account composition pipeline and per-account
 //!     orchestration (the `ValidatedAccountConfig` / `ValidatedMultiConfig`
 //!     types and the public `validate_multi` / `validate_legacy_as_multi`
 //!     entry points)
-//!   - [`identity`] — username and TLS fingerprint
-//!   - [`limits`]   — numeric-limits zero/cap checks
-//!   - [`paths`]    — audit and download-dir filesystem probes
-//!   - [`rules`]    — folder safety, SMTP requirement and encryption,
+//!   - `identity` — username and TLS fingerprint
+//!   - `limits`   — numeric-limits zero/cap checks
+//!   - `paths`    — audit and download-dir filesystem probes
+//!   - `rules`    — folder safety, SMTP requirement and encryption,
 //!     per-tool override resolution
 
 mod compose;
