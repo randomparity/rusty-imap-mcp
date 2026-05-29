@@ -8,11 +8,18 @@ pub mod preinit;
 pub mod response;
 pub(crate) mod result_provenance;
 pub mod server;
-// `tool_catalog` is `pub` (doc-hidden via the parent `#[doc(hidden)] pub mod
-// mcp` in `lib.rs`) so the binary's test-support `dump-tool-catalog`
-// subcommand (#264) can reach `TOOL_DEFS`. Production callers route through
-// `dispatch` and `server` and do not import this module directly.
-pub mod tool_catalog;
+// `tool_catalog` is in-crate only: production callers route through
+// `dispatch` and `server`. `TOOL_DEFS` is re-exported below under
+// `test-support` so the binary's `dump-tool-catalog` subcommand (#264)
+// can reach it without widening the module's surface for production.
+pub(crate) mod tool_catalog;
+
+/// Re-export of the static tool catalog for the binary's test-support
+/// `dump-tool-catalog` subcommand (#264). Gated to keep `TOOL_DEFS` out
+/// of the production library surface, mirroring `execute_tool_for_test`
+/// in [`server`].
+#[cfg(any(test, feature = "test-support"))]
+pub use tool_catalog::TOOL_DEFS;
 pub(crate) mod tool_name;
 pub mod wire_validator;
 

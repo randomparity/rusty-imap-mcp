@@ -261,7 +261,7 @@ async fn wire_published_output_schema_matches_fixture() {
     // under tests/fixtures/rimap-tool-schemas/. Both are generated from
     // the same Rust types via schemars — drift signals either a
     // regenerate-fixtures miss or a divergence between dump_tool_schemas
-    // and tool_catalog::output_schema.
+    // and tool_catalog::tool_def_parts.
     //
     // Scope: the zero-account harness exercises exactly two tools
     // (`list_accounts`, `use_account`). Full-catalog coverage lives in
