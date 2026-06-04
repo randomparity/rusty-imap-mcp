@@ -138,8 +138,19 @@ skip = [
 # Windows ABI shim. Skipping the older subtrees keeps Windows targets in
 # cargo-deny scope without forcing a coordinated upgrade across unrelated
 # ecosystems. The newest version (0.61) remains the canonical one.
+#
+# `windows-sys 0.52` is hard-pinned by `ring 0.17` (`= "0.52"`, a rustls
+# transitive via rimap-imap), so 0.52 is permanently in the graph and cannot
+# be lifted to 0.61 without forking ring/rustls. The flexible consumers
+# `rustix`/`tempfile`/`errno`/`io-extras`/`fs-set-times`/`winx` declare an
+# open `windows-sys` range that 0.52 satisfies, so cargo's resolver may
+# unify them onto ring's 0.52 node on any lockfile re-resolution (observed
+# when the cargo-minor-patch group regenerated Cargo.lock). Skip the 0.52
+# subtree for the same reason as 0.59. Revisit when `ring` publishes a
+# release using windows-sys >= 0.61.
 skip-tree = [
     { name = "windows-sys", version = "0.59" },
+    { name = "windows-sys", version = "0.52" },
 
     # Sprint 4b: the html5ever ecosystem is mid-split. `scraper 0.26` (our
     # HTML parser) has migrated to html5ever 0.39 / markup5ever 0.39 /
