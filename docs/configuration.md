@@ -127,7 +127,9 @@ See also: `smtp.encryption` (symmetric field for the SMTP transport).
 ## `[smtp]` section
 
 SMTP connection settings. Optional -- required only when `send_email` is
-enabled by the active posture.
+effectively enabled: either by the active posture (`full` or `destructive`)
+or by an explicit `[security.tools] send_email = "allow"` override on a
+posture that does not enable it (`readonly` or `draft-safe`).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

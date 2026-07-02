@@ -118,14 +118,27 @@ pub enum ConfigError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// `send_email` is effectively enabled but no `[smtp]` section is configured.
+    /// `send_email` is enabled by the base posture but no `[smtp]` section
+    /// is configured.
     #[error(
-        "send_email is enabled (posture = {posture}) but no [smtp] section \
-         is configured; add [smtp] or deny send_email via \
+        "send_email is enabled by the '{posture}' posture but no [smtp] \
+         section is configured; add [smtp] or deny send_email via \
          [security.tools] send_email = \"deny\""
     )]
     SmtpRequired {
-        /// The posture that enabled `send_email`.
+        /// The base posture that enabled `send_email`.
+        posture: rimap_core::Posture,
+    },
+    /// `send_email` is enabled by an explicit `[security.tools]` override on
+    /// a posture that does not itself enable it, but no `[smtp]` section is
+    /// configured (see #327).
+    #[error(
+        "send_email is enabled by a [security.tools] send_email = \"allow\" \
+         override (the '{posture}' posture does not enable it) but no [smtp] \
+         section is configured; add [smtp] or remove the send_email override"
+    )]
+    SmtpRequiredByOverride {
+        /// The base posture, which does not itself enable `send_email`.
         posture: rimap_core::Posture,
     },
     /// A folder appears in both `protected_folders` and `expunge_folders`.
