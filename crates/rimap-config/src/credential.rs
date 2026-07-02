@@ -16,8 +16,40 @@ use crate::error::ConfigError;
 /// Service name used for all keychain entries.
 pub const KEYCHAIN_SERVICE: &str = "rusty-imap-mcp";
 
-/// Environment variable name checked as fallback.
+/// Environment variable name checked as the legacy shared fallback (consulted
+/// after the protocol-scoped variables).
 pub const PASSWORD_ENV_VAR: &str = "RUSTY_IMAP_MCP_PASSWORD";
+
+/// Environment variable checked as the IMAP-scoped fallback, before the legacy
+/// [`PASSWORD_ENV_VAR`].
+pub const IMAP_PASSWORD_ENV_VAR: &str = "RUSTY_IMAP_MCP_IMAP_PASSWORD";
+
+/// Environment variable checked as the SMTP-scoped fallback, before the legacy
+/// [`PASSWORD_ENV_VAR`].
+pub const SMTP_PASSWORD_ENV_VAR: &str = "RUSTY_IMAP_MCP_SMTP_PASSWORD";
+
+/// Which protocol a credential is being resolved for. Selects the
+/// protocol-scoped environment-variable fallback name. Baked into
+/// [`KeyringCredentialResolver`] at construction for the IMAP path; passed
+/// directly by the SMTP path in `rimap-server`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// IMAP transport — uses [`IMAP_PASSWORD_ENV_VAR`].
+    Imap,
+    /// SMTP transport — uses [`SMTP_PASSWORD_ENV_VAR`].
+    Smtp,
+}
+
+impl Protocol {
+    /// The protocol-scoped password environment-variable name.
+    #[must_use]
+    pub fn env_var_name(self) -> &'static str {
+        match self {
+            Protocol::Imap => IMAP_PASSWORD_ENV_VAR,
+            Protocol::Smtp => SMTP_PASSWORD_ENV_VAR,
+        }
+    }
+}
 
 /// Abstract credential store. Production uses [`KeyringStore`]; tests
 /// substitute an in-memory map.
@@ -324,10 +356,22 @@ mod tests {
 
     use rimap_core::account::AccountId;
 
-    use crate::credential::{PASSWORD_ENV_VAR, account_key, resolve_credential};
+    use crate::credential::{PASSWORD_ENV_VAR, Protocol, account_key, resolve_credential};
     use crate::error::ConfigError;
     use crate::model::FallbackMode;
     use crate::test_support::MockStore;
+
+    #[test]
+    fn protocol_maps_to_scoped_env_var_names() {
+        assert_eq!(
+            Protocol::Imap.env_var_name(),
+            "RUSTY_IMAP_MCP_IMAP_PASSWORD"
+        );
+        assert_eq!(
+            Protocol::Smtp.env_var_name(),
+            "RUSTY_IMAP_MCP_SMTP_PASSWORD"
+        );
+    }
 
     #[test]
     fn hash_account_tag_is_16_hex_and_deterministic() {
