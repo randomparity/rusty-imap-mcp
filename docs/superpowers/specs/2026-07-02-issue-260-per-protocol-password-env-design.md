@@ -74,12 +74,28 @@ downstream source.
 
 ### Observability
 
-When step 4 fires (legacy `RUSTY_IMAP_MCP_PASSWORD` supplied the credential)
-**and** `PROTO_ENV(P)` was unset, emit a one-shot `tracing::warn!` naming the
-protocol-scoped variable the operator should migrate to. This is the discovery
-mechanism for the new vars. The warning fires per resolution attempt (same
-cadence as the existing legacy-keyring-key warning); it does not dedupe across
-attempts, consistent with the existing warnings in this function.
+Two warnings interact here; both must name the variable that *actually* fired.
+
+1. **Migration warn (new).** When step 4 fires (legacy `RUSTY_IMAP_MCP_PASSWORD`
+   supplied the credential) **and** `PROTO_ENV(P)` was unset, emit a
+   `tracing::warn!` naming the protocol-scoped variable the operator should
+   migrate to. This is the discovery mechanism for the new vars. It fires per
+   resolution attempt — the same cadence as the existing legacy-keyring-key
+   warning, with **no** dedup state. (On the IMAP path `resolve()` runs on every
+   reconnect, so a legacy-var deployment sees this per reconnect; that matches
+   how the legacy-keyring warning already behaves and is acceptable.)
+
+2. **Keyring-error fallback warn (existing, must be corrected).** Today
+   `credential.rs:154-160` emits `keyring lookup failed; using
+   \`RUSTY_IMAP_MCP_PASSWORD\` fallback` whenever the keyring *errored* and the
+   env fallback then supplied the credential. With protocol-scoped vars this
+   message becomes false: if the keyring transport is down and
+   `RUSTY_IMAP_MCP_IMAP_PASSWORD` is set, resolution succeeds from the
+   IMAP-scoped var but the log still names `RUSTY_IMAP_MCP_PASSWORD` — misleading
+   the operator during exactly the keyring-outage incident when these logs matter
+   most. This warning MUST name whichever env var actually supplied the value.
+   Implementation: capture the resolved variable name (and its value) once in the
+   env-var block, then use it in both this warning and the migration warn.
 
 The audit-log `CredentialSource` enum is **unchanged**: any env-var resolution
 (step 3 or step 4) records `CredentialSource::EnvVar`. See "Rejected
@@ -166,8 +182,11 @@ references `resolve_credential` only in comments — it constructs no resolver.
    (and then to failure), never masking it.
 5. In `KeyringOnly`: neither the protocol-scoped var nor the legacy var is
    consulted; behavior is byte-for-byte unchanged from today.
-6. Keyring hits (new key, legacy key) still win over every env var, unchanged.
-7. `just ci` is green; MSRV 1.88.0 build passes; `cargo-deny` clean; no new
+6. When the keyring *errors* and a protocol-scoped var supplies the credential,
+   the keyring-error fallback warning names the protocol-scoped var that fired
+   (not the hardcoded legacy name).
+7. Keyring hits (new key, legacy key) still win over every env var, unchanged.
+8. `just ci` is green; MSRV 1.88.0 build passes; `cargo-deny` clean; no new
    dependency.
 
 ## Rejected alternatives
