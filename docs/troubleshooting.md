@@ -212,20 +212,34 @@ shell history. Use this only for diagnosis or in environments where
 the OS keyring genuinely isn't available. Move back to the keyring as
 soon as the underlying problem is fixed.
 
-**The env-var fallback is single-valued.** `RUSTY_IMAP_MCP_PASSWORD`
-is the only password env var; it serves IMAP and SMTP lookups
-indistinguishably (see `crates/rimap-config/src/credential.rs` —
-`resolve_credential` is called from both protocol paths with the
-same env var name). If your IMAP and SMTP passwords are identical
-(Gmail App Passwords, Proton Bridge passwords), this is fine. If
-they differ, the env-var fallback can silently feed the wrong
-password to one of the two protocols.
+**Per-protocol env vars.** Three password variables are consulted, in
+order, and only when `fallback = "keyring-then-env"` (the default):
 
-For split-credential setups, use the keyring (each protocol uses its
-own key — `<account>/<imap_username>@<imap_host>` vs
-`<account>/<smtp_username>@<smtp_host>`) and switch the credential
-policy to keyring-only so a keyring miss fails loud instead of
-falling through to the wrong env var:
+1. The protocol-scoped var — `RUSTY_IMAP_MCP_IMAP_PASSWORD` for IMAP
+   lookups, `RUSTY_IMAP_MCP_SMTP_PASSWORD` for SMTP lookups.
+2. The legacy shared var `RUSTY_IMAP_MCP_PASSWORD` (back-compat).
+
+If your IMAP and SMTP passwords are identical (Gmail App Passwords,
+Proton Bridge passwords), `RUSTY_IMAP_MCP_PASSWORD` alone still works.
+If they differ, set the two protocol-scoped vars so each protocol gets
+its own credential — the shared var would otherwise feed the same
+password to both. When a credential resolves from the legacy
+`RUSTY_IMAP_MCP_PASSWORD` while the protocol-scoped var is unset, the
+server logs a `warn` naming the scoped var to set.
+
+```jsonc
+"env": {
+  "RUSTY_IMAP_MCP_IMAP_PASSWORD": "...",
+  "RUSTY_IMAP_MCP_SMTP_PASSWORD": "...",
+  "RUSTY_IMAP_MCP_CONFIG": "..."
+}
+```
+
+For split-credential setups that want the strongest guarantee — a
+keyring miss fails loud instead of consulting *any* env var — keep
+using the keyring (each protocol uses its own key —
+`<account>/<imap_username>@<imap_host>` vs
+`<account>/<smtp_username>@<smtp_host>`) with keyring-only:
 
 ```toml
 [defaults.credentials]
