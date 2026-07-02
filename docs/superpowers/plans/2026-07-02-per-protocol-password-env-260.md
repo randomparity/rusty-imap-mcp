@@ -124,6 +124,13 @@ This task changes the public signature of `resolve_credential` and the `KeyringC
 **Files:**
 - Modify: `crates/rimap-config/src/credential.rs` — add `resolve_env_fallback` helper; add `protocol: Protocol` param to `resolve_credential` (line 102); rewrite the env-var block (lines 150-163); add `protocol` field to `KeyringCredentialResolver` (line 223) + `new` (line 244); pass `self.protocol` in `resolve` (line 263); update every in-crate test call to `resolve_credential`.
 - Modify: `crates/rimap-server/src/main.rs` — IMAP resolver construction (line 451) passes `Protocol::Imap`; `build_smtp_client` `resolve_credential` call (line 494) passes `Protocol::Smtp`; add import.
+- Modify (test-crate constructor call sites — the `new` signature change breaks all of these; all are IMAP connections, so all pass `Protocol::Imap`):
+  - `crates/rimap-imap/tests/integration/proton.rs:88`
+  - `crates/rimap-imap/tests/integration/dovecot.rs:147` and `:298`
+  - `crates/rimap-imap/tests/integration/support/container.rs:716`
+  - `crates/rimap-server/tests/e2e.rs:177`
+  - `crates/rimap-server/tests/e2e_wire.rs:877`
+  - `crates/rimap-server/tests/server_capabilities.rs:108`
 
 **Interfaces:**
 - Consumes: `Protocol`, `IMAP_PASSWORD_ENV_VAR`, `SMTP_PASSWORD_ENV_VAR`, `PASSWORD_ENV_VAR` (Task 1).
@@ -245,6 +252,28 @@ fn proto_var_wins_over_legacy_var() {
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "imap_pw");
+            assert_eq!(src, rimap_core::CredentialSource::EnvVar);
+        },
+    );
+}
+
+#[test]
+fn keyring_error_falls_back_to_proto_var() {
+    // Criterion 6 path: keyring transport errors, only the protocol-scoped
+    // var is set (legacy unset). Resolution must succeed from the proto var.
+    let store = MockStore::failing();
+    let id = AccountId::default_account();
+    temp_env::with_vars(
+        [
+            (SMTP_PASSWORD_ENV_VAR, Some("smtp_pw")),
+            (PASSWORD_ENV_VAR, None::<&str>),
+        ],
+        || {
+            let (got, src) = resolve_credential(
+                &store, &id, "alice", "host", FallbackMode::KeyringThenEnv, Protocol::Smtp,
+            )
+            .unwrap();
+            assert_eq!(got.expose_secret(), "smtp_pw");
             assert_eq!(src, rimap_core::CredentialSource::EnvVar);
         },
     );
@@ -419,13 +448,36 @@ IMAP resolver (line 451):
     .with_context(|| format!("resolving SMTP credential for account {}", acfg.id.as_str()))?;
 ```
 
+**3g.** Update the seven test-crate constructor call sites listed in **Files**. Each currently reads:
+
+```rust
+Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
+    store,
+    rimap_config::model::FallbackMode::KeyringThenEnv,
+))
+```
+(or the `use`-imported short forms `KeyringCredentialResolver::new(store, FallbackMode::KeyringThenEnv)` in `container.rs`, `e2e_wire.rs`, `server_capabilities.rs`). Append `Protocol::Imap` as the third argument, fully qualified to avoid touching each file's imports:
+
+```rust
+Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
+    store,
+    rimap_config::model::FallbackMode::KeyringThenEnv,
+    rimap_config::credential::Protocol::Imap,
+))
+```
+
+Verify none was missed:
+
+Run: `rg -n 'KeyringCredentialResolver::new' --type rust`
+Expected: every call site now passes a `Protocol` argument (8 total: main.rs + 7 test sites).
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p rimap-config credential:: 2>&1 | tail -30`
 Expected: PASS (new + all pre-existing credential tests).
 
-Run: `cargo check -p rimap-server 2>&1 | tail -10`
-Expected: compiles (call sites updated).
+Run: `cargo test --workspace --all-features --no-run 2>&1 | tail -15`
+Expected: the whole workspace — including the gated integration/e2e test crates that construct `KeyringCredentialResolver` — compiles. (`cargo check -p rimap-server` alone would NOT build those test targets, masking a break until Task 4.)
 
 - [ ] **Step 5: Full guardrail + commit**
 
@@ -433,7 +485,13 @@ Run: `just lint 2>&1 | tail -8` (expect clean — watch for pedantic on the new 
 Run: `just test-fast 2>&1 | tail -8` (expect green)
 
 ```bash
-git add crates/rimap-config/src/credential.rs crates/rimap-server/src/main.rs
+git add crates/rimap-config/src/credential.rs crates/rimap-server/src/main.rs \
+  crates/rimap-imap/tests/integration/proton.rs \
+  crates/rimap-imap/tests/integration/dovecot.rs \
+  crates/rimap-imap/tests/integration/support/container.rs \
+  crates/rimap-server/tests/e2e.rs \
+  crates/rimap-server/tests/e2e_wire.rs \
+  crates/rimap-server/tests/server_capabilities.rs
 git commit -m "feat(config): resolve per-protocol password env vars"
 ```
 
@@ -544,7 +602,7 @@ Run: `git status --short` (expect clean)
 - Empty-string fall-through (criterion 4) — `env_fallback_prefers_proto_var_then_legacy` (empty case).
 - Keyring wins over env (criterion 6-old/now 7) — existing `keychain_hit_wins_over_env` (kept, `Protocol::Imap`).
 - Corrected keyring-error warn naming (criterion 6) — helper returns the fired var name; warn in 3c uses it; `resolve_env_fallback` test asserts the returned name.
-- IMAP-untouched trait — verified: `CredentialResolver::resolve` signature unchanged; only the resolver struct/ctor gain `protocol`.
+- IMAP-untouched trait — verified: `CredentialResolver::resolve` signature unchanged; only the resolver struct/ctor gain `protocol`. The ctor change does ripple to eight `KeyringCredentialResolver::new` call sites (main.rs + seven test crates), all enumerated in Task 2 with `Protocol::Imap`; Task 2 step 4 builds the whole workspace's test targets (`cargo test --workspace --no-run`) so any missed site fails before commit, not at Task 4.
 - Docs (troubleshooting + model.rs) — Task 3.
 - No new dependency, MSRV, zero-warnings — Task 4 + Global Constraints.
 
