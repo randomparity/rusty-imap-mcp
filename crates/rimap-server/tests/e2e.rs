@@ -177,6 +177,7 @@ fn test_connection(harness: &DovecotHarness, audit: &AuditWriter) -> Connection 
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
             store,
             rimap_config::model::FallbackMode::KeyringThenEnv,
+            rimap_config::credential::Protocol::Imap,
         ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
     Connection::new(conn_cfg, sink, creds)

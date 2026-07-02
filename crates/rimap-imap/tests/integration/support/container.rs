@@ -716,6 +716,7 @@ impl ConnectedHarness {
         let creds: Arc<dyn CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
             store,
             rimap_config::model::FallbackMode::KeyringThenEnv,
+            rimap_config::credential::Protocol::Imap,
         ));
         let sink: Arc<dyn AuthEventSink> = Arc::new(audit.clone());
         let connection = Connection::new(cfg, sink, creds);

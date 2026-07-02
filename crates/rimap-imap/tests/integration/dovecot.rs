@@ -147,6 +147,7 @@ async fn case_04_login_rejected_emits_audit() {
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
             store,
             rimap_config::model::FallbackMode::KeyringThenEnv,
+            rimap_config::credential::Protocol::Imap,
         ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(h.audit.clone());
     // Reuse h.audit so the rejected-auth record lands in the same file
@@ -298,6 +299,7 @@ async fn case_10_fetch_body_over_limit_drops_connection() {
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
             store,
             rimap_config::model::FallbackMode::KeyringThenEnv,
+            rimap_config::credential::Protocol::Imap,
         ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(h.audit.clone());
     // Reuse h.audit so the size-limit / connection-loss records land in

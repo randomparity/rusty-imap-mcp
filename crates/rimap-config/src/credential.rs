@@ -1,11 +1,14 @@
 //! Credential resolution.
 //!
-//! Order of precedence (design spec §4, updated for #77):
+//! Order of precedence (design spec §4, updated for #77 and #260):
 //!   1. OS keychain (service = `rusty-imap-mcp`,
 //!      account = `<account-id>/<username>@<host>`), with a back-compat read
 //!      on the legacy `<username>@<host>` form that logs a migration hint.
-//!   2. Environment variable `RUSTY_IMAP_MCP_PASSWORD`.
-//!   3. Clear, actionable error naming both.
+//!   2. Protocol-scoped env var `RUSTY_IMAP_MCP_IMAP_PASSWORD` /
+//!      `RUSTY_IMAP_MCP_SMTP_PASSWORD` (only in `KeyringThenEnv`).
+//!   3. Legacy shared env var `RUSTY_IMAP_MCP_PASSWORD` (only in
+//!      `KeyringThenEnv`).
+//!   4. Clear, actionable error naming the keyring keys.
 
 use rimap_core::account::AccountId;
 use secrecy::{ExposeSecret, SecretString};
@@ -117,6 +120,24 @@ pub(crate) fn split_account_for_error(account: &str) -> (String, String) {
     (host.to_string(), hash_account_tag(username, host))
 }
 
+/// Resolve the env-var fallback for one protocol: try the protocol-scoped
+/// `proto_var` first, then the legacy [`PASSWORD_ENV_VAR`]. A defined-but-empty
+/// value is treated as unset so it never masks a later source. Returns the
+/// variable name that actually supplied the value, so callers can log the true
+/// source. Callers gate this on [`crate::model::FallbackMode::KeyringThenEnv`].
+fn resolve_env_fallback(proto_var: &'static str) -> Option<(&'static str, String)> {
+    let non_empty = |name: &'static str| -> Option<(&'static str, String)> {
+        match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Some((name, v)),
+            Ok(_) | Err(_) => None,
+        }
+    };
+    match non_empty(proto_var) {
+        Some(hit) => Some(hit),
+        None => non_empty(PASSWORD_ENV_VAR),
+    }
+}
+
 /// Resolve a credential: try the store first (new key, then legacy key), then
 /// optionally the env var (depending on `fallback_mode`), then fail.
 ///
@@ -137,6 +158,7 @@ pub fn resolve_credential(
     username: &str,
     host: &str,
     fallback_mode: crate::model::FallbackMode,
+    protocol: Protocol,
 ) -> Result<(SecretString, rimap_core::CredentialSource), ConfigError> {
     use rimap_core::CredentialSource;
 
@@ -180,18 +202,26 @@ pub fn resolve_credential(
     }
 
     if fallback_mode == crate::model::FallbackMode::KeyringThenEnv
-        && let Ok(env) = std::env::var(PASSWORD_ENV_VAR)
-        && !env.is_empty()
+        && let Some((var_name, value)) = resolve_env_fallback(protocol.env_var_name())
     {
         if let Some(e) = &keyring_error {
             tracing::warn!(
                 account_id = %account_id.as_str(),
                 host = %host,
                 error = %e,
-                "keyring lookup failed; using `RUSTY_IMAP_MCP_PASSWORD` fallback",
+                "keyring lookup failed; using `{var_name}` env-var fallback",
             );
         }
-        return Ok((SecretString::from(env), CredentialSource::EnvVar));
+        if var_name == PASSWORD_ENV_VAR {
+            tracing::warn!(
+                account_id = %account_id.as_str(),
+                host = %host,
+                "credential resolved via legacy `{PASSWORD_ENV_VAR}`; set \
+                 `{}` to scope this credential to one protocol",
+                protocol.env_var_name(),
+            );
+        }
+        return Ok((SecretString::from(value), CredentialSource::EnvVar));
     }
 
     // No env fallback available (env unset/empty, or `KeyringOnly` mode).
@@ -255,6 +285,7 @@ fn build_no_credential_reason(
 pub struct KeyringCredentialResolver {
     store: std::sync::Arc<dyn CredentialStore>,
     fallback_mode: crate::model::FallbackMode,
+    protocol: Protocol,
 }
 
 impl std::fmt::Debug for KeyringCredentialResolver {
@@ -265,6 +296,7 @@ impl std::fmt::Debug for KeyringCredentialResolver {
         f.debug_struct("KeyringCredentialResolver")
             .field("store", &"<dyn CredentialStore>")
             .field("fallback_mode", &self.fallback_mode)
+            .field("protocol", &self.protocol)
             .finish()
     }
 }
@@ -276,10 +308,12 @@ impl KeyringCredentialResolver {
     pub fn new(
         store: std::sync::Arc<dyn CredentialStore>,
         fallback_mode: crate::model::FallbackMode,
+        protocol: Protocol,
     ) -> Self {
         Self {
             store,
             fallback_mode,
+            protocol,
         }
     }
 }
@@ -292,7 +326,15 @@ impl rimap_core::CredentialResolver for KeyringCredentialResolver {
         host: &str,
     ) -> Result<(SecretString, rimap_core::CredentialSource), rimap_core::CredentialResolverError>
     {
-        resolve_credential(&*self.store, account, username, host, self.fallback_mode).map_err(|e| {
+        resolve_credential(
+            &*self.store,
+            account,
+            username,
+            host,
+            self.fallback_mode,
+            self.protocol,
+        )
+        .map_err(|e| {
             let reason = e.to_string();
             rimap_core::CredentialResolverError::with_source(reason, e)
         })
@@ -356,7 +398,10 @@ mod tests {
 
     use rimap_core::account::AccountId;
 
-    use crate::credential::{PASSWORD_ENV_VAR, Protocol, account_key, resolve_credential};
+    use crate::credential::{
+        IMAP_PASSWORD_ENV_VAR, PASSWORD_ENV_VAR, Protocol, SMTP_PASSWORD_ENV_VAR, account_key,
+        resolve_credential, resolve_env_fallback,
+    };
     use crate::error::ConfigError;
     use crate::model::FallbackMode;
     use crate::test_support::MockStore;
@@ -370,6 +415,183 @@ mod tests {
         assert_eq!(
             Protocol::Smtp.env_var_name(),
             "RUSTY_IMAP_MCP_SMTP_PASSWORD"
+        );
+    }
+
+    #[test]
+    fn env_fallback_prefers_proto_var_then_legacy() {
+        temp_env::with_vars(
+            [
+                (IMAP_PASSWORD_ENV_VAR, Some("imap_secret")),
+                (PASSWORD_ENV_VAR, Some("legacy_secret")),
+            ],
+            || {
+                let (var, val) = resolve_env_fallback(IMAP_PASSWORD_ENV_VAR).unwrap();
+                assert_eq!(var, IMAP_PASSWORD_ENV_VAR);
+                assert_eq!(val, "imap_secret");
+            },
+        );
+        temp_env::with_vars(
+            [
+                (IMAP_PASSWORD_ENV_VAR, None::<&str>),
+                (PASSWORD_ENV_VAR, Some("legacy_secret")),
+            ],
+            || {
+                let (var, val) = resolve_env_fallback(IMAP_PASSWORD_ENV_VAR).unwrap();
+                assert_eq!(var, PASSWORD_ENV_VAR);
+                assert_eq!(val, "legacy_secret");
+            },
+        );
+        temp_env::with_vars(
+            [
+                (IMAP_PASSWORD_ENV_VAR, Some("")),
+                (PASSWORD_ENV_VAR, Some("legacy_secret")),
+            ],
+            || {
+                let (var, _val) = resolve_env_fallback(IMAP_PASSWORD_ENV_VAR).unwrap();
+                assert_eq!(var, PASSWORD_ENV_VAR);
+            },
+        );
+        temp_env::with_vars(
+            [
+                (IMAP_PASSWORD_ENV_VAR, None::<&str>),
+                (PASSWORD_ENV_VAR, None::<&str>),
+            ],
+            || assert!(resolve_env_fallback(IMAP_PASSWORD_ENV_VAR).is_none()),
+        );
+    }
+
+    #[test]
+    fn imap_and_smtp_env_vars_resolve_independently() {
+        let store = MockStore::default();
+        let id = AccountId::default_account();
+        temp_env::with_vars(
+            [
+                (IMAP_PASSWORD_ENV_VAR, Some("imap_pw")),
+                (SMTP_PASSWORD_ENV_VAR, Some("smtp_pw")),
+                (PASSWORD_ENV_VAR, None::<&str>),
+            ],
+            || {
+                let (imap, _) = resolve_credential(
+                    &store,
+                    &id,
+                    "alice",
+                    "host",
+                    FallbackMode::KeyringThenEnv,
+                    Protocol::Imap,
+                )
+                .unwrap();
+                let (smtp, _) = resolve_credential(
+                    &store,
+                    &id,
+                    "alice",
+                    "host",
+                    FallbackMode::KeyringThenEnv,
+                    Protocol::Smtp,
+                )
+                .unwrap();
+                assert_eq!(imap.expose_secret(), "imap_pw");
+                assert_eq!(smtp.expose_secret(), "smtp_pw");
+            },
+        );
+    }
+
+    #[test]
+    fn proto_var_does_not_leak_to_other_protocol() {
+        let store = MockStore::default();
+        let id = AccountId::default_account();
+        temp_env::with_vars(
+            [
+                (IMAP_PASSWORD_ENV_VAR, Some("imap_pw")),
+                (SMTP_PASSWORD_ENV_VAR, None::<&str>),
+                (PASSWORD_ENV_VAR, None::<&str>),
+            ],
+            || {
+                let err = resolve_credential(
+                    &store,
+                    &id,
+                    "alice",
+                    "host",
+                    FallbackMode::KeyringThenEnv,
+                    Protocol::Smtp,
+                )
+                .unwrap_err();
+                assert!(matches!(err, ConfigError::NoCredential { .. }));
+            },
+        );
+    }
+
+    #[test]
+    fn proto_var_wins_over_legacy_var() {
+        let store = MockStore::default();
+        let id = AccountId::default_account();
+        temp_env::with_vars(
+            [
+                (IMAP_PASSWORD_ENV_VAR, Some("imap_pw")),
+                (PASSWORD_ENV_VAR, Some("legacy_pw")),
+            ],
+            || {
+                let (got, src) = resolve_credential(
+                    &store,
+                    &id,
+                    "alice",
+                    "host",
+                    FallbackMode::KeyringThenEnv,
+                    Protocol::Imap,
+                )
+                .unwrap();
+                assert_eq!(got.expose_secret(), "imap_pw");
+                assert_eq!(src, rimap_core::CredentialSource::EnvVar);
+            },
+        );
+    }
+
+    #[test]
+    fn keyring_error_falls_back_to_proto_var() {
+        let store = MockStore::failing();
+        let id = AccountId::default_account();
+        temp_env::with_vars(
+            [
+                (SMTP_PASSWORD_ENV_VAR, Some("smtp_pw")),
+                (PASSWORD_ENV_VAR, None::<&str>),
+            ],
+            || {
+                let (got, src) = resolve_credential(
+                    &store,
+                    &id,
+                    "alice",
+                    "host",
+                    FallbackMode::KeyringThenEnv,
+                    Protocol::Smtp,
+                )
+                .unwrap();
+                assert_eq!(got.expose_secret(), "smtp_pw");
+                assert_eq!(src, rimap_core::CredentialSource::EnvVar);
+            },
+        );
+    }
+
+    #[test]
+    fn keyring_only_ignores_proto_var() {
+        let store = MockStore::default();
+        let id = AccountId::default_account();
+        temp_env::with_vars(
+            [
+                (SMTP_PASSWORD_ENV_VAR, Some("smtp_pw")),
+                (PASSWORD_ENV_VAR, Some("legacy_pw")),
+            ],
+            || {
+                let err = resolve_credential(
+                    &store,
+                    &id,
+                    "alice",
+                    "host",
+                    FallbackMode::KeyringOnly,
+                    Protocol::Smtp,
+                )
+                .unwrap_err();
+                assert!(matches!(err, ConfigError::NoCredential { .. }));
+            },
         );
     }
 
@@ -415,9 +637,15 @@ mod tests {
             ("alice@host", "from_legacy_key"),
         ]);
         temp_env::with_var(PASSWORD_ENV_VAR, None::<&str>, || {
-            let (got, _src) =
-                resolve_credential(&store, &id, "alice", "host", FallbackMode::KeyringThenEnv)
-                    .unwrap();
+            let (got, _src) = resolve_credential(
+                &store,
+                &id,
+                "alice",
+                "host",
+                FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
+            )
+            .unwrap();
             assert_eq!(got.expose_secret(), "from_new_key");
         });
     }
@@ -428,9 +656,15 @@ mod tests {
         let id = AccountId::new("work").unwrap();
         let store = MockStore::with(&[("alice@host", "from_legacy_key")]);
         temp_env::with_var(PASSWORD_ENV_VAR, None::<&str>, || {
-            let (got, _src) =
-                resolve_credential(&store, &id, "alice", "host", FallbackMode::KeyringThenEnv)
-                    .unwrap();
+            let (got, _src) = resolve_credential(
+                &store,
+                &id,
+                "alice",
+                "host",
+                FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
+            )
+            .unwrap();
             assert_eq!(got.expose_secret(), "from_legacy_key");
         });
     }
@@ -446,6 +680,7 @@ mod tests {
                 "alice",
                 "host",
                 FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_keychain");
@@ -463,6 +698,7 @@ mod tests {
                 "alice",
                 "host",
                 FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_env");
@@ -480,6 +716,7 @@ mod tests {
                 "alice",
                 "host",
                 FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
             )
             .unwrap_err();
             match err {
@@ -512,6 +749,7 @@ mod tests {
                 "alice",
                 "host",
                 FallbackMode::KeyringOnly,
+                Protocol::Imap,
             )
             .unwrap_err();
             assert!(matches!(err, ConfigError::Keychain { .. }));
@@ -535,6 +773,7 @@ mod tests {
                 "alice",
                 "host",
                 FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_env");
@@ -556,6 +795,7 @@ mod tests {
                 "alice",
                 "host",
                 FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
             )
             .unwrap_err();
             assert!(matches!(err, ConfigError::Keychain { .. }));
@@ -574,6 +814,7 @@ mod tests {
                     "alice",
                     "host",
                     FallbackMode::KeyringThenEnv,
+                    Protocol::Imap,
                 )
                 .unwrap()
                 .0
@@ -596,8 +837,15 @@ mod tests {
         let id = AccountId::new("work").unwrap();
         let store = MockStore::default();
         temp_env::with_var(PASSWORD_ENV_VAR, Some("from_env"), || {
-            let err = resolve_credential(&store, &id, "alice", "host", FallbackMode::KeyringOnly)
-                .unwrap_err();
+            let err = resolve_credential(
+                &store,
+                &id,
+                "alice",
+                "host",
+                FallbackMode::KeyringOnly,
+                Protocol::Imap,
+            )
+            .unwrap_err();
             assert!(matches!(err, ConfigError::NoCredential { .. }));
         });
     }
@@ -608,9 +856,15 @@ mod tests {
         let id = AccountId::new("work").unwrap();
         let store = MockStore::default();
         temp_env::with_var(PASSWORD_ENV_VAR, Some("from_env"), || {
-            let (password, source) =
-                resolve_credential(&store, &id, "alice", "host", FallbackMode::KeyringThenEnv)
-                    .unwrap();
+            let (password, source) = resolve_credential(
+                &store,
+                &id,
+                "alice",
+                "host",
+                FallbackMode::KeyringThenEnv,
+                Protocol::Imap,
+            )
+            .unwrap();
             assert_eq!(password.expose_secret(), "from_env");
             assert_eq!(source, rimap_core::CredentialSource::EnvVar);
         });
@@ -622,9 +876,15 @@ mod tests {
         let id = AccountId::new("work").unwrap();
         let store = MockStore::with(&[("work/alice@host", "secret")]);
         temp_env::with_var(PASSWORD_ENV_VAR, None::<&str>, || {
-            let (_p, source) =
-                resolve_credential(&store, &id, "alice", "host", FallbackMode::KeyringOnly)
-                    .unwrap();
+            let (_p, source) = resolve_credential(
+                &store,
+                &id,
+                "alice",
+                "host",
+                FallbackMode::KeyringOnly,
+                Protocol::Imap,
+            )
+            .unwrap();
             assert_eq!(source, rimap_core::CredentialSource::Keyring);
         });
     }
@@ -635,9 +895,15 @@ mod tests {
         let id = AccountId::new("work").unwrap();
         let store = MockStore::with(&[("alice@host", "secret")]);
         temp_env::with_var(PASSWORD_ENV_VAR, None::<&str>, || {
-            let (_p, source) =
-                resolve_credential(&store, &id, "alice", "host", FallbackMode::KeyringOnly)
-                    .unwrap();
+            let (_p, source) = resolve_credential(
+                &store,
+                &id,
+                "alice",
+                "host",
+                FallbackMode::KeyringOnly,
+                Protocol::Imap,
+            )
+            .unwrap();
             assert_eq!(source, rimap_core::CredentialSource::LegacyKeyring);
         });
     }
