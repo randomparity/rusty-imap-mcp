@@ -556,6 +556,27 @@ path = "/tmp/audit.jsonl"
     }
 
     #[test]
+    fn smtp_required_by_override_on_readonly_posture_names_the_override() {
+        // Regression (#327): a readonly posture with an explicit
+        // `send_email = "allow"` override requires SMTP, and the diagnostic
+        // must blame the override rather than the (non-enabling) posture.
+        let dir = TempDir::new().unwrap();
+        let mut cfg = base_config(dir.path());
+        cfg.security.posture = Posture::Readonly;
+        cfg.security
+            .tools
+            .insert("send_email".into(), Verdict::Allow);
+        let err = validate(cfg).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::SmtpRequiredByOverride { posture } if posture == Posture::Readonly),
+            "expected SmtpRequiredByOverride, got {err:?}",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("override"), "message: {msg}");
+        assert!(msg.contains("readonly"), "message: {msg}");
+    }
+
+    #[test]
     fn conflicting_folders_fails() {
         let dir = TempDir::new().unwrap();
         let mut cfg = base_config(dir.path());

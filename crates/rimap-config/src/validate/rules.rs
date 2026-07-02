@@ -35,13 +35,21 @@ pub(super) fn validate_smtp_required(
 ) -> Result<(), ConfigError> {
     let posture = security.posture;
     let send_email_base = rimap_core::base_allows(posture, ToolName::SendEmail);
-    let send_email_effective = match tool_overrides.get(&ToolName::SendEmail) {
+    let override_verdict = tool_overrides.get(&ToolName::SendEmail);
+    let send_email_effective = match override_verdict {
         Some(Verdict::Allow) => true,
         Some(Verdict::Deny) => false,
         None => send_email_base,
     };
     if send_email_effective && smtp.is_none() {
-        return Err(ConfigError::SmtpRequired { posture });
+        // Attribute the requirement to its real cause: an explicit `allow`
+        // override enables send_email only where the posture itself does not.
+        let enabled_by_override = !send_email_base && override_verdict == Some(&Verdict::Allow);
+        return Err(if enabled_by_override {
+            ConfigError::SmtpRequiredByOverride { posture }
+        } else {
+            ConfigError::SmtpRequired { posture }
+        });
     }
     Ok(())
 }
@@ -141,6 +149,61 @@ mod tests {
         let mut overrides = BTreeMap::new();
         overrides.insert(ToolName::SendEmail, Verdict::Deny);
         assert!(validate_smtp_required(&s, &overrides, None).is_ok());
+    }
+
+    #[test]
+    fn smtp_required_by_posture_blames_the_posture() {
+        // A posture that base-allows send_email (full/destructive) is the
+        // genuine cause; the message must attribute it to the posture.
+        let s = security_with_posture(Posture::Full);
+        let overrides = BTreeMap::new();
+        let err = validate_smtp_required(&s, &overrides, None).unwrap_err();
+        assert!(matches!(err, ConfigError::SmtpRequired { .. }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("full"),
+            "message should name the posture: {msg}"
+        );
+    }
+
+    #[test]
+    fn smtp_required_by_override_blames_the_override_not_the_posture() {
+        // Regression (#327): readonly/draft-safe never base-allow send_email,
+        // so an explicit `send_email = "allow"` override is the real cause.
+        // The diagnostic must say so instead of blaming the posture.
+        for posture in [Posture::Readonly, Posture::DraftSafe] {
+            let s = security_with_posture(posture);
+            let mut overrides = BTreeMap::new();
+            overrides.insert(ToolName::SendEmail, Verdict::Allow);
+            let err = validate_smtp_required(&s, &overrides, None).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::SmtpRequiredByOverride { posture: p } if p == posture),
+                "expected SmtpRequiredByOverride for {posture}, got {err:?}",
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("override"),
+                "message should name the override: {msg}"
+            );
+            assert!(
+                msg.contains(posture.as_str()),
+                "message should name the posture that does not enable it: {msg}",
+            );
+        }
+    }
+
+    #[test]
+    fn redundant_allow_override_on_enabling_posture_stays_posture_blamed() {
+        // A `send_email = "allow"` override on a posture that already
+        // base-allows it is redundant; the posture is still the cause.
+        let s = security_with_posture(Posture::Full);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(ToolName::SendEmail, Verdict::Allow);
+        let err = validate_smtp_required(&s, &overrides, None).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::SmtpRequired { .. }),
+            "redundant override should stay posture-blamed, got {err:?}",
+        );
     }
 
     #[test]
