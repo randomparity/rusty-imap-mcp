@@ -7,6 +7,15 @@
           "description": "Folder that was searched.",
           "type": "string"
         },
+        "next_offset": {
+          "description": "Offset to pass on the next call to fetch the following page in\nthe same order (see `SearchInput`'s \"Result ordering\" section).\nPresent only when `truncated` is `true`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "returned": {
           "description": "Number of messages returned in this response.",
           "format": "uint",
