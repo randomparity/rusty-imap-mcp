@@ -65,6 +65,24 @@ pub struct ContentMeta {
     pub body_truncated: bool,
 }
 
+/// A single requested header and its sanitized value(s).
+///
+/// Produced by [`crate::parse_message_with_headers`] for names in the
+/// caller's allowlist that are present on the message. Repeated header
+/// lines (e.g. multiple `Received:`) collect into `values` in message
+/// order. Requested names absent from the message produce no
+/// `SelectedHeader`. Every value has passed the Unicode sanitization
+/// pipeline, so any codepoint-class finding is recorded in the parent
+/// [`Content::security_warnings`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedHeader {
+    /// The requested header name, echoed back in the caller's spelling.
+    pub name: String,
+    /// Sanitized value(s), one per matching header line, in message order.
+    pub values: Vec<String>,
+}
+
 /// Mailing-list markers extracted from `List-*` headers.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
