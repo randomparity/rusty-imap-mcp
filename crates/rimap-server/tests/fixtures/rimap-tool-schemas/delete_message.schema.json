@@ -8,7 +8,7 @@
           "type": "boolean"
         },
         "destination": {
-          "description": "Trash folder the message was moved to.",
+          "description": "Trash folder the message was moved to \u2014 the account's resolved\n`\\Trash` SPECIAL-USE mailbox name, or the literal `\"Trash\"` fallback.",
           "type": "string"
         },
         "folder": {
