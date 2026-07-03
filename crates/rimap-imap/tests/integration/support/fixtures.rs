@@ -30,3 +30,22 @@ pub fn minimal_rfc5322(subject: &str) -> Vec<u8> {
     )
     .into_bytes()
 }
+
+/// RFC 5322 reply referencing `parent_message_id` (the bracketed
+/// `<local@domain>` form) via `In-Reply-To` and `References`, for
+/// thread/reference-chain test seeding.
+#[must_use]
+pub fn reply_rfc5322(subject: &str, parent_message_id: &str) -> Vec<u8> {
+    format!(
+        "From: test@example.com\r\n\
+         To: recipient@example.com\r\n\
+         Subject: Re: {subject}\r\n\
+         Date: Sat, 12 Apr 2026 12:05:00 +0000\r\n\
+         Message-ID: <test-reply-{subject}@example.com>\r\n\
+         In-Reply-To: {parent_message_id}\r\n\
+         References: {parent_message_id}\r\n\
+         \r\n\
+         Reply body for {subject}.\r\n"
+    )
+    .into_bytes()
+}
