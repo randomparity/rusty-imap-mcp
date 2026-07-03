@@ -285,7 +285,14 @@ pub(crate) fn read_sandboxed_file(
     let canonical_parent = parent.canonicalize().map_err(|e| {
         RimapError::invalid_input(format!("cannot resolve attachment directory: {e}"))
     })?;
-    if !canonical_parent.starts_with(root) {
+    // Canonicalize the root too: the configured download root may itself
+    // contain a symlink component (e.g. macOS `/var` → `/private/var`, or an
+    // operator-symlinked staging dir), so comparing the canonical parent
+    // against a raw root would spuriously reject in-sandbox files.
+    let canonical_root = root.canonicalize().map_err(|e| {
+        RimapError::invalid_input(format!("cannot resolve download sandbox root: {e}"))
+    })?;
+    if !canonical_parent.starts_with(&canonical_root) {
         return Err(RimapError::invalid_input(
             "attachment path is outside the download sandbox",
         ));
@@ -762,6 +769,30 @@ mod tests {
         let data =
             read_sandboxed_file(&root, nested.join("f.bin").to_str().unwrap(), 1024).unwrap();
         assert_eq!(data, b"deep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_accepts_symlinked_non_canonical_root() {
+        // The configured download root may itself be reached through a symlink
+        // (macOS `/var`→`/private/var`, or an operator-symlinked staging dir).
+        // Passing that non-canonical root must still admit an in-sandbox file:
+        // the containment check canonicalizes BOTH sides. Regression guard for
+        // the bug the e2e_wire attachment round-trip surfaced.
+        let tmp = tempfile::tempdir().unwrap();
+        let real_root = tmp.path().canonicalize().unwrap().join("real_root");
+        std::fs::create_dir_all(&real_root).unwrap();
+        std::fs::write(real_root.join("doc.pdf"), b"payload").unwrap();
+
+        // A symlink that points at the real root; use it as the configured root.
+        let link_root = tmp.path().canonicalize().unwrap().join("link_root");
+        std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+        // Reference the file through the symlinked root path (as a caller who
+        // was handed a path under the configured, non-canonical root would).
+        let requested = link_root.join("doc.pdf");
+        let data = read_sandboxed_file(&link_root, requested.to_str().unwrap(), 1024).unwrap();
+        assert_eq!(data, b"payload");
     }
 
     #[cfg(not(unix))]

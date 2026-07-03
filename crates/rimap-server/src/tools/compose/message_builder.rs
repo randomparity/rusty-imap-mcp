@@ -6,7 +6,9 @@
 
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
+use mail_builder::headers::content_type::ContentType;
 use mail_builder::headers::message_id::MessageId;
+use mail_builder::mime::MimePart;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -590,7 +592,18 @@ fn assemble_message(
             filename: read.filename.clone(),
             bytes: read.bytes.len() as u64,
         });
-        builder = builder.attachment(read.content_type, read.filename, read.bytes);
+        // Set the filename in BOTH the Content-Type `name` parameter and the
+        // Content-Disposition `filename` parameter. `mail_builder`'s
+        // `.attachment()` helper writes only the disposition, but many clients
+        // (and this server's own `list_attachments`, which reads the Content-Type
+        // `name`) key off the `name` param — so a disposition-only filename
+        // round-trips as an unnamed part. Emitting both matches standard mailer
+        // behavior. The bytes are `BodyPart::Binary`, so a non-`text/*` type is
+        // base64-encoded.
+        let content_type =
+            ContentType::new(read.content_type).attribute("name", read.filename.clone());
+        let part = MimePart::new(content_type, read.bytes).attachment(read.filename);
+        builder.attachments.get_or_insert_with(Vec::new).push(part);
     }
 
     let raw = builder
@@ -1509,6 +1522,7 @@ mod tests {
 
     #[test]
     fn assemble_attachment_produces_multipart_mixed() {
+        use mail_parser::MimeHeaders as _;
         let input = html_input("body", None);
         let builder = build_message_headers("me@example.com", &input, false);
         let reads = vec![read_of("application/pdf", "report.pdf", b"%PDF-1.4 data")];
@@ -1522,6 +1536,19 @@ mod tests {
         assert!(
             !text.contains("%PDF-1.4 data"),
             "attachment not base64-encoded"
+        );
+        // The filename must round-trip through a parser: it is set in both the
+        // Content-Type `name` and the Content-Disposition `filename`, so a
+        // reader keying off either recovers it (regression guard for the null
+        // filename the e2e attachment round-trip surfaced).
+        let parsed = mail_parser::MessageParser::new().parse(&built.raw).unwrap();
+        let names: Vec<&str> = parsed
+            .attachments()
+            .filter_map(|a| a.attachment_name())
+            .collect();
+        assert!(
+            names.contains(&"report.pdf"),
+            "attachment_name did not round-trip; got {names:?}",
         );
     }
 
