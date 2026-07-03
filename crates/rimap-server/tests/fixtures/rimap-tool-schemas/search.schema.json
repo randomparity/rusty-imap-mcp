@@ -53,6 +53,20 @@
     "SearchResultEntry": {
       "description": "A single message entry in a `search` untrusted payload.",
       "properties": {
+        "body_preview": {
+          "description": "First bytes of the sanitized plain-text body, present only when\n`body_preview_bytes` was requested and a body was retrievable.\nAttacker-controlled email content.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body_preview_truncated": {
+          "description": "Whether the body extended beyond `body_preview`. Present only\nalongside `body_preview`; `true` means fetch the message with\n`fetch_message` for the full body.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "cc": {
           "description": "Cc addresses, sanitized. Omitted when empty.\n\nNote: `bcc` is intentionally absent \u2014 exposing BCC recipients\nviolates the privacy boundary enforced at the `SearchInput` and\noutput layers. See the spec's Privacy subsection.",
           "items": {
