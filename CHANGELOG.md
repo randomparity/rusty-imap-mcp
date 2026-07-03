@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `search` gains an opt-in `body_preview_bytes` parameter: when set, each
+  result carries a sanitized plain-text `body_preview` (first N bytes, capped
+  at 1024) plus a `body_preview_truncated` flag, for the first 50 results of a
+  page. Collapses "summarize my inbox" from one `search` + K `fetch_message`
+  calls to a single call. Previews reuse the `fetch_message` body pipeline
+  (same Unicode sanitization); per-message fetch/parse failures are isolated,
+  and the parameter adds no posture gate (a truncated body of an
+  already-matched message, like `fetch_message`, not a content filter).
+  Rationale in `docs/superpowers/specs/2026-07-03-issue-410-body-preview-design.md`.
+  Issue #410.
 - `fetch_message` gains an opt-in `include_headers` parameter: an allowlist
   of header names (≤ 16 per call) whose sanitized values are returned under
   `untrusted.headers` (name → array of values). Unblocks unsubscribe,
