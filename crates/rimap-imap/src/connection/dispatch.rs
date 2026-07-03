@@ -351,10 +351,17 @@ impl Connection {
     ///
     /// If the message is already in the Trash folder, only the flag is applied.
     ///
+    /// If `expected_uidvalidity` is `Some(v)`, the folder's UIDVALIDITY
+    /// (observed at the SELECT this call performs) is verified against `v`
+    /// before the delete proceeds; a mismatch returns
+    /// `ImapError::UidValidityChanged`. Pass `None` to skip the guard.
+    ///
     /// # Errors
     ///
     /// Returns `ImapError::InvalidInput` if `folder` or `trash_folder` fails
     /// `validate_folder_name`.
+    /// Returns `ImapError::UidValidityChanged` if `expected_uidvalidity` is
+    /// set and does not match the folder's observed UIDVALIDITY.
     /// Returns `ImapError::ConnectionLost` or `ImapError::Timeout` on transport failure,
     /// or a protocol error if the server rejects the command.
     pub async fn delete_message(
@@ -362,12 +369,15 @@ impl Connection {
         folder: &str,
         uid: crate::types::Uid,
         trash_folder: &str,
-    ) -> Result<crate::ops::delete::DeleteResult, ImapError> {
+        expected_uidvalidity: Option<u32>,
+    ) -> Result<(crate::ops::delete::DeleteResult, Option<u32>), ImapError> {
         let has_move = self.has_move_capability();
         let has_uidplus = self.has_uidplus_capability();
         self.with_session("delete_message", async |session| {
-            crate::ops::folders::select(session, folder, false).await?;
-            crate::ops::delete::delete_message(
+            let selected = crate::ops::folders::select(session, folder, false).await?;
+            let uid_validity = selected.uid_validity;
+            crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
+            let result = crate::ops::delete::delete_message(
                 session,
                 uid,
                 folder,
@@ -375,7 +385,8 @@ impl Connection {
                 has_move,
                 has_uidplus,
             )
-            .await
+            .await?;
+            Ok((result, uid_validity))
         })
         .await
     }

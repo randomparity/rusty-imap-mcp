@@ -132,7 +132,9 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
         ),
         ToolName::Search => (
             "Search Messages",
-            "Search messages with structured query",
+            "Search messages with structured query. Results are ordered \
+             oldest-first by UID; set newest_first to reverse. Paginate \
+             with offset/limit and next_offset.",
             envelope_schema::<SearchInput>(),
             envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>(),
         ),
