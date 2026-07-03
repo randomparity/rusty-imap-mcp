@@ -56,9 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `posture`, making the server instructions' claim true and giving an
   agent a self-service answer to a posture denial. The instructions now
   also name the four postures (`readonly` / `draft-safe` / `full` /
-  `destructive`) and what each enables, and the `search` tool's
-  posture-gated fields use plain language instead of the internal
-  "Content-oracle" / `SearchAdvanced` terms. `imap_host` stays in the
+  `destructive`) and what each enables. `imap_host` stays in the
   resource but remains omitted from the leaner `list_accounts` summary
   (documented tiering). Issue #406.
 - Tool-execution failures are now returned as a `CallToolResult` with
