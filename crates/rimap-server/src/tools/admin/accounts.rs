@@ -8,7 +8,9 @@ use crate::mcp::response::ToolResponse;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UseAccountInput {
-    /// Account name to select as the session default.
+    /// Account name to make active. Selecting an account narrows the
+    /// `tools/list` advertisement to that account's tools; every account
+    /// stays callable by its `<account>.<tool>` name regardless.
     pub account: String,
 }
 
@@ -39,7 +41,9 @@ pub struct ListAccountsMeta {
     pub count: usize,
 }
 
-/// Select `input.account` as the session's active account.
+/// Make `input.account` the session-active account. The selection
+/// narrows the `tools/list` advertisement to that account's tools; it
+/// does not gate dispatch (every account stays callable by namespace).
 ///
 /// # Errors
 ///
