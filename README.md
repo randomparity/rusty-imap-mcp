@@ -84,7 +84,7 @@ security metadata, not raw attack surface.
 | Rate limiting | token-bucket | no | token-bucket | no |
 | Circuit breaker | yes | no | no | no |
 | **Capabilities** | | | | |
-| Tool count | 23 | ~10 | 47 | 7 |
+| Tool count | 24 | ~10 | 47 | 7 |
 | Multi-account | yes | yes | yes | yes |
 | SMTP send | yes | yes | yes | yes |
 | Credential storage | OS keychain | env vars | config file | env vars |
@@ -127,7 +127,7 @@ Prefer to start from a full annotated config? Copy
   (see [The `export_messages` tool](docs/configuration.md#the-export_messages-tool))
 - **Mutate:** `mark_read`, `mark_unread`, `flag`, `unflag`,
   `add_label`, `remove_label`, `move_message`, `create_draft`
-- **Manage:** `send_email`, `delete_message`, `create_folder`,
+- **Manage:** `send_email`, `forward`, `delete_message`, `create_folder`,
   `rename_folder`, `expunge`, `delete_folder`
 
 `search`'s content-search arguments (`advanced_query`, `body`, `text`,

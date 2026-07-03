@@ -28,6 +28,30 @@ pub struct SentCopyInfo {
     pub failure_code: Option<rimap_core::ErrorCode>,
 }
 
+impl SentCopyInfo {
+    /// A successful copy-to-Sent, carrying the server-assigned UID if any.
+    #[must_use]
+    pub(crate) fn succeeded(folder: &str, uid: Option<u32>) -> Self {
+        Self {
+            folder: folder.to_string(),
+            uid,
+            failed: false,
+            failure_code: None,
+        }
+    }
+
+    /// A failed (or skipped) copy-to-Sent classified by `code`.
+    #[must_use]
+    pub(crate) fn failed(folder: &str, code: rimap_core::ErrorCode) -> Self {
+        Self {
+            folder: folder.to_string(),
+            uid: None,
+            failed: true,
+            failure_code: Some(code),
+        }
+    }
+}
+
 /// Trusted metadata for a `send_email` response.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SendEmailMeta {
