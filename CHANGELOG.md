@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two static MCP resources, `rimap://docs/postures` and
+  `rimap://docs/workflows`, advertised by `resources/list` regardless of
+  account count. `rimap://docs/postures` is `docs/postures.md` verbatim;
+  `rimap://docs/workflows` is a new `docs/mcp-workflows.md` covering the
+  search→fetch→act pattern, UIDVALIDITY pinning, attachment retrieval, the
+  draft lifecycle, and the `export_messages` opt-in, with a numeric-limits
+  table pinned by a test against the Rust constants that enforce each
+  limit. Both `ServerInfo.instructions` constants now point agents at these
+  URIs. Issue #407.
 - `search` gains an opt-in `body_preview_bytes` parameter: when set, each
   result carries a sanitized plain-text `body_preview` (first N bytes, capped
   at 1024) plus a `body_preview_truncated` flag, for the first 50 results of a

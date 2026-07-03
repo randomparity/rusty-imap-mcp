@@ -234,7 +234,10 @@ at `rimap://accounts/<name>` reports the posture and available tool list. \
 Postures, least to most capable, are `readonly` (read and metadata \
 search), `draft-safe` (adds flag/label changes, moves, and draft \
 creation), `full` (adds send, delete, folder management, and content \
-search), and `destructive` (adds expunge and folder deletion).";
+search), and `destructive` (adds expunge and folder deletion). Read the \
+MCP resource `rimap://docs/postures` for the full posture matrix and \
+`rimap://docs/workflows` for UIDVALIDITY pinning, attachment retrieval, \
+the draft lifecycle, and numeric limits.";
 
     assert_eq!(
         info.instructions.as_deref(),
