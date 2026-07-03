@@ -24,6 +24,15 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "uid_validity": {
+          "description": "UIDVALIDITY observed at the SELECT used for this operation. `None`\nwhen the server's SELECT response omitted the response code. (#70)",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [

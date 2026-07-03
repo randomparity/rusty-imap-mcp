@@ -19,11 +19,11 @@ pub mod test_support;
 
 pub use error::ContentError;
 pub use output::{
-    AttachmentMeta, Content, ContentMeta, MailingListInfo, SecurityWarning, Untrusted, WarningCode,
-    WarningSeverity,
+    AttachmentMeta, Content, ContentMeta, MailingListInfo, SecurityWarning, SelectedHeader,
+    Untrusted, WarningCode, WarningSeverity,
 };
-pub use parse::parse_message;
 pub use parse::{RawPart, ThreadingHeaders, extract_threading_headers, walk_attachment_parts};
+pub use parse::{parse_message, parse_message_with_headers};
 // Sanctioned text-sanitization surface. The `unicode` module is crate-private;
 // handlers reach these named entry points at the crate root rather than into
 // the module internals, so the "sanitize every untrusted byte before it

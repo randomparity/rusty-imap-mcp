@@ -41,6 +41,16 @@ pub struct HeaderInput {
 }
 
 /// Input for the `search` tool.
+///
+/// # Result ordering
+///
+/// Results are ordered by UID ascending — oldest message first — unless
+/// `newest_first` is set, which reverses the order to newest first.
+/// UIDs are assigned in strictly increasing order within a folder's
+/// `UIDVALIDITY` epoch (RFC 3501 §2.3.1.1), so ascending UID order is
+/// equivalent to arrival order. Use `offset`/`limit` to page through
+/// results in whichever order is selected, and read `next_offset` from
+/// the response to fetch the following page without recomputing it.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct SearchInput {
@@ -110,13 +120,19 @@ pub struct SearchInput {
     )]
     #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub limit: Option<usize>,
-    /// Offset into the result set (default 0).
+    /// Offset into the result set (default 0), counted in whichever
+    /// order `newest_first` selects. See "Result ordering" above.
     #[serde(
         default,
         deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
     )]
     #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub offset: Option<usize>,
+    /// Return results newest-first (UID descending) instead of the
+    /// default oldest-first (UID ascending). Reverses the already
+    /// matched UID list before paginating — no IMAP SORT extension is
+    /// used or required. Default `false`.
+    pub newest_first: Option<bool>,
 }
 
 /// A single message entry in a `search` untrusted payload.
@@ -165,6 +181,11 @@ pub struct SearchMeta {
     pub returned: usize,
     /// Whether there are more results beyond this page.
     pub truncated: bool,
+    /// Offset to pass on the next call to fetch the following page in
+    /// the same order (see `SearchInput`'s "Result ordering" section).
+    /// Present only when `truncated` is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
     /// UIDVALIDITY observed for the searched folder, from the same
     /// EXAMINE/UID SEARCH operation. Thread into `export_messages`'
     /// `expected_uidvalidity`. `None` if the server omitted it.
@@ -201,10 +222,9 @@ pub async fn handle(
 
     let offset = input.offset.unwrap_or(0);
     let limit = input.limit.unwrap_or(MAX_LIMIT).min(MAX_LIMIT);
+    let newest_first = input.newest_first.unwrap_or(false);
 
-    let page_uids: Vec<Uid> = uids.into_iter().skip(offset).take(limit).collect();
-
-    let truncated = total_matched > offset + page_uids.len();
+    let (page_uids, truncated, next_offset) = paginate_uids(uids, offset, limit, newest_first);
 
     let messages: Vec<SearchResultEntry> = if page_uids.is_empty() {
         Vec::new()
@@ -224,7 +244,18 @@ pub async fn handle(
             )
             .await?;
         let (fetched, _uid_validity) = fetched;
-        fetched.iter().map(format_search_result).collect()
+        // `fetch` streams FETCH responses back in the server's own
+        // (ascending) order regardless of the order `page_uids` was
+        // passed in, so reassemble in `page_uids`' order — the only
+        // place the requested ordering (oldest-first or newest-first)
+        // is actually recorded — rather than trusting the fetch order.
+        let mut by_uid: std::collections::HashMap<Uid, &FetchedMessage> =
+            fetched.iter().map(|m| (m.uid, m)).collect();
+        page_uids
+            .iter()
+            .filter_map(|uid| by_uid.remove(uid))
+            .map(format_search_result)
+            .collect()
     };
 
     Ok(ToolResponse::meta_only(SearchMeta {
@@ -232,9 +263,35 @@ pub async fn handle(
         total_matched,
         returned: messages.len(),
         truncated,
+        next_offset,
         uid_validity,
     })
     .with_untrusted(SearchUntrusted { messages }))
+}
+
+/// Select one page of UIDs from a full search result set, plus the
+/// pagination metadata to report back to the caller. Pure and
+/// independent of the async IMAP layer so it is unit-testable without
+/// a live connection.
+///
+/// When `newest_first` is set, `uids` is reversed before paginating, so
+/// `offset` counts from the newest message and consecutive pages (via
+/// `next_offset`) walk backward through time without overlapping.
+fn paginate_uids(
+    mut uids: Vec<Uid>,
+    offset: usize,
+    limit: usize,
+    newest_first: bool,
+) -> (Vec<Uid>, bool, Option<u64>) {
+    if newest_first {
+        uids.reverse();
+    }
+    let total = uids.len();
+    let page: Vec<Uid> = uids.into_iter().skip(offset).take(limit).collect();
+    let consumed = offset.saturating_add(page.len());
+    let truncated = total > consumed;
+    let next_offset = truncated.then(|| u64::try_from(consumed).unwrap_or(u64::MAX));
+    (page, truncated, next_offset)
 }
 
 /// Build a `SearchQuery` from the input. The `SearchAdvanced` posture
@@ -544,6 +601,7 @@ mod tests {
             advanced_query: None,
             limit: None,
             offset: None,
+            newest_first: None,
         }
     }
 
@@ -868,9 +926,120 @@ mod tests {
             total_matched: 0,
             returned: 0,
             truncated: false,
+            next_offset: None,
             uid_validity: Some(12345),
         };
         let v = serde_json::to_value(meta).unwrap();
         assert_eq!(v["uid_validity"], serde_json::json!(12345));
+    }
+
+    #[test]
+    fn search_meta_omits_next_offset_when_absent() {
+        let meta = SearchMeta {
+            folder: "INBOX".to_string(),
+            total_matched: 5,
+            returned: 5,
+            truncated: false,
+            next_offset: None,
+            uid_validity: None,
+        };
+        let v = serde_json::to_value(meta).unwrap();
+        assert!(
+            v.get("next_offset").is_none(),
+            "next_offset must be omitted, not null, when absent; got {v}",
+        );
+    }
+
+    #[test]
+    fn search_meta_serializes_next_offset_when_present() {
+        let meta = SearchMeta {
+            folder: "INBOX".to_string(),
+            total_matched: 150,
+            returned: 100,
+            truncated: true,
+            next_offset: Some(100),
+            uid_validity: None,
+        };
+        let v = serde_json::to_value(meta).unwrap();
+        assert_eq!(v["next_offset"], serde_json::json!(100));
+    }
+
+    fn uids(range: std::ops::RangeInclusive<u32>) -> Vec<rimap_imap::types::Uid> {
+        range.map(uid).collect()
+    }
+
+    #[test]
+    fn paginate_uids_not_truncated_yields_no_next_offset() {
+        let (page, truncated, next_offset) = paginate_uids(uids(1..=5), 0, 10, false);
+        assert_eq!(page.len(), 5);
+        assert!(!truncated);
+        assert_eq!(next_offset, None);
+    }
+
+    #[test]
+    fn paginate_uids_truncated_yields_correct_next_offset() {
+        let (page, truncated, next_offset) = paginate_uids(uids(1..=150), 0, 100, false);
+        assert_eq!(page.len(), 100);
+        assert!(truncated);
+        assert_eq!(next_offset, Some(100));
+
+        // Following the returned next_offset picks up exactly where the
+        // first page left off, with no gap or overlap.
+        let (page2, truncated2, next_offset2) = paginate_uids(uids(1..=150), 100, 100, false);
+        assert_eq!(page2.len(), 50);
+        assert!(!truncated2);
+        assert_eq!(next_offset2, None);
+        assert_eq!(page2.first().map(|u| u.get()), Some(101));
+        assert_eq!(page2.last().map(|u| u.get()), Some(150));
+    }
+
+    #[test]
+    fn paginate_uids_offset_past_end_yields_empty_page_and_no_next_offset() {
+        let (page, truncated, next_offset) = paginate_uids(uids(1..=5), 1000, 100, false);
+        assert!(page.is_empty());
+        assert!(!truncated);
+        assert_eq!(next_offset, None);
+    }
+
+    #[test]
+    fn paginate_uids_offset_exactly_at_end_yields_empty_page_and_no_next_offset() {
+        let (page, truncated, next_offset) = paginate_uids(uids(1..=5), 5, 100, false);
+        assert!(page.is_empty());
+        assert!(!truncated);
+        assert_eq!(next_offset, None);
+    }
+
+    #[test]
+    fn paginate_uids_newest_first_orders_descending() {
+        let (page, _, _) = paginate_uids(uids(1..=5), 0, 100, true);
+        let nums: Vec<u32> = page.iter().map(|u| u.get()).collect();
+        assert_eq!(nums, vec![5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn paginate_uids_newest_first_pages_do_not_overlap() {
+        let (page1, truncated1, next_offset1) = paginate_uids(uids(1..=10), 0, 4, true);
+        assert_eq!(
+            page1.iter().map(|u| u.get()).collect::<Vec<_>>(),
+            vec![10, 9, 8, 7],
+        );
+        assert!(truncated1);
+        assert_eq!(next_offset1, Some(4));
+
+        let (page2, truncated2, next_offset2) = paginate_uids(uids(1..=10), 4, 4, true);
+        assert_eq!(
+            page2.iter().map(|u| u.get()).collect::<Vec<_>>(),
+            vec![6, 5, 4, 3],
+        );
+        assert!(truncated2);
+        assert_eq!(next_offset2, Some(8));
+
+        let (page3, truncated3, next_offset3) = paginate_uids(uids(1..=10), 8, 4, true);
+        assert_eq!(
+            page3.iter().map(|u| u.get()).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert!(!truncated3);
+        assert_eq!(next_offset3, None);
     }
 }

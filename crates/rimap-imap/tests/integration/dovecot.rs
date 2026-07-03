@@ -641,9 +641,9 @@ async fn case_17_delete_message() {
     let _ = h.connection.create_folder("Trash").await;
 
     // Delete it (move to Trash)
-    let result = h
+    let (result, _uid_validity) = h
         .connection
-        .delete_message("INBOX", uid, "Trash")
+        .delete_message("INBOX", uid, "Trash", None)
         .await
         .unwrap();
     assert!(result.moved_to_trash);
@@ -661,6 +661,107 @@ async fn case_17_delete_message() {
     assert!(
         !after.contains(&uid),
         "message should be gone from INBOX after delete"
+    );
+}
+
+/// `delete_message` with `expected_uidvalidity`: a matching value proceeds
+/// and echoes the observed UIDVALIDITY; a stale value (captured before the
+/// folder is deleted and recreated, which rotates UIDVALIDITY) aborts with
+/// `ImapError::UidValidityChanged` and performs no delete.
+#[tokio::test]
+async fn case_23_delete_message_uidvalidity_guard() {
+    let Some(h) = boot(PinChoice::Correct) else {
+        return;
+    };
+    let folder = "DeleteGuardTest";
+    h.connection.create_folder(folder).await.unwrap();
+    let _ = h.connection.create_folder("Trash").await;
+
+    let msg = support::fixtures::minimal_rfc5322("delete-guard-test");
+    h.connection
+        .append_message(folder, &msg, &[], &[])
+        .await
+        .unwrap();
+    let (uids, uid_validity) = Box::pin(h.connection.search(
+        folder,
+        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
+            subject: Some("delete-guard-test".to_string()),
+            ..Default::default()
+        }),
+    ))
+    .await
+    .unwrap();
+    assert!(!uids.is_empty(), "seeded message not found");
+    let uid = uids[0];
+    let stale_validity = uid_validity.expect("dovecot reports UIDVALIDITY");
+
+    // Matching UIDVALIDITY: the delete proceeds and echoes the value back.
+    let (result, observed) = h
+        .connection
+        .delete_message(folder, uid, "Trash", Some(stale_validity))
+        .await
+        .unwrap();
+    assert!(result.moved_to_trash);
+    assert_eq!(observed, Some(stale_validity));
+
+    // Force a new UIDVALIDITY by deleting and recreating the folder. The
+    // prior `delete_message` call left `folder` selected via SELECT on this
+    // session; deselect it first (Dovecot drops the connection if a client
+    // tries to DELETE its own currently-selected mailbox) by selecting
+    // INBOX instead.
+    let _ = Box::pin(h.connection.search(
+        "INBOX",
+        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery::default()),
+    ))
+    .await
+    .unwrap();
+    h.connection.delete_folder(folder).await.unwrap();
+    h.connection.create_folder(folder).await.unwrap();
+    h.connection
+        .append_message(folder, &msg, &[], &[])
+        .await
+        .unwrap();
+    let (uids, fresh_validity) = Box::pin(h.connection.search(
+        folder,
+        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
+            subject: Some("delete-guard-test".to_string()),
+            ..Default::default()
+        }),
+    ))
+    .await
+    .unwrap();
+    assert!(!uids.is_empty(), "seeded message not found after recreate");
+    let fresh_uid = uids[0];
+    assert_ne!(
+        fresh_validity,
+        Some(stale_validity),
+        "recreating the folder should rotate UIDVALIDITY"
+    );
+
+    // Stale UIDVALIDITY: the guard aborts before any STORE/MOVE is issued.
+    let err = h
+        .connection
+        .delete_message(folder, fresh_uid, "Trash", Some(stale_validity))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ImapError::UidValidityChanged { .. }),
+        "expected UidValidityChanged, got {err:?}"
+    );
+
+    // The message must still be present — the guard aborted before delete.
+    let (after, _) = Box::pin(h.connection.search(
+        folder,
+        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
+            subject: Some("delete-guard-test".to_string()),
+            ..Default::default()
+        }),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        after.contains(&fresh_uid),
+        "message must survive a guard-aborted delete"
     );
 }
 

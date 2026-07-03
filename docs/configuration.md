@@ -243,6 +243,16 @@ authorization gates within their parent tool. The parent tool name
 (`search`, `fetch_message`) controls the base capability; the
 sub-capability controls the escape hatch.
 
+`fetch_message`'s `include_headers` parameter is **not** a gated
+sub-capability. It takes an allowlist of header names (≤ 16 per call,
+e.g. `["List-Unsubscribe", "List-Id"]`) and returns their sanitized
+values under `untrusted.headers`. It is available at every posture
+`fetch_message` is, because reading named header values off a single
+already-fetched message is a weaker capability than the header *filtering*
+that `search.advanced_query` already gates at `full`. See
+`docs/superpowers/specs/2026-07-03-issue-409-include-headers-design.md`
+for the threat-model rationale.
+
 #### Override semantics
 
 - `"allow"` grants the tool regardless of posture
