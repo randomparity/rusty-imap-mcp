@@ -95,6 +95,62 @@ For GUI MCP clients, use the absolute path to the binary and set
 }
 ```
 
+## Unsupported protocol version during initialize
+
+If your MCP client rejects the server at startup, or its logs show an
+error like:
+
+```
+Unsupported protocol version: '2025-06-18'. Server supports: 2025-11-25.
+```
+
+your MCP host sent an `initialize` request with a `protocolVersion`
+other than `2025-11-25`, and rusty-imap-mcp returned a JSON-RPC
+`INVALID_PARAMS` error instead of negotiating down to the host's
+version.
+
+### Why there's no fallback
+
+Per the MCP spec, a server that doesn't support a client's requested
+version should counter-offer a version it does support, and let the
+client decide whether to proceed. rusty-imap-mcp doesn't do this — it
+accepts `protocolVersion` only when it matches `2025-11-25`
+(`ProtocolVersion::LATEST`) exactly.
+
+This is deliberate. The `rmcp` SDK this project is built on always
+serializes `initialize`, `tools/list`, and other responses using the
+wire shapes of its own compiled-in latest spec revision, regardless of
+what version string appears in the response. Echoing back an older
+version the client requested — the behavior the spec recommends —
+would leave the response *body* still shaped like `2025-11-25`,
+misrepresenting which spec revision's semantics the client is actually
+getting. Rejecting the mismatch outright is more honest than that
+silent lie. See the `initialize` implementation and the
+`unsupported_protocol_version_error` builder in
+`crates/rimap-server/src/mcp/server.rs`, and
+[#276](https://github.com/randomparity/rusty-imap-mcp/issues/276) for
+the earlier version-echoing bug this replaced.
+
+### Fix
+
+Update your MCP host. Every mainstream host (Claude Desktop, Claude
+Code, Claude.ai, Cursor, VS Code, etc.) has negotiated `2025-11-25` by
+default since that revision became the MCP spec's latest, so this
+almost always means the host predates that update — check for an
+app/CLI update and retry.
+
+### When this will change
+
+If a future `rmcp` release adds real per-version wire-shape
+negotiation (rather than just echoing a version string while
+serializing the latest shapes), rusty-imap-mcp can counter-offer a
+supported version instead of rejecting outright. No dedicated upstream
+tracking issue for that capability exists as of this writing; the
+closest related report is
+[modelcontextprotocol/rust-sdk#916](https://github.com/modelcontextprotocol/rust-sdk/issues/916)
+(the `streamable_http` transport skipping version negotiation
+entirely — a narrower, transport-specific instance of the same gap).
+
 ## Verifying and managing stored credentials
 
 `rusty-imap-mcp login` stores the IMAP/SMTP password in the OS-native
