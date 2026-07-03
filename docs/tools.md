@@ -45,7 +45,7 @@ Every response also carries `security_warnings`, an array of structured trust ob
 
 **Search Messages** — minimum posture: `readonly`
 
-Find message UIDs in a folder by structured criteria (sender, subject, date, flags, size). The UID-discovery step feeding fetch_message, mark_read, move_message and other per-message tools; it also returns the folder's uid_validity those tools accept as a guard. Ordered oldest-first by UID (set newest_first to reverse); paginate with offset/limit and next_offset.
+Find message UIDs in a folder by structured criteria (sender, subject, date, flags, size). The UID-discovery step feeding fetch_message, mark_read, move_message and other per-message tools; it also returns the folder's uid_validity those tools accept as a guard. Ordered oldest-first by UID (set newest_first to reverse); paginate with offset/limit and next_offset. Set thread_of_uid to retrieve a whole conversation instead of a filtered search.
 
 ### Parameters
 
@@ -75,6 +75,7 @@ Find message UIDs in a folder by structured criteria (sender, subject, date, fla
 | `smaller` | integer or string (nullable) | no | Match messages strictly smaller than this many octets. |
 | `subject` | string or null | no | Filter by `Subject` header substring. |
 | `text` | string or null | no | Substring search across headers OR body. Searches message content, so it is denied unless the account posture is `full` or `destructive`. Check the `rimap://accounts/<name>` resource for this account's posture and available tools. |
+| `thread_of_uid` | integer or string (nullable) | no | Return the whole conversation containing this UID instead of a filtered search: the target message, every ancestor named in its own `References`/`In-Reply-To` chain, and every descendant whose `References`/`In-Reply-To` names the target's `Message-ID`. A Message-ID chain-walk within `folder` only — no IMAP THREAD extension. Mutually exclusive with `advanced_query`. All other filters are ignored when set. Available at every posture: the header values compared come from the target message itself, not caller-supplied text, so this cannot probe arbitrary header/value pairs the way `headers`/`body`/`text` can. |
 | `to` | string or null | no | Filter by `To` header substring. |
 
 ### Response

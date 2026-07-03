@@ -170,6 +170,23 @@ pub struct SearchInput {
     )]
     #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub body_preview_bytes: Option<usize>,
+    /// Return the whole conversation containing this UID instead of a
+    /// filtered search: the target message, every ancestor named in
+    /// its own `References`/`In-Reply-To` chain, and every descendant
+    /// whose `References`/`In-Reply-To` names the target's
+    /// `Message-ID`. A Message-ID chain-walk within `folder` only — no
+    /// IMAP THREAD extension. Mutually exclusive with `advanced_query`.
+    /// All other filters are ignored when set. Available at every
+    /// posture: the header values compared come from the target
+    /// message itself, not caller-supplied text, so this cannot probe
+    /// arbitrary header/value pairs the way `headers`/`body`/`text`
+    /// can.
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_nonzero_u32"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_nonzero_u32")]
+    pub thread_of_uid: Option<core::num::NonZeroU32>,
 }
 
 /// A single message entry in a `search` untrusted payload.
@@ -262,6 +279,10 @@ pub async fn handle(
 ) -> Result<ToolResponse<SearchMeta, SearchUntrusted>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
 
+    if let Some(target) = input.thread_of_uid {
+        return Box::pin(handle_thread(account, input, target)).await;
+    }
+
     let query = build_query(&input)?;
 
     let (uids, uid_validity) = Box::pin(account.imap.search(&input.folder, query)).await?;
@@ -273,37 +294,7 @@ pub async fn handle(
 
     let (page_uids, truncated, next_offset) = paginate_uids(uids, offset, limit, newest_first);
 
-    let mut messages: Vec<SearchResultEntry> = if page_uids.is_empty() {
-        Vec::new()
-    } else {
-        let fetched = account
-            .imap
-            .fetch(
-                &input.folder,
-                &page_uids,
-                FetchSpec {
-                    envelope: true,
-                    flags: true,
-                    size: true,
-                    ..FetchSpec::default()
-                },
-                None,
-            )
-            .await?;
-        let (fetched, _uid_validity) = fetched;
-        // `fetch` streams FETCH responses back in the server's own
-        // (ascending) order regardless of the order `page_uids` was
-        // passed in, so reassemble in `page_uids`' order — the only
-        // place the requested ordering (oldest-first or newest-first)
-        // is actually recorded — rather than trusting the fetch order.
-        let mut by_uid: std::collections::HashMap<Uid, &FetchedMessage> =
-            fetched.iter().map(|m| (m.uid, m)).collect();
-        page_uids
-            .iter()
-            .filter_map(|uid| by_uid.remove(uid))
-            .map(format_search_result)
-            .collect()
-    };
+    let mut messages = fetch_and_format_page(account, &input.folder, &page_uids).await?;
 
     // Body previews (option (b) of #410): best-effort, per-UID isolated.
     let preview_warnings =
@@ -319,6 +310,187 @@ pub async fn handle(
     })
     .with_untrusted(SearchUntrusted { messages })
     .with_warnings(preview_warnings))
+}
+
+/// `thread_of_uid` path (option (c) of #410): return the conversation
+/// containing `target`, in place of a normal filtered search.
+///
+/// Fetches the target message's own `Message-ID`/`References`/
+/// `In-Reply-To` headers, then issues one combined `SEARCH` for every
+/// message causally connected to it (see
+/// `rimap_imap`'s `Connection::thread_related`), unions the result
+/// with the target UID itself, and paginates/formats identically to
+/// the normal `search` path.
+async fn handle_thread(
+    account: &AccountState,
+    input: SearchInput,
+    target: core::num::NonZeroU32,
+) -> Result<ToolResponse<SearchMeta, SearchUntrusted>, rimap_core::RimapError> {
+    validate_thread_request(&input)?;
+
+    let target_uid = Uid::from(target);
+    let (own_message_id, ancestor_ids) =
+        fetch_thread_headers(account, &input.folder, target_uid).await?;
+
+    let (mut related, uid_validity) = Box::pin(account.imap.thread_related(
+        &input.folder,
+        own_message_id.as_deref(),
+        &ancestor_ids,
+    ))
+    .await?;
+
+    if !related.contains(&target_uid) {
+        related.push(target_uid);
+        related.sort_unstable();
+    }
+    let total_matched = related.len();
+
+    let offset = input.offset.unwrap_or(0);
+    let limit = input.limit.unwrap_or(MAX_LIMIT).min(MAX_LIMIT);
+    let newest_first = input.newest_first.unwrap_or(false);
+
+    let (page_uids, truncated, next_offset) = paginate_uids(related, offset, limit, newest_first);
+
+    let mut messages = fetch_and_format_page(account, &input.folder, &page_uids).await?;
+
+    let preview_warnings =
+        attach_body_previews(account, &input.folder, uid_validity, &mut messages, &input).await;
+
+    Ok(ToolResponse::meta_only(SearchMeta {
+        folder: input.folder,
+        total_matched,
+        returned: messages.len(),
+        truncated,
+        next_offset,
+        uid_validity,
+    })
+    .with_untrusted(SearchUntrusted { messages })
+    .with_warnings(preview_warnings))
+}
+
+/// Fetch `target`'s raw body and extract its own `Message-ID` plus the
+/// list of ancestor Message-IDs from its `References` and
+/// `In-Reply-To` headers (closest ancestors first — see
+/// `cap_ancestor_ids`). Reuses the same header-extraction pipeline as
+/// `fetch_message`'s `include_headers` (#409).
+async fn fetch_thread_headers(
+    account: &AccountState,
+    folder: &str,
+    target: Uid,
+) -> Result<(Option<String>, Vec<String>), rimap_core::RimapError> {
+    let raw = account.imap.fetch_body(folder, target, None).await?;
+    let wanted = vec![
+        "Message-ID".to_string(),
+        "References".to_string(),
+        "In-Reply-To".to_string(),
+    ];
+    let (_, selected) =
+        crate::tools::content_parse::parse_message_with_headers_async(raw, wanted).await?;
+
+    let mut own_message_id = None;
+    let mut ancestor_ids = Vec::new();
+    for header in selected {
+        match header.name.as_str() {
+            "Message-ID" => {
+                own_message_id = header.values.into_iter().next();
+            }
+            "References" | "In-Reply-To" => {
+                for value in &header.values {
+                    ancestor_ids.extend(parse_message_id_tokens(value));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((own_message_id, cap_ancestor_ids(ancestor_ids)))
+}
+
+/// Reject a `thread_of_uid` request combined with `advanced_query` —
+/// both are "special mode" flags that each determine the whole query,
+/// so combining them is ambiguous about which one actually runs.
+/// Pure and independent of the async IMAP layer so it is unit-testable
+/// without a live connection.
+fn validate_thread_request(input: &SearchInput) -> Result<(), rimap_core::RimapError> {
+    if input.advanced_query.is_some() {
+        return Err(rimap_core::RimapError::invalid_input(
+            "thread_of_uid cannot be combined with advanced_query",
+        ));
+    }
+    Ok(())
+}
+
+/// Split a `References`/`In-Reply-To` header value into individual RFC
+/// 5322 msg-id tokens (`<local@domain>`). Ignores anything that is not
+/// a bracketed msg-id (stray whitespace or comments some clients emit).
+fn parse_message_id_tokens(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .filter(|tok| tok.starts_with('<') && tok.ends_with('>') && tok.len() > 2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Maximum number of ancestor Message-IDs to search for when walking a
+/// target message's `References`/`In-Reply-To` chain. Bounds IMAP
+/// command length and search cost against pathologically long chains.
+const MAX_THREAD_ANCESTOR_IDS: usize = 50;
+
+/// Deduplicate (preserving first occurrence) and cap `ids` at
+/// [`MAX_THREAD_ANCESTOR_IDS`], keeping the *last* entries when the
+/// list is longer than the cap. `References` is ordered oldest-first
+/// per RFC 5322 §3.6.4 (each hop appends its own `Message-ID`), so the
+/// tail holds the closest ancestors — the most useful ones to keep
+/// when a chain must be truncated.
+fn cap_ancestor_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    let mut deduped = Vec::with_capacity(ids.len());
+    for id in ids {
+        if seen.insert(id.clone()) {
+            deduped.push(id);
+        }
+    }
+    let start = deduped.len().saturating_sub(MAX_THREAD_ANCESTOR_IDS);
+    deduped.split_off(start)
+}
+
+/// Fetch envelope/flags/size for `page_uids` and format each as a
+/// `SearchResultEntry`, in `page_uids`' order (not the FETCH response
+/// order — see the comment on the `fetch` call for why).
+async fn fetch_and_format_page(
+    account: &AccountState,
+    folder: &str,
+    page_uids: &[Uid],
+) -> Result<Vec<SearchResultEntry>, rimap_core::RimapError> {
+    if page_uids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fetched = account
+        .imap
+        .fetch(
+            folder,
+            page_uids,
+            FetchSpec {
+                envelope: true,
+                flags: true,
+                size: true,
+                ..FetchSpec::default()
+            },
+            None,
+        )
+        .await?;
+    let (fetched, _uid_validity) = fetched;
+    // `fetch` streams FETCH responses back in the server's own
+    // (ascending) order regardless of the order `page_uids` was passed
+    // in, so reassemble in `page_uids`' order — the only place the
+    // requested ordering (oldest-first, newest-first, or thread
+    // membership order) is actually recorded — rather than trusting
+    // the fetch order.
+    let mut by_uid: std::collections::HashMap<Uid, &FetchedMessage> =
+        fetched.iter().map(|m| (m.uid, m)).collect();
+    Ok(page_uids
+        .iter()
+        .filter_map(|uid| by_uid.remove(uid))
+        .map(format_search_result)
+        .collect())
 }
 
 /// Fill `body_preview` on the first [`MAX_PREVIEW_MESSAGES`] entries when
@@ -877,6 +1049,7 @@ mod tests {
             offset: None,
             newest_first: None,
             body_preview_bytes: None,
+            thread_of_uid: None,
         }
     }
 
@@ -1316,5 +1489,79 @@ mod tests {
         );
         assert!(!truncated3);
         assert_eq!(next_offset3, None);
+    }
+
+    #[test]
+    fn parse_message_id_tokens_splits_whitespace_separated_ids() {
+        let tokens = parse_message_id_tokens("<a@x.com> <b@y.com>  <c@z.com>");
+        assert_eq!(tokens, vec!["<a@x.com>", "<b@y.com>", "<c@z.com>"]);
+    }
+
+    #[test]
+    fn parse_message_id_tokens_ignores_non_bracketed_stray_text() {
+        // Some clients emit comments or malformed References; only
+        // well-formed <...> tokens should survive.
+        let tokens = parse_message_id_tokens("<a@x.com> (comment) not-an-id <b@y.com>");
+        assert_eq!(tokens, vec!["<a@x.com>", "<b@y.com>"]);
+    }
+
+    #[test]
+    fn parse_message_id_tokens_rejects_bare_angle_brackets() {
+        assert_eq!(parse_message_id_tokens("<>"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_message_id_tokens_empty_input_yields_empty_vec() {
+        assert!(parse_message_id_tokens("").is_empty());
+        assert!(parse_message_id_tokens("   ").is_empty());
+    }
+
+    #[test]
+    fn cap_ancestor_ids_dedupes_preserving_first_occurrence() {
+        let ids = vec!["<a>".to_string(), "<b>".to_string(), "<a>".to_string()];
+        assert_eq!(cap_ancestor_ids(ids), vec!["<a>", "<b>"]);
+    }
+
+    #[test]
+    fn cap_ancestor_ids_under_cap_returns_all() {
+        let ids: Vec<String> = (0..5).map(|i| format!("<{i}>")).collect();
+        assert_eq!(cap_ancestor_ids(ids.clone()), ids);
+    }
+
+    #[test]
+    fn cap_ancestor_ids_over_cap_keeps_closest_ancestors() {
+        // References is oldest-first (RFC 5322 §3.6.4), so when a chain
+        // exceeds the cap, the *last* (closest/most recent) entries are
+        // the useful ones to keep.
+        let ids: Vec<String> = (0..MAX_THREAD_ANCESTOR_IDS + 10)
+            .map(|i| format!("<{i}>"))
+            .collect();
+        let capped = cap_ancestor_ids(ids);
+        assert_eq!(capped.len(), MAX_THREAD_ANCESTOR_IDS);
+        assert_eq!(capped.first().map(String::as_str), Some("<10>"));
+        assert_eq!(
+            capped.last().map(String::as_str),
+            Some(format!("<{}>", MAX_THREAD_ANCESTOR_IDS + 9).as_str()),
+        );
+    }
+
+    #[test]
+    fn validate_thread_request_rejects_advanced_query_combination() {
+        let mut input = input_with_folder();
+        input.advanced_query = Some("ALL".to_string());
+        input.thread_of_uid = std::num::NonZeroU32::new(1);
+        let err = validate_thread_request(&input)
+            .expect_err("advanced_query + thread_of_uid must be rejected");
+        assert!(
+            err.to_string().contains("thread_of_uid"),
+            "expected thread_of_uid/advanced_query conflict error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_thread_request_accepts_thread_of_uid_alone() {
+        let mut input = input_with_folder();
+        input.thread_of_uid = std::num::NonZeroU32::new(1);
+        assert!(validate_thread_request(&input).is_ok());
     }
 }

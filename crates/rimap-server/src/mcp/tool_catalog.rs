@@ -141,7 +141,8 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
              tools; it also returns the folder's uid_validity those tools \
              accept as a guard. Ordered oldest-first by UID (set \
              newest_first to reverse); paginate with offset/limit and \
-             next_offset.",
+             next_offset. Set thread_of_uid to retrieve a whole \
+             conversation instead of a filtered search.",
             envelope_schema::<SearchInput>(),
             envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>(),
         ),

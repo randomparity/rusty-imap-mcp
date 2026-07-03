@@ -502,4 +502,19 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn refine_tool_name_does_not_promote_on_thread_of_uid() {
+        // thread_of_uid (#435) is not a content-oracle input: the
+        // header values it compares come from the target message
+        // itself, not caller-supplied text, so it stays at the
+        // low-posture Search seat like cc/larger/etc.
+        let mut args = serde_json::Map::new();
+        args.insert("thread_of_uid".into(), serde_json::json!(42));
+        assert_eq!(
+            refine_tool_name(ToolName::Search, Some(&args)),
+            ToolName::Search,
+            "thread_of_uid unexpectedly promoted",
+        );
+    }
 }

@@ -139,6 +139,26 @@ impl Connection {
         .await
     }
 
+    /// `SEARCH` for messages related to `own_message_id` by RFC 5322
+    /// threading (`References`/`In-Reply-To`/`Message-ID`), within
+    /// `folder`. See `ops::search::thread_related` for the query this
+    /// builds and its injection-safety rationale.
+    ///
+    /// # Errors
+    /// Propagates timeout, connection-lost, or protocol errors from the
+    /// underlying `ops::search::thread_related` call.
+    pub async fn thread_related(
+        &self,
+        folder: &str,
+        own_message_id: Option<&str>,
+        ancestor_ids: &[String],
+    ) -> Result<(Vec<crate::types::Uid>, Option<u32>), ImapError> {
+        self.with_session("thread_related", async |session| {
+            crate::ops::search::thread_related(session, folder, own_message_id, ancestor_ids).await
+        })
+        .await
+    }
+
     /// `FETCH` for the given UIDs with the requested items. Does NOT include
     /// `BODY[]` — see `fetch_body` (Task 13) for full message retrieval.
     ///
