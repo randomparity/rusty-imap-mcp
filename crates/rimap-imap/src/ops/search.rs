@@ -25,10 +25,21 @@ pub(crate) async fn search(
         .uid_search(&key)
         .await
         .map_err(super::folders::map_err)?;
-    Ok((
-        uids.into_iter().filter_map(Uid::new).collect(),
-        uid_validity,
-    ))
+    Ok((sorted_uids(uids), uid_validity))
+}
+
+/// Convert the raw `UID SEARCH` response into a numerically ascending
+/// `Vec<Uid>`. `async-imap`'s `uid_search` returns a `HashSet<u32>`
+/// because RFC 3501 does not mandate an order for `SEARCH` results, and
+/// `HashSet` iteration order is not numeric or otherwise meaningful.
+/// Sorting ascending here establishes a deterministic order for callers
+/// to paginate against — oldest first, since UIDs are strictly
+/// increasing within a mailbox's `UIDVALIDITY` epoch (RFC 3501
+/// §2.3.1.1).
+fn sorted_uids(raw: std::collections::HashSet<u32>) -> Vec<Uid> {
+    let mut uids: Vec<Uid> = raw.into_iter().filter_map(Uid::new).collect();
+    uids.sort_unstable();
+    uids
 }
 
 fn structured_to_key(q: &StructuredQuery) -> Result<String, ImapError> {
@@ -183,7 +194,7 @@ fn format_imap_date(d: ::time::Date) -> String {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::{format_imap_date, quote, structured_to_key, validate_header_name};
+    use super::{format_imap_date, quote, sorted_uids, structured_to_key, validate_header_name};
     use crate::error::ImapError;
     use crate::types::StructuredQuery;
 
@@ -191,6 +202,28 @@ mod tests {
     fn structured_to_key_empty_query_yields_all() {
         let q = StructuredQuery::default();
         assert_eq!(structured_to_key(&q).unwrap(), "ALL");
+    }
+
+    #[test]
+    fn sorted_uids_orders_ascending_regardless_of_hashset_iteration_order() {
+        let raw: std::collections::HashSet<u32> = [42, 7, 100, 1, 23].into_iter().collect();
+        let sorted: Vec<u32> = sorted_uids(raw).iter().map(|u| u.get()).collect();
+        assert_eq!(sorted, vec![1, 7, 23, 42, 100]);
+    }
+
+    #[test]
+    fn sorted_uids_filters_out_zero() {
+        // UID SEARCH cannot legitimately return 0 (RFC 3501 §2.3.1.1),
+        // but Uid::new rejects it defensively; confirm it is dropped
+        // rather than panicking.
+        let raw: std::collections::HashSet<u32> = [0, 5].into_iter().collect();
+        let sorted: Vec<u32> = sorted_uids(raw).iter().map(|u| u.get()).collect();
+        assert_eq!(sorted, vec![5]);
+    }
+
+    #[test]
+    fn sorted_uids_empty_set_yields_empty_vec() {
+        assert!(sorted_uids(std::collections::HashSet::new()).is_empty());
     }
 
     #[test]
