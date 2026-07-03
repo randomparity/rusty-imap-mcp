@@ -67,6 +67,7 @@ pub(super) fn refine_tool_name(
         | ToolName::MoveMessage
         | ToolName::CreateDraft
         | ToolName::SendEmail
+        | ToolName::Forward
         | ToolName::DeleteMessage
         | ToolName::Expunge
         | ToolName::CreateFolder

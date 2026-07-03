@@ -27,6 +27,12 @@ pub(crate) const MAX_SUBJECT_LEN: usize = 1000;
 pub(crate) const MAX_BODY_BYTES: usize = 1_048_576;
 pub(crate) const MAX_REFERENCES: usize = 50;
 
+/// Upper bound on the size of the original message a `forward` will
+/// re-send. The fetched message is base64-wrapped as a `message/rfc822`
+/// part (≈ +33% on the wire), so this raw cap keeps the outgoing message
+/// within common MTA limits while bounding server memory.
+pub(crate) const MAX_FORWARD_ORIGINAL_BYTES: usize = 25 * 1_048_576;
+
 /// Common input fields shared by `create_draft` and `send_email`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
@@ -103,6 +109,123 @@ pub(crate) fn validate_compose_input(input: &ComposeInput) -> Result<(), rimap_c
         crate::tools::validation::validate_folder_input("in_reply_to_folder", folder)?;
     }
     Ok(())
+}
+
+/// Validate a forward's recipient set: at least one `To`, the shared
+/// `MAX_RECIPIENTS` cap across To/Cc/Bcc, and per-address header-injection
+/// guards. Mirrors the recipient checks in [`validate_compose_input`] for
+/// the `forward` tool, which carries no subject/body of its own.
+pub(crate) fn validate_recipient_set(
+    to: &[AddressInput],
+    cc: Option<&[AddressInput]>,
+    bcc: Option<&[AddressInput]>,
+) -> Result<(), rimap_core::RimapError> {
+    if to.is_empty() {
+        return Err(rimap_core::RimapError::invalid_input(
+            "at least one To recipient is required",
+        ));
+    }
+    let total = to.len() + cc.map_or(0, <[_]>::len) + bcc.map_or(0, <[_]>::len);
+    if total > MAX_RECIPIENTS {
+        return Err(rimap_core::RimapError::invalid_input(format!(
+            "too many recipients ({total}); max is {MAX_RECIPIENTS}"
+        )));
+    }
+    validate_addresses("To", to)?;
+    if let Some(cc) = cc {
+        validate_addresses("CC", cc)?;
+    }
+    if let Some(bcc) = bcc {
+        validate_addresses("BCC", bcc)?;
+    }
+    Ok(())
+}
+
+/// Prefix a fetched (untrusted) subject with `Fwd: ` for a forward.
+///
+/// The subject comes from `rimap_content::extract_subject`, which RFC
+/// 2047-decodes it. A decoded encoded-word can contain bare CR/LF that
+/// `mail_builder` does NOT neutralize in a `Subject` value, so every
+/// control character is stripped here before the value reaches the
+/// builder — otherwise it would enable header injection into the outgoing
+/// message. The result is capped at `MAX_SUBJECT_LEN` on a char boundary.
+#[must_use]
+pub(crate) fn forwarded_subject(original: Option<&str>) -> String {
+    let cleaned: String = original
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let cleaned = cleaned.trim();
+    let subject = if cleaned.is_empty() {
+        "Fwd:".to_string()
+    } else {
+        format!("Fwd: {cleaned}")
+    };
+    if subject.len() <= MAX_SUBJECT_LEN {
+        return subject;
+    }
+    let mut end = MAX_SUBJECT_LEN;
+    while !subject.is_char_boundary(end) {
+        end -= 1;
+    }
+    subject[..end].to_string()
+}
+
+/// Build the raw RFC 5322 bytes for a `forward`: a `message/rfc822`
+/// wrapper carrying `original_raw` verbatim, with `comment_body` as the
+/// text/plain body and threading headers echoing the source message.
+///
+/// Security-relevant construction choices:
+/// - `Bcc` is intentionally NOT set on the builder, so the header never
+///   appears in the sent DATA (Bcc recipients ride only in the SMTP
+///   envelope). Passing `bcc` here would disclose them to every recipient.
+/// - The wrapper is added via [`MessageBuilder::attachment`] with a
+///   non-`text/*` content type, so `mail_builder` base64-encodes it. This
+///   neutralizes bare-LF headers, boundary-lookalikes, and 8bit content in
+///   attacker-crafted original bytes. Never switch this to a raw/7bit/8bit
+///   part.
+/// - `subject` must already be sanitized via [`forwarded_subject`]; the
+///   threading `message_id` is already stripped of `< > CR LF NUL` by
+///   `extract_threading_headers`.
+pub(crate) fn build_forward_message(
+    from_addr: &str,
+    to: &[AddressInput],
+    cc: Option<&[AddressInput]>,
+    subject: &str,
+    comment_body: &str,
+    original_raw: &[u8],
+    threading: &rimap_content::ThreadingHeaders,
+) -> Result<Vec<u8>, rimap_core::RimapError> {
+    let msg_id = generate_message_id(from_addr);
+    let mut builder = MessageBuilder::new()
+        .from(from_addr)
+        .to(addresses_to_builder(to))
+        .subject(subject)
+        .text_body(comment_body)
+        .message_id(msg_id);
+
+    if let Some(cc) = cc.filter(|v| !v.is_empty()) {
+        builder = builder.cc(addresses_to_builder(cc));
+    }
+
+    if let Some(orig_id) = threading.message_id.as_ref().filter(|s| !s.is_empty()) {
+        builder = builder.in_reply_to(orig_id.clone());
+        let mut refs = threading.references.clone();
+        refs.push(orig_id.clone());
+        let refs = cap_references(refs);
+        builder = builder.references(MessageId::new_list(refs.into_iter()));
+    }
+
+    // Non-`text/*` content type → mail_builder base64-encodes the part.
+    builder = builder.attachment("message/rfc822", "forwarded.eml", original_raw.to_vec());
+
+    builder
+        .write_to_vec()
+        .map_err(|e| rimap_core::RimapError::InternalSourced {
+            message: "failed to build forward message".into(),
+            source: Box::new(e),
+        })
 }
 
 /// Reject strings that could inject RFC 5322 headers.
@@ -673,5 +796,208 @@ mod tests {
         let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
         assert!(parsed.cc().is_none());
         assert!(parsed.bcc().is_none());
+    }
+
+    // --- forward (#408) ---
+
+    use super::{
+        MAX_RECIPIENTS, MAX_SUBJECT_LEN, build_forward_message, forwarded_subject,
+        validate_recipient_set,
+    };
+
+    fn to_one(a: &str) -> Vec<AddressInput> {
+        vec![AddressInput {
+            name: None,
+            address: a.to_string(),
+        }]
+    }
+
+    #[test]
+    fn forwarded_subject_prefixes_and_strips_controls() {
+        assert_eq!(forwarded_subject(Some("Hello")), "Fwd: Hello");
+        assert_eq!(forwarded_subject(None), "Fwd:");
+        assert_eq!(forwarded_subject(Some("   ")), "Fwd:");
+        // A decoded encoded-word can carry bare CR/LF; they must be stripped
+        // before the value reaches the builder, or they inject headers.
+        let cleaned = forwarded_subject(Some("hi\r\nBcc: evil@example.com"));
+        assert!(!cleaned.contains('\r') && !cleaned.contains('\n'));
+        assert_eq!(cleaned, "Fwd: hiBcc: evil@example.com");
+    }
+
+    #[test]
+    fn forwarded_subject_capped_at_max_len() {
+        let subject = forwarded_subject(Some(&"x".repeat(MAX_SUBJECT_LEN * 2)));
+        assert!(subject.len() <= MAX_SUBJECT_LEN);
+    }
+
+    #[test]
+    fn build_forward_wraps_original_as_base64_message_rfc822() {
+        let original = MessageBuilder::new()
+            .from("orig@example.com")
+            .to("me@example.com")
+            .message_id("orig-123@example.com")
+            .subject("Original")
+            .text_body("original body")
+            .write_to_vec()
+            .unwrap();
+
+        let threading = rimap_content::extract_threading_headers(&original);
+        let subject = forwarded_subject(rimap_content::extract_subject(&original).as_deref());
+        let raw = build_forward_message(
+            "me@example.com",
+            &to_one("dest@example.com"),
+            None,
+            &subject,
+            "see below",
+            &original,
+            &threading,
+        )
+        .unwrap();
+
+        let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+        assert_eq!(parsed.subject().unwrap(), "Fwd: Original");
+        assert_eq!(
+            parsed.to().unwrap().first().unwrap().address().unwrap(),
+            "dest@example.com",
+        );
+        // Threading preserved from the fetched bytes.
+        assert_eq!(
+            parsed.in_reply_to().as_text().unwrap(),
+            "orig-123@example.com",
+        );
+
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("message/rfc822"), "wrapper part missing");
+        // The wrapper must be base64 — never a raw/8bit part. If it were raw,
+        // the original's `Subject:`/`From:` lines would appear verbatim in
+        // the output and could break the outer framing.
+        assert!(
+            text.to_ascii_lowercase().contains("base64"),
+            "message/rfc822 wrapper must be base64-encoded",
+        );
+        assert!(
+            !text.contains("original body"),
+            "original body leaked unencoded into the wrapper",
+        );
+    }
+
+    #[test]
+    fn build_forward_excludes_bcc_from_data() {
+        // build_forward_message never receives bcc; the header must not
+        // appear in the sent DATA (bcc rides the SMTP envelope only).
+        let original = MessageBuilder::new()
+            .from("orig@example.com")
+            .subject("O")
+            .text_body("b")
+            .write_to_vec()
+            .unwrap();
+        let threading = rimap_content::extract_threading_headers(&original);
+        let raw = build_forward_message(
+            "me@example.com",
+            &to_one("dest@example.com"),
+            None,
+            "Fwd: O",
+            "",
+            &original,
+            &threading,
+        )
+        .unwrap();
+        let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+        assert!(
+            parsed.bcc().is_none(),
+            "Bcc must not be in the message DATA"
+        );
+    }
+
+    #[test]
+    fn build_forward_neutralizes_smuggled_subject_header_injection() {
+        // A malicious original carries a Q-encoded Subject that decodes to a
+        // value containing CRLF + a fake Bcc header. Extracting + sanitizing
+        // it must strip the CRLF so the outbound message has no injected
+        // header. The original's own `Subject:` line is base64-wrapped, so it
+        // never appears as a second plaintext Subject header.
+        let original = b"From: attacker@evil.example\r\n\
+              Subject: =?utf-8?Q?PWNED=0D=0ABcc:=20evil@example.com?=\r\n\
+              Message-ID: <o@evil.example>\r\n\
+              \r\n\
+              body\r\n"
+            .to_vec();
+
+        let decoded = rimap_content::extract_subject(&original);
+        // The decoded subject really does contain the smuggled CRLF...
+        assert!(decoded.as_deref().unwrap().contains('\n'));
+        // ...but forwarded_subject strips it.
+        let subject = forwarded_subject(decoded.as_deref());
+        assert!(!subject.contains('\r') && !subject.contains('\n'));
+
+        let threading = rimap_content::extract_threading_headers(&original);
+        let raw = build_forward_message(
+            "me@example.com",
+            &to_one("dest@example.com"),
+            None,
+            &subject,
+            "",
+            &original,
+            &threading,
+        )
+        .unwrap();
+
+        let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+        assert!(
+            parsed.bcc().is_none(),
+            "smuggled Bcc must not become a real header",
+        );
+        let text = String::from_utf8_lossy(&raw);
+        assert_eq!(
+            text.matches("Subject:").count(),
+            1,
+            "exactly one (outer) Subject header; original's is base64-wrapped",
+        );
+    }
+
+    #[test]
+    fn build_forward_base64_neutralizes_boundary_lookalike() {
+        // An original whose bytes embed a boundary-lookalike and a bare-LF
+        // header must be base64-wrapped so those bytes cannot break the outer
+        // MIME frame — none of the attacker's tokens appear as plaintext.
+        let original = b"From: a@b\nSubject: x\n\r\n--=_lookalike_boundary\r\n\
+              Content-Type: text/x-smuggled\r\n\r\npayload\r\n"
+            .to_vec();
+        let threading = rimap_content::extract_threading_headers(&original);
+        let raw = build_forward_message(
+            "me@example.com",
+            &to_one("dest@example.com"),
+            None,
+            "Fwd: x",
+            "",
+            &original,
+            &threading,
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            !text.contains("text/x-smuggled") && !text.contains("--=_lookalike_boundary"),
+            "attacker tokens leaked unencoded; wrapper is not base64",
+        );
+        // The result still parses as a single well-formed message.
+        let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+        assert_eq!(parsed.subject().unwrap(), "Fwd: x");
+    }
+
+    #[test]
+    fn validate_recipient_set_enforces_cap_and_injection() {
+        assert!(validate_recipient_set(&to_one("a@example.com"), None, None).is_ok());
+        // empty To
+        assert!(validate_recipient_set(&[], None, None).is_err());
+        // injection in address
+        assert!(validate_recipient_set(&to_one("a@b>\r\nBcc: x@evil"), None, None).is_err(),);
+        // over the recipient cap
+        let many: Vec<AddressInput> = (0..=MAX_RECIPIENTS)
+            .map(|i| AddressInput {
+                name: None,
+                address: format!("u{i}@example.com"),
+            })
+            .collect();
+        assert!(validate_recipient_set(&many, None, None).is_err());
     }
 }

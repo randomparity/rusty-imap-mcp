@@ -38,6 +38,7 @@ pub(super) fn result_provenance(tool: ToolName, value: &serde_json::Value) -> Re
         | ToolName::MoveMessage
         | ToolName::CreateDraft
         | ToolName::SendEmail
+        | ToolName::Forward
         | ToolName::DeleteMessage
         | ToolName::Expunge
         | ToolName::CreateFolder

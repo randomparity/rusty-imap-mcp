@@ -102,6 +102,7 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
     use crate::tools::admin::accounts::{ListAccountsMeta, UseAccountInput, UseAccountMeta};
     use crate::tools::admin::list_folders::ListFoldersMeta;
     use crate::tools::compose::create_draft::{CreateDraftInput, CreateDraftMeta};
+    use crate::tools::compose::forward::{ForwardInput, ForwardMeta};
     use crate::tools::compose::send_email::{SendEmailInput, SendEmailMeta};
     use crate::tools::mailbox::delete_message::{DeleteMessageInput, DeleteMessageMeta};
     use crate::tools::mailbox::expunge::{ExpungeInput, ExpungeMeta};
@@ -205,6 +206,15 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
             "Send an email via SMTP",
             envelope_schema::<SendEmailInput>(),
             envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
+        ),
+        ToolName::Forward => (
+            "Forward Message",
+            "Forward an existing message (by folder + uid) to new \
+             recipients as a message/rfc822 attachment, with an optional \
+             comment. Re-sends the account's own stored mail via SMTP; the \
+             original is attached verbatim. Same posture gate as send_email.",
+            envelope_schema::<ForwardInput>(),
+            envelope_schema::<ToolResponse<ForwardMeta, ()>>(),
         ),
         ToolName::DeleteMessage => (
             "Delete Message",
@@ -491,7 +501,7 @@ mod tests {
         // `ToolName → (MetaType, UntrustedType)` tables disagree. The wire
         // test `wire_published_output_schema_matches_fixture` only
         // exercises 2 tools in the zero-account harness; this unit test
-        // covers all 23 without docker.
+        // covers all 24 without docker.
         use std::path::Path;
         for def in ToolName::all()
             .into_iter()

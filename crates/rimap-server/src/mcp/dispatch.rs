@@ -127,7 +127,7 @@ impl ImapMcpServer {
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, rimap_core::RimapError> {
         use crate::tools::admin::list_folders;
-        use crate::tools::compose::{create_draft, send_email};
+        use crate::tools::compose::{create_draft, forward, send_email};
         use crate::tools::mailbox::{
             delete_message, expunge, flags, folder_management, labels, move_message,
         };
@@ -170,6 +170,7 @@ impl ImapMcpServer {
             ToolName::SendEmail => {
                 ser(Box::pin(send_email::handle(account, parse_args(args)?)).await?)?
             }
+            ToolName::Forward => ser(Box::pin(forward::handle(account, parse_args(args)?)).await?)?,
             ToolName::DeleteMessage => {
                 ser(Box::pin(delete_message::handle(account, parse_args(args)?)).await?)?
             }
@@ -259,6 +260,7 @@ impl ImapMcpServer {
                     | ToolName::MoveMessage
                     | ToolName::CreateDraft
                     | ToolName::SendEmail
+                    | ToolName::Forward
                     | ToolName::DeleteMessage
                     | ToolName::Expunge
                     | ToolName::CreateFolder

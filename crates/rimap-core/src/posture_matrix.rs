@@ -9,9 +9,9 @@ use crate::tool::ToolName;
 
 /// Compile-time truth table. `true` = allowed by base posture.
 ///
-/// Layout: outer by [`ToolName`] (23 tools),
+/// Layout: outer by [`ToolName`] (24 tools),
 /// inner `[readonly, draft_safe, full, destructive]`.
-pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 23] = [
+pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 24] = [
     (ToolName::ListFolders, [true, true, true, true]),
     (ToolName::Search, [true, true, true, true]),
     (ToolName::SearchAdvanced, [false, false, true, true]),
@@ -33,6 +33,9 @@ pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 23] = [
     (ToolName::CreateDraft, [false, true, true, true]),
     // v2 tools:
     (ToolName::SendEmail, [false, false, true, true]),
+    // forward: re-sends an existing message via SMTP; gated identically
+    // to send_email (full + destructive only).
+    (ToolName::Forward, [false, false, true, true]),
     (ToolName::DeleteMessage, [false, false, true, true]),
     (ToolName::CreateFolder, [false, false, true, true]),
     (ToolName::RenameFolder, [false, false, true, true]),
