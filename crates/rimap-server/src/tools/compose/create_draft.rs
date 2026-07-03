@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
-use crate::tools::compose::message_builder::{self, ComposeInput};
+use crate::tools::compose::message_builder::{self, AttachmentSummary, ComposeInput};
 
 /// Input for `create_draft` — identical to shared `ComposeInput`.
 pub type CreateDraftInput = ComposeInput;
@@ -21,6 +21,9 @@ pub struct CreateDraftMeta {
     pub message_id: Option<String>,
     /// IMAP keywords applied to the draft.
     pub keywords: Vec<&'static str>,
+    /// Attachments placed on the draft (basename + byte count), in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentSummary>,
 }
 
 /// `create_draft` handler.
@@ -43,7 +46,7 @@ pub async fn handle(
     let from_addr = account.imap.username();
     // Drafts retain the Bcc header so the saved draft carries the full
     // recipient set for later sending (include_bcc = true).
-    let raw_msg = message_builder::build_message(account, from_addr, &input, true).await?;
+    let built = message_builder::build_message(account, from_addr, &input, true).await?;
 
     let drafts_folder: &str = account.special_use.drafts().unwrap_or("Drafts");
     crate::tools::validation::validate_folder_input("drafts folder", drafts_folder)?;
@@ -51,20 +54,22 @@ pub async fn handle(
         .imap
         .append_message(
             drafts_folder,
-            &raw_msg,
+            &built.raw,
             &[rimap_imap::types::Flag::Draft],
             &["$PendingReview"],
         )
         .await?;
 
-    let generated_msg_id = rimap_content::extract_message_id(&raw_msg);
+    let generated_msg_id = rimap_content::extract_message_id(&built.raw);
 
     Ok(ToolResponse::meta_only(CreateDraftMeta {
         folder: drafts_folder.to_string(),
         uid: result.uid.map(rimap_imap::types::Uid::get),
         message_id: generated_msg_id,
         keywords: vec!["$PendingReview"],
-    }))
+        attachments: built.attachments,
+    })
+    .with_warnings(built.security_warnings))
 }
 
 #[cfg(test)]
@@ -138,6 +143,7 @@ mod tests {
             uid: Some(42),
             message_id: Some("<abc@example.com>".to_string()),
             keywords: vec!["$PendingReview"],
+            attachments: vec![],
         };
         let value = serde_json::to_value(&meta).unwrap();
         assert_eq!(value["folder"], serde_json::json!("Drafts"));
@@ -153,6 +159,7 @@ mod tests {
             uid: None,
             message_id: None,
             keywords: vec!["$PendingReview"],
+            attachments: vec![],
         };
         let value = serde_json::to_value(&meta).unwrap();
         assert_eq!(value["uid"], serde_json::Value::Null);
@@ -173,6 +180,7 @@ mod tests {
             uid: Some(1),
             message_id: None,
             keywords: vec!["$PendingReview"],
+            attachments: vec![],
         };
         assert!(meta.keywords.contains(&"$PendingReview"));
         assert_eq!(meta.keywords.len(), 1);

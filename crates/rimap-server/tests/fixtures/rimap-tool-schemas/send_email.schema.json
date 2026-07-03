@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "AttachmentSummary": {
+      "description": "Basename + byte count of one attachment placed on a composed message.\nSurfaced in the tool response and recorded in the audit `result_summary`\nso an incident responder can see which sandbox file left the boundary,\neven though the raw `path` is redacted in the request args.",
+      "properties": {
+        "bytes": {
+          "description": "Raw byte length of the attachment before base64 inflation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "filename": {
+          "description": "Basename of the attached file (never a full sandbox path).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "filename",
+        "bytes"
+      ],
+      "type": "object"
+    },
     "ErrorCode": {
       "description": "Stable machine-readable error codes, per design spec \u00a79.",
       "type": "string"
@@ -34,6 +54,13 @@
     "SendEmailMeta": {
       "description": "Trusted metadata for a `send_email` response.",
       "properties": {
+        "attachments": {
+          "description": "Attachments placed on the sent message (basename + byte count), in order.",
+          "items": {
+            "$ref": "#/$defs/AttachmentSummary"
+          },
+          "type": "array"
+        },
         "message_id": {
           "description": "RFC 2822 `Message-ID` assigned to the outgoing message.",
           "type": [

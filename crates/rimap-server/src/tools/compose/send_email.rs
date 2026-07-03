@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
-use crate::tools::compose::message_builder::{self, ComposeInput};
+use crate::tools::compose::message_builder::{self, AttachmentSummary, ComposeInput};
 
 /// Input for `send_email` — identical fields to `create_draft`.
 pub type SendEmailInput = ComposeInput;
@@ -63,6 +63,9 @@ pub struct SendEmailMeta {
     pub smtp_status: String,
     /// Result of the best-effort copy to the Sent folder.
     pub sent_copy: SentCopyInfo,
+    /// Attachments placed on the sent message (basename + byte count), in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentSummary>,
 }
 
 /// `send_email` handler.
@@ -93,7 +96,8 @@ pub async fn handle(
     // disclosed in the transmitted bytes. The same Bcc-free bytes are used
     // for the best-effort Sent copy below, so the Sent folder does not
     // record Bcc either (#432).
-    let raw_msg = message_builder::build_message(account, from_addr, &input, false).await?;
+    let built = message_builder::build_message(account, from_addr, &input, false).await?;
+    let raw_msg = built.raw;
 
     // Build SMTP envelope from the compose addresses (unions To/Cc/Bcc into
     // the RCPT TO set, so blind recipients are still delivered).
@@ -153,7 +157,9 @@ pub async fn handle(
         message_id: generated_msg_id,
         smtp_status: "delivered".to_string(),
         sent_copy: build_sent_copy_info(sent_folder, append_outcome),
-    }))
+        attachments: built.attachments,
+    })
+    .with_warnings(built.security_warnings))
 }
 
 /// Translate a best-effort APPEND-to-Sent outcome into a [`SentCopyInfo`].
@@ -225,6 +231,8 @@ mod tests {
             bcc: None,
             subject: "s".into(),
             body_text: "b".into(),
+            body_html: None,
+            attachments: None,
             in_reply_to_uid: None,
             in_reply_to_folder: None,
         }

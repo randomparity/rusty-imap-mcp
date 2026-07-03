@@ -150,6 +150,7 @@ mod tests {
         let denied = [
             ToolName::SearchAdvanced,
             ToolName::FetchMessageHtml,
+            ToolName::CreateDraftHtml,
             ToolName::SendEmail,
             ToolName::Forward,
             ToolName::DeleteMessage,

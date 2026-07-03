@@ -50,6 +50,8 @@ pub enum ToolName {
     MoveMessage,
     /// `create_draft` (appends to Drafts with `$PendingReview`).
     CreateDraft,
+    /// `create_draft` with a non-empty `body_html`. Requires `full` posture.
+    CreateDraftHtml,
     /// `send_email`
     SendEmail,
     /// `forward` — re-send an existing message as a `message/rfc822`
@@ -97,6 +99,7 @@ impl ToolName {
             Self::ListLabels => "list_labels",
             Self::MoveMessage => "move_message",
             Self::CreateDraft => "create_draft",
+            Self::CreateDraftHtml => "create_draft.include_html",
             Self::SendEmail => "send_email",
             Self::Forward => "forward",
             Self::DeleteMessage => "delete_message",
@@ -146,6 +149,7 @@ impl ToolName {
             | Self::ListLabels
             | Self::MoveMessage
             | Self::CreateDraft
+            | Self::CreateDraftHtml
             | Self::SendEmail
             | Self::Forward
             | Self::DeleteMessage
@@ -163,7 +167,7 @@ impl ToolName {
     #[must_use]
     pub fn is_draft_quota_gated(self) -> bool {
         match self {
-            Self::CreateDraft => true,
+            Self::CreateDraft | Self::CreateDraftHtml => true,
             Self::ListFolders
             | Self::Search
             | Self::SearchAdvanced
@@ -217,6 +221,7 @@ impl ToolName {
             | Self::ListLabels
             | Self::MoveMessage
             | Self::CreateDraft
+            | Self::CreateDraftHtml
             | Self::DeleteMessage
             | Self::Expunge
             | Self::CreateFolder
@@ -303,6 +308,7 @@ impl ToolName {
             // rest of this group.
             Self::MoveMessage
             | Self::CreateDraft
+            | Self::CreateDraftHtml
             | Self::RenameFolder
             | Self::CreateFolder
             | Self::ExportMessages => (false, false, false, true),
@@ -373,9 +379,9 @@ mod tests {
     use strum::IntoEnumIterator;
 
     #[test]
-    fn all_has_exactly_twenty_six_variants() {
-        assert_eq!(ToolName::all().len(), 26);
-        assert_eq!(ToolName::iter().count(), 26);
+    fn all_has_exactly_twenty_seven_variants() {
+        assert_eq!(ToolName::all().len(), 27);
+        assert_eq!(ToolName::iter().count(), 27);
     }
 
     #[test]

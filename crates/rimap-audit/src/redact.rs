@@ -353,7 +353,7 @@ impl ToolRedactionSchema for ToolName {
             Self::ExportMessages => export_messages_schema(self),
             Self::Flag | Self::Unflag => flag_schema(self),
             Self::MoveMessage => move_message_schema(self),
-            Self::CreateDraft => create_draft_schema(self),
+            Self::CreateDraft | Self::CreateDraftHtml => create_draft_schema(self),
             Self::SendEmail => send_email_schema(self),
             Self::Forward => forward_schema(self),
             Self::DeleteMessage => delete_message_schema(self),
@@ -549,6 +549,10 @@ fn create_draft_schema(tool: ToolName) -> RedactionSchema {
             ("subject", RedactString),
             ("body_text", RedactString),
             ("body_html", RedactString),
+            // Attachment source paths/filenames are redacted here (they would
+            // leak sandbox layout); durable provenance — basenames + byte
+            // counts — is recorded in the tool_end result_summary instead.
+            ("attachments", RedactString),
             ("password", Forbidden),
             ("token", Forbidden),
         ],
@@ -588,6 +592,11 @@ fn send_email_schema(tool: ToolName) -> RedactionSchema {
             ("bcc", SaltedHash),
             ("subject", RedactString),
             ("body", RedactString),
+            ("body_text", RedactString),
+            ("body_html", RedactString),
+            // See create_draft_schema: source paths/filenames redacted here,
+            // provenance lands in the result_summary.
+            ("attachments", RedactString),
             ("in_reply_to", Verbatim(VtString)),
             ("references", Verbatim(StringArray)),
             ("message_id", Verbatim(VtString)),

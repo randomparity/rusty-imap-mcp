@@ -49,6 +49,7 @@ pub(super) fn refine_tool_name(
             ToolName::FetchMessageHtml
         }
         ToolName::Search if promotes_search_to_advanced(args) => ToolName::SearchAdvanced,
+        ToolName::CreateDraft if promotes_draft_to_html(args) => ToolName::CreateDraftHtml,
         ToolName::ListFolders
         | ToolName::Search
         | ToolName::SearchAdvanced
@@ -66,6 +67,7 @@ pub(super) fn refine_tool_name(
         | ToolName::ListLabels
         | ToolName::MoveMessage
         | ToolName::CreateDraft
+        | ToolName::CreateDraftHtml
         | ToolName::SendEmail
         | ToolName::Forward
         | ToolName::DeleteMessage
@@ -76,6 +78,18 @@ pub(super) fn refine_tool_name(
         | ToolName::UseAccount
         | ToolName::ListAccounts => base,
     }
+}
+
+/// Whether a `create_draft` call carries a non-empty `body_html`, promoting it
+/// to the `full`-gated `CreateDraftHtml` capability. Uses the same
+/// "present" predicate as the MIME builder
+/// ([`crate::tools::compose::message_builder::body_html_is_present`]) so the
+/// posture gate and the emitted structure never disagree: whitespace-only HTML
+/// neither elevates the capability nor produces a `text/html` part.
+fn promotes_draft_to_html(args: &serde_json::Map<String, serde_json::Value>) -> bool {
+    args.get("body_html")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(crate::tools::compose::message_builder::body_html_is_present)
 }
 
 /// Whether the `search` argument shape forces promotion to
@@ -257,6 +271,45 @@ mod tests {
             refine_tool_name(ToolName::Search, Some(&args)),
             ToolName::SearchAdvanced,
         );
+    }
+
+    #[test]
+    fn refine_promotes_create_draft_to_html_on_body_html() {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "body_html".into(),
+            serde_json::Value::String("<p>hi</p>".into()),
+        );
+        assert_eq!(
+            refine_tool_name(ToolName::CreateDraft, Some(&args)),
+            ToolName::CreateDraftHtml,
+            "a non-empty body_html must require the full-gated capability",
+        );
+    }
+
+    #[test]
+    fn refine_does_not_promote_create_draft_on_absent_or_empty_body_html() {
+        // No body_html → stays plain create_draft (draft_safe).
+        let args = serde_json::Map::new();
+        assert_eq!(
+            refine_tool_name(ToolName::CreateDraft, Some(&args)),
+            ToolName::CreateDraft,
+        );
+        // Explicit null, empty, and whitespace-only all count as "no HTML" —
+        // the seam and the MIME builder share this predicate, so neither
+        // elevates the capability nor emits a text/html part.
+        for value in [
+            serde_json::Value::Null,
+            serde_json::Value::String(String::new()),
+            serde_json::Value::String("   \t\n".into()),
+        ] {
+            let mut args = serde_json::Map::new();
+            args.insert("body_html".into(), value);
+            assert_eq!(
+                refine_tool_name(ToolName::CreateDraft, Some(&args)),
+                ToolName::CreateDraft,
+            );
+        }
     }
 
     #[test]

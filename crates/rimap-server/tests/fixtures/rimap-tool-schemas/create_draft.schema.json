@@ -1,8 +1,35 @@
 {
   "$defs": {
+    "AttachmentSummary": {
+      "description": "Basename + byte count of one attachment placed on a composed message.\nSurfaced in the tool response and recorded in the audit `result_summary`\nso an incident responder can see which sandbox file left the boundary,\neven though the raw `path` is redacted in the request args.",
+      "properties": {
+        "bytes": {
+          "description": "Raw byte length of the attachment before base64 inflation.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "filename": {
+          "description": "Basename of the attached file (never a full sandbox path).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "filename",
+        "bytes"
+      ],
+      "type": "object"
+    },
     "CreateDraftMeta": {
       "description": "Trusted metadata for a `create_draft` response.",
       "properties": {
+        "attachments": {
+          "description": "Attachments placed on the draft (basename + byte count), in order.",
+          "items": {
+            "$ref": "#/$defs/AttachmentSummary"
+          },
+          "type": "array"
+        },
         "folder": {
           "description": "Folder the draft was appended to.",
           "type": "string"

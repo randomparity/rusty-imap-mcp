@@ -351,7 +351,9 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
         // (e.g. `SearchAdvanced` shares `search`; `FetchMessageHtml`
         // shares `fetch_message`) are advertised under the parent entry,
         // so they have no standalone definition.
-        ToolName::SearchAdvanced | ToolName::FetchMessageHtml => return None,
+        ToolName::SearchAdvanced | ToolName::FetchMessageHtml | ToolName::CreateDraftHtml => {
+            return None;
+        }
     };
     Some(parts)
 }
@@ -394,8 +396,11 @@ mod tests {
     fn tool_definition_covers_all_mcp_tools() {
         // Sub-capabilities are surfaced via their parent tool's schema, not
         // as standalone MCP tools, so they do not appear in `TOOL_DEFS`.
-        const SUB_CAPABILITIES: &[ToolName] =
-            &[ToolName::SearchAdvanced, ToolName::FetchMessageHtml];
+        const SUB_CAPABILITIES: &[ToolName] = &[
+            ToolName::SearchAdvanced,
+            ToolName::FetchMessageHtml,
+            ToolName::CreateDraftHtml,
+        ];
         let expected = ToolName::all().len() - SUB_CAPABILITIES.len();
         let defs: Vec<_> = ToolName::all()
             .into_iter()
@@ -408,6 +413,7 @@ mod tests {
     fn sub_capabilities_return_none() {
         assert!(TOOL_DEFS.get(&ToolName::SearchAdvanced).is_none());
         assert!(TOOL_DEFS.get(&ToolName::FetchMessageHtml).is_none());
+        assert!(TOOL_DEFS.get(&ToolName::CreateDraftHtml).is_none());
     }
 
     #[test]

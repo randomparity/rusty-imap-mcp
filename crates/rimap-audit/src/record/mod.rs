@@ -253,6 +253,24 @@ pub struct ResultSummary {
     /// partition). Empty (and omitted) for tools that do not export.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uids_failed: Vec<u32>,
+    /// Sandbox files attached to an outbound `send_email` / `create_draft`
+    /// message (basename + byte count), in caller order. The compensating
+    /// forensic control for the accepted shared-sandbox model: the request
+    /// args redact attachment paths, so this is where "which sandbox file left
+    /// the boundary" is durably recorded. Empty (and omitted) for every other
+    /// tool and for messages with no attachments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments_sent: Vec<AttachmentProvenance>,
+}
+
+/// Basename and byte count of one attachment recorded in a `tool_end`
+/// [`ResultSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentProvenance {
+    /// Basename of the attached sandbox file (never a full path).
+    pub filename: String,
+    /// Raw byte length before base64 inflation.
+    pub bytes: u64,
 }
 
 /// Snapshot of the provenance ring buffer at `tool_end` time.

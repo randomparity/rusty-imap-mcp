@@ -164,7 +164,7 @@ impl ImapMcpServer {
             ToolName::ExportMessages => {
                 ser(Box::pin(export_messages::handle(account, parse_args(args)?)).await?)?
             }
-            ToolName::CreateDraft => {
+            ToolName::CreateDraft | ToolName::CreateDraftHtml => {
                 ser(Box::pin(create_draft::handle(account, parse_args(args)?)).await?)?
             }
             ToolName::SendEmail => {
@@ -259,6 +259,7 @@ impl ImapMcpServer {
                     | ToolName::ListLabels
                     | ToolName::MoveMessage
                     | ToolName::CreateDraft
+                    | ToolName::CreateDraftHtml
                     | ToolName::SendEmail
                     | ToolName::Forward
                     | ToolName::DeleteMessage
