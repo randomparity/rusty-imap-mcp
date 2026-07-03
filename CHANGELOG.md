@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tools/list` now honors MCP cursor pagination. Large multi-account
+  catalogs are served one page at a time (25 tools/page) instead of a single
+  response; the cursor is an opaque catalog offset and a client walks
+  `nextCursor` to completion. Single- and few-account deployments fit in one
+  page and are unchanged. For a 3-account full-posture config the initial
+  response drops from ~616 KB (59 entries) to ~267 KB (25 entries). A
+  non-numeric cursor is rejected with `-32602`. Issue #411.
 - Two static MCP resources, `rimap://docs/postures` and
   `rimap://docs/workflows`, advertised by `resources/list` regardless of
   account count. `rimap://docs/postures` is `docs/postures.md` verbatim;

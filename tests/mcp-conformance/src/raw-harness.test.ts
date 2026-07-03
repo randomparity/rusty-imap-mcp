@@ -128,4 +128,34 @@ describe("raw-harness (live)", () => {
     await harness.notify("notifications/initialized", {});
     await expect(harness.assertNoResponseWithin(200)).resolves.toBeUndefined();
   });
+
+  it("tools/list honors cursor pagination and rejects a garbage cursor (#411)", async () => {
+    harness = await spawnRaw();
+    await harness.request("initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "raw-harness-self-test", version: "0.0.0" },
+    });
+    await harness.notify("notifications/initialized", {});
+
+    // No cursor: the zero-account catalog (infrastructure tools only) fits in
+    // one page, so nextCursor is absent — no behavior change for small
+    // catalogs.
+    const first = await harness.request("tools/list", {});
+    expect(first.error, JSON.stringify(first.error)).toBeUndefined();
+    const tools = first.result?.["tools"] as unknown[];
+    expect(Array.isArray(tools)).toBe(true);
+    expect(tools.length).toBeGreaterThanOrEqual(2);
+    expect(first.result?.["nextCursor"]).toBeUndefined();
+
+    // A valid offset cursor ("0") returns the same first page.
+    const zero = await harness.request("tools/list", { cursor: "0" });
+    expect(zero.error).toBeUndefined();
+    expect((zero.result?.["tools"] as unknown[]).length).toBe(tools.length);
+
+    // A non-numeric cursor is a client error (JSON-RPC invalid params).
+    const bad = await harness.request("tools/list", { cursor: "not-a-number" });
+    expect(bad.result).toBeUndefined();
+    expect(bad.error?.code).toBe(-32602);
+  });
 });
