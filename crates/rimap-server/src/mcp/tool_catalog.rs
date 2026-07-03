@@ -135,7 +135,8 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
             "Search Messages",
             "Search messages with structured query. Results are ordered \
              oldest-first by UID; set newest_first to reverse. Paginate \
-             with offset/limit and next_offset.",
+             with offset/limit and next_offset. Set thread_of_uid to \
+             retrieve a whole conversation instead of a filtered search.",
             envelope_schema::<SearchInput>(),
             envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>(),
         ),

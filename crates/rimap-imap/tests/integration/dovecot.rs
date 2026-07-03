@@ -1049,3 +1049,91 @@ async fn case_22_probe_preflight_mismatch_returns_typed_tls_error() {
         other => panic!("expected ImapError::Tls, got {other:?}"),
     }
 }
+
+/// #435: `thread_related` finds a reply from the parent's own
+/// Message-ID (descendant search via `References`/`In-Reply-To`), and
+/// finds the parent from the reply's own References chain (ancestor
+/// search via `Message-ID`). No IMAP THREAD extension involved — this
+/// exercises the fallback Message-ID chain-walk end to end.
+#[tokio::test]
+async fn case_24_thread_related_chain_walk_finds_reply_and_parent() {
+    let Some(h) = boot(PinChoice::Correct) else {
+        return;
+    };
+
+    let parent_message_id = "<test-thread-parent-435@example.com>";
+    let parent_msg = support::fixtures::minimal_rfc5322("thread-parent-435");
+    h.connection
+        .append_message("INBOX", &parent_msg, &[], &[])
+        .await
+        .unwrap();
+
+    let reply_message_id = "<test-reply-thread-parent-435@example.com>";
+    let reply_msg = support::fixtures::reply_rfc5322("thread-parent-435", parent_message_id);
+    h.connection
+        .append_message("INBOX", &reply_msg, &[], &[])
+        .await
+        .unwrap();
+
+    // Locate the parent's own UID by its exact Message-ID (SUBJECT search
+    // would substring-match both the parent and "Re: <parent subject>").
+    let (parent_uids, _) = Box::pin(h.connection.search(
+        "INBOX",
+        rimap_imap::types::SearchQuery::Raw(format!("HEADER Message-ID \"{parent_message_id}\"")),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(parent_uids.len(), 1, "expected exactly one parent match");
+    let parent_uid = parent_uids[0];
+
+    // Descendant direction: search from the parent's own Message-ID
+    // should find the reply (via its References/In-Reply-To).
+    let (descendants, _) = h
+        .connection
+        .thread_related("INBOX", Some(parent_message_id), &[])
+        .await
+        .unwrap();
+    assert!(
+        !descendants.contains(&parent_uid),
+        "descendant search must not match the parent itself"
+    );
+    let (fetched, _) = h
+        .connection
+        .fetch(
+            "INBOX",
+            &descendants,
+            rimap_imap::types::FetchSpec {
+                envelope: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let subjects: Vec<String> = fetched
+        .iter()
+        .filter_map(|m| m.envelope.as_ref())
+        .filter_map(|e| e.subject_raw.as_ref())
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .collect();
+    assert!(
+        subjects.iter().any(|s| s.contains("thread-parent-435")),
+        "reply not found via thread_related descendant search; subjects: {subjects:?}",
+    );
+
+    // Ancestor direction: search from the reply's own ancestor chain
+    // (its References, which name the parent) should find the parent.
+    let (ancestors, _) = h
+        .connection
+        .thread_related(
+            "INBOX",
+            Some(reply_message_id),
+            &[parent_message_id.to_string()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        ancestors.contains(&parent_uid),
+        "parent not found via thread_related ancestor search; got {ancestors:?}",
+    );
+}

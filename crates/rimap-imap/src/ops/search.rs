@@ -42,6 +42,69 @@ fn sorted_uids(raw: std::collections::HashSet<u32>) -> Vec<Uid> {
     uids
 }
 
+/// Search `folder` for messages related to `own_message_id` by RFC 5322
+/// threading: descendants (whose `References` or `In-Reply-To` names
+/// `own_message_id`) and ancestors (whose `Message-ID` matches one of
+/// `ancestor_ids`). Returns UIDs only — the target message itself is
+/// not included, since it may not match any of these clauses (e.g. a
+/// root message with no parent and no replies yet); callers add that
+/// UID separately.
+///
+/// No IMAP THREAD extension (RFC 5256) is used: `async-imap` 0.11 has
+/// no client support for parsing a `* THREAD` untagged response, so
+/// this is a Message-ID chain-walk within `folder` only, built from a
+/// single `SEARCH` command with nested `OR` clauses.
+///
+/// `ancestor_ids` must already be capped by the caller — this function
+/// issues one `HEADER Message-ID` clause per entry with no further
+/// limiting, to keep the capping policy (which entries to keep when a
+/// `References` chain is longer than the cap) at the call site that
+/// has the ordering context.
+///
+/// Message-ID values originate in email content (attacker-controlled),
+/// so each is quoted through [`quote`] — the same CR/LF/NUL-rejecting
+/// escaper used for user-supplied search strings — before being
+/// embedded in the raw SEARCH command. That is the actual injection
+/// boundary being defended; the caller-supplied target UID never
+/// reaches the command text.
+pub(crate) async fn thread_related(
+    session: &mut ImapSession,
+    folder: &str,
+    own_message_id: Option<&str>,
+    ancestor_ids: &[String],
+) -> Result<(Vec<Uid>, Option<u32>), ImapError> {
+    let mut clauses = Vec::new();
+    if let Some(id) = own_message_id {
+        clauses.push(format!("HEADER References {}", quote(id)?));
+        clauses.push(format!("HEADER In-Reply-To {}", quote(id)?));
+    }
+    for id in ancestor_ids {
+        clauses.push(format!("HEADER Message-ID {}", quote(id)?));
+    }
+    let Some(key) = or_join(&clauses) else {
+        // No Message-ID and no References/In-Reply-To to search by —
+        // nothing can be causally related to this message; the target
+        // itself (added by the caller) is the whole "thread".
+        let selected = super::folders::select(session, folder, true).await?;
+        return Ok((Vec::new(), selected.uid_validity));
+    };
+    search(session, folder, SearchQuery::Raw(key)).await
+}
+
+/// Combine search-key clauses with nested IMAP `OR`. RFC 3501 §6.4.4's
+/// `OR` takes exactly two search-keys, so N clauses need N-1 nested
+/// levels: `OR a (OR b (OR c d))`. `None` for an empty slice.
+fn or_join(clauses: &[String]) -> Option<String> {
+    match clauses {
+        [] => None,
+        [only] => Some(only.clone()),
+        [first, rest @ ..] => {
+            let nested = or_join(rest)?;
+            Some(format!("OR {first} ({nested})"))
+        }
+    }
+}
+
 fn structured_to_key(q: &StructuredQuery) -> Result<String, ImapError> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = &q.from {
@@ -194,7 +257,9 @@ fn format_imap_date(d: ::time::Date) -> String {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::{format_imap_date, quote, sorted_uids, structured_to_key, validate_header_name};
+    use super::{
+        format_imap_date, or_join, quote, sorted_uids, structured_to_key, validate_header_name,
+    };
     use crate::error::ImapError;
     use crate::types::StructuredQuery;
 
@@ -516,5 +581,30 @@ mod tests {
     #[test]
     fn validate_header_name_rejects_high_bit_byte() {
         assert!(validate_header_name("X-Föo").is_err());
+    }
+
+    #[test]
+    fn or_join_empty_yields_none() {
+        assert_eq!(or_join(&[]), None);
+    }
+
+    #[test]
+    fn or_join_single_clause_yields_it_unwrapped() {
+        assert_eq!(
+            or_join(&["HEADER Message-ID \"<a@x>\"".to_string()]),
+            Some("HEADER Message-ID \"<a@x>\"".to_string()),
+        );
+    }
+
+    #[test]
+    fn or_join_two_clauses_nests_once() {
+        let clauses = vec!["A".to_string(), "B".to_string()];
+        assert_eq!(or_join(&clauses), Some("OR A (B)".to_string()));
+    }
+
+    #[test]
+    fn or_join_three_clauses_nests_twice() {
+        let clauses = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        assert_eq!(or_join(&clauses), Some("OR A (OR B (C))".to_string()));
     }
 }

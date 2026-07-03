@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `search` gains an opt-in `thread_of_uid` parameter: given a UID, returns
+  the whole conversation (the target message, every ancestor named in its
+  own `References`/`In-Reply-To` chain, and every descendant whose
+  `References`/`In-Reply-To` names the target's `Message-ID`) instead of a
+  filtered search. Built as a Message-ID chain-walk over a single `SEARCH`
+  command with nested `OR` clauses — `async-imap` has no client support
+  for the IMAP THREAD extension (RFC 5256), so that path is out of scope.
+  Available at every posture: the header values compared are drawn from
+  the target message itself, not caller-supplied text, so `thread_of_uid`
+  cannot probe arbitrary header/value pairs across the mailbox the way
+  `headers`/`body`/`text` can — it stays at the low-posture `Search` seat
+  rather than promoting to `SearchAdvanced`. Mutually exclusive with
+  `advanced_query`. Issue #435 (deferred option (c) from #410).
 - Two static MCP resources, `rimap://docs/postures` and
   `rimap://docs/workflows`, advertised by `resources/list` regardless of
   account count. `rimap://docs/postures` is `docs/postures.md` verbatim;
