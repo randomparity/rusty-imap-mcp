@@ -15,6 +15,12 @@ CNA = "CNA"
 # STRIDE table uses bold-letter notation (**I**nformation). Typos sees "nformation" as a fragment.
 nformation = "nformation"
 
+[default.extend-identifiers]
+# IMAP SELECT command, pluralized in prose ("SELECTs"). Typos's camelCase
+# splitter treats the trailing lowercase "s" as a new word boundary and
+# flags the remaining "SELEC" fragment as a typo of "SELECT".
+SELECTs = "SELECTs"
+
 [files]
 extend-exclude = [
     "target/",
