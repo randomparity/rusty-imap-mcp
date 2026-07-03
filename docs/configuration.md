@@ -157,9 +157,10 @@ RFC 6154 special-use markers (`\Drafts`, `\Sent`, `\Trash`, `\Junk`,
 `\Archive`, `\All`, `\Flagged`) reported by the server. These names
 are then:
 
-1. Used as the target folder for `create_draft` (`\Drafts`) and
-   `send_email`'s Sent copy (`\Sent`), falling back to the literal
-   strings `"Drafts"` and `"Sent"` if the server does not advertise
+1. Used as the target folder for `create_draft` (`\Drafts`),
+   `send_email`'s Sent copy (`\Sent`), and `delete_message`'s move
+   destination (`\Trash`), falling back to the literal strings
+   `"Drafts"`, `"Sent"`, and `"Trash"` if the server does not advertise
    special-use attributes.
 2. Merged (case-insensitively) into the `protected_folders` list, so
    Gmail's `[Gmail]/Sent Mail` is protected by the default config even
