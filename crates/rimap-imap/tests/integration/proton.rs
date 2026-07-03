@@ -88,6 +88,7 @@ fn build_connection(cfg: &ProtonConfig) -> Connection {
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
             store,
             rimap_config::model::FallbackMode::KeyringThenEnv,
+            rimap_config::credential::Protocol::Imap,
         ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit);
     Connection::new(conn_cfg, sink, creds)

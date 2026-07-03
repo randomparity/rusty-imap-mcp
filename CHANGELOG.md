@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-protocol password env-var fallbacks
+  `RUSTY_IMAP_MCP_IMAP_PASSWORD` / `RUSTY_IMAP_MCP_SMTP_PASSWORD`, consulted
+  before the legacy shared `RUSTY_IMAP_MCP_PASSWORD` when
+  `fallback = "keyring-then-env"`. Lets IMAP and SMTP resolve different
+  credentials via the env-var fallback; a `tracing::warn!` fires when the
+  legacy shared var supplies a credential while the protocol-scoped var is
+  unset. `keyring-only` mode still consults no env var. Issue #260.
 - MCP wire-shape conformance test
   (`crates/rimap-server/tests/mcp_wire_conformance.rs`) — spawns the
   binary, drives JSON-RPC over stdio, and validates every response

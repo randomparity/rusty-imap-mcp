@@ -13,8 +13,9 @@ pub mod validate;
 pub mod test_support;
 
 pub use crate::credential::{
-    CredentialStore, KEYCHAIN_SERVICE, KeyringCredentialResolver, KeyringStore, PASSWORD_ENV_VAR,
-    account_key, resolve_credential,
+    CredentialStore, IMAP_PASSWORD_ENV_VAR, KEYCHAIN_SERVICE, KeyringCredentialResolver,
+    KeyringStore, PASSWORD_ENV_VAR, Protocol, ResolutionPolicy, SMTP_PASSWORD_ENV_VAR, account_key,
+    resolve_credential,
 };
 pub use crate::error::ConfigError;
 #[cfg(feature = "test-support")]

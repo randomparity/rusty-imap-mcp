@@ -108,6 +108,7 @@ fn build_test_connection(account_name: &str, audit: &AuditWriter) -> Connection 
     let creds: Arc<dyn rimap_core::CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
         store,
         FallbackMode::KeyringThenEnv,
+        rimap_config::credential::Protocol::Imap,
     ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
     Connection::new(conn_cfg, sink, creds)

@@ -877,6 +877,7 @@ async fn seed_multipart_message(dovecot: &DovecotHarness) {
     let creds: Arc<dyn rimap_core::CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
         store,
         FallbackMode::KeyringThenEnv,
+        rimap_config::credential::Protocol::Imap,
     ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
     let conn = Connection::new(cfg, sink, creds);

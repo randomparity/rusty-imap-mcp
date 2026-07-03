@@ -19,7 +19,7 @@ use rimap_authz::DispatchGuard;
 use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
 use rimap_authz::rate_limit::Governor;
-use rimap_config::credential::{CredentialStore, KeyringStore};
+use rimap_config::credential::{CredentialStore, KeyringStore, Protocol};
 use rimap_config::loader::{load_and_validate, resolve_config_path};
 use rimap_config::login::{run_login, tty_prompt};
 use rimap_config::validate::ValidatedAccountConfig;
@@ -451,6 +451,7 @@ async fn build_registry(
             Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
                 credentials.clone(),
                 acfg.fallback_mode,
+                Protocol::Imap,
             ));
         let imap = Connection::new(conn_cfg, auth_sink.clone(), resolver);
 
@@ -496,7 +497,10 @@ fn build_smtp_client(
         &acfg.id,
         &smtp_cfg.username,
         &smtp_cfg.host,
-        acfg.fallback_mode,
+        rimap_config::credential::ResolutionPolicy {
+            fallback_mode: acfg.fallback_mode,
+            protocol: Protocol::Smtp,
+        },
     )
     .with_context(|| format!("resolving SMTP credential for account {}", acfg.id.as_str()))?;
     let client = rimap_smtp::SmtpClient::new(smtp_cfg, smtp_password.expose_secret())
