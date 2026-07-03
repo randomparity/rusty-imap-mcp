@@ -594,6 +594,7 @@ async fn wire_e2e_readonly_posture_denial() {
 
     assert_readonly_tools_list(&mut harness).await;
     assert_readonly_success_path(&mut harness).await;
+    assert_readonly_resource_reports_posture(&mut harness).await;
     assert_readonly_denial(&mut harness).await;
 
     // Bind the returned tempdir guard so the audit file outlives the
@@ -603,6 +604,35 @@ async fn wire_e2e_readonly_posture_denial() {
     assert!(status.success(), "child must exit 0, got {status:?}");
 
     assert_readonly_audit_records(&audit_path);
+}
+
+/// The `rimap://accounts/readonly` resource must report the account's
+/// posture over the wire (#406): the instructions promise it, and it is
+/// the agent's self-service answer to a posture denial.
+async fn assert_readonly_resource_reports_posture(harness: &mut Harness) {
+    let resp = harness
+        .request(
+            "resources/read",
+            json!({ "uri": "rimap://accounts/readonly" }),
+        )
+        .await;
+    assert!(
+        resp["error"].is_null(),
+        "resources/read must succeed, got {resp}",
+    );
+    let text = resp["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("resource contents[0].text must be a string, got {resp}"));
+    let body: Value = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("resource body must be JSON: {e}: {text}"));
+    assert_eq!(
+        body["posture"], "readonly",
+        "resource must report the readonly account's posture; got {body}",
+    );
+    assert_eq!(
+        body["name"], "readonly",
+        "resource must echo the account name"
+    );
 }
 
 /// Verify tools/list advertisement posture for the readonly namespace.
