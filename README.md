@@ -111,6 +111,11 @@ For other IMAP servers (Fastmail, Dovecot, Cyrus, etc.), follow the
 Gmail guide and adjust the `host`, `port`, and `encryption` fields for
 your provider.
 
+Prefer to start from a full annotated config? Copy
+[`config.example.toml`](config.example.toml) (single account) or
+[`config.multi-account.example.toml`](config.multi-account.example.toml)
+(several mailboxes) and edit the values.
+
 ## MCP tools
 
 **21 posture-gated tools:**
