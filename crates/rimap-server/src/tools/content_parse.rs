@@ -2,7 +2,9 @@
 
 use std::sync::LazyLock;
 
-use rimap_content::{Content, ContentError, parse_message};
+use rimap_content::{
+    Content, ContentError, SelectedHeader, parse_message, parse_message_with_headers,
+};
 use rimap_core::RimapError;
 use tokio::sync::Semaphore;
 
@@ -68,6 +70,21 @@ static PARSE_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8)
 /// classification cannot drift at call sites.
 pub async fn parse_message_async(raw: Vec<u8>) -> Result<Content, RimapError> {
     run_on_blocking_pool(move || parse_message(&raw)).await
+}
+
+/// Like [`parse_message_async`] but also extracts the caller-requested
+/// header names (`wanted`, already validated and deduplicated) from the
+/// same scrubbed message in one blocking parse. Returns the [`Content`]
+/// plus the selected headers.
+///
+/// # Errors
+///
+/// Same surface as [`parse_message_async`].
+pub async fn parse_message_with_headers_async(
+    raw: Vec<u8>,
+    wanted: Vec<String>,
+) -> Result<(Content, Vec<SelectedHeader>), RimapError> {
+    run_on_blocking_pool(move || parse_message_with_headers(&raw, &wanted)).await
 }
 
 /// Run `rimap_content::walk_attachment_parts` on the blocking

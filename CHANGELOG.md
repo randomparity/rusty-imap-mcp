@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fetch_message` gains an opt-in `include_headers` parameter: an allowlist
+  of header names (≤ 16 per call) whose sanitized values are returned under
+  `untrusted.headers` (name → array of values). Unblocks unsubscribe,
+  mailing-list triage, and delivery/spam-header workflows without raising
+  posture. Not gated as a sub-capability (rationale in
+  `docs/superpowers/specs/2026-07-03-issue-409-include-headers-design.md`).
+  Extraction runs on the same scrubbed message as body parsing, so
+  CRLF-smuggled headers cannot reappear. Issue #409.
 - Annotated `config.example.toml` (single-account) and
   `config.multi-account.example.toml` at the repo root — copyable,
   secrets-free starting points documenting the full config surface. A
