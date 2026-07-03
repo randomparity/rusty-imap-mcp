@@ -52,19 +52,27 @@ pub struct SearchInput {
     pub to: Option<String>,
     /// Filter by `Cc` header substring.
     pub cc: Option<String>,
-    /// Filter by `Bcc` header substring. Content-oracle — requires
-    /// `SearchAdvanced` posture (Full or Destructive).
+    /// Filter by `Bcc` header substring. Gated like a content search
+    /// (it can expose recipients): denied unless the account posture is
+    /// `full` or `destructive`. Check the `rimap://accounts/<name>`
+    /// resource for this account's posture and available tools.
     pub bcc: Option<String>,
     /// Filter by `Subject` header substring.
     pub subject: Option<String>,
-    /// Substring search across body parts. Content-oracle — requires
-    /// `SearchAdvanced` posture (Full or Destructive).
+    /// Substring search across body parts. Searches message content, so
+    /// it is denied unless the account posture is `full` or
+    /// `destructive`. Check the `rimap://accounts/<name>` resource for
+    /// this account's posture and available tools.
     pub body: Option<String>,
-    /// Substring search across headers OR body. Content-oracle —
-    /// requires `SearchAdvanced` posture (Full or Destructive).
+    /// Substring search across headers OR body. Searches message
+    /// content, so it is denied unless the account posture is `full` or
+    /// `destructive`. Check the `rimap://accounts/<name>` resource for
+    /// this account's posture and available tools.
     pub text: Option<String>,
-    /// One or more `HEADER name value` filters. Content-oracle when
-    /// non-empty — requires `SearchAdvanced` posture (Full or Destructive).
+    /// One or more `HEADER name value` filters. When non-empty this is
+    /// gated like a content search: denied unless the account posture is
+    /// `full` or `destructive`. Check the `rimap://accounts/<name>`
+    /// resource for this account's posture and available tools.
     pub headers: Option<Vec<HeaderInput>>,
     /// Match messages strictly larger than this many octets.
     #[serde(
@@ -101,7 +109,9 @@ pub struct SearchInput {
     pub draft: Option<bool>,
     /// Filter for messages with attachments.
     pub has_attachment: Option<bool>,
-    /// Raw IMAP SEARCH query (full posture only).
+    /// Raw IMAP SEARCH query. Denied unless the account posture is
+    /// `full` or `destructive`. Check the `rimap://accounts/<name>`
+    /// resource for this account's posture and available tools.
     pub advanced_query: Option<String>,
     /// Max results to return (default 100, max 100).
     #[serde(
@@ -474,6 +484,32 @@ mod tests {
     #[test]
     fn sanitize_strips_null_byte() {
         assert_eq!(sanitize_for_output("hello\x00world"), "helloworld");
+    }
+
+    /// The published `search` input schema must not leak posture jargon
+    /// to agents (#406): no "Content-oracle" threat-model vocabulary and
+    /// no bare `SearchAdvanced` posture-enum variant name. The
+    /// posture-gated fields must instead point at the account resource.
+    #[test]
+    fn input_schema_uses_plain_language_not_posture_jargon() {
+        let schema = serde_json::to_string(&schemars::schema_for!(SearchInput))
+            .expect("SearchInput schema serializes");
+        assert!(
+            !schema.contains("Content-oracle"),
+            "input schema must not use 'Content-oracle' jargon",
+        );
+        assert!(
+            !schema.contains("SearchAdvanced"),
+            "input schema must not use the bare 'SearchAdvanced' variant name",
+        );
+        assert!(
+            schema.contains("rimap://accounts/<name>"),
+            "posture-gated fields must point at the account resource",
+        );
+        assert!(
+            schema.contains("full` or `destructive"),
+            "posture-gated fields must name the postures that permit them",
+        );
     }
 
     #[test]
