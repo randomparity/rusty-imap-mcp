@@ -1,5 +1,7 @@
 //! `fetch_message` tool handler.
 
+use std::collections::BTreeMap;
+
 use rimap_content::truncate_graphemes_in_place;
 use rimap_imap::types::Uid;
 use schemars::JsonSchema;
@@ -36,6 +38,17 @@ pub struct FetchMessageInput {
     )]
     #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
     pub max_body_bytes: Option<usize>,
+    /// Opt-in allowlist of raw header names to return (e.g.
+    /// `["List-Unsubscribe", "List-Id"]`). Matching is case-insensitive;
+    /// repeated headers are returned as an array of values. Requested
+    /// names that are not present on the message are simply omitted from
+    /// the response (not an error). At most 16 names per call; each value
+    /// is sanitized and length-capped like every other header. Values
+    /// appear under `untrusted.headers` because header content is
+    /// attacker-controlled. Available at every posture `fetch_message`
+    /// is (no separate capability gate).
+    #[serde(default)]
+    pub include_headers: Option<Vec<String>>,
 }
 
 /// Trusted metadata for a `fetch_message` response.
@@ -80,6 +93,12 @@ pub struct FetchMessageUntrusted {
     pub date: Option<time::OffsetDateTime>,
     /// MIME attachment parts found in the message.
     pub attachments: Vec<rimap_content::AttachmentMeta>,
+    /// Requested raw headers (from `include_headers`), each mapped to its
+    /// sanitized value(s). Present only when `include_headers` was
+    /// supplied; contains only the requested names that were present on
+    /// the message. Values are attacker-controlled email content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, Vec<String>>>,
 }
 
 /// Execute the `fetch_message` tool.
@@ -87,7 +106,9 @@ pub struct FetchMessageUntrusted {
 /// # Errors
 ///
 /// Returns `RimapError::Authz { code: InvalidInput, ... }` when
-/// `rimap-content` rejects the body as malformed RFC 5322.
+/// `rimap-content` rejects the body as malformed RFC 5322, or when
+/// `include_headers` exceeds the count cap or names a structurally
+/// invalid header (validated before any IMAP work).
 /// Returns `RimapError::AttachmentTooLarge { kind, limit }` when a
 /// content-pipeline cap (MIME depth/parts, header count, HTML size) is
 /// exceeded during parse, or when the IMAP fetch-body cap is hit
@@ -110,12 +131,37 @@ pub async fn handle(
     // the include_html flag.
     let include_html = input.include_html.unwrap_or(false);
 
+    // Validate the header allowlist before any IMAP work so a malformed
+    // request fails fast. `None` and `Some([])` both mean "no headers".
+    let wanted_headers = match &input.include_headers {
+        Some(names) => crate::tools::validation::validate_include_headers(names)?,
+        None => Vec::new(),
+    };
+    let requested_headers = input.include_headers.is_some();
+
     let uid = Uid::from(input.uid);
 
     let raw = account.imap.fetch_body(&input.folder, uid, None).await?;
     let raw_size = raw.len();
 
-    let content = crate::tools::content_parse::parse_message_async(raw).await?;
+    // Only pay for header extraction when the caller asked for headers;
+    // the common path stays a plain parse.
+    let (content, selected_headers) = if wanted_headers.is_empty() {
+        let content = crate::tools::content_parse::parse_message_async(raw).await?;
+        (content, Vec::new())
+    } else {
+        crate::tools::content_parse::parse_message_with_headers_async(raw, wanted_headers).await?
+    };
+
+    // Present the `headers` map whenever the caller opted in, even if none
+    // of the requested names were found (empty object), so the response
+    // shape reflects the request rather than the message.
+    let headers = requested_headers.then(|| {
+        selected_headers
+            .into_iter()
+            .map(|h| (h.name, h.values))
+            .collect::<BTreeMap<_, _>>()
+    });
 
     let mut body_text = content.untrusted.body_text;
     let mut body_html = if include_html {
@@ -156,6 +202,7 @@ pub async fn handle(
         reply_to: content.meta.reply_to,
         date: content.meta.date,
         attachments: content.meta.attachments,
+        headers,
     })
     .with_warnings(content.security_warnings))
 }
@@ -199,6 +246,7 @@ mod tests {
             reply_to: None,
             date,
             attachments: Vec::new(),
+            headers: None,
         }
     }
 
