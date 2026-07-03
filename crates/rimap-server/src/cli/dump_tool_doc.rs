@@ -88,11 +88,18 @@ mod tests {
         let text = String::from_utf8(buf).expect("utf8");
         let lines: Vec<&str> = text.lines().collect();
 
-        // Advertised tools = all ToolName variants minus the two
+        // Advertised tools = all ToolName variants minus the
         // sub-capabilities that share a parent's wire entry.
         let expected = ToolName::all()
             .into_iter()
-            .filter(|tn| !matches!(tn, ToolName::SearchAdvanced | ToolName::FetchMessageHtml))
+            .filter(|tn| {
+                !matches!(
+                    tn,
+                    ToolName::SearchAdvanced
+                        | ToolName::FetchMessageHtml
+                        | ToolName::CreateDraftHtml
+                )
+            })
             .count();
         assert_eq!(lines.len(), expected, "one record per advertised tool");
 
