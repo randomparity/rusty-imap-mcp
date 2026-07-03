@@ -268,6 +268,42 @@ array is added to the `create_draft` / `send_email` redaction schemas with
 to avoid leaking sandbox layout). Schema fixtures regenerate via
 `just regen-tool-schemas`.
 
+### Security review outcome (2026-07-03, implementation round)
+
+Two agents (mcp-security-reviewer, email-imap-security-reviewer) reviewed the
+attachments + HTML scope update before implementation. All blocking findings
+were addressed in the code:
+
+- **Aggregate memory cap enforced incrementally.** The 25 MiB total budget is
+  applied *during* the read loop (`read_attachments` caps each read at
+  `min(MAX_ATTACHMENT_BYTES, remaining)`), so 20×10 MiB cannot materialize
+  ~200 MiB before rejection. Peak resident bytes stay bounded by the total.
+- **Per-file bound on the held fd.** `read_sandboxed_file` `.take(cap+1)`s the
+  held file descriptor and rejects on the actual read length; the pre-read stat
+  is fd-relative (not a second path resolution) and only an early-reject.
+- **`content_type` validated as a strict RFC 2045 `type/subtype` token** (no
+  `;`, parameters, or whitespace), since `mail_builder` writes it verbatim.
+  Attachment bytes are added as `BodyPart::Binary`, which base64-encodes any
+  non-`text/*` part.
+- **One `body_html_is_present` predicate** shared by the `refine_tool_name`
+  authz seam and the MIME builder, so whitespace-only HTML neither elevates the
+  capability nor emits a `text/html` part. Regression-tested.
+- **Audit provenance.** Attachment paths/filenames are redacted in the request
+  args; attachment basenames + byte counts are recorded in the `tool_end`
+  `result_summary.attachments_sent` as the compensating control for the accepted
+  shared-sandbox exfil channel. `body_html` added to both compose redaction
+  schemas.
+- **Adversarial coverage.** Unit tests assert `<script>`, event handlers,
+  `javascript:` URLs, and remote `img src` are stripped from the *emitted*
+  message bytes, and that the tree is `multipart/alternative` (text first)
+  nested in `multipart/mixed` when attachments are present. The inbound
+  `injection-corpus` harness is for parsing received mail and does not model
+  outbound composition, so these live as `message_builder` unit tests.
+- **Leaf-symlink no-follow.** `read_sandboxed_file` canonicalizes the *parent*
+  (not the full path) and rejects a symlink final component, so an in-root
+  symlink is not silently followed and an escaping one is rejected by
+  `starts_with(root)`.
+
 ## Deferred, with rationale
 
 - **~~HTML body~~** — **now in scope** (see Decision 2 above). This bullet is
