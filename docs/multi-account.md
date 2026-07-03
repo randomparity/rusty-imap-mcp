@@ -70,15 +70,27 @@ Reading a resource returns account metadata:
 ```json
 {
   "name": "work",
+  "posture": "draft-safe",
   "imap_host": "127.0.0.1",
   "smtp_configured": true,
   "available_tools": ["list_folders", "search", "fetch_message", "..."]
 }
 ```
 
-No credentials, TLS fingerprints, passwords, or posture are exposed in
-resources. Posture is intentionally withheld so an injected prompt
-cannot discover which account has the most-permissive posture.
+No credentials, TLS fingerprints, or passwords are exposed in resources.
+
+`posture` **is** reported. It is already public — every namespaced tool
+description carries `[account: X, posture: Y]` — and it is the agent's
+only self-service answer to a posture denial (an agent that hits a
+denial can read this resource to learn what its account allows and stop
+retrying a call that will always fail). Withholding it here would not
+have hidden it, only made the exposure incoherent across channels.
+
+`imap_host` is reported here but omitted from the `list_accounts`
+summary. This is a deliberate tiering, not an oversight: `list_accounts`
+returns in every session and is kept minimal, whereas this resource is a
+deliberate, on-demand lookup of one account's details. Host information
+is per-account detail, so it lives in the detail view.
 
 ## Account selection
 
