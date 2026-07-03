@@ -499,14 +499,16 @@ Every response also carries `security_warnings`, an array of structured trust ob
 
 **Create Draft Email** — minimum posture: `draft-safe`
 
-Save a new email as a draft flagged $PendingReview for a human to review and send from their own mail client. This ends the workflow: the draft cannot be sent through this server, so do not follow up with send_email (that would send a duplicate and bypass the human-review gate).
+Save a new email as a draft flagged $PendingReview for a human to review and send from their own mail client. This ends the workflow: the draft cannot be sent through this server, so do not follow up with send_email (that would send a duplicate and bypass the human-review gate). Optional attachments are read from the server's download sandbox by path (only files the server downloaded/exported or the operator placed there; max 20 files, 10 MiB each, 25 MiB total). Optional body_html is sanitized (scripts, event handlers, remote content, and javascript: URLs are stripped) and always sent alongside the required plain-text body_text as a text/plain alternative; supplying body_html requires the full posture (create_draft.include_html).
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
+| `attachments` | array or null | no | Attachments sourced from the download sandbox. |
 | `bcc` | array or null | no | BCC addresses. |
-| `body_text` | string | yes | Plain text body. |
+| `body_html` | string or null | no | Optional sanitized HTML body. When present, the message is `multipart/alternative` (text first, sanitized HTML second). Requires `full` posture for `create_draft` (`create_draft.include_html`). |
+| `body_text` | string | yes | Plain text body. Always sent, and used as the `text/plain` alternative when `body_html` is present. |
 | `cc` | array or null | no | CC addresses. |
 | `in_reply_to_folder` | string or null | no | Folder containing the message to reply to (default INBOX). |
 | `in_reply_to_uid` | integer or string (nullable) | no | UID of message to reply to (for threading headers). |
@@ -519,6 +521,7 @@ Save a new email as a draft flagged $PendingReview for a human to review and sen
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `attachments` | array of AttachmentSummary | Attachments placed on the draft (basename + byte count), in order. |
 | `folder` | string | Folder the draft was appended to. |
 | `keywords` | array of string | IMAP keywords applied to the draft. |
 | `message_id` | string or null | RFC 2822 `Message-ID` assigned to the draft. |
@@ -534,14 +537,16 @@ Every response also carries `security_warnings`, an array of structured trust ob
 
 **Send Email** — minimum posture: `full`
 
-Send a new email immediately via SMTP from the account. This is an autonomous send; when a human should review first, use create_draft instead. Requires the full or destructive posture; a lower posture is denied with ERR_POSTURE_DENIED (see the rimap://docs/postures resource).
+Send a new email immediately via SMTP from the account. This is an autonomous send; when a human should review first, use create_draft instead. Requires the full or destructive posture; a lower posture is denied with ERR_POSTURE_DENIED (see the rimap://docs/postures resource). Optional attachments are read from the server's download sandbox by path (only files the server downloaded/exported or the operator placed there; max 20 files, 10 MiB each, 25 MiB total). Optional body_html is sanitized and always sent alongside the required plain-text body_text as a text/plain alternative.
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
+| `attachments` | array or null | no | Attachments sourced from the download sandbox. |
 | `bcc` | array or null | no | BCC addresses. |
-| `body_text` | string | yes | Plain text body. |
+| `body_html` | string or null | no | Optional sanitized HTML body. When present, the message is `multipart/alternative` (text first, sanitized HTML second). Requires `full` posture for `create_draft` (`create_draft.include_html`). |
+| `body_text` | string | yes | Plain text body. Always sent, and used as the `text/plain` alternative when `body_html` is present. |
 | `cc` | array or null | no | CC addresses. |
 | `in_reply_to_folder` | string or null | no | Folder containing the message to reply to (default INBOX). |
 | `in_reply_to_uid` | integer or string (nullable) | no | UID of message to reply to (for threading headers). |
@@ -554,6 +559,7 @@ Send a new email immediately via SMTP from the account. This is an autonomous se
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `attachments` | array of AttachmentSummary | Attachments placed on the sent message (basename + byte count), in order. |
 | `message_id` | string or null | RFC 2822 `Message-ID` assigned to the outgoing message. |
 | `sent` | boolean | Whether the message was delivered via SMTP. |
 | `sent_copy` | SentCopyInfo | Result of the best-effort copy to the Sent folder. |

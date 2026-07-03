@@ -223,7 +223,15 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
              to review and send from their own mail client. This ends the \
              workflow: the draft cannot be sent through this server, so do \
              not follow up with send_email (that would send a duplicate \
-             and bypass the human-review gate).",
+             and bypass the human-review gate). Optional attachments are \
+             read from the server's download sandbox by path (only files the \
+             server downloaded/exported or the operator placed there; max 20 \
+             files, 10 MiB each, 25 MiB total). Optional body_html is \
+             sanitized (scripts, event handlers, remote content, and \
+             javascript: URLs are stripped) and always sent alongside the \
+             required plain-text body_text as a text/plain alternative; \
+             supplying body_html requires the full posture \
+             (create_draft.include_html).",
             envelope_schema::<CreateDraftInput>(),
             envelope_schema::<ToolResponse<CreateDraftMeta, ()>>(),
         ),
@@ -233,7 +241,12 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
              is an autonomous send; when a human should review first, use \
              create_draft instead. Requires the full or destructive \
              posture; a lower posture is denied with ERR_POSTURE_DENIED \
-             (see the rimap://docs/postures resource).",
+             (see the rimap://docs/postures resource). Optional attachments \
+             are read from the server's download sandbox by path (only files \
+             the server downloaded/exported or the operator placed there; max \
+             20 files, 10 MiB each, 25 MiB total). Optional body_html is \
+             sanitized and always sent alongside the required plain-text \
+             body_text as a text/plain alternative.",
             envelope_schema::<SendEmailInput>(),
             envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
         ),

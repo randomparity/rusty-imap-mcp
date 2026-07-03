@@ -38,6 +38,7 @@ capability).
 | `list_labels` | allowed | allowed | allowed | allowed |
 | `move_message` | denied | allowed | allowed | allowed |
 | `create_draft` | denied | allowed | allowed | allowed |
+| `create_draft.include_html` | denied | denied | allowed | allowed |
 | `send_email` | denied | denied | allowed | allowed |
 | `forward` | denied | denied | allowed | allowed |
 | `delete_message` | denied | denied | allowed | allowed |
@@ -55,6 +56,41 @@ writes a raw, unsanitized mbox to the download sandbox, so when enabled it
 also requires a server-private download root (config validation rejects a
 group/world-writable `download_dir` on Unix). See
 [configuration.md](configuration.md#the-export_messages-tool).
+
+## Compose attachments and HTML
+
+`create_draft` and `send_email` accept optional `attachments` and `body_html`.
+
+**Attachments are sourced only from the download sandbox.** An attachment is
+referenced by a `path` that must resolve inside the download-sandbox root; the
+server reads it through the same containment used for `download_attachment`
+(canonicalize + `starts_with(root)` + a held directory fd, refusing to follow a
+symlink at the final component). An agent can therefore attach only a file the
+server itself downloaded or exported, or one the operator deliberately placed in
+the sandbox — never an arbitrary host path. Caps: at most 20 attachments,
+10 MiB per file, 25 MiB total (raw bytes; base64 adds ~33% on the wire).
+
+**Shared-sandbox trust model (multi-account operators).** The download root is a
+single process-global directory shared by every configured account. Allowing
+compose to read files back out of it means that, on a server hosting more than
+one account, those accounts **share a file staging area**: a file one account
+downloads or exports can be attached to outbound mail sent from another account.
+This is an accepted product trade-off, not a defect — it does not widen the
+boundary beyond "files the server wrote or the operator placed in the root," and
+it never permits reading arbitrary host paths. The request arguments redact
+attachment paths, but every send/draft records the attachment basenames and byte
+counts in the audit `tool_end` result so an operator can see which sandbox file
+left the boundary. Deployments that need hard cross-account file isolation should
+run separate servers with separate download roots.
+
+**HTML bodies require `full`.** `body_html` is sanitized through the same
+tag-allowlist pipeline used for inbound mail (scripts, event handlers, remote
+content, and `javascript:` URLs are stripped) and is always sent alongside the
+required plain-text `body_text` as a `text/plain` alternative. Because HTML is a
+richer surface than plain text, supplying `body_html` to `create_draft` is gated
+at `full` via the `create_draft.include_html` capability, even though a
+plain-text draft is allowed at `draft-safe`. `send_email` already requires
+`full`, so it carries no separate HTML sub-capability.
 
 ## Per-tool overrides
 
