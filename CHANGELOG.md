@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `headers`/`body`/`text` can — it stays at the low-posture `Search` seat
   rather than promoting to `SearchAdvanced`. Mutually exclusive with
   `advanced_query`. Issue #435 (deferred option (c) from #410).
+- `tools/list` now honors MCP cursor pagination. Large multi-account
+  catalogs are served one page at a time (25 tools/page) instead of a single
+  response; the cursor is an opaque catalog offset and a client walks
+  `nextCursor` to completion. Single- and few-account deployments fit in one
+  page and are unchanged. For a 3-account full-posture config the initial
+  response drops from ~616 KB (59 entries) to ~267 KB (25 entries). A
+  non-numeric cursor is rejected with `-32602`. Issue #411.
 - Two static MCP resources, `rimap://docs/postures` and
   `rimap://docs/workflows`, advertised by `resources/list` regardless of
   account count. `rimap://docs/postures` is `docs/postures.md` verbatim;
@@ -74,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Expanded the MCP tool descriptions from terse one-liners to 1-3
+  sentences of workflow and constraint guidance an agent can act on:
+  when to use each tool, the discovery tool that feeds it (`search` for
+  UIDs, `list_attachments` for `part_id`), the batch limit (single `uid`
+  or up to 100 `uids`), the two-step delete/expunge model, and plain-word
+  posture/config gating. `create_draft` now documents the `$PendingReview`
+  dead-end (the draft cannot be sent through the server; do not follow up
+  with `send_email`). Issue #404.
 - Stripped rustdoc artifacts from every published tool schema:
   unresolvable Rust doc-link syntax (`` [`...`] ``), internal
   function/constant names (`build_query`, `escape_wire_name`,
