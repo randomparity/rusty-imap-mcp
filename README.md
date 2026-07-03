@@ -138,6 +138,17 @@ are not separate MCP tools.
 for the full 23-capability x 4-posture matrix (the two gated
 sub-capabilities above are counted as separate rows there).
 
+## Compatibility
+
+rusty-imap-mcp accepts MCP protocol version `2025-11-25` only — it
+does not negotiate down to older versions a client requests. Every
+mainstream MCP host (Claude Desktop, Claude Code, Claude.ai, Cursor,
+VS Code, etc.) has negotiated `2025-11-25` by default since that
+revision became the MCP spec's latest; an older host will fail the
+handshake instead of connecting with reduced capabilities. See
+[Unsupported protocol version during initialize](docs/troubleshooting.md#unsupported-protocol-version-during-initialize)
+for the exact error text and why there's no fallback.
+
 ## Build from source
 
 ```bash
@@ -184,6 +195,13 @@ Binaries are published for five targets on each
   client must use a distinct `[audit].path`; see
   [Running multiple MCP clients](docs/audit-log.md#running-multiple-mcp-clients)
   for the configuration pattern.
+- **MCP client rejects the server at startup with `Unsupported
+  protocol version: '<version>'. Server supports: 2025-11-25.`** —
+  your MCP host is negotiating an older protocol version;
+  rusty-imap-mcp requires an exact match and does not fall back. See
+  [Compatibility](#compatibility) and
+  [Unsupported protocol version during initialize](docs/troubleshooting.md#unsupported-protocol-version-during-initialize)
+  for why, and update your MCP host.
 
 ## License
 
