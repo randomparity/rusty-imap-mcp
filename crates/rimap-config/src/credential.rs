@@ -236,7 +236,13 @@ pub fn resolve_credential(
     Err(ConfigError::NoCredential {
         host: host.to_string(),
         account_tag: hash_account_tag(username, host),
-        reason: build_no_credential_reason(account_id, fallback_mode, &new_key, &legacy_key),
+        reason: build_no_credential_reason(
+            account_id,
+            fallback_mode,
+            protocol,
+            &new_key,
+            &legacy_key,
+        ),
     })
 }
 
@@ -253,6 +259,7 @@ pub fn resolve_credential(
 fn build_no_credential_reason(
     account_id: &AccountId,
     fallback_mode: crate::model::FallbackMode,
+    protocol: Protocol,
     new_key: &str,
     legacy_key: &str,
 ) -> String {
@@ -266,10 +273,12 @@ fn build_no_credential_reason(
         ),
         crate::model::FallbackMode::KeyringThenEnv => format!(
             "no entry in keychain service `{KEYCHAIN_SERVICE}` under key \
-             `{new_key}` or legacy `{legacy_key}`, and `{PASSWORD_ENV_VAR}` \
-             is unset or empty. Run `rusty-imap-mcp login --account {}` \
-             or set the environment variable",
+             `{new_key}` or legacy `{legacy_key}`, and neither `{}` nor \
+             `{PASSWORD_ENV_VAR}` is set. Run `rusty-imap-mcp login \
+             --account {}` or set `{}`",
+            protocol.env_var_name(),
             account_id.as_str(),
+            protocol.env_var_name(),
         ),
     }
 }
@@ -729,6 +738,9 @@ mod tests {
                     assert_eq!(account_tag.len(), 16);
                     assert!(reason.contains("rusty-imap-mcp login"));
                     assert!(reason.contains("RUSTY_IMAP_MCP_PASSWORD"));
+                    // The failure message names the protocol-scoped var so
+                    // operators are steered to it, not just the legacy shared var.
+                    assert!(reason.contains("RUSTY_IMAP_MCP_IMAP_PASSWORD"));
                 }
                 other => panic!("wrong variant: {other:?}"),
             }
