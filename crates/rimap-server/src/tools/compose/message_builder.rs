@@ -261,9 +261,16 @@ pub(crate) fn generate_message_id(from_addr: &str) -> String {
 }
 
 /// Set From, To, CC, BCC, Subject, body, and Message-ID on a builder.
+/// `include_bcc` controls whether the `Bcc` header is written into the
+/// message DATA. `create_draft` passes `true` so a saved draft retains the
+/// full recipient set for later sending; `send_email` passes `false` so the
+/// transmitted (and Sent-copy) bytes never carry a `Bcc` header — blind
+/// recipients are delivered via the SMTP envelope `RCPT TO` only and are
+/// never disclosed to other recipients (#432).
 pub(crate) fn build_message_headers<'a>(
     from_addr: &'a str,
     input: &'a ComposeInput,
+    include_bcc: bool,
 ) -> MessageBuilder<'a> {
     let msg_id = generate_message_id(from_addr);
     let builder = MessageBuilder::new()
@@ -279,10 +286,9 @@ pub(crate) fn build_message_headers<'a>(
         builder
     };
 
-    if let Some(bcc) = input.bcc.as_ref().filter(|v| !v.is_empty()) {
-        builder.bcc(addresses_to_builder(bcc))
-    } else {
-        builder
+    match input.bcc.as_ref().filter(|v| !v.is_empty()) {
+        Some(bcc) if include_bcc => builder.bcc(addresses_to_builder(bcc)),
+        Some(_) | None => builder,
     }
 }
 
@@ -347,8 +353,9 @@ pub(crate) async fn build_message(
     account: &AccountState,
     from_addr: &str,
     input: &ComposeInput,
+    include_bcc: bool,
 ) -> Result<Vec<u8>, rimap_core::RimapError> {
-    let builder = build_message_headers(from_addr, input);
+    let builder = build_message_headers(from_addr, input, include_bcc);
 
     let builder = if let Some(reply_uid) = input.in_reply_to_uid {
         Box::pin(apply_threading_headers(
@@ -400,7 +407,7 @@ mod tests {
             in_reply_to_folder: None,
         };
 
-        let builder = super::build_message_headers("alice@example.com", &input);
+        let builder = super::build_message_headers("alice@example.com", &input, true);
         let raw = builder.write_to_vec().unwrap();
         let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
 
@@ -612,7 +619,7 @@ mod tests {
             name: None,
             address: "bob@example.com".into(),
         }]);
-        let builder = super::build_message_headers("alice@secret-host.internal", &input);
+        let builder = super::build_message_headers("alice@secret-host.internal", &input, true);
         let raw = builder.write_to_vec().unwrap();
         let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
         let mid = parsed.message_id().unwrap();
@@ -791,11 +798,86 @@ mod tests {
             in_reply_to_folder: None,
         };
         validate_compose_input(&input).unwrap();
-        let builder = super::build_message_headers("alice@example.com", &input);
+        let builder = super::build_message_headers("alice@example.com", &input, true);
         let raw = builder.write_to_vec().unwrap();
         let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
         assert!(parsed.cc().is_none());
         assert!(parsed.bcc().is_none());
+    }
+
+    // --- Bcc exclusion from sent DATA (#432) ---
+
+    fn bcc_input() -> ComposeInput {
+        ComposeInput {
+            to: vec![AddressInput {
+                name: None,
+                address: "to@example.com".into(),
+            }],
+            cc: None,
+            bcc: Some(vec![AddressInput {
+                name: None,
+                address: "blind@secret.example".into(),
+            }]),
+            subject: "Hi".into(),
+            body_text: "body".into(),
+            in_reply_to_uid: None,
+            in_reply_to_folder: None,
+        }
+    }
+
+    #[test]
+    fn send_email_path_excludes_bcc_from_data() {
+        // include_bcc = false (the send_email path): the Bcc header must not
+        // appear in the message bytes and no blind address may leak into the
+        // DATA. Blind recipients are delivered via the SMTP envelope instead.
+        let raw = super::build_message_headers("from@example.com", &bcc_input(), false)
+            .write_to_vec()
+            .unwrap();
+        let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+        assert!(
+            parsed.bcc().is_none(),
+            "Bcc header must not be in the sent DATA",
+        );
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            !text.contains("Bcc:"),
+            "no Bcc header line may appear in DATA"
+        );
+        assert!(
+            !text.contains("blind@secret.example"),
+            "blind recipient leaked into the sent DATA",
+        );
+    }
+
+    #[test]
+    fn draft_path_retains_bcc_in_data() {
+        // include_bcc = true (the create_draft path): a saved draft keeps the
+        // Bcc so the full recipient set survives until the user sends it.
+        let raw = super::build_message_headers("from@example.com", &bcc_input(), true)
+            .write_to_vec()
+            .unwrap();
+        let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+        let bcc = parsed.bcc().unwrap();
+        assert_eq!(
+            bcc.first().unwrap().address().unwrap(),
+            "blind@secret.example",
+        );
+    }
+
+    #[test]
+    fn empty_bcc_never_emitted_regardless_of_flag() {
+        for include_bcc in [true, false] {
+            let mut input = bcc_input();
+            input.bcc = Some(vec![]);
+            let raw = super::build_message_headers("from@example.com", &input, include_bcc)
+                .write_to_vec()
+                .unwrap();
+            let parsed = mail_parser::MessageParser::new().parse(&raw).unwrap();
+            assert!(
+                parsed.bcc().is_none(),
+                "empty bcc must not emit a header (include_bcc={include_bcc})",
+            );
+        }
     }
 
     // --- forward (#408) ---
