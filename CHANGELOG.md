@@ -81,6 +81,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Added static remediation guidance for folder-policy and posture
+  denials to the `expunge`, `create_folder`, `rename_folder`,
+  `delete_folder`, and `send_email` descriptions. Runtime denial errors
+  are deliberately scrubbed (`ProtectedFolder`/`ExpungeDenied` become
+  "operation denied for this folder"), leaving an agent no way to act;
+  the descriptions now name the stable `error_code` it will see
+  (`ERR_PROTECTED_FOLDER`, `ERR_EXPUNGE_DENIED`, `ERR_POSTURE_DENIED`),
+  the governing config key (`[security].protected_folders`,
+  `[security].expunge_folders`), that the policy cannot be overridden
+  through MCP, and the `rimap://docs/postures` resource. No runtime
+  behavior or error message changed. Issue #417.
 - Expanded the MCP tool descriptions from terse one-liners to 1-3
   sentences of workflow and constraint guidance an agent can act on:
   when to use each tool, the discovery tool that feeds it (`search` for

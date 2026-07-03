@@ -231,8 +231,9 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
             "Send Email",
             "Send a new email immediately via SMTP from the account. This \
              is an autonomous send; when a human should review first, use \
-             create_draft instead. Requires a posture that permits \
-             sending.",
+             create_draft instead. Requires the full or destructive \
+             posture; a lower posture is denied with ERR_POSTURE_DENIED \
+             (see the rimap://docs/postures resource).",
             envelope_schema::<SendEmailInput>(),
             envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
         ),
@@ -258,33 +259,50 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
             "Expunge Folder",
             "Permanently and irreversibly erase every message already \
              flagged for deletion in a folder; the second step after \
-             delete_message. Restricted to folders allowlisted in \
-             [security.tools] and to the destructive posture.",
+             delete_message. Only allowed for folders the operator has \
+             allowlisted in the server's [security].expunge_folders (empty \
+             = deny-all by default) and at the destructive posture. A \
+             denial returns ERR_EXPUNGE_DENIED (folder not allowlisted) or \
+             ERR_POSTURE_DENIED (posture too low); neither is overridable \
+             through MCP, so the operator must change the server config. \
+             See the rimap://docs/postures resource.",
             envelope_schema::<ExpungeInput>(),
             envelope_schema::<ToolResponse<ExpungeMeta, ()>>(),
         ),
         ToolName::CreateFolder => (
             "Create IMAP Folder",
-            "Create a new IMAP folder by name. Names that collide with \
-             protected folders (INBOX, Sent, Drafts, Trash) are rejected. \
-             Requires a posture that permits folder management.",
+            "Create a new IMAP folder by name. A name colliding with a \
+             protected folder (INBOX, Sent, Drafts, Trash by default, set \
+             by the server's [security].protected_folders) is refused with \
+             ERR_PROTECTED_FOLDER. Requires the full or destructive \
+             posture, else ERR_POSTURE_DENIED. Both are server-side policy \
+             the agent cannot override; see the rimap://docs/postures \
+             resource.",
             envelope_schema::<CreateFolderInput>(),
             envelope_schema::<ToolResponse<CreateFolderMeta, ()>>(),
         ),
         ToolName::RenameFolder => (
             "Rename IMAP Folder",
-            "Rename an IMAP folder. Protected folders (INBOX, Sent, Drafts, \
-             Trash) cannot be renamed. Requires a posture that permits \
-             folder management.",
+            "Rename an IMAP folder. Renaming a protected folder or reusing \
+             a protected name (INBOX, Sent, Drafts, Trash by default, from \
+             the server's [security].protected_folders) is refused with \
+             ERR_PROTECTED_FOLDER. Requires the full or destructive \
+             posture, else ERR_POSTURE_DENIED. These are server-side \
+             policy, not overridable through MCP; see the \
+             rimap://docs/postures resource.",
             envelope_schema::<RenameFolderInput>(),
             envelope_schema::<ToolResponse<RenameFolderMeta, ()>>(),
         ),
         ToolName::DeleteFolder => (
             "Delete IMAP Folder",
             "Delete an IMAP folder and everything inside it; this is \
-             irreversible. Protected folders are refused and the folder \
-             must be allowlisted for deletion. Requires the destructive \
-             posture.",
+             irreversible. A protected folder (INBOX, Sent, Drafts, Trash \
+             by default, from the server's [security].protected_folders) is \
+             refused with ERR_PROTECTED_FOLDER, and a folder not \
+             allowlisted in [security].expunge_folders is refused with \
+             ERR_EXPUNGE_DENIED. Requires the destructive posture, else \
+             ERR_POSTURE_DENIED. All are server-side policy the agent \
+             cannot override; see the rimap://docs/postures resource.",
             envelope_schema::<DeleteFolderInput>(),
             envelope_schema::<ToolResponse<DeleteFolderMeta, ()>>(),
         ),
@@ -520,6 +538,78 @@ mod tests {
         assert!(
             desc(ToolName::DownloadAttachment).contains("list_attachments"),
             "download_attachment must reference list_attachments for part_id",
+        );
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "test lookups")]
+    fn descriptions_carry_denial_remediation() {
+        // Regression net for #417: denial errors are scrubbed at runtime
+        // (ProtectedFolder/ExpungeDenied -> "operation denied for this
+        // folder"), so the folder-policy tools must carry the remediation
+        // statically. Each references the governing config key, the stable
+        // error_code an agent will see in structuredContent (#402), and the
+        // rimap://docs/postures resource, and states the policy is not
+        // overridable through MCP.
+        fn desc(tn: ToolName) -> String {
+            TOOL_DEFS
+                .get(&tn)
+                .and_then(|d| d.description.as_deref())
+                .expect("tool has a description")
+                .to_string()
+        }
+
+        // Posture denials name the stable code + point at the doc resource.
+        for tn in [
+            ToolName::SendEmail,
+            ToolName::Expunge,
+            ToolName::CreateFolder,
+            ToolName::RenameFolder,
+            ToolName::DeleteFolder,
+        ] {
+            let d = desc(tn);
+            assert!(
+                d.contains("ERR_POSTURE_DENIED"),
+                "{} must name ERR_POSTURE_DENIED; got {d:?}",
+                tn.as_str(),
+            );
+            assert!(
+                d.contains("rimap://docs/postures"),
+                "{} must point at rimap://docs/postures; got {d:?}",
+                tn.as_str(),
+            );
+        }
+
+        // protected_folders policy: create/rename/delete_folder name the
+        // config key and the ERR_PROTECTED_FOLDER code.
+        for tn in [
+            ToolName::CreateFolder,
+            ToolName::RenameFolder,
+            ToolName::DeleteFolder,
+        ] {
+            let d = desc(tn);
+            assert!(
+                d.contains("[security].protected_folders") && d.contains("ERR_PROTECTED_FOLDER"),
+                "{} must name [security].protected_folders + ERR_PROTECTED_FOLDER; got {d:?}",
+                tn.as_str(),
+            );
+        }
+
+        // expunge_folders allowlist: expunge and delete_folder name the
+        // config key and the ERR_EXPUNGE_DENIED code.
+        for tn in [ToolName::Expunge, ToolName::DeleteFolder] {
+            let d = desc(tn);
+            assert!(
+                d.contains("[security].expunge_folders") && d.contains("ERR_EXPUNGE_DENIED"),
+                "{} must name [security].expunge_folders + ERR_EXPUNGE_DENIED; got {d:?}",
+                tn.as_str(),
+            );
+        }
+
+        // The denial is a server-side decision the agent cannot self-serve.
+        assert!(
+            desc(ToolName::Expunge).contains("operator must change the server config"),
+            "expunge must state the operator (not the agent) resolves an expunge denial",
         );
     }
 
