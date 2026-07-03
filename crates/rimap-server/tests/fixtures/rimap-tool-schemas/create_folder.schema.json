@@ -26,7 +26,7 @@
           "description": "Classification of the warning."
         },
         "detail": {
-          "description": "Optional context string whose format is defined per-variant in\nthe [`WarningCode`] doc comments. Within a single crate version\nthe format is structured (key=value pairs), so tests may\npattern-match substrings against known variants. Consumers MUST\nNOT rely on this format across crate versions \u2014 it may change\nwithout notice; use `code` for stable dispatch.\n\n`None` when no additional detail is available.",
+          "description": "Optional context string, format varies by `code`. Within a\nsingle server version the format is structured (key=value\npairs), but it may change across versions \u2014 do not depend on\nits exact shape; use `code` for stable dispatch. `None` when no\nadditional detail is available.",
           "type": [
             "string",
             "null"
@@ -172,7 +172,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
+  "description": "Top-level tool response envelope: `meta` (trusted server metadata),\n`untrusted` (sanitized content derived from email data, when the\ntool returns any), and `security_warnings` (structured security\nobservations from content sanitization).",
   "properties": {
     "meta": {
       "$ref": "#/$defs/CreateFolderMeta",

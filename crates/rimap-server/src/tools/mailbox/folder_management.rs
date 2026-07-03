@@ -6,14 +6,12 @@ use serde::{Deserialize, Serialize};
 use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
 
-/// Input for `create_folder`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateFolderInput {
     /// Folder to create.
     pub folder: String,
 }
 
-/// Input for `rename_folder`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RenameFolderInput {
     /// Current folder name.
@@ -22,7 +20,6 @@ pub struct RenameFolderInput {
     pub new_folder: String,
 }
 
-/// Input for `delete_folder`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteFolderInput {
     /// Folder to delete.

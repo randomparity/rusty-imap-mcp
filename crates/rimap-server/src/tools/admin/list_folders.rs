@@ -81,10 +81,10 @@ pub struct FolderEntry {
     /// Tag codepoints are stripped before this reaches the client.
     pub name: String,
     /// Raw wire form of the folder name encoded as `\u{H..}` Unicode
-    /// escape sequences (see `escape_wire_name`), populated only when
-    /// `name` differs from what the server sent. Clients pass this back
-    /// for SELECT / STATUS / MOVE / FETCH when `name_wire` is `Some(_)`;
-    /// otherwise they pass `name` directly.
+    /// escape sequences, populated only when `name` differs from what
+    /// the server sent. Pass this back for SELECT / STATUS / MOVE /
+    /// FETCH when `name_wire` is present; otherwise pass `name`
+    /// directly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_wire: Option<String>,
     /// Hierarchy delimiter character reported by the server.

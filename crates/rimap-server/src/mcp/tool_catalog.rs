@@ -369,6 +369,49 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "panicking on serialization failure is the right test behavior"
+    )]
+    fn no_tool_schema_leaks_rustdoc_or_internal_identifiers() {
+        // Regression net for #405: published tool schemas are generated
+        // from rustdoc via schemars, so unresolvable doc-link syntax,
+        // internal-only identifiers, and design essays for reviewers can
+        // leak straight to agents if a doc comment isn't written with
+        // the schema in mind. Scans the full serialized Tool (title,
+        // description, input/output schema) for every tool.
+        const BANNED_SUBSTRINGS: &[&str] = &[
+            "# Shape",
+            "Content-oracle",
+            "MAX_BATCH_UIDS",
+            "MAX_EXPORT_TOTAL_BYTES",
+            "build_query",
+            "escape_wire_name",
+            "must `Serialize`",
+        ];
+        for def in ToolName::all()
+            .into_iter()
+            .filter_map(|tn| TOOL_DEFS.get(&tn))
+        {
+            let serialized = serde_json::to_string(def).expect("tool def serializes");
+            assert!(
+                !serialized.contains("[`"),
+                "tool {} schema contains unresolvable rustdoc doc-link syntax \
+                 ([`...`]); inline the referenced value or drop the link",
+                def.name,
+            );
+            for banned in BANNED_SUBSTRINGS {
+                assert!(
+                    !serialized.contains(banned),
+                    "tool {} schema leaks internal identifier or maintainer \
+                     jargon {banned:?}",
+                    def.name,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_tool_input_schema_declares_object_type() {
         // Spec-strict MCP clients (e.g. bobshell's Zod validator) reject
         // any tool whose inputSchema.type is not the string "object". A
