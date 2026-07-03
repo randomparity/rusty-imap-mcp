@@ -5,6 +5,11 @@ this repository. The global development standards in the developer's personal
 `~/.claude/CLAUDE.md` (or equivalent) apply first; this file adds repo-specific
 context and overrides where needed.
 
+> **Scope:** this is a contributor guide for developing *this codebase*. If you
+> are configuring or operating an email agent and want the surface the server
+> exposes — the tools, their parameters, response fields, and required
+> postures — see the generated reference at [docs/tools.md](docs/tools.md).
+
 ## What this project is
 
 `rusty-imap-mcp` is a security-first [Model Context Protocol](https://modelcontextprotocol.io/)

@@ -138,6 +138,35 @@ jobs:
             exit 1
           fi
 
+  tools-doc-drift:
+    name: tools-doc drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          key: tools-doc-drift
+      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9  # v2.82.2
+        with:
+          tool: just
+      - name: Regenerate docs/tools.md
+        run: just gen-tools-doc
+      - name: Verify no tools-doc drift
+        run: |
+          if ! git diff --exit-code docs/tools.md; then
+            git diff --stat docs/tools.md
+            echo "::error::docs/tools.md is out of sync — run 'just gen-tools-doc' and commit the updated reference"
+            exit 1
+          fi
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04

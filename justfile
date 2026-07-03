@@ -287,8 +287,27 @@ regen-tool-schemas:
     #!/usr/bin/env bash
     ./scripts/regen-tool-schemas.sh
 
+# Regenerate docs/tools.md from the live tool catalog (dump-tool-doc).
+# Run after changing any tool description, parameter, or response struct.
+# CI fails on a non-empty diff (see `check-tools-doc`).
+gen-tools-doc:
+    #!/usr/bin/env bash
+    ./scripts/gen-tools-doc.sh
+
+# Fail if docs/tools.md has drifted from the live tool catalog. Part of
+# `ci`; mirrors the tool-schema drift check.
+check-tools-doc:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/gen-tools-doc.sh
+    if ! git diff --exit-code docs/tools.md; then
+        git diff --stat docs/tools.md
+        echo "::error::docs/tools.md is out of sync — run 'just gen-tools-doc' and commit the result"
+        exit 1
+    fi
+
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny mcp-conformance-node
+ci: fmt-check lint test test-msrv deny mcp-conformance-node check-tools-doc
     typos
 
 # Re-run pre-commit hooks across all files.

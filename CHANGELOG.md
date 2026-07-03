@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Generated tool reference at [`docs/tools.md`](docs/tools.md): one section
+  per advertised MCP tool with its title, description, minimum posture,
+  parameter table, and response fields, rendered from the live catalog. A
+  hidden `dump-tool-doc` subcommand emits the per-tool data (including the
+  minimum posture from `rimap-core`'s matrix); `just gen-tools-doc` renders
+  it and a `tools-doc drift` CI job (plus `just ci`) fails if the committed
+  doc falls out of sync — the same guarantee as the tool-schema drift check.
+  `AGENTS.md` now states it is a contributor guide and points operators at
+  `docs/tools.md`; `docs/INDEX.md` links the reference. Issue #413.
 - `search` gains an opt-in `thread_of_uid` parameter: given a UID, returns
   the whole conversation (the target message, every ancestor named in its
   own `References`/`In-Reply-To` chain, and every descendant whose

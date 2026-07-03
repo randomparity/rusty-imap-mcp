@@ -13,6 +13,8 @@ pub(crate) mod dry_run;
 #[cfg(feature = "test-support")]
 pub(crate) mod dump_tool_catalog;
 #[cfg(feature = "test-support")]
+pub(crate) mod dump_tool_doc;
+#[cfg(feature = "test-support")]
 pub(crate) mod dump_tool_schemas;
 pub(crate) mod migrate_keyring;
 
@@ -108,6 +110,14 @@ pub enum Command {
     #[cfg(feature = "test-support")]
     #[command(name = "dump-tool-schemas", hide = true)]
     DumpToolSchemas,
+    /// Emit per-tool documentation records (title, description, min
+    /// posture, and input/output schemas) as line-delimited JSON on
+    /// stdout. Consumed by `scripts/gen-tools-doc.py` via
+    /// `just gen-tools-doc` to render `docs/tools.md` (#413). Hidden from
+    /// `--help` because it is a test-only utility.
+    #[cfg(feature = "test-support")]
+    #[command(name = "dump-tool-doc", hide = true)]
+    DumpToolDoc,
 }
 
 /// Actions under `rusty-imap-mcp audit <action>`.
