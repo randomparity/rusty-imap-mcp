@@ -355,6 +355,7 @@ impl ToolRedactionSchema for ToolName {
             Self::MoveMessage => move_message_schema(self),
             Self::CreateDraft => create_draft_schema(self),
             Self::SendEmail => send_email_schema(self),
+            Self::Forward => forward_schema(self),
             Self::DeleteMessage => delete_message_schema(self),
             Self::Expunge => expunge_schema(self),
             Self::CreateFolder => create_folder_schema(self),
@@ -548,6 +549,28 @@ fn create_draft_schema(tool: ToolName) -> RedactionSchema {
             ("subject", RedactString),
             ("body_text", RedactString),
             ("body_html", RedactString),
+            ("password", Forbidden),
+            ("token", Forbidden),
+        ],
+    )
+}
+
+// `forward` audits the SOURCE folder+uid verbatim: `forward` re-sends an
+// existing stored message to arbitrary recipients, so provenance ("which
+// stored message left the boundary?") is the field an incident responder
+// most needs. Do NOT alias send_email_schema, which has no source fields.
+fn forward_schema(tool: ToolName) -> RedactionSchema {
+    use FieldPolicy::{Forbidden, RedactString, SaltedHash, Verbatim};
+    use VerbatimType::{String as VtString, U64};
+    RedactionSchema::new(
+        tool,
+        &[
+            ("folder", Verbatim(VtString)),
+            ("uid", Verbatim(U64)),
+            ("to", SaltedHash),
+            ("cc", SaltedHash),
+            ("bcc", SaltedHash),
+            ("comment", RedactString),
             ("password", Forbidden),
             ("token", Forbidden),
         ],

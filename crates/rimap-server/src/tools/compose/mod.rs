@@ -9,5 +9,6 @@
 //! mixed concerns.
 
 pub mod create_draft;
+pub mod forward;
 pub mod message_builder;
 pub mod send_email;

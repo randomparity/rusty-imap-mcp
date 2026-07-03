@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table pinned by a test against the Rust constants that enforce each
   limit. Both `ServerInfo.instructions` constants now point agents at these
   URIs. Issue #407.
+- `search` gains an opt-in `body_preview_bytes` parameter: when set, each
+  result carries a sanitized plain-text `body_preview` (first N bytes, capped
+  at 1024) plus a `body_preview_truncated` flag, for the first 50 results of a
+  page. Collapses "summarize my inbox" from one `search` + K `fetch_message`
+  calls to a single call. Previews reuse the `fetch_message` body pipeline
+  (same Unicode sanitization); per-message fetch/parse failures are isolated,
+  and the parameter adds no posture gate (a truncated body of an
+  already-matched message, like `fetch_message`, not a content filter).
+  Rationale in `docs/superpowers/specs/2026-07-03-issue-410-body-preview-design.md`.
+  Issue #410.
 - `fetch_message` gains an opt-in `include_headers` parameter: an allowlist
   of header names (≤ 16 per call) whose sanitized values are returned under
   `untrusted.headers` (name → array of values). Unblocks unsubscribe,
@@ -55,9 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `posture`, making the server instructions' claim true and giving an
   agent a self-service answer to a posture denial. The instructions now
   also name the four postures (`readonly` / `draft-safe` / `full` /
-  `destructive`) and what each enables, and the `search` tool's
-  posture-gated fields use plain language instead of the internal
-  "Content-oracle" / `SearchAdvanced` terms. `imap_host` stays in the
+  `destructive`) and what each enables. `imap_host` stays in the
   resource but remains omitted from the leaner `list_accounts` summary
   (documented tiering). Issue #406.
 - Tool-execution failures are now returned as a `CallToolResult` with

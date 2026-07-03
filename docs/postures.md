@@ -39,6 +39,7 @@ capability).
 | `move_message` | denied | allowed | allowed | allowed |
 | `create_draft` | denied | allowed | allowed | allowed |
 | `send_email` | denied | denied | allowed | allowed |
+| `forward` | denied | denied | allowed | allowed |
 | `delete_message` | denied | denied | allowed | allowed |
 | `create_folder` | denied | denied | allowed | allowed |
 | `rename_folder` | denied | denied | allowed | allowed |

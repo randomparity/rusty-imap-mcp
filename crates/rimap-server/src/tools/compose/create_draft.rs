@@ -41,7 +41,9 @@ pub async fn handle(
 ) -> Result<ToolResponse<CreateDraftMeta>, rimap_core::RimapError> {
     message_builder::validate_compose_input(&input)?;
     let from_addr = account.imap.username();
-    let raw_msg = message_builder::build_message(account, from_addr, &input).await?;
+    // Drafts retain the Bcc header so the saved draft carries the full
+    // recipient set for later sending (include_bcc = true).
+    let raw_msg = message_builder::build_message(account, from_addr, &input, true).await?;
 
     let drafts_folder: &str = account.special_use.drafts().unwrap_or("Drafts");
     crate::tools::validation::validate_folder_input("drafts folder", drafts_folder)?;

@@ -196,8 +196,8 @@ describe("wire conformance (CLI catalog dump)", () => {
     const entries = await dumpToolCatalog();
     expect(
       entries.length,
-      "dump must contain 23 tool defs (25 ToolName variants - 2 sub-capabilities)",
-    ).toBe(23);
+      "dump must contain 24 tool defs (26 ToolName variants - 2 sub-capabilities)",
+    ).toBe(24);
 
     for (const entry of entries) {
       const result = ToolSchema.safeParse(entry);

@@ -1,158 +1,48 @@
 {
   "$defs": {
-    "SearchMeta": {
-      "description": "Trusted metadata for a `search` response.",
+    "ErrorCode": {
+      "description": "Stable machine-readable error codes, per design spec \u00a79.",
+      "type": "string"
+    },
+    "ForwardMeta": {
+      "description": "Trusted metadata for a `forward` response.",
       "properties": {
-        "folder": {
-          "description": "Folder that was searched.",
-          "type": "string"
-        },
-        "next_offset": {
-          "description": "Offset to pass on the next call to fetch the following page in\nthe same order (see `SearchInput`'s \"Result ordering\" section).\nPresent only when `truncated` is `true`.",
-          "format": "uint64",
-          "minimum": 0,
+        "message_id": {
+          "description": "RFC 2822 `Message-ID` assigned to the outgoing forward.",
           "type": [
-            "integer",
+            "string",
             "null"
           ]
         },
-        "returned": {
-          "description": "Number of messages returned in this response.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "total_matched": {
-          "description": "Total number of messages matching the query (before pagination).",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "truncated": {
-          "description": "Whether there are more results beyond this page.",
+        "sent": {
+          "description": "Whether the message was delivered via SMTP.",
           "type": "boolean"
         },
-        "uid_validity": {
-          "description": "UIDVALIDITY observed for the searched folder, from the same\nEXAMINE/UID SEARCH operation. Thread into `export_messages`'\n`expected_uidvalidity`. `None` if the server omitted it.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "folder",
-        "total_matched",
-        "returned",
-        "truncated"
-      ],
-      "type": "object"
-    },
-    "SearchResultEntry": {
-      "description": "A single message entry in a `search` untrusted payload.",
-      "properties": {
-        "body_preview": {
-          "description": "First bytes of the sanitized plain-text body, present only when\n`body_preview_bytes` was requested and a body was retrievable.\nAttacker-controlled email content.",
-          "type": [
-            "string",
-            "null"
-          ]
+        "sent_copy": {
+          "$ref": "#/$defs/SentCopyInfo",
+          "description": "Result of the best-effort copy to the Sent folder."
         },
-        "body_preview_truncated": {
-          "description": "Whether the body extended beyond `body_preview`. Present only\nalongside `body_preview`; `true` means fetch the message with\n`fetch_message` for the full body.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+        "smtp_status": {
+          "description": "Human-readable SMTP delivery status.",
+          "type": "string"
         },
-        "cc": {
-          "description": "Cc addresses, sanitized. Omitted when empty.\n\nNote: `bcc` is intentionally absent \u2014 exposing BCC recipients\nviolates the privacy boundary enforced at the `SearchInput` and\noutput layers. See the spec's Privacy subsection.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "source_folder": {
+          "description": "Folder the forwarded message was fetched from.",
+          "type": "string"
         },
-        "date": {
-          "description": "Date header, sanitized.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "flags": {
-          "description": "IMAP flags on the message, if fetched.",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "from": {
-          "description": "From addresses, sanitized. Omitted when empty.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "message_id": {
-          "description": "RFC 2822 `Message-ID`, sanitized.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "size": {
-          "description": "Message size in bytes, if fetched.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "subject": {
-          "description": "Subject header, sanitized.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "to": {
-          "description": "To addresses, sanitized. Omitted when empty.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "uid": {
-          "description": "UID of the message.",
+        "source_uid": {
+          "description": "UID of the forwarded source message.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         }
       },
       "required": [
-        "uid"
-      ],
-      "type": "object"
-    },
-    "SearchUntrusted": {
-      "description": "Untrusted payload for a `search` response.",
-      "properties": {
-        "messages": {
-          "description": "Matching messages with sanitized header fields.",
-          "items": {
-            "$ref": "#/$defs/SearchResultEntry"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "messages"
+        "sent",
+        "smtp_status",
+        "source_folder",
+        "source_uid",
+        "sent_copy"
       ],
       "type": "object"
     },
@@ -180,6 +70,44 @@
       },
       "required": [
         "code"
+      ],
+      "type": "object"
+    },
+    "SentCopyInfo": {
+      "description": "Copy-to-Sent result included in a `send_email` response.",
+      "properties": {
+        "failed": {
+          "description": "`true` if the APPEND failed (best-effort; send itself succeeded).",
+          "type": "boolean"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Error code classifying why the APPEND failed. Present only when\n`failed` is `true`. Clients use this to decide whether to retry\n(e.g. `Timeout`, `ConnectionLost`) or surface an operator action\n(e.g. `InvalidInput`, `ImapProtocol`, `AttachmentTooLarge`)."
+        },
+        "folder": {
+          "description": "Folder the copy was appended to.",
+          "type": "string"
+        },
+        "uid": {
+          "description": "UID assigned by the server, if returned.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "folder",
+        "failed"
       ],
       "type": "object"
     },
@@ -313,7 +241,7 @@
   "description": "Top-level tool response envelope.\n\n`M` is the trusted metadata shape (must `Serialize`). `U` is the\nuntrusted payload shape (must `Serialize`). Handlers that have no\nuntrusted body should return `ToolResponse<M, ()>` with\n`untrusted: None`.",
   "properties": {
     "meta": {
-      "$ref": "#/$defs/SearchMeta",
+      "$ref": "#/$defs/ForwardMeta",
       "description": "Server-controlled metadata. Trusted."
     },
     "security_warnings": {
@@ -324,15 +252,8 @@
       "type": "array"
     },
     "untrusted": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/SearchUntrusted"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Sanitized content derived from email data. Untrusted."
+      "description": "Sanitized content derived from email data. Untrusted.",
+      "type": "null"
     }
   },
   "required": [

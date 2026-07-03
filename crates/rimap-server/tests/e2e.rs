@@ -299,6 +299,36 @@ async fn assert_search(server: &ImapMcpServer) -> u32 {
         .expect("messages array");
     let uid = json_u32(&messages[0]["uid"]);
     assert!(uid > 0);
+
+    // body_preview_bytes (#410): one search returns a sanitized body
+    // preview inline, no per-message fetch_message round trip.
+    let with_preview = call_tool(
+        server,
+        "search",
+        serde_json::json!({
+            "folder": "INBOX",
+            "subject": "e2e-test-smoke",
+            "body_preview_bytes": 1024
+        }),
+    )
+    .await
+    .expect("search with body_preview_bytes failed");
+    let previewed = with_preview["untrusted"]["messages"]
+        .as_array()
+        .expect("messages array");
+    let preview = previewed[0]["body_preview"]
+        .as_str()
+        .expect("body_preview present when body_preview_bytes set");
+    assert!(
+        preview.contains("Hello from the e2e smoke test"),
+        "unexpected preview: {preview}",
+    );
+    // The fixture body is well under 1024 bytes, so it is not truncated.
+    assert_eq!(
+        previewed[0]["body_preview_truncated"],
+        serde_json::json!(false)
+    );
+
     uid
 }
 
