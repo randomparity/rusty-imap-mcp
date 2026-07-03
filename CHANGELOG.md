@@ -61,6 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Expanded the MCP tool descriptions from terse one-liners to 1-3
+  sentences of workflow and constraint guidance an agent can act on:
+  when to use each tool, the discovery tool that feeds it (`search` for
+  UIDs, `list_attachments` for `part_id`), the batch limit (single `uid`
+  or up to 100 `uids`), the two-step delete/expunge model, and plain-word
+  posture/config gating. `create_draft` now documents the `$PendingReview`
+  dead-end (the draft cannot be sent through the server; do not follow up
+  with `send_email`). Issue #404.
 - Stripped rustdoc artifacts from every published tool schema:
   unresolvable Rust doc-link syntax (`` [`...`] ``), internal
   function/constant names (`build_query`, `escape_wire_name`,
