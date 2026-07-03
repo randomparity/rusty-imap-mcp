@@ -7,6 +7,11 @@
 | [Quick start: Gmail](quickstart-gmail.md) | Gmail (app password) | ~10 min |
 | [Quick start: Proton Bridge](quickstart-proton-bridge.md) | Proton Mail via Bridge | ~15 min |
 
+Copyable annotated configs: [`config.example.toml`](../config.example.toml)
+(single account) and
+[`config.multi-account.example.toml`](../config.multi-account.example.toml)
+(several mailboxes).
+
 ## Configuration and operations
 
 | Document | Description |
