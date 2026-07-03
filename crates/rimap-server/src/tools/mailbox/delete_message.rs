@@ -1,11 +1,12 @@
 //! `delete_message` tool handler: flag as \Deleted and move to Trash.
 //!
-//! The destination folder name is hard-coded to `"Trash"` by design:
-//! IMAP servers almost universally use this exact spelling (RFC 6154
-//! `\Trash` SPECIAL-USE mailbox maps to `Trash` at every mainstream
-//! provider). If a deployment needs a different folder, the right seam
-//! is a per-account `trash_folder` config override — not a per-call
-//! argument — so that the gesture of "delete" is consistent.
+//! The destination folder is resolved via the account's RFC 6154
+//! `\Trash` SPECIAL-USE mailbox, falling back to the literal `"Trash"`
+//! when the server does not advertise SPECIAL-USE or has no `\Trash`
+//! mailbox. This mirrors `create_draft`'s `\Drafts` resolution — servers
+//! such as Gmail (`[Gmail]/Trash`) do not use the literal name `Trash`,
+//! and moving a message into a folder the provider doesn't recognize as
+//! trash silently defeats the deletion (no auto-purge, still searchable).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,10 +35,9 @@ pub struct DeleteMessageInput {
     pub uid: core::num::NonZeroU32,
 }
 
-/// Target folder for `delete_message`. Hard-coded per the module-level
-/// doc; a config override is the right seam if a deployment needs to
-/// diverge from this.
-const TRASH_FOLDER: &str = "Trash";
+/// Literal fallback used when the account has no `\Trash` SPECIAL-USE
+/// mailbox on record.
+const TRASH_FOLDER_FALLBACK: &str = "Trash";
 
 /// Trusted metadata for a `delete_message` response.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -50,8 +50,9 @@ pub struct DeleteMessageMeta {
     pub uid: u32,
     /// Whether the message was moved to the trash folder.
     pub moved_to_trash: bool,
-    /// Trash folder the message was moved to.
-    pub destination: &'static str,
+    /// Trash folder the message was moved to — the account's resolved
+    /// `\Trash` SPECIAL-USE mailbox name, or the literal `"Trash"` fallback.
+    pub destination: String,
 }
 
 /// `delete_message` handler.
@@ -68,11 +69,14 @@ pub async fn handle(
 ) -> Result<ToolResponse<DeleteMessageMeta>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
 
+    let trash_folder: &str = account.special_use.trash().unwrap_or(TRASH_FOLDER_FALLBACK);
+    crate::tools::validation::validate_folder_input("trash folder", trash_folder)?;
+
     let uid = rimap_imap::types::Uid::from(input.uid);
 
     let result = account
         .imap
-        .delete_message(&input.folder, uid, TRASH_FOLDER)
+        .delete_message(&input.folder, uid, trash_folder)
         .await?;
 
     let warnings =
@@ -83,7 +87,7 @@ pub async fn handle(
         folder: input.folder,
         uid: input.uid.get(),
         moved_to_trash: result.moved_to_trash,
-        destination: TRASH_FOLDER,
+        destination: trash_folder.to_string(),
     })
     .with_warnings(warnings))
 }
@@ -91,7 +95,20 @@ pub async fn handle(
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::{DeleteMessageInput, DeleteMessageMeta, TRASH_FOLDER};
+    use rimap_imap::SpecialUseMap;
+    use rimap_imap::special_use::SpecialUse;
+    use rimap_imap::types::{Folder, FolderAttribute};
+
+    use super::{DeleteMessageInput, DeleteMessageMeta, TRASH_FOLDER_FALLBACK};
+
+    fn folder(name: &str, special: Option<SpecialUse>) -> Folder {
+        Folder {
+            name: name.to_string(),
+            attributes: Vec::<FolderAttribute>::new(),
+            delimiter: Some('/'),
+            special_use: special,
+        }
+    }
 
     fn sample_meta(uid: u32, moved: bool) -> DeleteMessageMeta {
         DeleteMessageMeta {
@@ -99,8 +116,46 @@ mod tests {
             folder: "INBOX".to_string(),
             uid,
             moved_to_trash: moved,
-            destination: TRASH_FOLDER,
+            destination: TRASH_FOLDER_FALLBACK.to_string(),
         }
+    }
+
+    #[test]
+    fn trash_fallback_is_literal_trash_when_special_use_absent() {
+        // Mirrors the handler's fallback:
+        //     account.special_use.trash().unwrap_or(TRASH_FOLDER_FALLBACK)
+        let map = SpecialUseMap::from_folders(&[folder("INBOX", None)]);
+        let trash_folder: &str = map.trash().unwrap_or(TRASH_FOLDER_FALLBACK);
+        assert_eq!(trash_folder, "Trash");
+    }
+
+    #[test]
+    fn trash_resolves_to_server_name_when_special_use_present() {
+        let map = SpecialUseMap::from_folders(&[
+            folder("INBOX", None),
+            folder("[Gmail]/Trash", Some(SpecialUse::Trash)),
+        ]);
+        let trash_folder: &str = map.trash().unwrap_or(TRASH_FOLDER_FALLBACK);
+        assert_eq!(trash_folder, "[Gmail]/Trash");
+    }
+
+    #[test]
+    fn trash_fallback_survives_when_only_other_special_uses_present() {
+        // \Sent is present, \Trash is not → fallback still applies.
+        let map = SpecialUseMap::from_folders(&[
+            folder("INBOX", None),
+            folder("Sent", Some(SpecialUse::Sent)),
+        ]);
+        let trash_folder: &str = map.trash().unwrap_or(TRASH_FOLDER_FALLBACK);
+        assert_eq!(trash_folder, "Trash");
+    }
+
+    #[test]
+    fn fallback_trash_name_passes_folder_name_validation() {
+        // `FolderName::new("Trash")` must not error — the handler
+        // revalidates whatever the fallback produced and would surface
+        // `RimapError::invalid_input` otherwise.
+        assert!(rimap_authz::folder_name::FolderName::new("Trash").is_ok());
     }
 
     #[test]
@@ -144,15 +199,23 @@ mod tests {
     }
 
     #[test]
-    fn trash_constant_round_trips_through_meta() {
-        // The TRASH_FOLDER literal is load-bearing: downstream clients
-        // and audit trails read the `destination` string back. Pin the
-        // exact spelling so a silent rename can't drift past review.
-        assert_eq!(TRASH_FOLDER, "Trash");
-        let meta = sample_meta(1, true);
-        assert_eq!(meta.destination, TRASH_FOLDER);
+    fn destination_reports_resolved_folder_not_fallback_when_special_use_present() {
+        // Downstream clients and audit trails read the `destination`
+        // string back to learn where the message actually landed. Pin
+        // that it carries the resolved SPECIAL-USE name, not the
+        // hard-coded fallback, when the server advertises one.
+        let meta = DeleteMessageMeta {
+            deleted: true,
+            folder: "INBOX".to_string(),
+            uid: 1,
+            moved_to_trash: true,
+            destination: "[Gmail]/Trash".to_string(),
+        };
         let json = serde_json::to_string(&meta).unwrap();
-        assert!(json.contains(r#""destination":"Trash""#), "json = {json}");
+        assert!(
+            json.contains(r#""destination":"[Gmail]/Trash""#),
+            "json = {json}"
+        );
     }
 
     #[test]
