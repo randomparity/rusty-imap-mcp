@@ -5,10 +5,10 @@
 
 use crate::error::ContentError;
 use crate::lookalike;
-use crate::output::{Content, SecurityWarning, Untrusted};
+use crate::output::{Content, SecurityWarning, SelectedHeader, Untrusted};
 
 use super::bodies::extract_bodies;
-use super::headers::{collect_header_domains, enforce_header_count};
+use super::headers::{collect_header_domains, enforce_header_count, extract_selected_headers};
 use super::meta::extract_meta;
 use super::mime_scrub::scrub_header_smuggling;
 use super::safe_parser;
@@ -51,6 +51,36 @@ pub const MAX_HEADER_COUNT: usize = 256;
 /// - [`ContentError::ParserPanic`] when the underlying `mail-parser`
 ///   panics and is caught by the safe-parser wrapper.
 pub fn parse_message(raw: &[u8]) -> Result<Content, ContentError> {
+    Ok(parse_message_inner(raw, &[])?.0)
+}
+
+/// Parse `raw` and additionally extract the header names in `wanted`
+/// (case-insensitive, sanitized) from the **same scrubbed message** as
+/// the body/meta extraction, so a CRLF-smuggled header removed by
+/// [`scrub_header_smuggling`] can never reappear in the returned headers.
+///
+/// Returns the [`Content`] plus the selected headers in requested order;
+/// requested names absent from the message are omitted. An empty `wanted`
+/// is equivalent to [`parse_message`]. Header-value sanitization warnings
+/// are appended to `Content::security_warnings`.
+///
+/// # Errors
+///
+/// Same as [`parse_message`].
+pub fn parse_message_with_headers(
+    raw: &[u8],
+    wanted: &[String],
+) -> Result<(Content, Vec<SelectedHeader>), ContentError> {
+    parse_message_inner(raw, wanted)
+}
+
+/// Shared body of [`parse_message`] and [`parse_message_with_headers`].
+/// Runs the full pipeline once, then extracts `wanted` headers from the
+/// already-scrubbed, already-parsed message.
+fn parse_message_inner(
+    raw: &[u8],
+    wanted: &[String],
+) -> Result<(Content, Vec<SelectedHeader>), ContentError> {
     if raw.len() > MAX_MESSAGE_BYTES {
         return Err(ContentError::LimitExceeded {
             kind: "message_bytes",
@@ -93,7 +123,13 @@ pub fn parse_message(raw: &[u8]) -> Result<Content, ContentError> {
     });
     content.security_warnings.extend(lookalike_warnings);
 
-    Ok(content)
+    let selected = if wanted.is_empty() {
+        Vec::new()
+    } else {
+        extract_selected_headers(&message, &scrubbed, wanted, &mut content.security_warnings)
+    };
+
+    Ok((content, selected))
 }
 
 #[cfg(test)]

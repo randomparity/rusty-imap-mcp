@@ -4,10 +4,10 @@
 //! address/subject/date headers) and the parent module (which harvests
 //! mailing-list headers and enforces header-count limits).
 
-use mail_parser::{Address, HeaderValue, Message};
+use mail_parser::{Address, Header, HeaderValue, Message};
 
 use crate::error::ContentError;
-use crate::output::{MailingListInfo, SecurityWarning, WarningCode};
+use crate::output::{MailingListInfo, SecurityWarning, SelectedHeader, WarningCode};
 use crate::parse::meta::format_addr;
 use crate::parse::{MAX_HEADER_BYTES, MAX_HEADER_COUNT};
 use crate::unicode;
@@ -104,6 +104,84 @@ pub(super) fn header_value_all_text(
             text
         })
         .collect()
+}
+
+/// Extract the caller-requested header names from `message`, sanitizing
+/// each value. `raw` is the scrubbed byte slice `message` was parsed
+/// from; it backs the raw-offset fallback for structured header variants
+/// (`Received`, `Date`, `Content-Type`) that mail-parser does not expose
+/// as plain text.
+///
+/// Matching is case-insensitive (RFC 5322). Repeated header lines collect
+/// in message order. Requested names with no matching header are omitted
+/// (absent, not an error). Output preserves the caller's requested order
+/// and spelling.
+pub(super) fn extract_selected_headers(
+    message: &Message<'_>,
+    raw: &[u8],
+    wanted: &[String],
+    warnings: &mut Vec<SecurityWarning>,
+) -> Vec<SelectedHeader> {
+    let mut out = Vec::with_capacity(wanted.len());
+    for name in wanted {
+        let location = format!("header:{}", name.to_ascii_lowercase());
+        let mut values = Vec::new();
+        for header in message.headers() {
+            if header.name().eq_ignore_ascii_case(name)
+                && let Some(value) = coerce_header_value(header, raw, &location, warnings)
+            {
+                values.push(value);
+            }
+        }
+        if !values.is_empty() {
+            out.push(SelectedHeader {
+                name: name.clone(),
+                values,
+            });
+        }
+    }
+    out
+}
+
+/// Coerce any header to a sanitized string. `Text`/`TextList`/`Address`
+/// use the RFC 2047-decoded typed value; structured variants
+/// (`DateTime`/`ContentType`/`Received`) fall back to the raw header
+/// slice so headers like `Received` stay readable. `Empty` yields `None`.
+fn coerce_header_value(
+    header: &Header<'_>,
+    raw: &[u8],
+    location: &str,
+    warnings: &mut Vec<SecurityWarning>,
+) -> Option<String> {
+    match header.value() {
+        HeaderValue::Text(_) | HeaderValue::TextList(_) | HeaderValue::Address(_) => {
+            sanitize_header_value(header.value(), location, warnings)
+        }
+        HeaderValue::DateTime(_) | HeaderValue::ContentType(_) | HeaderValue::Received(_) => {
+            raw_header_slice(header, raw, location, warnings)
+        }
+        HeaderValue::Empty => None,
+    }
+}
+
+/// Sanitize the raw on-the-wire header value delimited by mail-parser's
+/// byte offsets. Used for structured variants `sanitize_header_value`
+/// cannot render as text. Returns `None` when the offsets are degenerate
+/// or the sanitized value is empty.
+fn raw_header_slice(
+    header: &Header<'_>,
+    raw: &[u8],
+    location: &str,
+    warnings: &mut Vec<SecurityWarning>,
+) -> Option<String> {
+    let start = header.offset_start() as usize;
+    let end = header.offset_end() as usize;
+    let slice = raw.get(start..end)?;
+    let (text, mut new_warnings) =
+        unicode::sanitize(slice, Some("utf-8"), MAX_HEADER_BYTES, location);
+    warnings.append(&mut new_warnings);
+    let text = text.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 /// Extract `List-ID` / `List-Unsubscribe` / `List-Post` into a
@@ -287,6 +365,111 @@ mod headers_tests {
         let joined = content.meta.references.join(" ");
         assert!(joined.contains("one@example"), "missing first id");
         assert!(joined.contains("three@example"), "missing last id");
+    }
+
+    use crate::parse::parse_message_with_headers;
+
+    #[test]
+    fn selects_requested_header_case_insensitively() {
+        let raw = b"From: a@example\r\n\
+                    List-Unsubscribe: <mailto:unsub@example>\r\n\
+                    \r\n\
+                    body";
+        let (_content, headers) =
+            parse_message_with_headers(raw, &["list-unsubscribe".to_string()]).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].name, "list-unsubscribe");
+        assert_eq!(headers[0].values.len(), 1);
+        assert!(
+            headers[0].values[0].contains("unsub@example"),
+            "got {:?}",
+            headers[0].values,
+        );
+    }
+
+    #[test]
+    fn selects_header_not_in_parsed_set() {
+        // MIME-Version is not part of the fixed parsed meta; extraction must
+        // still surface it — the whole point of the allowlist.
+        let raw = b"From: a@example\r\nMIME-Version: 1.0\r\n\r\nbody";
+        let (_content, headers) =
+            parse_message_with_headers(raw, &["MIME-Version".to_string()]).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].values, vec!["1.0".to_string()]);
+    }
+
+    #[test]
+    fn missing_header_is_omitted_not_errored() {
+        let raw = b"From: a@example\r\n\r\nbody";
+        let (_content, headers) =
+            parse_message_with_headers(raw, &["X-Absent".to_string()]).unwrap();
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn repeated_header_collects_all_values_in_order() {
+        let raw = b"From: a@example\r\n\
+                    Received: from one.example\r\n\
+                    Received: from two.example\r\n\
+                    \r\n\
+                    body";
+        let (_content, headers) =
+            parse_message_with_headers(raw, &["Received".to_string()]).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].values.len(), 2, "got {:?}", headers[0].values);
+        assert!(headers[0].values[0].contains("one.example"));
+        assert!(headers[0].values[1].contains("two.example"));
+    }
+
+    #[test]
+    fn empty_allowlist_yields_no_headers() {
+        let raw = b"From: a@example\r\nX-Custom: value\r\n\r\nbody";
+        let (_content, headers) = parse_message_with_headers(raw, &[]).unwrap();
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn requested_order_and_spelling_preserved() {
+        let raw = b"From: a@example\r\n\
+                    X-Alpha: 1\r\n\
+                    X-Beta: 2\r\n\
+                    \r\n\
+                    body";
+        let (_content, headers) =
+            parse_message_with_headers(raw, &["X-Beta".to_string(), "X-Alpha".to_string()])
+                .unwrap();
+        assert_eq!(headers[0].name, "X-Beta");
+        assert_eq!(headers[1].name, "X-Alpha");
+    }
+
+    #[test]
+    fn smuggled_header_does_not_reappear_in_selection() {
+        // A CRLF-smuggled `Bcc:` inside an encoded-word Subject is scrubbed
+        // before parsing; requesting it must not resurrect it.
+        let raw = b"From: a@example\r\n\
+                    Subject: =?utf-8?B?x\r\n\
+                    Bcc: victim@example\r\n\
+                    ?=\r\n\
+                    To: b@example\r\n\
+                    \r\n\
+                    body";
+        let (_content, headers) = parse_message_with_headers(raw, &["Bcc".to_string()]).unwrap();
+        assert!(headers.is_empty(), "smuggled Bcc must not be selectable");
+    }
+
+    #[test]
+    fn control_chars_in_value_are_stripped() {
+        // A NUL embedded in a custom header value must be removed by the
+        // sanitizer before the value is returned.
+        let raw = b"From: a@example\r\nX-Token: ab\x00cd\r\n\r\nbody";
+        let (_content, headers) =
+            parse_message_with_headers(raw, &["X-Token".to_string()]).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert!(
+            !headers[0].values[0].contains('\u{0}'),
+            "NUL must be stripped, got {:?}",
+            headers[0].values,
+        );
     }
 
     #[test]
