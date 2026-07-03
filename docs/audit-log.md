@@ -97,6 +97,12 @@ Recorded after dispatch completes.
 | `provenance.window_seconds` | Configured provenance window |
 | `provenance.message_ids_recently_read` | Message IDs read by this process within the window |
 
+The audit record shape is independent of how the failure is delivered to
+the MCP client. Since #402 a tool-execution failure is returned as a
+`CallToolResult` with `isError: true` rather than a JSON-RPC error, but
+the `tool_end` record still carries `status = "error"` and the same
+`error_code`.
+
 ### `config`
 
 Config-related event. Declared for future use.

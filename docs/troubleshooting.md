@@ -29,6 +29,23 @@ count and names plus full stderr.
 - **Tool count is 0 or the probe shows a server error** — the gap
   is server-side; check the stderr output the script printed.
 
+## A tool call returned an error result (`isError`)
+
+When a tool runs but fails — a missing UID, a rate limit, a stale
+UIDVALIDITY, a size cap, an IMAP/SMTP/TLS/timeout failure, or a posture /
+folder-policy denial — the server returns a normal tool result with
+`isError: true` (not a JSON-RPC transport error). The failure appears in
+your MCP client as tool output, not a connection error. The result's
+text content carries the human-readable message, and its
+`structuredContent` carries the stable `error_code` (e.g. `ERR_NOT_FOUND`,
+`ERR_RATE_LIMITED`, `ERR_POSTURE_DENIED`) plus any typed recovery fields
+(`retry_after_ms`, expected/actual UIDVALIDITY, `kind`/`limit`). Posture
+and folder-policy denials use an opaque message (`operation denied for
+this folder`) by design.
+
+Genuine protocol problems — an unknown tool name, malformed arguments, or
+a rejected protocol version — are still returned as JSON-RPC errors.
+
 ## "Connection closed" / "MCP error -32000" from your MCP client
 
 A generic transport error from the client (Claude Desktop, Claude Code,
