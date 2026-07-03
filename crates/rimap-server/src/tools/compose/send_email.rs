@@ -88,9 +88,15 @@ pub async fn handle(
     })?;
 
     let from_addr = account.imap.username();
-    let raw_msg = message_builder::build_message(account, from_addr, &input).await?;
+    // Exclude the Bcc header from the message DATA (include_bcc = false):
+    // blind recipients are delivered via the SMTP envelope only, never
+    // disclosed in the transmitted bytes. The same Bcc-free bytes are used
+    // for the best-effort Sent copy below, so the Sent folder does not
+    // record Bcc either (#432).
+    let raw_msg = message_builder::build_message(account, from_addr, &input, false).await?;
 
-    // Build SMTP envelope from the compose addresses.
+    // Build SMTP envelope from the compose addresses (unions To/Cc/Bcc into
+    // the RCPT TO set, so blind recipients are still delivered).
     let envelope = build_envelope(from_addr, &input);
 
     // Send via SMTP using raw bytes
