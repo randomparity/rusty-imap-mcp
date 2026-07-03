@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fetch_message` gains an opt-in `include_headers` parameter: an allowlist
+  of header names (≤ 16 per call) whose sanitized values are returned under
+  `untrusted.headers` (name → array of values). Unblocks unsubscribe,
+  mailing-list triage, and delivery/spam-header workflows without raising
+  posture. Not gated as a sub-capability (rationale in
+  `docs/superpowers/specs/2026-07-03-issue-409-include-headers-design.md`).
+  Extraction runs on the same scrubbed message as body parsing, so
+  CRLF-smuggled headers cannot reappear. Issue #409.
 - Annotated `config.example.toml` (single-account) and
   `config.multi-account.example.toml` at the repo root — copyable,
   secrets-free starting points documenting the full config surface. A
@@ -34,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Tool-execution failures are now returned as a `CallToolResult` with
+  `isError: true` instead of a JSON-RPC protocol error. Per the MCP
+  spec, a tool that ran but failed should report the failure inside the
+  result so the agent reliably sees the message and can self-correct.
+  This covers `NotFound`, `UidValidityChanged`, `RateLimited`,
+  `CircuitOpen`, `AttachmentTooLarge`, IMAP/SMTP/TLS/auth/connection/
+  timeout failures, and posture / folder-policy denials. The stable
+  `error_code` string and typed recovery `data` (`retry_after_ms`,
+  expected/actual UIDVALIDITY, `kind`/`limit`) now ride
+  `result.structuredContent` instead of `error.data`; the human-readable
+  message is the result's text content. Genuine protocol errors (unknown
+  tool, malformed params shape, account resolution, unsupported protocol
+  version) are unchanged and still returned as JSON-RPC errors. This is
+  an observable behavior change for existing clients that keyed on the
+  JSON-RPC `error` envelope for tool failures. Issue #402.
 - `rimap-config` now accepts configs with `accounts = []`. The server
   boots in infrastructure-only mode (only `list_accounts` /
   `use_account` are functionally useful). Unblocks the wire-conformance

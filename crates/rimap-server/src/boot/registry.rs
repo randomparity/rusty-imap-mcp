@@ -129,10 +129,17 @@ impl AccountRegistry {
     /// Resolve which account a request targets.
     ///
     /// Resolution order:
-    /// 1. Explicit name passed by the caller.
-    /// 2. Session-scoped active account (set via `use_account`).
-    /// 3. Auto-select when exactly one account is configured.
-    /// 4. Error listing available accounts.
+    /// 1. Explicit name passed by the caller (the `<account>` namespace
+    ///    of an `<account>.<tool>` invocation).
+    /// 2. Auto-select when exactly one account is configured.
+    /// 3. Error listing available accounts.
+    ///
+    /// The session-active account (`use_account`) is intentionally NOT a
+    /// resolution input: account-scoped tools are dispatched by their
+    /// advertised `<account>.<tool>` name, so `explicit` is always set for
+    /// them. The active account governs only which tools `list_tools`
+    /// advertises (see [`AccountRegistry::active_name`]); every account
+    /// stays callable by namespace regardless of the active selection.
     ///
     /// # Errors
     ///
@@ -149,12 +156,6 @@ impl AccountRegistry {
                 });
         }
 
-        // Check session-scoped active account.
-        let active = self.active.load_full();
-        if let Some(state) = active.as_deref().and_then(|id| self.accounts.get(id)) {
-            return Ok(state);
-        }
-
         // Auto-select when there is exactly one account.
         if let Some((_, state)) = (self.accounts.len() == 1)
             .then(|| self.accounts.iter().next())
@@ -168,8 +169,18 @@ impl AccountRegistry {
         })
     }
 
-    /// Set the session-scoped active account, returning the previous
-    /// account name (if any).
+    /// The session-active account name, or `None` when no `use_account`
+    /// selection is in effect. Read by `list_tools` to narrow the
+    /// advertised tool set to a single account; not consulted by
+    /// [`AccountRegistry::resolve`].
+    #[must_use]
+    pub fn active_name(&self) -> Option<String> {
+        self.active.load_full().as_deref().map(ToString::to_string)
+    }
+
+    /// Set the session-active account, returning the previous account
+    /// name (if any). The selection narrows `list_tools` advertisement
+    /// (see [`AccountRegistry::active_name`]); it does not gate dispatch.
     ///
     /// # Errors
     ///
@@ -267,6 +278,72 @@ mod tests {
         let reg = AccountRegistry::new(BTreeMap::new());
         let err = reg.set_active("nope").unwrap_err();
         assert!(matches!(err, RimapError::UnknownAccount { name, .. } if name == "nope"));
+    }
+
+    #[test]
+    fn resolve_ignores_active_selection() {
+        // The session-active account (use_account) must NOT influence
+        // resolve: account-scoped tools dispatch by their <account>.<tool>
+        // namespace, so `explicit` is always set for them. With two
+        // accounts and one made active, resolve(None) must still return
+        // NoAccount rather than the active account — proving the dead
+        // session-default resolution branch is gone (#401).
+        use crate::test_support::make_test_account_state;
+
+        let work = make_test_account_state("work");
+        let personal = make_test_account_state("personal");
+        let mut accounts = BTreeMap::new();
+        accounts.insert(work.id.clone(), work);
+        accounts.insert(personal.id.clone(), personal);
+        let reg = AccountRegistry::new(accounts);
+
+        reg.set_active("work").unwrap();
+        assert_eq!(reg.active_name().as_deref(), Some("work"));
+
+        let err = reg.resolve(None).unwrap_err();
+        assert!(
+            matches!(err, RimapError::NoAccount { .. }),
+            "resolve(None) must not fall back to the active account; got {err:?}",
+        );
+
+        // The namespace still resolves the account directly.
+        let state = reg.resolve(Some("work")).unwrap();
+        assert_eq!(state.id.as_str(), "work");
+    }
+
+    #[test]
+    fn resolve_auto_selects_single_account_regardless_of_active() {
+        // With exactly one account, resolve(None) auto-selects it whether
+        // or not it has been made active — auto-select, not session
+        // default, is the mechanism.
+        use crate::test_support::make_test_account_state;
+
+        let solo = make_test_account_state("solo");
+        let mut accounts = BTreeMap::new();
+        accounts.insert(solo.id.clone(), solo);
+        let reg = AccountRegistry::new(accounts);
+
+        let state = reg.resolve(None).unwrap();
+        assert_eq!(state.id.as_str(), "solo");
+
+        reg.set_active("solo").unwrap();
+        let state = reg.resolve(None).unwrap();
+        assert_eq!(state.id.as_str(), "solo");
+    }
+
+    #[test]
+    fn active_name_none_until_set() {
+        use crate::test_support::make_test_account_state;
+
+        let work = make_test_account_state("work");
+        let mut accounts = BTreeMap::new();
+        accounts.insert(work.id.clone(), work);
+        let reg = AccountRegistry::new(accounts);
+
+        assert!(reg.active_name().is_none(), "no active account initially");
+        let prev = reg.set_active("work").unwrap();
+        assert!(prev.is_none(), "first selection has no previous");
+        assert_eq!(reg.active_name().as_deref(), Some("work"));
     }
 
     #[test]

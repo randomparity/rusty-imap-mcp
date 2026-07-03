@@ -9,7 +9,7 @@
 //! - -32005: attachment too large
 
 use rimap_core::{ErrorCode, RimapError};
-use rmcp::model::{ErrorCode as McpCode, ErrorData};
+use rmcp::model::{CallToolResult, Content, ErrorCode as McpCode, ErrorData};
 
 /// Posture denied (tool not allowed by current posture).
 pub const POSTURE_DENIED: McpCode = McpCode(-32001);
@@ -29,97 +29,151 @@ pub const ATTACHMENT_TOO_LARGE: McpCode = McpCode(-32005);
 /// session shutdown.
 pub const NOT_INITIALIZED: McpCode = McpCode(-32002);
 
-/// Convert a `RimapError` into an rmcp `ErrorData`.
+/// Classify a `RimapError` as a tool-execution failure (returned to the
+/// client as `CallToolResult { isError: true }`) versus a protocol /
+/// routing / infrastructure failure (returned as a JSON-RPC `ErrorData`).
 ///
-/// Maps each `ErrorCode` variant to the closest JSON-RPC / MCP
-/// error code. Application-specific codes use the JSON-RPC
-/// "server error" range (-32000 to -32099).
+/// A tool-execution error means the request was validly routed and the
+/// tool ran but failed in a way the agent should read and can act on
+/// (missing UID, stale UIDVALIDITY, rate limit, posture / folder
+/// denial, IMAP/SMTP/TLS/timeout). Per the MCP spec these belong inside
+/// the result. Protocol / routing errors (`InvalidInput` params shape,
+/// account selection, server config / bug, cancellation) stay JSON-RPC
+/// errors: the framework could not run the tool as requested, or the
+/// failure is not agent-recoverable.
+///
+/// The `match` has no wildcard arm, so a newly added [`ErrorCode`] fails
+/// to compile until its channel is declared here. See issue #402.
 #[must_use]
-pub fn to_mcp_error(err: &RimapError) -> ErrorData {
-    let message = err.to_string();
+pub fn is_tool_execution_error(err: &RimapError) -> bool {
+    match err.code() {
+        ErrorCode::NotFound
+        | ErrorCode::UidValidityChanged
+        | ErrorCode::RateLimited
+        | ErrorCode::CircuitOpen
+        | ErrorCode::AttachmentTooLarge
+        | ErrorCode::ImapProtocol
+        | ErrorCode::SmtpProtocol
+        | ErrorCode::Tls
+        | ErrorCode::Auth
+        | ErrorCode::ConnectionLost
+        | ErrorCode::Timeout
+        | ErrorCode::PostureDenied
+        | ErrorCode::ProtectedFolder
+        | ErrorCode::ExpungeDenied => true,
+        ErrorCode::InvalidInput
+        | ErrorCode::NoAccount
+        | ErrorCode::UnknownAccount
+        | ErrorCode::Config
+        | ErrorCode::Internal
+        | ErrorCode::Cancelled => false,
+    }
+}
 
-    // Variants with structured data: build `data` from typed fields
-    // and short-circuit so the generic `code()`-based mapping below
-    // doesn't lose the data argument.
+/// The human-readable wire message for `err`, applying the folder-denial
+/// opacity: `ProtectedFolder` / `ExpungeDenied` never reveal the folder
+/// name or the `protected_folders` / `expunge_folders` field names.
+/// Shared by [`to_mcp_error`] and [`to_error_call_result`] so both
+/// channels present the same (opaque where applicable) message.
+fn wire_message(err: &RimapError) -> String {
+    match err.code() {
+        ErrorCode::ProtectedFolder | ErrorCode::ExpungeDenied => {
+            "operation denied for this folder".to_string()
+        }
+        _ => err.to_string(),
+    }
+}
+
+/// The structured `data` payload for the variants that carry typed
+/// recovery fields (#303), or `None` for variants with none. Shared by
+/// both wire channels so the `error_code` + typed fields are identical
+/// whether the failure surfaces as `ErrorData.data` or
+/// `CallToolResult.structuredContent`.
+fn structured_error_data(err: &RimapError) -> Option<serde_json::Value> {
     match err {
-        RimapError::NoAccount { available } => {
-            let data = serde_json::json!({
-                "error_code": ErrorCode::NoAccount.as_str(),
-                "available": available,
-                "hint": "call use_account or pass account argument",
-            });
-            return ErrorData::invalid_params(message, Some(data));
-        }
-        RimapError::UnknownAccount { name, available } => {
-            let data = serde_json::json!({
-                "error_code": ErrorCode::UnknownAccount.as_str(),
-                "name": name,
-                "available": available,
-            });
-            return ErrorData::invalid_params(message, Some(data));
-        }
+        RimapError::NoAccount { available } => Some(serde_json::json!({
+            "error_code": ErrorCode::NoAccount.as_str(),
+            "available": available,
+            "hint": "call use_account or pass account argument",
+        })),
+        RimapError::UnknownAccount { name, available } => Some(serde_json::json!({
+            "error_code": ErrorCode::UnknownAccount.as_str(),
+            "name": name,
+            "available": available,
+        })),
         RimapError::UidValidityChanged {
             folder,
             expected,
             actual,
             ..
-        } => {
-            let data = serde_json::json!({
-                "error_code": ErrorCode::UidValidityChanged.as_str(),
-                "folder": folder,
-                "expected": expected,
-                "actual": actual,
-            });
-            return ErrorData::invalid_params(message, Some(data));
-        }
-        RimapError::RateLimited { retry_after_ms } => {
-            let data = serde_json::json!({
-                "error_code": ErrorCode::RateLimited.as_str(),
-                "retry_after_ms": retry_after_ms,
-            });
-            return ErrorData::new(RATE_LIMITED, message, Some(data));
-        }
-        RimapError::CircuitOpen { retry_after_ms } => {
-            let data = serde_json::json!({
-                "error_code": ErrorCode::CircuitOpen.as_str(),
-                "retry_after_ms": retry_after_ms,
-            });
-            return ErrorData::new(CIRCUIT_OPEN, message, Some(data));
-        }
-        RimapError::AttachmentTooLarge { kind, limit } => {
-            let data = serde_json::json!({
-                "error_code": ErrorCode::AttachmentTooLarge.as_str(),
-                "kind": kind,
-                "limit": limit,
-            });
-            return ErrorData::new(ATTACHMENT_TOO_LARGE, message, Some(data));
-        }
-        _ => {}
+        } => Some(serde_json::json!({
+            "error_code": ErrorCode::UidValidityChanged.as_str(),
+            "folder": folder,
+            "expected": expected,
+            "actual": actual,
+        })),
+        RimapError::RateLimited { retry_after_ms } => Some(serde_json::json!({
+            "error_code": ErrorCode::RateLimited.as_str(),
+            "retry_after_ms": retry_after_ms,
+        })),
+        RimapError::CircuitOpen { retry_after_ms } => Some(serde_json::json!({
+            "error_code": ErrorCode::CircuitOpen.as_str(),
+            "retry_after_ms": retry_after_ms,
+        })),
+        RimapError::AttachmentTooLarge { kind, limit } => Some(serde_json::json!({
+            "error_code": ErrorCode::AttachmentTooLarge.as_str(),
+            "kind": kind,
+            "limit": limit,
+        })),
+        _ => None,
     }
+}
 
-    // Existing code-based dispatch for non-structured variants. The
-    // `NoAccount` / `UnknownAccount` / `UidValidityChanged` arms below
-    // are defensive: the dedicated `RimapError` variants are short-
-    // circuited above with structured data, so these only fire if a
-    // future `RimapError::Authz { code: ErrorCode::NoAccount, .. }`
-    // (or similar) is ever constructed by accident — they produce a
-    // correct but data-less response rather than a wrong code.
+/// Build a tool-execution error `CallToolResult` (`isError: true`) for
+/// `err`: the human-readable [`wire_message`] as `content` text and the
+/// machine-readable `error_code` (+ typed [`structured_error_data`]) as
+/// `structured_content`. Codes with no typed data still carry
+/// `{ "error_code": "ERR_…" }` so the agent always has the stable code.
+///
+/// Used by `run_with_audit_envelope` for errors classified as
+/// [`is_tool_execution_error`]. See issue #402.
+#[must_use]
+pub fn to_error_call_result(err: &RimapError) -> CallToolResult {
+    let message = wire_message(err);
+    let data = structured_error_data(err)
+        .unwrap_or_else(|| serde_json::json!({ "error_code": err.code().as_str() }));
+    // `CallToolResult` is `#[non_exhaustive]`; build via the `error`
+    // constructor (sets `is_error = Some(true)`) then set the public
+    // `structured_content` field.
+    let mut result = CallToolResult::error(vec![Content::text(message)]);
+    result.structured_content = Some(data);
+    result
+}
+
+/// Convert a `RimapError` into an rmcp `ErrorData`.
+///
+/// Maps each `ErrorCode` variant to the closest JSON-RPC / MCP
+/// error code. Application-specific codes use the JSON-RPC
+/// "server error" range (-32000 to -32099). Used for protocol /
+/// routing failures; tool-execution failures use
+/// [`to_error_call_result`] instead (see [`is_tool_execution_error`]).
+#[must_use]
+pub fn to_mcp_error(err: &RimapError) -> ErrorData {
+    let message = wire_message(err);
+    let data = structured_error_data(err);
     match err.code() {
         ErrorCode::InvalidInput
         | ErrorCode::NoAccount
         | ErrorCode::UnknownAccount
-        | ErrorCode::UidValidityChanged => ErrorData::invalid_params(message, None),
+        | ErrorCode::UidValidityChanged => ErrorData::invalid_params(message, data),
 
-        ErrorCode::NotFound => ErrorData::new(McpCode::RESOURCE_NOT_FOUND, message, None),
-        ErrorCode::PostureDenied => ErrorData::new(POSTURE_DENIED, message, None),
-        ErrorCode::ProtectedFolder | ErrorCode::ExpungeDenied => ErrorData::new(
-            POSTURE_DENIED,
-            "operation denied for this folder".to_string(),
-            None,
-        ),
-        ErrorCode::RateLimited => ErrorData::new(RATE_LIMITED, message, None),
-        ErrorCode::CircuitOpen => ErrorData::new(CIRCUIT_OPEN, message, None),
-        ErrorCode::AttachmentTooLarge => ErrorData::new(ATTACHMENT_TOO_LARGE, message, None),
+        ErrorCode::NotFound => ErrorData::new(McpCode::RESOURCE_NOT_FOUND, message, data),
+        ErrorCode::PostureDenied | ErrorCode::ProtectedFolder | ErrorCode::ExpungeDenied => {
+            ErrorData::new(POSTURE_DENIED, message, data)
+        }
+        ErrorCode::RateLimited => ErrorData::new(RATE_LIMITED, message, data),
+        ErrorCode::CircuitOpen => ErrorData::new(CIRCUIT_OPEN, message, data),
+        ErrorCode::AttachmentTooLarge => ErrorData::new(ATTACHMENT_TOO_LARGE, message, data),
         ErrorCode::ImapProtocol
         | ErrorCode::SmtpProtocol
         | ErrorCode::Tls
@@ -128,7 +182,7 @@ pub fn to_mcp_error(err: &RimapError) -> ErrorData {
         | ErrorCode::Timeout
         | ErrorCode::Config
         | ErrorCode::Internal
-        | ErrorCode::Cancelled => ErrorData::internal_error(message, None),
+        | ErrorCode::Cancelled => ErrorData::internal_error(message, data),
     }
 }
 
@@ -324,5 +378,160 @@ mod tests {
         assert_eq!(data_value["folder"], "INBOX");
         assert_eq!(data_value["expected"], 100);
         assert_eq!(data_value["actual"], 101);
+    }
+
+    /// Extract the first text content item from a `CallToolResult`.
+    fn result_text(result: &rmcp::model::CallToolResult) -> String {
+        result
+            .content
+            .first()
+            .and_then(|c| c.as_text().map(|t| t.text.clone()))
+            .expect("result must carry text content")
+    }
+
+    #[test]
+    fn classification_covers_every_error_code_with_no_wildcard() {
+        // The expected classification is a `match` with NO wildcard arm,
+        // so a newly added `ErrorCode` fails THIS test build until its
+        // channel (isError vs protocol) is declared here — mirroring the
+        // no-wildcard intent of the production `is_tool_execution_error`.
+        fn expected(code: ErrorCode) -> bool {
+            match code {
+                ErrorCode::NotFound
+                | ErrorCode::UidValidityChanged
+                | ErrorCode::RateLimited
+                | ErrorCode::CircuitOpen
+                | ErrorCode::AttachmentTooLarge
+                | ErrorCode::ImapProtocol
+                | ErrorCode::SmtpProtocol
+                | ErrorCode::Tls
+                | ErrorCode::Auth
+                | ErrorCode::ConnectionLost
+                | ErrorCode::Timeout
+                | ErrorCode::PostureDenied
+                | ErrorCode::ProtectedFolder
+                | ErrorCode::ExpungeDenied => true,
+                ErrorCode::InvalidInput
+                | ErrorCode::NoAccount
+                | ErrorCode::UnknownAccount
+                | ErrorCode::Config
+                | ErrorCode::Internal
+                | ErrorCode::Cancelled => false,
+            }
+        }
+
+        const ALL: &[ErrorCode] = &[
+            ErrorCode::InvalidInput,
+            ErrorCode::PostureDenied,
+            ErrorCode::RateLimited,
+            ErrorCode::CircuitOpen,
+            ErrorCode::NotFound,
+            ErrorCode::ImapProtocol,
+            ErrorCode::SmtpProtocol,
+            ErrorCode::Tls,
+            ErrorCode::Auth,
+            ErrorCode::ConnectionLost,
+            ErrorCode::Timeout,
+            ErrorCode::AttachmentTooLarge,
+            ErrorCode::ProtectedFolder,
+            ErrorCode::ExpungeDenied,
+            ErrorCode::Config,
+            ErrorCode::Internal,
+            ErrorCode::NoAccount,
+            ErrorCode::UnknownAccount,
+            ErrorCode::Cancelled,
+            ErrorCode::UidValidityChanged,
+        ];
+
+        for &code in ALL {
+            let err = RimapError::Imap {
+                code,
+                message: "x".into(),
+                source: None,
+            };
+            assert_eq!(
+                super::is_tool_execution_error(&err),
+                expected(code),
+                "classification mismatch for {code:?}",
+            );
+        }
+        assert_eq!(ALL.len(), 20, "list must enumerate all ErrorCode variants");
+    }
+
+    #[test]
+    fn not_found_becomes_iserror_result_with_code() {
+        let err = RimapError::Imap {
+            code: ErrorCode::NotFound,
+            message: "no such UID 5 in INBOX".into(),
+            source: None,
+        };
+        assert!(super::is_tool_execution_error(&err));
+        let result = super::to_error_call_result(&err);
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result_text(&result).contains("no such UID 5 in INBOX"),
+            "message text must reach the agent",
+        );
+        let sc = result
+            .structured_content
+            .as_ref()
+            .expect("structured content populated");
+        assert_eq!(sc["error_code"], "ERR_NOT_FOUND");
+    }
+
+    #[test]
+    fn protected_folder_iserror_result_is_opaque() {
+        // Folder-policy denials must not leak the folder name or config
+        // field names in the result text; the machine code still travels.
+        let err = authz_error(
+            ErrorCode::ProtectedFolder,
+            "folder `INBOX` is protected; remove it from protected_folders",
+        );
+        assert!(super::is_tool_execution_error(&err));
+        let result = super::to_error_call_result(&err);
+        let text = result_text(&result);
+        assert_eq!(text, "operation denied for this folder");
+        assert!(!text.contains("INBOX"));
+        assert!(!text.contains("protected_folders"));
+        let sc = result
+            .structured_content
+            .as_ref()
+            .expect("structured content populated");
+        assert_eq!(sc["error_code"], "ERR_PROTECTED_FOLDER");
+    }
+
+    #[test]
+    fn rate_limited_iserror_result_carries_retry_hint() {
+        let err = RimapError::RateLimited {
+            retry_after_ms: 250,
+        };
+        let result = super::to_error_call_result(&err);
+        assert_eq!(result.is_error, Some(true));
+        let sc = result
+            .structured_content
+            .as_ref()
+            .expect("structured content populated");
+        assert_eq!(sc["error_code"], "ERR_RATE_LIMITED");
+        assert_eq!(sc["retry_after_ms"], 250);
+    }
+
+    #[test]
+    fn uid_validity_changed_iserror_result_carries_expected_actual() {
+        let err = RimapError::UidValidityChanged {
+            folder: "INBOX".into(),
+            expected: 5,
+            actual: 6,
+            source: Box::new(std::io::Error::other("test source")),
+        };
+        let result = super::to_error_call_result(&err);
+        assert_eq!(result.is_error, Some(true));
+        assert!(result_text(&result).contains("UIDVALIDITY changed"));
+        let sc = result
+            .structured_content
+            .as_ref()
+            .expect("structured content populated");
+        assert_eq!(sc["error_code"], "ERR_UID_VALIDITY_CHANGED");
+        assert_eq!(sc["expected"], 5);
+        assert_eq!(sc["actual"], 6);
     }
 }

@@ -20,7 +20,7 @@ mod threading;
 
 pub use pipeline::{
     MAX_BODY_BYTES, MAX_HEADER_BYTES, MAX_HEADER_COUNT, MAX_MESSAGE_BYTES, MAX_MIME_DEPTH,
-    MAX_MIME_PARTS, MAX_TOTAL_BODY_BYTES, parse_message,
+    MAX_MIME_PARTS, MAX_TOTAL_BODY_BYTES, parse_message, parse_message_with_headers,
 };
 pub use raw_parts::{RawPart, walk_attachment_parts};
 pub use threading::{ThreadingHeaders, extract_threading_headers};

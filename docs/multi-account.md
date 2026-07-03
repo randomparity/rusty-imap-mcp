@@ -82,41 +82,50 @@ cannot discover which account has the most-permissive posture.
 
 ## Account selection
 
+### Namespaced tool names
+
+Account-scoped tools are advertised and invoked in `<account>.<tool>`
+form. `tools/list` publishes each account's tools under its namespace
+(e.g. `work.search`, `personal.list_folders`), and a call targets the
+account named in the prefix:
+
+```json
+{ "name": "work.search", "arguments": { "folder": "INBOX", "limit": 10 } }
+```
+
+The bare tool name (e.g. `search`) is rejected with `INVALID_PARAMS`
+whenever more than the single legacy `default` account is configured.
+With exactly one account configured, the server auto-selects it. The
+legacy single-account deployment (one account named `default`, from a
+flat config with no `[[accounts]]`) keeps bare tool names for backward
+compatibility.
+
+There is no per-call `account` argument: the namespace is the only
+selector, so no tool schema declares an `account` property.
+
 ### `use_account` tool
 
-Sets the session-scoped default account:
+`use_account` makes an account active:
 
 ```json
 { "account": "work" }
 ```
 
-All subsequent tool calls use this account unless overridden per-call.
+The active selection narrows the `tools/list` advertisement to that
+account's tools (plus the always-advertised `use_account` /
+`list_accounts`). It is a convenience for focusing the catalog — it does
+**not** gate dispatch. Every account's tools stay callable by their
+`<account>.<tool>` name regardless of which account is active. When the
+selection changes the advertised set, the server emits
+`notifications/tools/list_changed`.
+
 `use_account` bypasses posture checks, rate limiting, and circuit
 breaker -- it is an infrastructure tool, not an IMAP operation.
 
-### Per-call `account` parameter
-
-Any tool call can include an `"account"` parameter to target a specific
-account for that call only:
-
-```json
-{ "account": "personal", "folder": "INBOX", "limit": 10 }
-```
-
-The per-call parameter does not change the session default.
-
-### Resolution order
-
-On every tool call (except `use_account` and `list_accounts`):
-
-1. If the tool arguments contain `"account": "<name>"` -- use that account.
-2. Else if `use_account` has been called -- use the session default.
-3. Else if exactly one account is configured -- auto-select it.
-4. Else -- return `ERR_NO_ACCOUNT` with a list of available accounts.
-
 ### `list_accounts` tool
 
-Returns an array of account summaries:
+Returns an array of account summaries (always the full set, unaffected
+by `use_account`):
 
 ```json
 [
@@ -128,7 +137,9 @@ Returns an array of account summaries:
 `imap_host` and `posture` are intentionally omitted to avoid leaking
 provider fingerprints or security-posture signals to injected prompts.
 
-`list_accounts` bypasses posture checks and is always available.
+`list_accounts` bypasses posture checks and is always available. It is
+the discovery path for the account names needed to build
+`<account>.<tool>` invocations.
 
 ## Per-account isolation
 

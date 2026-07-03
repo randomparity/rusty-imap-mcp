@@ -563,14 +563,6 @@ fn read_audit_records(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
-// Pin the posture-denial JSON-RPC error code. If `to_mcp_error` (in
-// `crates/rimap-server/src/mcp/error.rs`) remaps `ErrorCode::PostureDenied`,
-// update this constant and document why — silent drift in posture wire
-// shape is exactly what this test surfaces.
-// (-32001 = custom server-error code reserved for posture denials; see
-//  the `POSTURE_DENIED` constant in `mcp/error.rs`.)
-const POSTURE_DENIAL_CODE: i64 = -32001;
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wire_e2e_readonly_posture_denial() {
     let dovecot = match DovecotHarness::try_start() {
@@ -652,76 +644,59 @@ async fn assert_readonly_success_path(harness: &mut Harness) {
     );
 }
 
-/// Posture denial on the wire: `readonly.move_message` must return an error envelope.
+/// Posture denial on the wire: a denied tool must return a tool result
+/// with `isError: true` (not a JSON-RPC error envelope), carrying the
+/// stable `ERR_POSTURE_DENIED` machine code in `structuredContent` and a
+/// non-empty message in `content` (#402).
 async fn assert_readonly_denial(harness: &mut Harness) {
-    // Use harness.request directly — call_tool asserts error.is_null() and
-    // would panic here. We expect an error envelope, not a success result.
-    let resp = harness
-        .request(
-            "tools/call",
-            json!({
-                "name": "readonly.move_message",
-                "arguments": {"folder": "INBOX", "destination": "Trash", "uid": 1},
-            }),
-        )
-        .await;
-    assert!(
-        resp["error"].is_object(),
-        "expected error envelope, got {resp}",
-    );
-    assert_eq!(
-        resp["error"]["code"].as_i64(),
-        Some(POSTURE_DENIAL_CODE),
-        "posture-denial wire code drifted; got {resp}",
-    );
+    // Each case denies under the Readonly posture:
+    //  - move_message is not advertised under Readonly.
+    //  - refine_tool_name promotes Search -> SearchAdvanced when
+    //    `advanced_query` or the `body` content-oracle is set; the
+    //    posture matrix denies SearchAdvanced under Readonly. The
+    //    TOOL_DEFS check must run on the parsed (parent) name so the
+    //    refined name reaches DispatchGuard and is posture-denied rather
+    //    than returning RESOURCE_NOT_FOUND (sub-capability dispatch-order
+    //    regression net).
+    let cases = [
+        json!({
+            "name": "readonly.move_message",
+            "arguments": {"folder": "INBOX", "destination": "Trash", "uid": 1},
+        }),
+        json!({
+            "name": "readonly.search",
+            "arguments": {"folder": "INBOX", "advanced_query": "FROM x"},
+        }),
+        json!({
+            "name": "readonly.search",
+            "arguments": {"folder": "INBOX", "body": "hello"},
+        }),
+    ];
 
-    // Regression coverage for the sub-capability dispatch order bug.
-    // refine_tool_name promotes Search -> SearchAdvanced when
-    // `advanced_query` is set; the TOOL_DEFS check must run on the
-    // parsed (parent) name so the refined name reaches DispatchGuard
-    // and returns PostureDenied (not RESOURCE_NOT_FOUND).
-    let advanced_denial = harness
-        .request(
-            "tools/call",
-            json!({
-                "name": "readonly.search",
-                "arguments": {"folder": "INBOX", "advanced_query": "FROM x"},
-            }),
-        )
-        .await;
-    assert!(
-        advanced_denial["error"].is_object(),
-        "expected error envelope for readonly.search advanced_query, got {advanced_denial}",
-    );
-    assert_eq!(
-        advanced_denial["error"]["code"].as_i64(),
-        Some(POSTURE_DENIAL_CODE),
-        "readonly.search advanced_query must be posture-denied (sub-capability \
-         dispatch reaches DispatchGuard); got {advanced_denial}",
-    );
-
-    // The new `body` input is a content-oracle; refine_tool_name
-    // promotes Search -> SearchAdvanced, which the posture matrix
-    // denies under Readonly. Pin the wire error to the posture-denial
-    // code so silent drift in refinement OR the matrix surfaces here.
-    let body_denial = harness
-        .request(
-            "tools/call",
-            json!({
-                "name": "readonly.search",
-                "arguments": {"folder": "INBOX", "body": "hello"},
-            }),
-        )
-        .await;
-    assert!(
-        body_denial["error"].is_object(),
-        "expected error envelope for readonly.search body, got {body_denial}",
-    );
-    assert_eq!(
-        body_denial["error"]["code"].as_i64(),
-        Some(POSTURE_DENIAL_CODE),
-        "readonly.search body must be posture-denied; got {body_denial}",
-    );
+    for args in cases {
+        let resp = harness.request("tools/call", args.clone()).await;
+        assert!(
+            resp["error"].is_null(),
+            "posture denial must not be a JSON-RPC error envelope; args={args}, got {resp}",
+        );
+        assert_valid(&resp["result"], "CallToolResult");
+        assert_eq!(
+            resp["result"]["isError"],
+            json!(true),
+            "posture denial must be a tool result with isError=true; args={args}, got {resp}",
+        );
+        assert_eq!(
+            resp["result"]["structuredContent"]["error_code"],
+            json!("ERR_POSTURE_DENIED"),
+            "posture denial must carry the ERR_POSTURE_DENIED code; args={args}, got {resp}",
+        );
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
+            "posture denial result must carry a non-empty message; args={args}, got {resp}",
+        );
+    }
 }
 
 /// Verify audit records from the readonly posture denial test.

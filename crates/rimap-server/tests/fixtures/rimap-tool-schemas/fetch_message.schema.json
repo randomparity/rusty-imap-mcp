@@ -121,6 +121,19 @@
             "null"
           ]
         },
+        "headers": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Requested raw headers (from `include_headers`), each mapped to its\nsanitized value(s). Present only when `include_headers` was\nsupplied; contains only the requested names that were present on\nthe message. Values are attacker-controlled email content.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "reply_to": {
           "description": "`Reply-To` header.",
           "type": [
