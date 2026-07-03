@@ -319,6 +319,32 @@ async fn assert_fetch(server: &ImapMcpServer, uid: u32) {
         "unexpected body: {body}",
     );
     assert_eq!(json_u32(&result["meta"]["uid"]), uid);
+
+    // include_headers: a header outside the fixed parsed set (MIME-Version)
+    // is returned under untrusted.headers; a requested-but-absent name is
+    // omitted rather than erroring.
+    let with_headers = call_tool(
+        server,
+        "fetch_message",
+        serde_json::json!({
+            "folder": "INBOX",
+            "uid": uid,
+            "include_headers": ["MIME-Version", "X-Absent-Header"]
+        }),
+    )
+    .await
+    .expect("fetch_message with include_headers failed");
+
+    let headers = &with_headers["untrusted"]["headers"];
+    assert_eq!(
+        headers["MIME-Version"],
+        serde_json::json!(["1.0"]),
+        "expected MIME-Version header, got {headers}",
+    );
+    assert!(
+        headers.get("X-Absent-Header").is_none(),
+        "absent header must be omitted, got {headers}",
+    );
 }
 
 async fn assert_mark_read(server: &ImapMcpServer, uid: u32) {
