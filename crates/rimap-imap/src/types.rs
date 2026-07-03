@@ -337,15 +337,18 @@ pub struct StructuredQuery {
     pub has_attachment: bool,
     /// Match `CC` header substring.
     pub cc: Option<String>,
-    /// Match `BCC` header substring. (Content-oracle — gated to
-    /// `SearchAdvanced` at the MCP dispatch seam.)
+    /// Match `BCC` header substring. Reads message content, so it is
+    /// gated to `SearchAdvanced` at the MCP dispatch seam.
     pub bcc: Option<String>,
-    /// Match `BODY` substring (body parts only). Content-oracle.
+    /// Match `BODY` substring (body parts only). Reads message content,
+    /// so it is gated to `SearchAdvanced` at the MCP dispatch seam.
     pub body: Option<String>,
-    /// Match `TEXT` substring (headers OR body). Content-oracle.
+    /// Match `TEXT` substring (headers OR body). Reads message content,
+    /// so it is gated to `SearchAdvanced` at the MCP dispatch seam.
     pub text: Option<String>,
-    /// One or more `HEADER name value` clauses. Content-oracle when
-    /// non-empty.
+    /// One or more `HEADER name value` clauses. When non-empty, reads
+    /// message content, so it is gated to `SearchAdvanced` at the MCP
+    /// dispatch seam.
     pub headers: Option<Vec<HeaderSearch>>,
     /// `LARGER N` (messages strictly greater than N octets).
     pub larger: Option<u64>,

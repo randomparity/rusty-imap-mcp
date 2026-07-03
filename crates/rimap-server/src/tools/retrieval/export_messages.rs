@@ -16,7 +16,6 @@ use crate::tools::retrieval::sandbox;
 /// caller-supplied `max_total_bytes`.
 pub const MAX_EXPORT_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Input for the `export_messages` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ExportMessagesInput {
@@ -33,7 +32,7 @@ pub struct ExportMessagesInput {
     pub dest_dir: Option<String>,
     /// Optional advisory basename prefix (sanitized).
     pub filename: Option<String>,
-    /// Aggregate byte cap; clamped to `MAX_EXPORT_TOTAL_BYTES`.
+    /// Aggregate byte cap; clamped to 104857600 (100 MiB).
     #[serde(
         default,
         deserialize_with = "crate::tools::lenient_int::deserialize_opt_u64"

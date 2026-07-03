@@ -41,8 +41,7 @@ const MAX_PREVIEW_MESSAGES: usize = 50;
 /// for adversarial inputs.
 const MAX_HEADERS: usize = 32;
 
-/// One `HEADER name value` filter for the `search` tool. Converted to
-/// [`rimap_imap::types::HeaderSearch`] in `build_query`.
+/// One `HEADER name value` filter for the `search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct HeaderInput {
@@ -52,8 +51,6 @@ pub struct HeaderInput {
     pub value: String,
 }
 
-/// Input for the `search` tool.
-///
 /// # Result ordering
 ///
 /// Results are ordered by UID ascending — oldest message first — unless

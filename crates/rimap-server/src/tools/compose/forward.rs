@@ -17,7 +17,6 @@ use crate::tools::compose::message_builder::{
 };
 use crate::tools::compose::send_email::SentCopyInfo;
 
-/// Input for the `forward` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ForwardInput {

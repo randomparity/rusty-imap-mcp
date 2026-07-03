@@ -6,12 +6,14 @@
 
 use serde::Serialize;
 
-/// Top-level tool response envelope.
-///
-/// `M` is the trusted metadata shape (must `Serialize`). `U` is the
-/// untrusted payload shape (must `Serialize`). Handlers that have no
-/// untrusted body should return `ToolResponse<M, ()>` with
-/// `untrusted: None`.
+/// Top-level tool response envelope: `meta` (trusted server metadata),
+/// `untrusted` (sanitized content derived from email data, when the
+/// tool returns any), and `security_warnings` (structured security
+/// observations from content sanitization).
+// `M` and `U` are the meta/untrusted type parameters (both `Serialize`);
+// handlers with no untrusted body use `ToolResponse<M, ()>` with
+// `untrusted: None`. Kept as a plain comment (not `///`) so this
+// implementation detail does not leak into the published schema.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ToolResponse<M: Serialize = serde_json::Value, U: Serialize = serde_json::Value> {
     /// Server-controlled metadata. Trusted.

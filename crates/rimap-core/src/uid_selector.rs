@@ -38,7 +38,7 @@ pub enum UidSelector {
         /// Non-zero message UID.
         uid: NonZeroU32,
     },
-    /// Batch target (1..=[`MAX_BATCH_UIDS`] uids).
+    /// Batch target (1 to 100 uids).
     Batch {
         /// Non-empty, bounded batch of UIDs.
         uids: BoundedUids,
@@ -56,7 +56,7 @@ impl UidSelector {
     }
 }
 
-/// `Vec<NonZeroU32>` enforcing `1..=MAX_BATCH_UIDS` at construction time.
+/// Non-empty list of UIDs, capped at 100 entries.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(transparent)]
 pub struct BoundedUids(Vec<NonZeroU32>);

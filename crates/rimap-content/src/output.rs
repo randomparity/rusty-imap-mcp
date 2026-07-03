@@ -137,14 +137,11 @@ pub struct Untrusted {
 pub struct SecurityWarning {
     /// Classification of the warning.
     pub code: WarningCode,
-    /// Optional context string whose format is defined per-variant in
-    /// the [`WarningCode`] doc comments. Within a single crate version
-    /// the format is structured (key=value pairs), so tests may
-    /// pattern-match substrings against known variants. Consumers MUST
-    /// NOT rely on this format across crate versions — it may change
-    /// without notice; use `code` for stable dispatch.
-    ///
-    /// `None` when no additional detail is available.
+    /// Optional context string, format varies by `code`. Within a
+    /// single server version the format is structured (key=value
+    /// pairs), but it may change across versions — do not depend on
+    /// its exact shape; use `code` for stable dispatch. `None` when no
+    /// additional detail is available.
     pub detail: Option<String>,
     /// Logical location in the message (e.g. `"header:subject"`,
     /// `"body:part[2]"`, `"attachment[0]"`). `None` for crate-wide events.

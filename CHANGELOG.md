@@ -52,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Stripped rustdoc artifacts from every published tool schema:
+  unresolvable Rust doc-link syntax (`` [`...`] ``), internal
+  function/constant names (`build_query`, `escape_wire_name`,
+  `MAX_BATCH_UIDS`), the generic-parameter (`M`/`U`) implementation
+  note on every tool's response envelope, `# Shape` design-rationale
+  essays aimed at reviewers rather than callers, and boilerplate
+  "Input for the `X` tool." schema roots that added nothing. Batch and
+  export size limits now appear as literal numbers (100 UIDs, 100 MiB)
+  where referenced. The `search` tool's posture-gated field
+  descriptions use plain language instead of the internal
+  "Content-oracle" / `SearchAdvanced` terms, pointing agents at
+  `rimap://accounts/<name>` instead — this piece was originally slated
+  for #406 but landed here. A new `dump-tool-catalog`-scanning test
+  guards against regressions. Issue #405.
 - The `rimap://accounts/<name>` resource now reports the account's
   `posture`, making the server instructions' claim true and giving an
   agent a self-service answer to a posture denial. The instructions now

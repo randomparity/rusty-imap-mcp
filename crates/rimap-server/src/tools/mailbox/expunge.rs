@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
 
-/// Input for `expunge`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExpungeInput {
     /// Folder to expunge.
