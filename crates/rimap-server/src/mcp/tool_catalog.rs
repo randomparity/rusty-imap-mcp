@@ -127,33 +127,46 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
     let parts = match name {
         ToolName::ListFolders => (
             "List IMAP Folders",
-            "List all IMAP folders",
+            "List every IMAP folder on the account. Use it to discover \
+             folder names before searching, moving, or fetching; most \
+             other tools take a `folder` argument.",
             no_args_schema(),
             envelope_schema::<ToolResponse<ListFoldersMeta, ()>>(),
         ),
         ToolName::Search => (
             "Search Messages",
-            "Search messages with structured query. Results are ordered \
-             oldest-first by UID; set newest_first to reverse. Paginate \
-             with offset/limit and next_offset.",
+            "Find message UIDs in a folder by structured criteria (sender, \
+             subject, date, flags, size). The UID-discovery step feeding \
+             fetch_message, mark_read, move_message and other per-message \
+             tools; it also returns the folder's uid_validity those tools \
+             accept as a guard. Ordered oldest-first by UID (set \
+             newest_first to reverse); paginate with offset/limit and \
+             next_offset.",
             envelope_schema::<SearchInput>(),
             envelope_schema::<ToolResponse<SearchMeta, SearchUntrusted>>(),
         ),
         ToolName::FetchMessage => (
             "Fetch Message",
-            "Fetch message metadata and text body",
+            "Fetch one message's envelope metadata and sanitized text body \
+             by folder and uid (get the uid from search). Attachments are \
+             not inlined; list them with list_attachments and retrieve \
+             with download_attachment.",
             envelope_schema::<FetchMessageInput>(),
             envelope_schema::<ToolResponse<FetchMessageMeta, FetchMessageUntrusted>>(),
         ),
         ToolName::ListAttachments => (
             "List Message Attachments",
-            "List attachments on a message",
+            "List a message's attachments with filename, MIME type, size, \
+             and the part_id. Provides the part_id that download_attachment \
+             requires; get the message uid from search first.",
             envelope_schema::<ListAttachmentsInput>(),
             envelope_schema::<ToolResponse<ListAttachmentsMeta, ListAttachmentsUntrusted>>(),
         ),
         ToolName::DownloadAttachment => (
             "Download Attachment",
-            "Download an attachment to the sandbox directory",
+            "Download one attachment (by folder, uid, and the part_id from \
+             list_attachments) into the server's download sandbox and \
+             return its path. File bytes are not returned inline.",
             envelope_schema::<DownloadAttachmentInput>(),
             envelope_schema::<ToolResponse<DownloadAttachmentMeta, DownloadAttachmentUntrusted>>(),
         ),
@@ -167,43 +180,58 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
         ),
         ToolName::MarkRead => (
             "Mark Messages Read",
-            "Mark messages as read",
+            "Mark messages read (Seen) in a folder. Accepts a single `uid` \
+             or up to 100 `uids` from search. Reversible with mark_unread.",
             envelope_schema::<FlagInput>(),
             envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::MarkUnread => (
             "Mark Messages Unread",
-            "Mark messages as unread",
+            "Mark messages unread (clear Seen) in a folder. Accepts a \
+             single `uid` or up to 100 `uids`. Inverse of mark_read.",
             envelope_schema::<FlagInput>(),
             envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::Flag => (
             "Flag Messages",
-            "Add the flagged flag to messages",
+            "Add the flagged (starred) status to messages in a folder. \
+             Accepts a single `uid` or up to 100 `uids` from search. \
+             Remove it with unflag.",
             envelope_schema::<FlagInput>(),
             envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::Unflag => (
             "Unflag Messages",
-            "Remove the flagged flag from messages",
+            "Remove the flagged (starred) status from messages. Accepts a \
+             single `uid` or up to 100 `uids`. Inverse of flag.",
             envelope_schema::<FlagInput>(),
             envelope_schema::<ToolResponse<FlagsMeta, ()>>(),
         ),
         ToolName::MoveMessage => (
             "Move Messages",
-            "Move messages to another folder",
+            "Move messages from one folder to another (destination by \
+             name; see list_folders). Accepts a single `uid` or up to 100 \
+             `uids` from search. Moved messages receive new UIDs in the \
+             destination folder.",
             envelope_schema::<MoveMessageInput>(),
             envelope_schema::<ToolResponse<MoveMessageMeta, ()>>(),
         ),
         ToolName::CreateDraft => (
             "Create Draft Email",
-            "Create a draft email with $PendingReview flag",
+            "Save a new email as a draft flagged $PendingReview for a human \
+             to review and send from their own mail client. This ends the \
+             workflow: the draft cannot be sent through this server, so do \
+             not follow up with send_email (that would send a duplicate \
+             and bypass the human-review gate).",
             envelope_schema::<CreateDraftInput>(),
             envelope_schema::<ToolResponse<CreateDraftMeta, ()>>(),
         ),
         ToolName::SendEmail => (
             "Send Email",
-            "Send an email via SMTP",
+            "Send a new email immediately via SMTP from the account. This \
+             is an autonomous send; when a human should review first, use \
+             create_draft instead. Requires a posture that permits \
+             sending.",
             envelope_schema::<SendEmailInput>(),
             envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
         ),
@@ -218,61 +246,85 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
         ),
         ToolName::DeleteMessage => (
             "Delete Message",
-            "Delete a message (move to Trash)",
+            "Delete a single message (by folder and uid) by moving it to \
+             Trash, which is recoverable. This does not erase it; permanent \
+             removal is the separate, irreversible expunge step. Pass \
+             expected_uidvalidity to guard against a changed folder.",
             envelope_schema::<DeleteMessageInput>(),
             envelope_schema::<ToolResponse<DeleteMessageMeta, ()>>(),
         ),
         ToolName::Expunge => (
             "Expunge Folder",
-            "Permanently remove deleted messages from a folder",
+            "Permanently and irreversibly erase every message already \
+             flagged for deletion in a folder; the second step after \
+             delete_message. Restricted to folders allowlisted in \
+             [security.tools] and to the destructive posture.",
             envelope_schema::<ExpungeInput>(),
             envelope_schema::<ToolResponse<ExpungeMeta, ()>>(),
         ),
         ToolName::CreateFolder => (
             "Create IMAP Folder",
-            "Create a new IMAP folder",
+            "Create a new IMAP folder by name. Names that collide with \
+             protected folders (INBOX, Sent, Drafts, Trash) are rejected. \
+             Requires a posture that permits folder management.",
             envelope_schema::<CreateFolderInput>(),
             envelope_schema::<ToolResponse<CreateFolderMeta, ()>>(),
         ),
         ToolName::RenameFolder => (
             "Rename IMAP Folder",
-            "Rename an IMAP folder",
+            "Rename an IMAP folder. Protected folders (INBOX, Sent, Drafts, \
+             Trash) cannot be renamed. Requires a posture that permits \
+             folder management.",
             envelope_schema::<RenameFolderInput>(),
             envelope_schema::<ToolResponse<RenameFolderMeta, ()>>(),
         ),
         ToolName::DeleteFolder => (
             "Delete IMAP Folder",
-            "Delete an IMAP folder and all its contents",
+            "Delete an IMAP folder and everything inside it; this is \
+             irreversible. Protected folders are refused and the folder \
+             must be allowlisted for deletion. Requires the destructive \
+             posture.",
             envelope_schema::<DeleteFolderInput>(),
             envelope_schema::<ToolResponse<DeleteFolderMeta, ()>>(),
         ),
         ToolName::AddLabel => (
             "Add Label to Messages",
-            "Add a keyword label to messages",
+            "Add an IMAP keyword label to messages in a folder. Accepts a \
+             single `uid` or up to 100 `uids` from search. Remove it with \
+             remove_label; inspect current labels with list_labels.",
             envelope_schema::<LabelInput>(),
             envelope_schema::<ToolResponse<LabelsMeta, ()>>(),
         ),
         ToolName::RemoveLabel => (
             "Remove Label from Messages",
-            "Remove a keyword label from messages",
+            "Remove an IMAP keyword label from messages. Accepts a single \
+             `uid` or up to 100 `uids`. Inverse of add_label.",
             envelope_schema::<LabelInput>(),
             envelope_schema::<ToolResponse<LabelsMeta, ()>>(),
         ),
         ToolName::ListLabels => (
             "List Labels on Message",
-            "List keyword labels on a message",
+            "List the IMAP keyword labels set on a single message (by \
+             folder and uid from search).",
             envelope_schema::<ListLabelsInput>(),
             envelope_schema::<ToolResponse<ListLabelsMeta, ()>>(),
         ),
         ToolName::UseAccount => (
             "Select Active Account",
-            "Set the active account for subsequent tool calls",
+            "Select the active account so tools/list advertises its tools. \
+             Optional: every account stays callable by its \
+             <account>.<tool> name regardless of which is active. Discover \
+             account names with list_accounts.",
             envelope_schema::<UseAccountInput>(),
             envelope_schema::<ToolResponse<UseAccountMeta, ()>>(),
         ),
         ToolName::ListAccounts => (
             "List Email Accounts",
-            "List all configured email accounts",
+            "List the configured email accounts (name and whether SMTP is \
+             set up). In multi-account setups, start here to learn the \
+             <account> prefix for namespaced tool calls; read the \
+             rimap://accounts/<name> resource for an account's posture and \
+             available tools.",
             no_args_schema(),
             envelope_schema::<ToolResponse<ListAccountsMeta, ()>>(),
         ),
@@ -409,6 +461,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "test lookups")]
+    fn descriptions_carry_workflow_guidance() {
+        // Regression net for #404: the description is the primary signal an
+        // agent uses to plan a call sequence. Pin the load-bearing pieces
+        // so a future edit can't silently drop them.
+        fn desc(tn: ToolName) -> String {
+            TOOL_DEFS
+                .get(&tn)
+                .and_then(|d| d.description.as_deref())
+                .expect("tool has a description")
+                .to_string()
+        }
+
+        // create_draft must document the $PendingReview dead-end (F18):
+        // the draft cannot be sent via MCP and send_email is not a
+        // follow-up.
+        let draft = desc(ToolName::CreateDraft);
+        assert!(
+            draft.contains("$PendingReview"),
+            "create_draft must name the $PendingReview lifecycle; got {draft:?}",
+        );
+        assert!(
+            draft.contains("send_email"),
+            "create_draft must warn against following up with send_email; got {draft:?}",
+        );
+
+        // Batch tools must state the single-uid-or-up-to-100-uids contract.
+        for tn in [
+            ToolName::MarkRead,
+            ToolName::Flag,
+            ToolName::AddLabel,
+            ToolName::MoveMessage,
+        ] {
+            let d = desc(tn);
+            assert!(
+                d.contains("100"),
+                "batch tool {} must state the 100-uid limit; got {d:?}",
+                tn.as_str(),
+            );
+        }
+
+        // The two-step delete model must be discoverable from both ends.
+        assert!(
+            desc(ToolName::DeleteMessage).contains("expunge"),
+            "delete_message must point at the separate expunge step",
+        );
+        assert!(
+            desc(ToolName::Expunge).contains("delete_message"),
+            "expunge must reference delete_message as the first step",
+        );
+
+        // download_attachment depends on list_attachments for the part_id.
+        assert!(
+            desc(ToolName::DownloadAttachment).contains("list_attachments"),
+            "download_attachment must reference list_attachments for part_id",
+        );
     }
 
     #[test]
