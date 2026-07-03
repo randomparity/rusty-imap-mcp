@@ -51,9 +51,10 @@ security metadata, not raw attack surface.
 
 ### Email operations
 
-- 22 posture-gated tools: list, search, fetch, flag, label, move,
-  draft, send, folder management, attachment download
+- 21 posture-gated tools: list, search, fetch, export, flag, label,
+  move, draft, send, folder management, attachment download
 - 2 infrastructure tools: `list_accounts`, `use_account`
+- 23 dispatchable tools total
 - Multi-account support with per-account posture, rate limits, and
   circuit breaker
 - SMTP sending with automatic Sent-folder copy via IMAP APPEND
@@ -83,7 +84,7 @@ security metadata, not raw attack surface.
 | Rate limiting | token-bucket | no | token-bucket | no |
 | Circuit breaker | yes | no | no | no |
 | **Capabilities** | | | | |
-| Tool count | 24 | ~10 | 47 | 7 |
+| Tool count | 23 | ~10 | 47 | 7 |
 | Multi-account | yes | yes | yes | yes |
 | SMTP send | yes | yes | yes | yes |
 | Credential storage | OS keychain | env vars | config file | env vars |
@@ -110,23 +111,37 @@ For other IMAP servers (Fastmail, Dovecot, Cyrus, etc.), follow the
 Gmail guide and adjust the `host`, `port`, and `encryption` fields for
 your provider.
 
+Prefer to start from a full annotated config? Copy
+[`config.example.toml`](config.example.toml) (single account) or
+[`config.multi-account.example.toml`](config.multi-account.example.toml)
+(several mailboxes) and edit the values.
+
 ## MCP tools
 
-**22 posture-gated tools:**
+**21 posture-gated tools:**
 
-- **Read:** `list_folders`, `search`, `search_advanced`,
-  `fetch_message`, `fetch_message_html`, `list_attachments`,
-  `download_attachment`, `list_labels`
+- **Read:** `list_folders`, `search`, `fetch_message`,
+  `list_attachments`, `download_attachment`, `list_labels`
+- **Export:** `export_messages` — denied in every posture by default;
+  enable with `export_messages = "allow"` under `[security.tools]`
+  (see [The `export_messages` tool](docs/configuration.md#the-export_messages-tool))
 - **Mutate:** `mark_read`, `mark_unread`, `flag`, `unflag`,
   `add_label`, `remove_label`, `move_message`, `create_draft`
 - **Manage:** `send_email`, `delete_message`, `create_folder`,
   `rename_folder`, `expunge`, `delete_folder`
 
+`search`'s content-search arguments (`advanced_query`, `body`, `text`,
+`bcc`, `headers`) and `fetch_message`'s `include_html` argument are
+gated sub-capabilities (`search.advanced_query`,
+`fetch_message.include_html`) requiring `full` posture or above — they
+are not separate MCP tools.
+
 **2 infrastructure tools** (always available):
 `use_account`, `list_accounts`
 
-See [docs/postures.md](docs/postures.md) for the full 22-tool x
-4-posture matrix.
+23 dispatchable tools total. See [docs/postures.md](docs/postures.md)
+for the full 23-capability x 4-posture matrix (the two gated
+sub-capabilities above are counted as separate rows there).
 
 ## Build from source
 
