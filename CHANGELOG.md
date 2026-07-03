@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Generated tool reference at [`docs/tools.md`](docs/tools.md): one section
+  per advertised MCP tool with its title, description, minimum posture,
+  parameter table, and response fields, rendered from the live catalog. A
+  hidden `dump-tool-doc` subcommand emits the per-tool data (including the
+  minimum posture from `rimap-core`'s matrix); `just gen-tools-doc` renders
+  it and a `tools-doc drift` CI job (plus `just ci`) fails if the committed
+  doc falls out of sync — the same guarantee as the tool-schema drift check.
+  `AGENTS.md` now states it is a contributor guide and points operators at
+  `docs/tools.md`; `docs/INDEX.md` links the reference. Issue #413.
 - `tools/list` now honors MCP cursor pagination. Large multi-account
   catalogs are served one page at a time (25 tools/page) instead of a single
   response; the cursor is an opaque catalog offset and a client walks

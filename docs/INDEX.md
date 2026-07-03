@@ -12,6 +12,10 @@ Copyable annotated configs: [`config.example.toml`](../config.example.toml)
 [`config.multi-account.example.toml`](../config.multi-account.example.toml)
 (several mailboxes).
 
+Tool reference: [Tools](tools.md) lists every MCP tool the server exposes —
+parameters, response fields, and the minimum posture each requires. Generated
+from the live tool catalog, so it never drifts from the code.
+
 ## Configuration and operations
 
 | Document | Description |

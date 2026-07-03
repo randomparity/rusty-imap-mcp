@@ -608,6 +608,10 @@ fn run_test_support_subcommands(cli: &Cli) -> Option<anyhow::Result<()>> {
                     .context("dumping tool schemas"),
             )
         }
+        Some(Command::DumpToolDoc) => {
+            let mut stdout = std::io::stdout().lock();
+            Some(cli::dump_tool_doc::dump_tool_doc(&mut stdout).context("dumping tool doc"))
+        }
         _ => None,
     }
 }
