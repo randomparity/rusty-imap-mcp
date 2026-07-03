@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Annotated `config.example.toml` (single-account) and
+  `config.multi-account.example.toml` at the repo root — copyable,
+  secrets-free starting points documenting the full config surface. A
+  `rimap-config` integration test loads both through the real loader so
+  the examples cannot drift from the schema. Issue #418.
 - Per-protocol password env-var fallbacks
   `RUSTY_IMAP_MCP_IMAP_PASSWORD` / `RUSTY_IMAP_MCP_SMTP_PASSWORD`, consulted
   before the legacy shared `RUSTY_IMAP_MCP_PASSWORD` when

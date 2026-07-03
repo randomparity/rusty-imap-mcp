@@ -1,0 +1,163 @@
+# rusty-imap-mcp — single-account (flat) configuration example.
+#
+# Copy this file to the config path the server reads and edit the values.
+# Resolution order (first match wins):
+#   1. --config <path> CLI argument
+#   2. RUSTY_IMAP_MCP_CONFIG environment variable
+#   3. Platform default:
+#        Linux:  $XDG_CONFIG_HOME/rusty-imap-mcp/config.toml
+#                (falls back to ~/.config/rusty-imap-mcp/config.toml)
+#        macOS:  ~/Library/Application Support/rusty-imap-mcp/config.toml
+#
+# This is the single-account (flat) format. For several accounts in one
+# server, use the [[accounts]] format instead — see
+# config.multi-account.example.toml. Mixing both formats in one file is a
+# startup error.
+#
+# Passwords are NEVER stored in this file. Supply the IMAP (and optional SMTP)
+# password via the OS keyring (`rusty-imap-mcp login`) or an environment
+# variable — see the [imap] notes below.
+#
+# Provider-specific values (hosts, ports, app passwords) live in the
+# quickstarts:
+#   docs/quickstart-gmail.md
+#   docs/quickstart-proton-bridge.md
+
+# --------------------------------------------------------------------------
+# [imap] — IMAP connection (required)
+# --------------------------------------------------------------------------
+[imap]
+# Server hostname and port. 993 = implicit TLS; 143/1143 = STARTTLS.
+host = "imap.example.com"
+port = 993
+# Account login (usually the full email address).
+username = "alice@example.com"
+# Transport encryption: "tls" (implicit TLS, the default) or "starttls".
+# Omit for implicit TLS on 993. Use "starttls" with port 143/1143.
+encryption = "tls"
+# Optional: pin the server's TLS certificate by its SHA-256 fingerprint
+# (32 hex bytes, colons optional). When set, a cert whose fingerprint does
+# not match is rejected. Handy for self-signed setups such as Proton Bridge.
+# tls_fingerprint_sha256 = "ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89"
+# Per-command timeout in seconds (default 30).
+command_timeout_seconds = 30
+# TCP + TLS handshake + greeting + CAPABILITY probe deadline (default 10).
+connect_timeout_seconds = 10
+#
+# The IMAP password is resolved at startup, never read from this file:
+#   1. OS keyring entry created by `rusty-imap-mcp login`.
+#   2. Fallback (single-account only): the RUSTY_IMAP_MCP_IMAP_PASSWORD env
+#      var, then the legacy RUSTY_IMAP_MCP_PASSWORD. This fallback is what
+#      makes headless/CI runs work without a secret-service. To disable the
+#      env fallback, use the multi-account format's per-account
+#      `credentials.fallback = "keyring-only"` (see the multi-account example).
+
+# --------------------------------------------------------------------------
+# [smtp] — SMTP for sending (optional)
+# --------------------------------------------------------------------------
+# Required only when the `send_email` tool is enabled (posture "full"/
+# "destructive", or an explicit override). Uncomment to enable sending.
+# The SMTP password resolves like IMAP but from RUSTY_IMAP_MCP_SMTP_PASSWORD
+# (then legacy RUSTY_IMAP_MCP_PASSWORD).
+# [smtp]
+# host = "smtp.example.com"
+# # 587 = STARTTLS, 465 = implicit TLS.
+# port = 587
+# # "starttls", "tls", or "none". Plaintext ("none") is rejected for remote
+# # hosts and permitted only for localhost testing.
+# encryption = "starttls"
+# username = "alice@example.com"
+# command_timeout_seconds = 30
+
+# --------------------------------------------------------------------------
+# [security] — posture and tool policy
+# --------------------------------------------------------------------------
+[security]
+# Base posture — the tool permission tier. One of:
+#   "readonly"    read-only: no flag changes, drafts, or moves
+#   "draft-safe"  read + safe mutations (flags, moves, draft creation) [default]
+#   "full"        adds escape hatches (advanced_query, include_html, send_email)
+#   "destructive" adds permanent deletion (expunge, delete_folder)
+# See docs/postures.md for the full tool matrix.
+posture = "draft-safe"
+# Folders that can never be deleted or renamed (case-insensitive).
+# Defaults to INBOX, Sent, Drafts, Trash if omitted.
+protected_folders = ["INBOX", "Sent", "Drafts", "Trash"]
+# Folders where `expunge` / `delete_folder` are permitted. A folder cannot be
+# in both lists. Empty by default (no folder allows permanent deletion).
+expunge_folders = []
+
+# Per-tool overrides — force a specific tool to "allow" or "deny" regardless
+# of the posture default. Keys are tool names (see docs/postures.md); dotted
+# names like "search.advanced_query" are escape hatches on a base tool.
+[security.tools]
+# Enable the advanced-query escape hatch without moving to the "full" posture:
+"search.advanced_query" = "allow"
+# Force-deny a tool the posture would otherwise allow:
+# mark_read = "deny"
+# Enable raw-message export (writes an unredacted mbox to the download dir).
+# Base-deny in every posture; enabling it requires a server-private
+# [attachments].download_dir. Leave off unless you need it:
+# export_messages = "allow"
+
+# Look-alike / homograph domain warnings on sender addresses.
+[security.lookalike]
+# Enable look-alike detection (default true).
+enabled = true
+# Domains you care about; look-alike variants of these are flagged.
+known_domains = []
+# Warn on any non-ASCII (IDN) sender domain, even if not in known_domains.
+warn_on_any_non_ascii_domain = false
+
+# --------------------------------------------------------------------------
+# [limits] — numeric guardrails (all optional; defaults shown)
+# --------------------------------------------------------------------------
+[limits]
+# Default and hard-cap for search result counts.
+max_search_results = 200
+max_search_results_cap = 1000
+# Byte ceilings for fetched bodies, attachments, and APPEND uploads.
+max_fetch_body_bytes = 5242880       # 5 MiB
+max_attachment_bytes = 26214400      # 25 MiB
+max_append_bytes = 10485760          # 10 MiB
+# Command rate limiter (commands per second).
+commands_per_second = 10
+# Per-minute caps on draft creation and email sending.
+drafts_per_minute = 5
+sends_per_minute = 3
+# Circuit breaker: trip after this many errors within the window (seconds).
+circuit_breaker_error_threshold = 5
+circuit_breaker_window_seconds = 30
+
+# --------------------------------------------------------------------------
+# [audit] — tamper-evident JSONL audit log (path required)
+# --------------------------------------------------------------------------
+[audit]
+# Where the audit log is written. Use an absolute path. On Linux the
+# conventional location is under $XDG_STATE_HOME.
+path = "/home/alice/.local/state/rusty-imap-mcp/audit.jsonl"
+# Rotate when the active file reaches this many bytes (default 10 MiB).
+rotate_bytes = 10485760
+# Keep this many rotated files (default 5).
+rotate_keep = 5
+# Optional time-based retention (seconds). Rotated files older than this are
+# pruned. Omit to disable; 0 is rejected (omit the field instead).
+# retention_seconds = 2592000        # 30 days
+# Provenance ring-buffer window in seconds (default 60).
+provenance_window_seconds = 60
+# If true, keep serving when an audit write fails (insecure; default false).
+fail_open = false
+# Optional containment base: `audit.path` must resolve to a path under this
+# directory or startup fails. Defaults to the platform state dir. Set to "/"
+# to opt out of containment entirely (not recommended).
+# allowed_base_dir = "/home/alice/.local/state/rusty-imap-mcp"
+
+# --------------------------------------------------------------------------
+# [attachments] — download sandbox
+# --------------------------------------------------------------------------
+[attachments]
+# Directory where downloaded attachments (and export_messages output) are
+# written. Empty = a fresh per-session tempdir the server creates with
+# private permissions. If you enable export_messages, set this to a
+# server-private (not group/world-writable) directory.
+download_dir = ""

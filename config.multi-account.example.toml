@@ -1,0 +1,104 @@
+# rusty-imap-mcp — multi-account configuration example.
+#
+# One server, several mailboxes. Each entry in the [[accounts]] array is an
+# independent account with its own IMAP/SMTP connection, security posture,
+# limits, and credentials. Accounts inherit anything they omit from the
+# [defaults] block.
+#
+# This is the [[accounts]] format. For a single mailbox, use the flat format
+# instead — see config.example.toml. Mixing both formats in one file is a
+# startup error.
+#
+# Passwords are never stored here. Each account resolves its password from the
+# OS keyring (`rusty-imap-mcp login --account <name>`) or, when the fallback
+# policy allows it, from an environment variable. See the credentials notes.
+#
+# Config path resolution and provider-specific values are the same as the flat
+# format — see config.example.toml and the docs/quickstart-*.md guides.
+
+# --------------------------------------------------------------------------
+# [defaults] — inherited by every account that omits the same setting
+# --------------------------------------------------------------------------
+[defaults.security]
+# Conservative base posture for all accounts unless one overrides it.
+posture = "readonly"
+
+[defaults.credentials]
+# Credential fallback policy inherited by accounts (per-account overridable).
+#   "keyring-then-env"  keyring, then env var, then fail (default)
+#   "keyring-only"      keyring only; never consult env vars
+# "keyring-only" is recommended for multi-account: a shared env-var fallback
+# could otherwise send one account's password to another account's server.
+fallback = "keyring-only"
+
+[defaults.limits]
+# Any [limits] field may be set here; accounts inherit what they don't set.
+commands_per_second = 10
+
+# --------------------------------------------------------------------------
+# Account 1 — "work": inherits every default (readonly, keyring-only).
+# --------------------------------------------------------------------------
+[[accounts]]
+# Account name: used for keyring lookup and the `use_account` tool.
+name = "work"
+
+[accounts.imap]
+host = "imap.work.example.com"
+port = 993
+username = "alice@work.example.com"
+encryption = "tls"
+
+# --------------------------------------------------------------------------
+# Account 2 — "personal": overrides posture, adds SMTP, opts into env
+# fallback, and enables an escape-hatch tool.
+# --------------------------------------------------------------------------
+[[accounts]]
+name = "personal"
+
+[accounts.imap]
+host = "imap.personal.example.com"
+port = 993
+username = "alice@personal.example.com"
+encryption = "tls"
+
+# Optional per-account SMTP (needed only if send_email is enabled). Uncomment
+# and fill in to enable sending from this account:
+# [accounts.smtp]
+# host = "smtp.personal.example.com"
+# port = 587
+# encryption = "starttls"
+# username = "alice@personal.example.com"
+
+[accounts.security]
+# Override the inherited "readonly" posture for this account.
+posture = "draft-safe"
+
+[accounts.security.tools]
+# Per-account tool override. Enables the advanced-query escape hatch.
+"search.advanced_query" = "allow"
+# Raw-message export is base-deny everywhere; enabling it requires a
+# server-private [attachments].download_dir:
+# export_messages = "allow"
+
+[accounts.credentials]
+# This account allows the env-var fallback (overriding the keyring-only
+# default) so it can run headless via RUSTY_IMAP_MCP_IMAP_PASSWORD.
+fallback = "keyring-then-env"
+
+# --------------------------------------------------------------------------
+# [audit] — global, applies to all accounts (path required)
+# --------------------------------------------------------------------------
+[audit]
+path = "/home/alice/.local/state/rusty-imap-mcp/audit.jsonl"
+rotate_bytes = 10485760
+rotate_keep = 5
+provenance_window_seconds = 60
+fail_open = false
+# allowed_base_dir = "/home/alice/.local/state/rusty-imap-mcp"
+
+# --------------------------------------------------------------------------
+# [attachments] — global download sandbox
+# --------------------------------------------------------------------------
+[attachments]
+# Empty = a fresh per-session tempdir with private permissions.
+download_dir = ""
