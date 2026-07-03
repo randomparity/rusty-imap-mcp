@@ -17,7 +17,8 @@ Copyable annotated configs: [`config.example.toml`](../config.example.toml)
 | Document | Description |
 |----------|-------------|
 | [Configuration reference](configuration.md) | All config fields, types, defaults, and validation rules |
-| [Security postures](postures.md) | 4-tier tool matrix, per-tool overrides, folder safety |
+| [Security postures](postures.md) | 4-tier tool matrix, per-tool overrides, folder safety. Also published as the MCP resource `rimap://docs/postures` |
+| [Agent workflows](mcp-workflows.md) | search→fetch→act, UIDVALIDITY pinning, attachment retrieval, draft lifecycle, numeric limits. Also published as the MCP resource `rimap://docs/workflows` |
 | [Multi-account support](multi-account.md) | Account discovery, selection, per-account isolation |
 | [Audit log](audit-log.md) | JSONL format, rotation, merge subcommand, tamper detection |
 | [Troubleshooting](troubleshooting.md) | Diagnosing startup failures, where logs go, capturing stderr from GUI MCP clients |

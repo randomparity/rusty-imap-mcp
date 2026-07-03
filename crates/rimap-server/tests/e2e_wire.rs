@@ -595,6 +595,7 @@ async fn wire_e2e_readonly_posture_denial() {
     assert_readonly_tools_list(&mut harness).await;
     assert_readonly_success_path(&mut harness).await;
     assert_readonly_resource_reports_posture(&mut harness).await;
+    assert_static_doc_resources_readable(&mut harness).await;
     assert_readonly_denial(&mut harness).await;
 
     // Bind the returned tempdir guard so the audit file outlives the
@@ -633,6 +634,48 @@ async fn assert_readonly_resource_reports_posture(harness: &mut Harness) {
         body["name"], "readonly",
         "resource must echo the account name"
     );
+}
+
+/// The `rimap://docs/postures` and `rimap://docs/workflows` static
+/// resources must both be listed and readable over the wire (#407): the
+/// instructions promise both URIs, so a client that follows them must not
+/// hit a dead end.
+async fn assert_static_doc_resources_readable(harness: &mut Harness) {
+    let list = harness.request("resources/list", json!({})).await;
+    let uris: Vec<&str> = list["result"]["resources"]
+        .as_array()
+        .expect("resources array")
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .collect();
+    assert!(
+        uris.contains(&"rimap://docs/postures"),
+        "resources/list must include rimap://docs/postures, got {uris:?}",
+    );
+    assert!(
+        uris.contains(&"rimap://docs/workflows"),
+        "resources/list must include rimap://docs/workflows, got {uris:?}",
+    );
+
+    for uri in ["rimap://docs/postures", "rimap://docs/workflows"] {
+        let resp = harness
+            .request("resources/read", json!({ "uri": uri }))
+            .await;
+        assert!(
+            resp["error"].is_null(),
+            "resources/read {uri} must succeed, got {resp}",
+        );
+        let text = resp["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("resource {uri} contents[0].text must be a string, got {resp}")
+            });
+        assert!(!text.is_empty(), "resource {uri} content must be non-empty",);
+        assert_eq!(
+            resp["result"]["contents"][0]["mimeType"], "text/markdown",
+            "resource {uri} must advertise text/markdown, got {resp}",
+        );
+    }
 }
 
 /// Verify tools/list advertisement posture for the readonly namespace.

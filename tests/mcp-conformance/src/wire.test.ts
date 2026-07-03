@@ -66,10 +66,17 @@ describe("wire conformance (SDK harness)", () => {
     }
   });
 
-  it("wire_resources_list_is_empty_for_no_accounts (SDK)", async () => {
+  it("wire_resources_list_has_only_static_docs_for_no_accounts (SDK)", async () => {
+    // The rimap://docs/... resources describe server semantics, not
+    // account state, so they are advertised even with zero accounts
+    // configured (#407). Only the per-account resources are absent.
     harness = await spawnSdk();
     const result = await harness.client.listResources();
-    expect(result.resources, "zero accounts must produce zero resources").toHaveLength(0);
+    const uris = result.resources.map((r) => r.uri);
+    expect(uris, "zero accounts must produce only the static doc resources").toEqual([
+      "rimap://docs/postures",
+      "rimap://docs/workflows",
+    ]);
   });
 
   it("wire_tools_call_unknown_tool_returns_error_envelope (SDK)", async () => {
