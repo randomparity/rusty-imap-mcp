@@ -32,7 +32,7 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
             accounts::{ListAccountsMeta, UseAccountMeta},
             list_folders::ListFoldersMeta,
         },
-        compose::{create_draft::CreateDraftMeta, send_email::SendEmailMeta},
+        compose::{create_draft::CreateDraftMeta, forward::ForwardMeta, send_email::SendEmailMeta},
         mailbox::{
             delete_message::DeleteMessageMeta,
             expunge::ExpungeMeta,
@@ -66,6 +66,7 @@ fn build_schemas() -> BTreeMap<&'static str, Value> {
     out.insert("move_message", tool_envelope::<MoveMessageMeta, ()>());
     out.insert("create_draft", tool_envelope::<CreateDraftMeta, ()>());
     out.insert("send_email", tool_envelope::<SendEmailMeta, ()>());
+    out.insert("forward", tool_envelope::<ForwardMeta, ()>());
     out.insert("delete_message", tool_envelope::<DeleteMessageMeta, ()>());
     out.insert("expunge", tool_envelope::<ExpungeMeta, ()>());
     out.insert("create_folder", tool_envelope::<CreateFolderMeta, ()>());
@@ -131,6 +132,7 @@ mod tests {
             "move_message",
             "create_draft",
             "send_email",
+            "forward",
             "delete_message",
             "expunge",
             "create_folder",
@@ -153,8 +155,8 @@ mod tests {
 
         assert_eq!(
             parsed.len(),
-            23,
-            "expected exactly 23 tool schemas, found {}",
+            24,
+            "expected exactly 24 tool schemas, found {}",
             parsed.len()
         );
     }

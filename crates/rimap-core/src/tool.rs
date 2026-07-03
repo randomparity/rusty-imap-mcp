@@ -52,6 +52,9 @@ pub enum ToolName {
     CreateDraft,
     /// `send_email`
     SendEmail,
+    /// `forward` — re-send an existing message as a `message/rfc822`
+    /// wrapper. Gated like `send_email` (sends via SMTP).
+    Forward,
     /// `delete_message`
     DeleteMessage,
     /// `expunge`
@@ -95,6 +98,7 @@ impl ToolName {
             Self::MoveMessage => "move_message",
             Self::CreateDraft => "create_draft",
             Self::SendEmail => "send_email",
+            Self::Forward => "forward",
             Self::DeleteMessage => "delete_message",
             Self::Expunge => "expunge",
             Self::CreateFolder => "create_folder",
@@ -143,6 +147,7 @@ impl ToolName {
             | Self::MoveMessage
             | Self::CreateDraft
             | Self::SendEmail
+            | Self::Forward
             | Self::DeleteMessage
             | Self::Expunge
             | Self::CreateFolder
@@ -176,6 +181,7 @@ impl ToolName {
             | Self::ListLabels
             | Self::MoveMessage
             | Self::SendEmail
+            | Self::Forward
             | Self::DeleteMessage
             | Self::Expunge
             | Self::CreateFolder
@@ -193,7 +199,7 @@ impl ToolName {
     #[must_use]
     pub fn is_send_quota_gated(self) -> bool {
         match self {
-            Self::SendEmail => true,
+            Self::SendEmail | Self::Forward => true,
             Self::ListFolders
             | Self::Search
             | Self::SearchAdvanced
@@ -301,10 +307,14 @@ impl ToolName {
             | Self::CreateFolder
             | Self::ExportMessages => (false, false, false, true),
 
-            // Destructive, irreversible.
-            Self::SendEmail | Self::DeleteMessage | Self::Expunge | Self::DeleteFolder => {
-                (false, true, false, true)
-            }
+            // Destructive, irreversible. `forward` re-sends an existing
+            // message via SMTP — an outbound mail leaves the boundary, same
+            // as `send_email`.
+            Self::SendEmail
+            | Self::Forward
+            | Self::DeleteMessage
+            | Self::Expunge
+            | Self::DeleteFolder => (false, true, false, true),
         };
         ToolAnnotationHints {
             read_only,
@@ -363,9 +373,9 @@ mod tests {
     use strum::IntoEnumIterator;
 
     #[test]
-    fn all_has_exactly_twenty_five_variants() {
-        assert_eq!(ToolName::all().len(), 25);
-        assert_eq!(ToolName::iter().count(), 25);
+    fn all_has_exactly_twenty_six_variants() {
+        assert_eq!(ToolName::all().len(), 26);
+        assert_eq!(ToolName::iter().count(), 26);
     }
 
     #[test]
