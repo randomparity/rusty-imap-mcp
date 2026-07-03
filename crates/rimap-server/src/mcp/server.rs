@@ -220,6 +220,14 @@ impl ImapMcpServer {
                 .map_err(|e| error_data_to_rimap_error(&e))?
         };
 
+        // A tool-execution failure now surfaces as a `CallToolResult`
+        // with `is_error: true` (#402). Bridge it back to a `RimapError`
+        // so this helper keeps its `Result`-based surface for callers
+        // that assert on `Err`.
+        if call_tool_result.is_error == Some(true) {
+            return Err(call_tool_result_to_rimap_error(&call_tool_result));
+        }
+
         Ok(extract_json_from_call_tool_result(call_tool_result))
     }
 
@@ -282,6 +290,32 @@ fn extract_json_from_call_tool_result(result: CallToolResult) -> serde_json::Val
 #[cfg(any(test, feature = "test-support"))]
 fn error_data_to_rimap_error(err: &ErrorData) -> rimap_core::RimapError {
     rimap_core::RimapError::Internal(format!("mcp error {}: {}", err.code.0, err.message))
+}
+
+/// Bridge a tool-execution `CallToolResult { is_error: true }` back to a
+/// `RimapError` for the test helper's uniform `Result<_, RimapError>`
+/// surface (#402). The message comes from the result's `content` text
+/// and the code is recovered from `structured_content.error_code`, so
+/// tests keep asserting on both `err.to_string()` and `err.code()`.
+#[cfg(any(test, feature = "test-support"))]
+fn call_tool_result_to_rimap_error(result: &CallToolResult) -> rimap_core::RimapError {
+    let message = result
+        .content
+        .iter()
+        .find_map(|c| c.as_text().map(|t| t.text.clone()))
+        .unwrap_or_default();
+    let code = result
+        .structured_content
+        .as_ref()
+        .and_then(|d| d.get("error_code"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| rimap_core::ErrorCode::from_str(s).ok())
+        .unwrap_or(rimap_core::ErrorCode::Internal);
+    rimap_core::RimapError::Imap {
+        code,
+        message,
+        source: None,
+    }
 }
 
 impl ServerHandler for ImapMcpServer {
