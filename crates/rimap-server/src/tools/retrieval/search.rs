@@ -6,10 +6,13 @@
 //! normalization, disallowed-codepoint filtering, grapheme truncation)
 //! and skips the `decode` step that would surface warnings. Envelope
 //! snippets (subject, date, addresses, `Message-ID`) are bounded and
-//! already UTF-8, so no warnings are produced and the top-level
-//! `security_warnings` on a `search` response is always empty. Full
-//! warning propagation happens in `fetch_message`, where MIME bodies
-//! flow through `unicode::sanitize`.
+//! already UTF-8, so they produce no warnings.
+//!
+//! The exception is `body_preview_bytes`: previews are real MIME bodies
+//! parsed through `parse_message`, so their sanitization warnings ARE
+//! aggregated into the response's top-level `security_warnings` (without
+//! per-message attribution — use `fetch_message` for that). A `search`
+//! without `body_preview_bytes` still returns an empty `security_warnings`.
 
 use rimap_imap::types::{
     Address, FetchSpec, FetchedMessage, Flag, SearchQuery, StructuredQuery, Uid,
@@ -22,6 +25,15 @@ use crate::mcp::response::ToolResponse;
 
 /// Maximum number of results per page.
 const MAX_LIMIT: usize = 100;
+
+/// Maximum bytes of sanitized body text returned per result when
+/// `body_preview_bytes` is requested. Larger requests are clamped to this.
+const MAX_BODY_PREVIEW_BYTES: usize = 1024;
+
+/// Maximum number of results per page that receive a `body_preview`.
+/// Bounds the number of sequential body fetches one `search` performs;
+/// entries beyond this omit the preview.
+const MAX_PREVIEW_MESSAGES: usize = 50;
 
 /// Maximum number of `HEADER` filters per search request. IMAP servers
 /// typically reject more than a handful in a single SEARCH command;
@@ -143,6 +155,22 @@ pub struct SearchInput {
     /// matched UID list before paginating — no IMAP SORT extension is
     /// used or required. Default `false`.
     pub newest_first: Option<bool>,
+    /// When set, include a short plain-text body preview per result under
+    /// `untrusted.messages[].body_preview` — the first N bytes of the
+    /// sanitized body, capped at 1024. This turns "summarize my inbox"
+    /// into a single call instead of one `fetch_message` per message.
+    /// Previews are provided for up to the first 50 results of the page;
+    /// request `limit` ≤ 50 or page with `next_offset` to preview more.
+    /// Available at every posture `search` is: a preview returns a
+    /// truncated body of an already-matched message (like `fetch_message`)
+    /// and does not filter on content, so it is not gated like `body`/
+    /// `text`. `0` or omitted returns no previews.
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_usize")]
+    pub body_preview_bytes: Option<usize>,
 }
 
 /// A single message entry in a `search` untrusted payload.
@@ -178,6 +206,16 @@ pub struct SearchResultEntry {
     /// RFC 2822 `Message-ID`, sanitized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// First bytes of the sanitized plain-text body, present only when
+    /// `body_preview_bytes` was requested and a body was retrievable.
+    /// Attacker-controlled email content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_preview: Option<String>,
+    /// Whether the body extended beyond `body_preview`. Present only
+    /// alongside `body_preview`; `true` means fetch the message with
+    /// `fetch_message` for the full body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_preview_truncated: Option<bool>,
 }
 
 /// Trusted metadata for a `search` response.
@@ -236,7 +274,7 @@ pub async fn handle(
 
     let (page_uids, truncated, next_offset) = paginate_uids(uids, offset, limit, newest_first);
 
-    let messages: Vec<SearchResultEntry> = if page_uids.is_empty() {
+    let mut messages: Vec<SearchResultEntry> = if page_uids.is_empty() {
         Vec::new()
     } else {
         let fetched = account
@@ -268,6 +306,10 @@ pub async fn handle(
             .collect()
     };
 
+    // Body previews (option (b) of #410): best-effort, per-UID isolated.
+    let preview_warnings =
+        attach_body_previews(account, &input.folder, uid_validity, &mut messages, &input).await;
+
     Ok(ToolResponse::meta_only(SearchMeta {
         folder: input.folder,
         total_matched,
@@ -276,7 +318,129 @@ pub async fn handle(
         next_offset,
         uid_validity,
     })
-    .with_untrusted(SearchUntrusted { messages }))
+    .with_untrusted(SearchUntrusted { messages })
+    .with_warnings(preview_warnings))
+}
+
+/// Fill `body_preview` on the first [`MAX_PREVIEW_MESSAGES`] entries when
+/// `body_preview_bytes` is requested, returning the aggregated
+/// sanitization warnings from parsing those bodies. A no-op (empty
+/// warnings) when no preview was requested.
+///
+/// Each body is fetched and parsed sequentially over the single IMAP
+/// session, so peak heap stays at roughly one body: fetch, parse, keep
+/// the preview, drop the body. A per-UID failure yields a `None` preview
+/// for that entry and never fails the search.
+async fn attach_body_previews(
+    account: &AccountState,
+    folder: &str,
+    expected_uidvalidity: Option<u32>,
+    messages: &mut [SearchResultEntry],
+    input: &SearchInput,
+) -> Vec<rimap_content::SecurityWarning> {
+    let Some(max_bytes) = clamp_preview_bytes(input.body_preview_bytes) else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    for entry in messages.iter_mut().take(MAX_PREVIEW_MESSAGES) {
+        let Some(uid_nz) = std::num::NonZeroU32::new(entry.uid) else {
+            continue;
+        };
+        let mut outcome = Box::pin(fetch_body_preview(
+            account,
+            folder,
+            Uid::from(uid_nz),
+            max_bytes,
+            expected_uidvalidity,
+        ))
+        .await;
+        if let Some(text) = outcome.text {
+            entry.body_preview = Some(text);
+            entry.body_preview_truncated = Some(outcome.truncated);
+        }
+        warnings.append(&mut outcome.warnings);
+    }
+    warnings
+}
+
+/// Result of building one message's body preview.
+struct PreviewOutcome {
+    /// Sanitized preview text, or `None` when the body was empty or
+    /// could not be fetched/parsed.
+    text: Option<String>,
+    /// Whether the full body extended beyond the returned preview.
+    truncated: bool,
+    /// Sanitization warnings emitted while parsing this body.
+    warnings: Vec<rimap_content::SecurityWarning>,
+}
+
+/// Fetch and parse a single message body, returning its sanitized preview
+/// (first `max_bytes`), a truncation flag, and any sanitization warnings.
+/// Any fetch or parse failure — including an oversize body rejected by the
+/// `max_fetch_body_bytes` preflight — is swallowed into `text: None` so one
+/// bad message never fails the batch.
+async fn fetch_body_preview(
+    account: &AccountState,
+    folder: &str,
+    uid: Uid,
+    max_bytes: usize,
+    expected_uidvalidity: Option<u32>,
+) -> PreviewOutcome {
+    let raw = match account
+        .imap
+        .fetch_body(folder, uid, expected_uidvalidity)
+        .await
+    {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::debug!(uid = uid.get(), %err, "body_preview: fetch_body failed");
+            return PreviewOutcome {
+                text: None,
+                truncated: false,
+                warnings: Vec::new(),
+            };
+        }
+    };
+    let content = match crate::tools::content_parse::parse_message_async(raw).await {
+        Ok(content) => content,
+        Err(err) => {
+            tracing::debug!(uid = uid.get(), %err, "body_preview: parse failed");
+            return PreviewOutcome {
+                text: None,
+                truncated: false,
+                warnings: Vec::new(),
+            };
+        }
+    };
+    let (text, truncated) = make_preview(content.untrusted.body_text, max_bytes);
+    PreviewOutcome {
+        text,
+        truncated,
+        warnings: content.security_warnings,
+    }
+}
+
+/// Clamp a requested `body_preview_bytes` to the supported range: `None`
+/// or `0` means no preview; anything larger than [`MAX_BODY_PREVIEW_BYTES`]
+/// is capped to it.
+fn clamp_preview_bytes(requested: Option<usize>) -> Option<usize> {
+    requested
+        .filter(|&n| n > 0)
+        .map(|n| n.min(MAX_BODY_PREVIEW_BYTES))
+}
+
+/// Truncate sanitized `body_text` to at most `max_bytes` on a grapheme
+/// boundary. Returns the preview (`None` if empty) and whether the body
+/// extended beyond it.
+fn make_preview(mut body_text: String, max_bytes: usize) -> (Option<String>, bool) {
+    let original_len = body_text.len();
+    rimap_content::truncate_graphemes_in_place(&mut body_text, max_bytes);
+    let truncated = body_text.len() < original_len;
+    if body_text.is_empty() {
+        (None, false)
+    } else {
+        (Some(body_text), truncated)
+    }
 }
 
 /// Select one page of UIDs from a full search result set, plus the
@@ -524,6 +688,9 @@ fn format_search_result(msg: &FetchedMessage) -> SearchResultEntry {
         to,
         cc,
         message_id,
+        // Filled by `attach_body_previews` when `body_preview_bytes` is set.
+        body_preview: None,
+        body_preview_truncated: None,
     }
 }
 
@@ -566,6 +733,78 @@ mod tests {
         assert!(
             schema.contains("full` or `destructive"),
             "posture-gated fields must name the postures that permit them",
+        );
+    }
+
+    #[test]
+    fn clamp_preview_bytes_none_and_zero_disable() {
+        assert_eq!(clamp_preview_bytes(None), None);
+        assert_eq!(clamp_preview_bytes(Some(0)), None);
+    }
+
+    #[test]
+    fn clamp_preview_bytes_caps_at_max() {
+        assert_eq!(clamp_preview_bytes(Some(10)), Some(10));
+        assert_eq!(
+            clamp_preview_bytes(Some(MAX_BODY_PREVIEW_BYTES + 500)),
+            Some(MAX_BODY_PREVIEW_BYTES),
+        );
+    }
+
+    #[test]
+    fn make_preview_flags_truncation_when_body_exceeds_cap() {
+        let (text, truncated) = make_preview("hello world".to_string(), 5);
+        assert_eq!(text.as_deref(), Some("hello"));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn make_preview_no_truncation_when_body_fits() {
+        let (text, truncated) = make_preview("hi".to_string(), 100);
+        assert_eq!(text.as_deref(), Some("hi"));
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn make_preview_empty_body_yields_none() {
+        let (text, truncated) = make_preview(String::new(), 100);
+        assert_eq!(text, None);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn make_preview_truncates_on_grapheme_boundary() {
+        // A 4-byte cap must not split the 4-byte "é… " sequence mid-codepoint;
+        // grapheme truncation keeps whole clusters, so a multi-byte char at
+        // the boundary is dropped rather than cut.
+        let (text, truncated) = make_preview("aé".to_string(), 2);
+        // "a" is 1 byte; "é" is 2 bytes → including it would be 3 > 2, so the
+        // preview keeps only "a".
+        assert_eq!(text.as_deref(), Some("a"));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn output_schema_exposes_body_preview_fields() {
+        let schema = serde_json::to_string(&schemars::schema_for!(SearchResultEntry))
+            .expect("SearchResultEntry schema serializes");
+        assert!(
+            schema.contains("body_preview"),
+            "output schema must expose body_preview",
+        );
+        assert!(
+            schema.contains("body_preview_truncated"),
+            "output schema must expose body_preview_truncated",
+        );
+    }
+
+    #[test]
+    fn input_schema_exposes_body_preview_bytes() {
+        let schema = serde_json::to_string(&schemars::schema_for!(SearchInput))
+            .expect("SearchInput schema serializes");
+        assert!(
+            schema.contains("body_preview_bytes"),
+            "input schema must expose body_preview_bytes",
         );
     }
 
@@ -638,6 +877,7 @@ mod tests {
             limit: None,
             offset: None,
             newest_first: None,
+            body_preview_bytes: None,
         }
     }
 
