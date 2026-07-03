@@ -54,6 +54,19 @@ impl Protocol {
     }
 }
 
+/// The policy inputs for one credential resolution: the keyring-vs-env
+/// fallback mode and the protocol whose scoped env var to consult. Bundled
+/// because the pair always travels together — it is the state
+/// [`KeyringCredentialResolver`] bakes in at construction and the policy
+/// [`resolve_credential`] applies.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolutionPolicy {
+    /// Keyring-vs-env fallback mode.
+    pub fallback_mode: crate::model::FallbackMode,
+    /// Protocol whose scoped env var to consult on the env-fallback path.
+    pub protocol: Protocol,
+}
+
 /// Abstract credential store. Production uses [`KeyringStore`]; tests
 /// substitute an in-memory map.
 pub trait CredentialStore: Send + Sync {
@@ -132,10 +145,7 @@ fn resolve_env_fallback(proto_var: &'static str) -> Option<(&'static str, String
             Ok(_) | Err(_) => None,
         }
     };
-    match non_empty(proto_var) {
-        Some(hit) => Some(hit),
-        None => non_empty(PASSWORD_ENV_VAR),
-    }
+    non_empty(proto_var).or_else(|| non_empty(PASSWORD_ENV_VAR))
 }
 
 /// Resolve a credential: try the store first (new key, then legacy key), then
@@ -157,10 +167,14 @@ pub fn resolve_credential(
     account_id: &AccountId,
     username: &str,
     host: &str,
-    fallback_mode: crate::model::FallbackMode,
-    protocol: Protocol,
+    policy: ResolutionPolicy,
 ) -> Result<(SecretString, rimap_core::CredentialSource), ConfigError> {
     use rimap_core::CredentialSource;
+
+    let ResolutionPolicy {
+        fallback_mode,
+        protocol,
+    } = policy;
 
     let new_key = account_key(account_id, username, host);
     let legacy_key = legacy_account_key(username, host);
@@ -236,13 +250,7 @@ pub fn resolve_credential(
     Err(ConfigError::NoCredential {
         host: host.to_string(),
         account_tag: hash_account_tag(username, host),
-        reason: build_no_credential_reason(
-            account_id,
-            fallback_mode,
-            protocol,
-            &new_key,
-            &legacy_key,
-        ),
+        reason: build_no_credential_reason(account_id, policy, &new_key, &legacy_key),
     })
 }
 
@@ -258,12 +266,11 @@ pub fn resolve_credential(
 /// revisited alongside the account-name disclosure in `UnknownAccount`.
 fn build_no_credential_reason(
     account_id: &AccountId,
-    fallback_mode: crate::model::FallbackMode,
-    protocol: Protocol,
+    policy: ResolutionPolicy,
     new_key: &str,
     legacy_key: &str,
 ) -> String {
-    match fallback_mode {
+    match policy.fallback_mode {
         crate::model::FallbackMode::KeyringOnly => format!(
             "no entry in keychain service `{KEYCHAIN_SERVICE}` under key \
              `{new_key}` or legacy `{legacy_key}`; fallback mode is \
@@ -276,9 +283,9 @@ fn build_no_credential_reason(
              `{new_key}` or legacy `{legacy_key}`, and neither `{}` nor \
              `{PASSWORD_ENV_VAR}` is set. Run `rusty-imap-mcp login \
              --account {}` or set `{}`",
-            protocol.env_var_name(),
+            policy.protocol.env_var_name(),
             account_id.as_str(),
-            protocol.env_var_name(),
+            policy.protocol.env_var_name(),
         ),
     }
 }
@@ -293,8 +300,7 @@ fn build_no_credential_reason(
 #[derive(Clone)]
 pub struct KeyringCredentialResolver {
     store: std::sync::Arc<dyn CredentialStore>,
-    fallback_mode: crate::model::FallbackMode,
-    protocol: Protocol,
+    policy: ResolutionPolicy,
 }
 
 impl std::fmt::Debug for KeyringCredentialResolver {
@@ -304,15 +310,14 @@ impl std::fmt::Debug for KeyringCredentialResolver {
         // store is shown as an opaque pointer rather than expanded.
         f.debug_struct("KeyringCredentialResolver")
             .field("store", &"<dyn CredentialStore>")
-            .field("fallback_mode", &self.fallback_mode)
-            .field("protocol", &self.protocol)
+            .field("policy", &self.policy)
             .finish()
     }
 }
 
 impl KeyringCredentialResolver {
     /// Build a resolver that walks `store` and falls back to the
-    /// configured policy.
+    /// configured policy for `protocol`.
     #[must_use]
     pub fn new(
         store: std::sync::Arc<dyn CredentialStore>,
@@ -321,8 +326,10 @@ impl KeyringCredentialResolver {
     ) -> Self {
         Self {
             store,
-            fallback_mode,
-            protocol,
+            policy: ResolutionPolicy {
+                fallback_mode,
+                protocol,
+            },
         }
     }
 }
@@ -335,15 +342,7 @@ impl rimap_core::CredentialResolver for KeyringCredentialResolver {
         host: &str,
     ) -> Result<(SecretString, rimap_core::CredentialSource), rimap_core::CredentialResolverError>
     {
-        resolve_credential(
-            &*self.store,
-            account,
-            username,
-            host,
-            self.fallback_mode,
-            self.protocol,
-        )
-        .map_err(|e| {
+        resolve_credential(&*self.store, account, username, host, self.policy).map_err(|e| {
             let reason = e.to_string();
             rimap_core::CredentialResolverError::with_source(reason, e)
         })
@@ -408,8 +407,8 @@ mod tests {
     use rimap_core::account::AccountId;
 
     use crate::credential::{
-        IMAP_PASSWORD_ENV_VAR, PASSWORD_ENV_VAR, Protocol, SMTP_PASSWORD_ENV_VAR, account_key,
-        resolve_credential, resolve_env_fallback,
+        IMAP_PASSWORD_ENV_VAR, PASSWORD_ENV_VAR, Protocol, ResolutionPolicy, SMTP_PASSWORD_ENV_VAR,
+        account_key, resolve_credential, resolve_env_fallback,
     };
     use crate::error::ConfigError;
     use crate::model::FallbackMode;
@@ -486,8 +485,10 @@ mod tests {
                     &id,
                     "alice",
                     "host",
-                    FallbackMode::KeyringThenEnv,
-                    Protocol::Imap,
+                    ResolutionPolicy {
+                        fallback_mode: FallbackMode::KeyringThenEnv,
+                        protocol: Protocol::Imap,
+                    },
                 )
                 .unwrap();
                 let (smtp, _) = resolve_credential(
@@ -495,8 +496,10 @@ mod tests {
                     &id,
                     "alice",
                     "host",
-                    FallbackMode::KeyringThenEnv,
-                    Protocol::Smtp,
+                    ResolutionPolicy {
+                        fallback_mode: FallbackMode::KeyringThenEnv,
+                        protocol: Protocol::Smtp,
+                    },
                 )
                 .unwrap();
                 assert_eq!(imap.expose_secret(), "imap_pw");
@@ -521,8 +524,10 @@ mod tests {
                     &id,
                     "alice",
                     "host",
-                    FallbackMode::KeyringThenEnv,
-                    Protocol::Smtp,
+                    ResolutionPolicy {
+                        fallback_mode: FallbackMode::KeyringThenEnv,
+                        protocol: Protocol::Smtp,
+                    },
                 )
                 .unwrap_err();
                 assert!(matches!(err, ConfigError::NoCredential { .. }));
@@ -545,8 +550,10 @@ mod tests {
                     &id,
                     "alice",
                     "host",
-                    FallbackMode::KeyringThenEnv,
-                    Protocol::Imap,
+                    ResolutionPolicy {
+                        fallback_mode: FallbackMode::KeyringThenEnv,
+                        protocol: Protocol::Imap,
+                    },
                 )
                 .unwrap();
                 assert_eq!(got.expose_secret(), "imap_pw");
@@ -570,8 +577,10 @@ mod tests {
                     &id,
                     "alice",
                     "host",
-                    FallbackMode::KeyringThenEnv,
-                    Protocol::Smtp,
+                    ResolutionPolicy {
+                        fallback_mode: FallbackMode::KeyringThenEnv,
+                        protocol: Protocol::Smtp,
+                    },
                 )
                 .unwrap();
                 assert_eq!(got.expose_secret(), "smtp_pw");
@@ -595,8 +604,10 @@ mod tests {
                     &id,
                     "alice",
                     "host",
-                    FallbackMode::KeyringOnly,
-                    Protocol::Smtp,
+                    ResolutionPolicy {
+                        fallback_mode: FallbackMode::KeyringOnly,
+                        protocol: Protocol::Smtp,
+                    },
                 )
                 .unwrap_err();
                 assert!(matches!(err, ConfigError::NoCredential { .. }));
@@ -651,8 +662,10 @@ mod tests {
                 &id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_new_key");
@@ -670,8 +683,10 @@ mod tests {
                 &id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_legacy_key");
@@ -688,8 +703,10 @@ mod tests {
                 &default_id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_keychain");
@@ -706,8 +723,10 @@ mod tests {
                 &default_id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_env");
@@ -724,8 +743,10 @@ mod tests {
                 &default_id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap_err();
             match err {
@@ -760,8 +781,10 @@ mod tests {
                 &default_id,
                 "alice",
                 "host",
-                FallbackMode::KeyringOnly,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringOnly,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap_err();
             assert!(matches!(err, ConfigError::Keychain { .. }));
@@ -784,8 +807,10 @@ mod tests {
                 &default_id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(got.expose_secret(), "from_env");
@@ -806,8 +831,10 @@ mod tests {
                 &default_id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap_err();
             assert!(matches!(err, ConfigError::Keychain { .. }));
@@ -825,8 +852,10 @@ mod tests {
                     &default_id,
                     "alice",
                     "host",
-                    FallbackMode::KeyringThenEnv,
-                    Protocol::Imap,
+                    ResolutionPolicy {
+                        fallback_mode: FallbackMode::KeyringThenEnv,
+                        protocol: Protocol::Imap,
+                    },
                 )
                 .unwrap()
                 .0
@@ -854,8 +883,10 @@ mod tests {
                 &id,
                 "alice",
                 "host",
-                FallbackMode::KeyringOnly,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringOnly,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap_err();
             assert!(matches!(err, ConfigError::NoCredential { .. }));
@@ -873,8 +904,10 @@ mod tests {
                 &id,
                 "alice",
                 "host",
-                FallbackMode::KeyringThenEnv,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringThenEnv,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(password.expose_secret(), "from_env");
@@ -893,8 +926,10 @@ mod tests {
                 &id,
                 "alice",
                 "host",
-                FallbackMode::KeyringOnly,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringOnly,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(source, rimap_core::CredentialSource::Keyring);
@@ -912,8 +947,10 @@ mod tests {
                 &id,
                 "alice",
                 "host",
-                FallbackMode::KeyringOnly,
-                Protocol::Imap,
+                ResolutionPolicy {
+                    fallback_mode: FallbackMode::KeyringOnly,
+                    protocol: Protocol::Imap,
+                },
             )
             .unwrap();
             assert_eq!(source, rimap_core::CredentialSource::LegacyKeyring);

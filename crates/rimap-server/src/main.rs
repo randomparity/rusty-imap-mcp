@@ -497,8 +497,10 @@ fn build_smtp_client(
         &acfg.id,
         &smtp_cfg.username,
         &smtp_cfg.host,
-        acfg.fallback_mode,
-        Protocol::Smtp,
+        rimap_config::credential::ResolutionPolicy {
+            fallback_mode: acfg.fallback_mode,
+            protocol: Protocol::Smtp,
+        },
     )
     .with_context(|| format!("resolving SMTP credential for account {}", acfg.id.as_str()))?;
     let client = rimap_smtp::SmtpClient::new(smtp_cfg, smtp_password.expose_secret())
