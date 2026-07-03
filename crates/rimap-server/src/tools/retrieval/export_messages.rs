@@ -100,7 +100,9 @@ pub struct ExportMessagesMeta {
 }
 
 /// Max UIDs per export, shared with the mutation-tool batch cap.
-const MAX_EXPORT_UIDS: usize = 100;
+/// `pub(crate)` so the `rimap://docs/workflows` resource's limits table
+/// can be pinned against it in `crate::mcp::server`'s tests.
+pub(crate) const MAX_EXPORT_UIDS: usize = 100;
 
 /// Validate and normalize the requested UID list: reject empty / over-cap,
 /// de-dup preserving first-seen order, and convert to `Uid`.

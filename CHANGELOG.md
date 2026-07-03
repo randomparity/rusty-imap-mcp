@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two static MCP resources, `rimap://docs/postures` and
+  `rimap://docs/workflows`, advertised by `resources/list` regardless of
+  account count. `rimap://docs/postures` is `docs/postures.md` verbatim;
+  `rimap://docs/workflows` is a new `docs/mcp-workflows.md` covering the
+  search→fetch→act pattern, UIDVALIDITY pinning, attachment retrieval, the
+  draft lifecycle, and the `export_messages` opt-in, with a numeric-limits
+  table pinned by a test against the Rust constants that enforce each
+  limit. Both `ServerInfo.instructions` constants now point agents at these
+  URIs. Issue #407.
 - `fetch_message` gains an opt-in `include_headers` parameter: an allowlist
   of header names (≤ 16 per call) whose sanitized values are returned under
   `untrusted.headers` (name → array of values). Unblocks unsubscribe,

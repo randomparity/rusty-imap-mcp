@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
 
-/// Maximum number of results per page.
-const MAX_LIMIT: usize = 100;
+/// Maximum number of results per page. `pub(crate)` so the
+/// `rimap://docs/workflows` resource's limits table can be pinned
+/// against it in `crate::mcp::server`'s tests.
+pub(crate) const MAX_LIMIT: usize = 100;
 
 /// Maximum number of `HEADER` filters per search request. IMAP servers
 /// typically reject more than a handful in a single SEARCH command;

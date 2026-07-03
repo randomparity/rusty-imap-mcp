@@ -161,7 +161,10 @@ async fn wire_tools_list_returns_object_schemas() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wire_resources_list_is_empty_for_no_accounts() {
+async fn wire_resources_list_has_only_static_docs_for_no_accounts() {
+    // The two `rimap://docs/...` resources describe server semantics, not
+    // account state, so they are advertised even with zero accounts
+    // configured (#407). Only the per-account resources are absent.
     let mut harness = Harness::spawn().await;
     let _ = harness.initialize_handshake().await;
     harness.send_initialized().await;
@@ -173,9 +176,14 @@ async fn wire_resources_list_is_empty_for_no_accounts() {
     let resources = result["resources"]
         .as_array()
         .expect("resources must be an array");
-    assert!(
-        resources.is_empty(),
-        "zero accounts must produce zero resources, got {resources:?}",
+    let uris: Vec<&str> = resources
+        .iter()
+        .map(|r| r["uri"].as_str().expect("resource uri must be a string"))
+        .collect();
+    assert_eq!(
+        uris,
+        vec!["rimap://docs/postures", "rimap://docs/workflows"],
+        "zero accounts must produce only the static doc resources, got {resources:?}",
     );
 }
 
