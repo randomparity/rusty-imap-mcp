@@ -153,7 +153,11 @@ without granting autonomous send capability.
 
 Four postures control which tools are available. Tools denied by the
 active posture are not advertised via `list_tools` and are rejected at
-dispatch.
+dispatch. A denial is returned to the client as a `CallToolResult` with
+`isError: true` carrying the `ERR_POSTURE_DENIED` code and an opaque
+message (`operation denied for this folder` for folder-policy denials —
+the folder name and policy field names are never reflected). See
+[Error delivery](#12-error-delivery).
 
 ### 7. Folder safety
 
@@ -211,6 +215,30 @@ When `imap.tls_fingerprint_sha256` is set, the server verifies the
 IMAP server's TLS certificate fingerprint before any application data
 flows. A mismatch is a hard failure -- the server does not fall back
 to the system trust store when pinning is configured.
+
+### 12. Error delivery
+
+The server distinguishes two failure channels, following the MCP spec:
+
+- **Tool-execution failures** — the request was validly routed and the
+  tool ran but failed (missing UID, stale UIDVALIDITY, rate limit,
+  circuit open, size cap, IMAP/SMTP/TLS/timeout, posture / folder-policy
+  denial). These are returned as a `CallToolResult` with `isError:
+  true`: the human-readable message is the result's text content and the
+  stable `error_code` plus any typed recovery `data` (`retry_after_ms`,
+  expected/actual UIDVALIDITY, `kind`/`limit`) are in
+  `structuredContent`. The agent reliably sees the message and can
+  self-correct.
+- **Protocol / routing failures** — unknown tool, malformed params
+  shape, account resolution, unsupported protocol version. These are
+  returned as JSON-RPC errors.
+
+Folder-policy denials (`protected_folders` / `expunge_folders`) and
+posture denials use an opaque message (`operation denied for this
+folder`) that never reflects the folder name or the policy field names,
+so the error surface does not leak configuration. The machine-readable
+`error_code` (`ERR_POSTURE_DENIED`, `ERR_PROTECTED_FOLDER`,
+`ERR_EXPUNGE_DENIED`) is still provided for programmatic handling.
 
 ## Posture matrix
 

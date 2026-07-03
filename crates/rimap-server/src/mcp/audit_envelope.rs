@@ -99,8 +99,17 @@ impl ImapMcpServer {
         self.emit_tool_end(start_seq, tool, audit_account, duration_ms, outcome)
             .await;
 
+        // A tool that ran but failed returns a normal `CallToolResult`
+        // with `is_error: true` so the agent reliably sees the message
+        // and typed recovery data and can self-correct (#402). Genuine
+        // protocol / routing / infrastructure failures stay JSON-RPC
+        // errors. The audit outcome above was already derived from the
+        // `RimapError`, so `tool_end` shape is unchanged either way.
         match result {
             Ok(value) => Ok(CallToolResult::structured(value)),
+            Err(e) if crate::mcp::error::is_tool_execution_error(&e) => {
+                Ok(crate::mcp::error::to_error_call_result(&e))
+            }
             Err(e) => Err(crate::mcp::error::to_mcp_error(&e)),
         }
     }
@@ -560,6 +569,94 @@ mod tests {
             serde_json::json!([7, 9])
         );
         assert_eq!(v["result_summary"]["uids_failed"], serde_json::json!([8]));
+    }
+
+    /// A tool-execution failure (`NotFound`) surfaces as
+    /// `Ok(CallToolResult { is_error: true })` carrying the structured
+    /// error code, and the `tool_end` record still records
+    /// `status = "error"` + the error code (#402). The isError mapping
+    /// does not change the audit shape.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execution_error_returns_iserror_result_and_records_error() {
+        use std::sync::Arc;
+
+        use rimap_core::tool::ToolName;
+
+        use crate::mcp::dispatch::PostureContext;
+        use crate::mcp::server::ImapMcpServer;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let writer = test_writer(path.clone());
+        let (tx, _rx) = cancellation_channel();
+        let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx));
+
+        let args = serde_json::Map::new();
+        let result = server
+            .run_with_audit_envelope(
+                ToolName::FetchMessage,
+                None,
+                PostureContext::Infrastructure,
+                &args,
+                |_ticket| async {
+                    Err(rimap_core::RimapError::Imap {
+                        code: rimap_core::ErrorCode::NotFound,
+                        message: "no such UID".into(),
+                        source: None,
+                    })
+                },
+            )
+            .await;
+
+        let call = result.expect("execution error must surface as Ok(CallToolResult), not Err");
+        assert_eq!(call.is_error, Some(true));
+        let sc = call
+            .structured_content
+            .as_ref()
+            .expect("execution error result must carry structured content");
+        assert_eq!(sc["error_code"], "ERR_NOT_FOUND");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let tool_end = contents
+            .lines()
+            .find(|l| l.contains(r#""kind":"tool_end""#))
+            .expect("tool_end record");
+        let v: serde_json::Value = serde_json::from_str(tool_end).unwrap();
+        assert_eq!(v["status"], "error", "tool_end status must be unchanged");
+        assert_eq!(v["error_code"], "ERR_NOT_FOUND");
+    }
+
+    /// A protocol-class failure (`InvalidInput`) still surfaces as
+    /// `Err(ErrorData)`; the isError mapping applies only to
+    /// tool-execution errors (#402).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn protocol_error_still_returns_err_error_data() {
+        use std::sync::Arc;
+
+        use rimap_core::tool::ToolName;
+
+        use crate::mcp::dispatch::PostureContext;
+        use crate::mcp::server::ImapMcpServer;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let writer = test_writer(path.clone());
+        let (tx, _rx) = cancellation_channel();
+        let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx));
+
+        let args = serde_json::Map::new();
+        let result = server
+            .run_with_audit_envelope(
+                ToolName::FetchMessage,
+                None,
+                PostureContext::Infrastructure,
+                &args,
+                |_ticket| async { Err(rimap_core::RimapError::invalid_input("bad uid")) },
+            )
+            .await;
+
+        let err = result.expect_err("protocol error must surface as Err(ErrorData)");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
     /// `fail_open` = false: an injected `tool_start` write failure must abort
