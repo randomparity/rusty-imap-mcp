@@ -33,6 +33,16 @@ pub struct DeleteMessageInput {
     #[serde(deserialize_with = "crate::tools::lenient_int::deserialize_nonzero_u32")]
     #[schemars(schema_with = "crate::tools::lenient_int::schema_nonzero_u32")]
     pub uid: core::num::NonZeroU32,
+    /// When set, the handler verifies the folder's UIDVALIDITY matches this
+    /// value before deleting the message. A mismatch returns
+    /// `ERR_UID_VALIDITY_CHANGED`. Omit to skip the guard.
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::lenient_int::deserialize_opt_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(schema_with = "crate::tools::lenient_int::schema_opt_u32")]
+    pub expected_uidvalidity: Option<u32>,
 }
 
 /// Literal fallback used when the account has no `\Trash` SPECIAL-USE
@@ -53,6 +63,10 @@ pub struct DeleteMessageMeta {
     /// Trash folder the message was moved to — the account's resolved
     /// `\Trash` SPECIAL-USE mailbox name, or the literal `"Trash"` fallback.
     pub destination: String,
+    /// UIDVALIDITY observed at the SELECT used for this operation. `None`
+    /// when the server's SELECT response omitted the response code. (#70)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid_validity: Option<u32>,
 }
 
 /// `delete_message` handler.
@@ -60,7 +74,9 @@ pub struct DeleteMessageMeta {
 /// # Errors
 ///
 /// Returns `RimapError::Imap { ... }` for IMAP-layer failures (server
-/// rejects the MOVE/COPY/STORE or the source folder is missing). The
+/// rejects the MOVE/COPY/STORE or the source folder is missing).
+/// Returns `RimapError::UidValidityChanged` if `expected_uidvalidity` is
+/// set and does not match the folder's observed UIDVALIDITY. The
 /// upstream `DispatchGuard::pre_dispatch` gate may return
 /// `PostureDenied`.
 pub async fn handle(
@@ -74,9 +90,9 @@ pub async fn handle(
 
     let uid = rimap_imap::types::Uid::from(input.uid);
 
-    let result = account
+    let (result, uid_validity) = account
         .imap
-        .delete_message(&input.folder, uid, trash_folder)
+        .delete_message(&input.folder, uid, trash_folder, input.expected_uidvalidity)
         .await?;
 
     let warnings =
@@ -88,6 +104,7 @@ pub async fn handle(
         uid: input.uid.get(),
         moved_to_trash: result.moved_to_trash,
         destination: trash_folder.to_string(),
+        uid_validity,
     })
     .with_warnings(warnings))
 }
@@ -117,6 +134,7 @@ mod tests {
             uid,
             moved_to_trash: moved,
             destination: TRASH_FOLDER_FALLBACK.to_string(),
+            uid_validity: None,
         }
     }
 
@@ -174,9 +192,25 @@ mod tests {
         let input = DeleteMessageInput {
             folder: "INBOX".into(),
             uid: core::num::NonZeroU32::new(42).unwrap(),
+            expected_uidvalidity: None,
         };
         let uid = rimap_imap::types::Uid::from(input.uid);
         assert_eq!(uid.get(), 42);
+    }
+
+    #[test]
+    fn input_parses_expected_uidvalidity_when_present() {
+        let input: DeleteMessageInput =
+            serde_json::from_str(r#"{"folder": "INBOX", "uid": 1, "expected_uidvalidity": 42}"#)
+                .unwrap();
+        assert_eq!(input.expected_uidvalidity, Some(42));
+    }
+
+    #[test]
+    fn input_defaults_expected_uidvalidity_to_none() {
+        let input: DeleteMessageInput =
+            serde_json::from_str(r#"{"folder": "INBOX", "uid": 1}"#).unwrap();
+        assert_eq!(input.expected_uidvalidity, None);
     }
 
     #[test]
@@ -210,12 +244,28 @@ mod tests {
             uid: 1,
             moved_to_trash: true,
             destination: "[Gmail]/Trash".to_string(),
+            uid_validity: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(
             json.contains(r#""destination":"[Gmail]/Trash""#),
             "json = {json}"
         );
+    }
+
+    #[test]
+    fn meta_serializes_uid_validity_when_some() {
+        let mut meta = sample_meta(1, true);
+        meta.uid_validity = Some(42);
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains(r#""uid_validity":42"#), "json = {json}");
+    }
+
+    #[test]
+    fn meta_omits_uid_validity_when_none() {
+        let meta = sample_meta(1, true);
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("uid_validity"), "json = {json}");
     }
 
     #[test]
