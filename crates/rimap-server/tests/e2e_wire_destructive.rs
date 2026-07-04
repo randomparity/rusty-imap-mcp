@@ -141,8 +141,8 @@ async fn wire_e2e_destructive_delete_then_expunge() {
         .await
         .expect("seeded message must be found in INBOX");
 
-    assert_delete_moves_to_trash(&mut harness, inbox_uid).await;
-    assert_expunge_purges_trash(&mut harness).await;
+    let trash_uid = assert_delete_moves_to_trash(&mut harness, inbox_uid).await;
+    assert_expunge_purges_trash(&mut harness, trash_uid).await;
     assert_expunge_denied_on_protected_folders(&mut harness).await;
 
     // Bind the returned tempdir guard so the audit file outlives the
@@ -176,8 +176,8 @@ async fn assert_destructive_tools_advertised(harness: &mut Harness) {
 /// Step 1 of the two-step semantics: `delete_message` flags `\Deleted`
 /// and UID MOVEs the message INBOX → Trash. Assert the response meta and
 /// that the message left INBOX and now lives in Trash (proving MOVE, not
-/// COPY).
-async fn assert_delete_moves_to_trash(harness: &mut Harness, inbox_uid: u32) {
+/// COPY). Returns the message's new UID in Trash for step 2.
+async fn assert_delete_moves_to_trash(harness: &mut Harness, inbox_uid: u32) -> u32 {
     let deleted = call_tool(
         harness,
         "destructive.delete_message",
@@ -207,20 +207,16 @@ async fn assert_delete_moves_to_trash(harness: &mut Harness, inbox_uid: u32) {
         "message must no longer be in INBOX after delete_message MOVE",
     );
     // ...and the moved copy is now in Trash, carrying the `\Deleted` flag.
-    assert!(
-        search_subject_uid(harness, "Trash").await.is_some(),
-        "moved message must be present in Trash after delete_message",
-    );
+    search_subject_uid(harness, "Trash")
+        .await
+        .expect("moved message must be present in Trash after delete_message")
 }
 
 /// Step 2 of the two-step semantics: `expunge` permanently removes the
-/// `\Deleted` message from Trash. Assert the reported counts and that the
-/// message is gone afterwards.
-async fn assert_expunge_purges_trash(harness: &mut Harness) {
-    let trash_uid = search_subject_uid(harness, "Trash")
-        .await
-        .expect("moved message must be in Trash before expunge");
-
+/// `\Deleted` message from Trash. `trash_uid` is the UID step 1 resolved
+/// for the moved message. Assert the reported counts and that the message
+/// is gone afterwards.
+async fn assert_expunge_purges_trash(harness: &mut Harness, trash_uid: u32) {
     let expunged = call_tool(harness, "destructive.expunge", json!({ "folder": "Trash" })).await;
     assert_eq!(
         expunged["meta"]["folder"].as_str(),
