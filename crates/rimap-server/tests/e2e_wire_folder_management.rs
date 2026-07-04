@@ -164,9 +164,15 @@ async fn assert_folder_tools_advertised(harness: &mut Harness) {
 /// `nextCursor` until it is absent; each page validates against
 /// `ListToolsResult`.
 async fn collect_all_advertised_tools(harness: &mut Harness) -> Vec<String> {
+    // Bound the walk so a server-side pagination regression — a repeating
+    // or non-advancing `nextCursor` — fails loudly here instead of hanging
+    // the suite until a CI timeout. The two-account catalog spans a handful
+    // of 25-tool pages; 100 is a generous ceiling.
+    const MAX_PAGES: usize = 100;
     let mut names = Vec::new();
+    let mut seen_cursors: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cursor: Option<String> = None;
-    loop {
+    for _ in 0..MAX_PAGES {
         let params = match &cursor {
             Some(c) => json!({ "cursor": c }),
             None => json!({}),
@@ -179,11 +185,17 @@ async fn collect_all_advertised_tools(harness: &mut Harness) -> Vec<String> {
             }
         }
         match resp["result"]["nextCursor"].as_str() {
-            Some(next) => cursor = Some(next.to_string()),
-            None => break,
+            Some(next) => {
+                assert!(
+                    seen_cursors.insert(next.to_string()),
+                    "tools/list returned a repeating cursor {next:?}; pagination is not advancing",
+                );
+                cursor = Some(next.to_string());
+            }
+            None => return names,
         }
     }
-    names
+    panic!("tools/list pagination did not terminate within {MAX_PAGES} pages");
 }
 
 /// The create -> rename -> delete round-trip, asserting the response meta
@@ -393,18 +405,64 @@ fn static_tool_name(bare: &str) -> &'static str {
 ///     pairs a `tool_start` with a `tool_end`.
 fn assert_folder_audit_records(audit_path: &std::path::Path) {
     let records = read_audit_records(audit_path);
-    assert_paired_tool(&records, "create_folder", "destructive", 2);
-    assert_paired_tool(&records, "rename_folder", "destructive", 2);
-    assert_paired_tool(&records, "delete_folder", "destructive", 3);
-    assert_paired_tool(&records, "list_folders", "destructive", 5);
-    assert_paired_tool(&records, "delete_folder", "full", 1);
+    // Each expected outcome is one paired call's recorded `(status,
+    // error_code)`, matched order-independently against the `tool_end`
+    // records — so this proves the on-disk attribution of success vs. the
+    // specific denial code, not just the wire response.
+    let ok = ("ok", None);
+    assert_paired_tool(
+        &records,
+        "create_folder",
+        "destructive",
+        &[ok, ("error", Some("ERR_PROTECTED_FOLDER"))],
+    );
+    assert_paired_tool(
+        &records,
+        "rename_folder",
+        "destructive",
+        &[ok, ("error", Some("ERR_PROTECTED_FOLDER"))],
+    );
+    assert_paired_tool(
+        &records,
+        "delete_folder",
+        "destructive",
+        &[
+            ok,
+            ("error", Some("ERR_PROTECTED_FOLDER")),
+            ("error", Some("ERR_EXPUNGE_DENIED")),
+        ],
+    );
+    assert_paired_tool(
+        &records,
+        "list_folders",
+        "destructive",
+        &[ok, ok, ok, ok, ok],
+    );
+    assert_paired_tool(
+        &records,
+        "delete_folder",
+        "full",
+        &[("error", Some("ERR_POSTURE_DENIED"))],
+    );
 }
 
-/// Assert exactly `expected` `tool_start` / `tool_end` pairs for `tool`
-/// attributed to `account`, each `tool_end` joined to a `tool_start` by
-/// `start_seq`. Filtering by account is required because `delete_folder`
-/// is dispatched on both the `destructive` and `full` accounts.
-fn assert_paired_tool(records: &[Value], tool: &str, account: &str, expected: usize) {
+/// Assert the `tool_start` / `tool_end` records for `tool` on `account`
+/// match `expected_outcomes` — one entry per paired call. Beyond the bare
+/// counts this verifies:
+///   - a one-to-one bijection between starts and ends (the multiset of
+///     `tool_end.start_seq` equals the multiset of `tool_start.seq`), so a
+///     duplicated or dropped `tool_end` cannot pass;
+///   - each `tool_end`'s recorded `(status, error_code)` outcome;
+///   - account attribution on both halves (via the filter).
+///
+/// Filtering by account is required because `delete_folder` is dispatched
+/// on both the `destructive` and `full` accounts.
+fn assert_paired_tool(
+    records: &[Value],
+    tool: &str,
+    account: &str,
+    expected_outcomes: &[(&str, Option<&str>)],
+) {
     let matches = |r: &&Value, kind: &str| {
         r["kind"] == kind && r["tool"] == tool && r["account"].as_str() == Some(account)
     };
@@ -413,6 +471,7 @@ fn assert_paired_tool(records: &[Value], tool: &str, account: &str, expected: us
         .filter(|r| matches(r, "tool_start"))
         .collect();
     let ends: Vec<&Value> = records.iter().filter(|r| matches(r, "tool_end")).collect();
+    let expected = expected_outcomes.len();
     assert_eq!(
         starts.len(),
         expected,
@@ -424,12 +483,47 @@ fn assert_paired_tool(records: &[Value], tool: &str, account: &str, expected: us
         "expected {expected} {tool} tool_end for {account}: {records:#?}",
     );
 
-    let start_seqs: std::collections::HashSet<&Value> = starts.iter().map(|s| &s["seq"]).collect();
-    for end in &ends {
-        assert!(
-            start_seqs.contains(&end["start_seq"]),
-            "{tool} tool_end.start_seq must match a {account} tool_start.seq: {records:#?}",
-        );
+    // One-to-one pairing: each `tool_start.seq` is consumed by exactly one
+    // `tool_end.start_seq`. Comparing the two as sorted multisets rejects a
+    // duplicated end (which set membership alone would accept).
+    let mut start_seqs: Vec<String> = starts.iter().map(|s| s["seq"].to_string()).collect();
+    let mut end_refs: Vec<String> = ends.iter().map(|e| e["start_seq"].to_string()).collect();
+    start_seqs.sort();
+    end_refs.sort();
+    assert_eq!(
+        start_seqs, end_refs,
+        "{tool}/{account} tool_end.start_seq set must equal the tool_start.seq set \
+         one-to-one: {records:#?}",
+    );
+
+    // Recorded outcomes, compared order-independently.
+    let mut actual: Vec<String> = ends.iter().map(|e| outcome_key(e)).collect();
+    let mut want: Vec<String> = expected_outcomes
+        .iter()
+        .map(|(status, code)| encode_outcome(status, *code))
+        .collect();
+    actual.sort();
+    want.sort();
+    assert_eq!(
+        actual, want,
+        "{tool}/{account} tool_end outcomes must match expected: {records:#?}",
+    );
+}
+
+/// Encode a `tool_end` record's recorded `(status, error_code)` as a
+/// comparable key. A successful call carries `status = "ok"` and a null
+/// `error_code`; a denial carries `status = "error"` and the stable code.
+fn outcome_key(end: &Value) -> String {
+    let status = end["status"].as_str().expect("tool_end.status");
+    encode_outcome(status, end["error_code"].as_str())
+}
+
+/// Canonical string form of a `(status, error_code)` outcome, used to
+/// compare recorded and expected outcomes as order-independent multisets.
+fn encode_outcome(status: &str, code: Option<&str>) -> String {
+    match code {
+        Some(c) => format!("{status}:{c}"),
+        None => format!("{status}:-"),
     }
 }
 
