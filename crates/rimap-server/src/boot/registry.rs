@@ -525,4 +525,38 @@ mod tests {
             h.join().unwrap();
         }
     }
+
+    #[tokio::test]
+    async fn account_state_dispatches_send_through_injected_fake() {
+        // Acceptance for #453: an AccountState can hold a fake sender and
+        // dispatch to it with no live SMTP server. The `spy` clone shares
+        // the injected fake's capture log, so we can inspect what the
+        // seam submitted after boxing it into the AccountState.
+        use rimap_smtp::SendEnvelope;
+        use rimap_smtp::testing::FakeSmtpSender;
+
+        use crate::test_support::make_test_account_state;
+
+        let fake = FakeSmtpSender::new();
+        let spy = fake.clone();
+
+        let mut state = make_test_account_state("sender-seam");
+        state.smtp = Some(Box::new(fake));
+
+        let envelope = SendEnvelope {
+            from: "me@test.invalid".into(),
+            to: vec!["you@test.invalid".into()],
+        };
+        let smtp = state.smtp.as_ref().unwrap();
+        let response = smtp
+            .send_raw(&envelope, b"From: me\r\n\r\nbody")
+            .await
+            .unwrap();
+
+        assert_eq!(response, "250 2.0.0 OK");
+        assert_eq!(spy.call_count(), 1);
+        let calls = spy.calls();
+        assert_eq!(calls[0].envelope.to, vec!["you@test.invalid".to_string()]);
+        assert_eq!(calls[0].raw, b"From: me\r\n\r\nbody");
+    }
 }
