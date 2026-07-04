@@ -27,11 +27,11 @@ pub trait SmtpSender: Send + Sync {
 
 impl SmtpSender for SmtpClient {
     fn send_raw<'a>(&'a self, envelope: &'a SendEnvelope, raw: &'a [u8]) -> SendRawFuture<'a> {
-        // Inherent `SmtpClient::send_raw` is preferred by method
-        // resolution over this trait method, so this delegates to the
-        // real implementation without recursing. (If resolution ever
-        // picked the trait method, the return-type mismatch would fail
-        // to compile — it cannot silently recurse.)
+        // `self.send_raw(..)` resolves to the inherent
+        // `SmtpClient::send_raw`, not this trait method: inherent methods
+        // take priority over trait methods in method-call resolution. That
+        // priority — not any type mismatch — is what makes this delegate
+        // to the real implementation rather than recurse.
         Box::pin(self.send_raw(envelope, raw))
     }
 }
