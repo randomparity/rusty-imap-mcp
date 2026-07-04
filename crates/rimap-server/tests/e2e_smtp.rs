@@ -243,6 +243,36 @@ async fn count_in_folder(server: &ImapMcpServer, folder: &str, subject: &str) ->
         .expect("total_matched")
 }
 
+/// Raw bytes of the newest message in `folder` whose `Subject` contains
+/// `subject`, fetched over IMAP. Used to inspect a Sent copy at the byte
+/// level — e.g. to prove it excludes `Bcc` (#432) — not just its presence.
+async fn fetch_newest_in_folder(server: &ImapMcpServer, folder: &str, subject: &str) -> Vec<u8> {
+    let result = call_tool(
+        server,
+        "search",
+        serde_json::json!({ "folder": folder, "subject": subject }),
+    )
+    .await
+    .expect("search failed");
+    let messages = result["untrusted"]["messages"]
+        .as_array()
+        .expect("messages array");
+    let uid = messages
+        .iter()
+        .filter_map(|m| m["uid"].as_u64())
+        .max()
+        .expect("a matching message with a UID");
+    let uid = core::num::NonZeroU32::new(u32::try_from(uid).expect("uid fits u32"))
+        .expect("server UIDs are non-zero");
+
+    let account = server.registry.resolve(None).expect("resolve account");
+    account
+        .imap
+        .fetch_body(folder, rimap_imap::types::Uid::from(uid), None)
+        .await
+        .expect("fetch Sent copy failed")
+}
+
 fn forward_source(subject: &str, body: &str) -> Vec<u8> {
     format!(
         "From: origin@example.com\r\n\
@@ -398,11 +428,32 @@ async fn assert_send_email_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSend
             .contains("hello from the send_email e2e"),
     );
 
-    // The best-effort Sent copy actually landed in IMAP.
+    // The best-effort Sent copy actually landed in IMAP — exactly one.
     assert_eq!(
         count_in_folder(server, "Sent", subject).await,
         1,
         "send_email did not APPEND a copy to Sent",
+    );
+
+    // The Sent copy must be the same Bcc-free bytes that went on the wire
+    // (#432): a regression that archived the pre-stripping bytes would leak
+    // the blind recipient into Sent while still matching the subject search.
+    let sent_copy = fetch_newest_in_folder(server, "Sent", subject).await;
+    let parsed_copy = MessageParser::new()
+        .parse(&sent_copy)
+        .expect("parse Sent copy");
+    assert!(
+        parsed_copy.bcc().is_none(),
+        "Bcc header leaked into the Sent copy",
+    );
+    assert!(
+        !String::from_utf8_lossy(&sent_copy).contains("blind@secret.example"),
+        "blind recipient leaked into the Sent copy",
+    );
+    assert_eq!(
+        parsed_copy.subject().expect("Sent copy subject"),
+        subject,
+        "Sent copy subject does not match the sent message",
     );
 }
 
