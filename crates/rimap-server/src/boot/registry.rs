@@ -20,7 +20,7 @@ use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::RimapError;
 use rimap_core::account::AccountId;
 use rimap_imap::{Connection, ConnectionConfig, SpecialUseMap};
-use rimap_smtp::SmtpClient;
+use rimap_smtp::SmtpSender;
 
 /// In-memory, unkeyed governor limiter used for infrastructure tools.
 type InfrastructureLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
@@ -56,8 +56,10 @@ pub struct AccountState {
     pub id: AccountId,
     /// IMAP connection for this account.
     pub imap: Connection,
-    /// Optional SMTP client (present when sending is configured).
-    pub smtp: Option<SmtpClient>,
+    /// Optional SMTP sender (present when sending is configured). A
+    /// trait object so tests can inject an in-memory fake in place of
+    /// the real `SmtpClient`.
+    pub smtp: Option<Box<dyn SmtpSender>>,
     /// Rate-limit and circuit-breaker guard.
     pub guard: DispatchGuard<SystemClock>,
     /// Folder-level access guard.

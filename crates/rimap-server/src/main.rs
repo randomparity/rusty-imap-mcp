@@ -488,7 +488,7 @@ async fn build_registry(
 fn build_smtp_client(
     acfg: &ValidatedAccountConfig,
     credentials: &Arc<dyn CredentialStore>,
-) -> anyhow::Result<Option<rimap_smtp::SmtpClient>> {
+) -> anyhow::Result<Option<Box<dyn rimap_smtp::SmtpSender>>> {
     let Some(ref smtp_cfg) = acfg.smtp else {
         return Ok(None);
     };
@@ -506,7 +506,7 @@ fn build_smtp_client(
     let client = rimap_smtp::SmtpClient::new(smtp_cfg, smtp_password.expose_secret())
         .with_context(|| format!("building SMTP client for account {}", acfg.id.as_str()))?;
     drop(smtp_password);
-    Ok(Some(client))
+    Ok(Some(Box::new(client)))
 }
 
 /// Build the composed authz guard from a per-account config.
