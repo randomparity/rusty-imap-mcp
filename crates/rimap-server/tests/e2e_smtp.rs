@@ -227,50 +227,49 @@ async fn call_tool(
     server.execute_tool_for_test(None, tool, args).await
 }
 
-/// Number of messages in `folder` whose `Subject` contains `subject`. The
-/// Sent-folder assertions read the copy back over IMAP this way rather than
+/// Run the `search` tool against `folder` for messages whose `Subject`
+/// contains `subject`. The one response carries both the match count
+/// (`meta.total_matched`) and the matched UIDs (`untrusted.messages`), so
+/// the Sent-folder assertions read a copy back over IMAP rather than
 /// trusting the tool's self-reported `sent_copy`.
-async fn count_in_folder(server: &ImapMcpServer, folder: &str, subject: &str) -> u64 {
-    let result = call_tool(
+async fn search_folder(server: &ImapMcpServer, folder: &str, subject: &str) -> serde_json::Value {
+    call_tool(
         server,
         "search",
         serde_json::json!({ "folder": folder, "subject": subject }),
     )
     .await
-    .expect("search failed");
-    result["meta"]["total_matched"]
+    .expect("search failed")
+}
+
+/// Number of matches in a `search_folder` response.
+fn match_count(search_result: &serde_json::Value) -> u64 {
+    search_result["meta"]["total_matched"]
         .as_u64()
         .expect("total_matched")
 }
 
-/// Raw bytes of the newest message in `folder` whose `Subject` contains
-/// `subject`, fetched over IMAP. Used to inspect a Sent copy at the byte
-/// level — e.g. to prove it excludes `Bcc` (#432) — not just its presence.
-async fn fetch_newest_in_folder(server: &ImapMcpServer, folder: &str, subject: &str) -> Vec<u8> {
-    let result = call_tool(
-        server,
-        "search",
-        serde_json::json!({ "folder": folder, "subject": subject }),
-    )
-    .await
-    .expect("search failed");
-    let messages = result["untrusted"]["messages"]
+/// Newest (highest) UID among a `search_folder` response's matches, or
+/// `None` when nothing matched.
+fn newest_uid(search_result: &serde_json::Value) -> Option<u32> {
+    let uid = search_result["untrusted"]["messages"]
         .as_array()
-        .expect("messages array");
-    let uid = messages
+        .expect("messages array")
         .iter()
         .filter_map(|m| m["uid"].as_u64())
-        .max()
-        .expect("a matching message with a UID");
-    let uid = core::num::NonZeroU32::new(u32::try_from(uid).expect("uid fits u32"))
-        .expect("server UIDs are non-zero");
+        .max()?;
+    Some(u32::try_from(uid).expect("uid fits u32"))
+}
 
+/// Fetch a message's raw bytes from `folder` by `uid` over IMAP.
+async fn fetch_body(server: &ImapMcpServer, folder: &str, uid: u32) -> Vec<u8> {
+    let uid = core::num::NonZeroU32::new(uid).expect("server UIDs are non-zero");
     let account = server.registry.resolve(None).expect("resolve account");
     account
         .imap
         .fetch_body(folder, rimap_imap::types::Uid::from(uid), None)
         .await
-        .expect("fetch Sent copy failed")
+        .expect("fetch_body failed")
 }
 
 fn forward_source(subject: &str, body: &str) -> Vec<u8> {
@@ -288,6 +287,16 @@ fn forward_source(subject: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// First recipient address in an optional `mail_parser` address header.
+fn first_address<'a>(header: Option<&'a mail_parser::Address<'a>>) -> &'a str {
+    header
+        .expect("address header present")
+        .first()
+        .expect("at least one address")
+        .address()
+        .expect("address value")
+}
+
 /// APPEND a to-be-forwarded message to INBOX and return its server UID.
 async fn seed_forward_source(server: &ImapMcpServer, subject: &str, body: &str) -> u32 {
     let account = server.registry.resolve(None).expect("resolve account");
@@ -296,23 +305,7 @@ async fn seed_forward_source(server: &ImapMcpServer, subject: &str, body: &str) 
         .append_message("INBOX", &forward_source(subject, body), &[], &[])
         .await
         .expect("APPEND to INBOX failed");
-
-    let result = call_tool(
-        server,
-        "search",
-        serde_json::json!({ "folder": "INBOX", "subject": subject }),
-    )
-    .await
-    .expect("search INBOX failed");
-    let messages = result["untrusted"]["messages"]
-        .as_array()
-        .expect("messages array");
-    let uid = messages
-        .iter()
-        .filter_map(|m| m["uid"].as_u64())
-        .max()
-        .expect("seeded message has a UID");
-    u32::try_from(uid).expect("uid fits u32")
+    newest_uid(&search_folder(server, "INBOX", subject).await).expect("seeded message has a UID")
 }
 
 // ── The test ────────────────────────────────────────────────────────
@@ -346,6 +339,7 @@ async fn e2e_send_email_and_forward_through_dispatch() {
 
 async fn assert_send_email_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender) {
     let subject = "e2e-smtp-send-happy";
+    let before = spy.call_count();
     let result = call_tool(
         server,
         "send_email",
@@ -360,27 +354,18 @@ async fn assert_send_email_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSend
     .await
     .expect("send_email failed");
 
-    assert_eq!(result["meta"]["sent"], serde_json::json!(true));
-    assert_eq!(
-        result["meta"]["smtp_status"],
-        serde_json::json!("delivered")
-    );
-    assert_eq!(
-        result["meta"]["sent_copy"]["folder"],
-        serde_json::json!("Sent")
-    );
-    assert_eq!(
-        result["meta"]["sent_copy"]["failed"],
-        serde_json::json!(false)
-    );
+    assert_eq!(result["meta"]["sent"], true);
+    assert_eq!(result["meta"]["smtp_status"], "delivered");
+    assert_eq!(result["meta"]["sent_copy"]["folder"], "Sent");
+    assert_eq!(result["meta"]["sent_copy"]["failed"], false);
 
-    // The fake captured exactly one submission.
+    // send_email produced exactly one new submission on the fake.
     let calls = spy.calls();
-    assert_eq!(calls.len(), 1, "expected one captured send");
-    let sent = &calls[0];
+    assert_eq!(calls.len(), before + 1, "expected one captured send");
+    let sent = calls.last().expect("a captured send");
 
     // Envelope: MAIL FROM is the account username; RCPT TO unions To+Cc+Bcc
-    // so blind recipients are still delivered.
+    // (in that order) so blind recipients are still delivered.
     assert_eq!(sent.envelope.from, ACCOUNT_USERNAME);
     assert_eq!(
         sent.envelope.to,
@@ -392,26 +377,8 @@ async fn assert_send_email_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSend
         .parse(&sent.raw)
         .expect("parse sent bytes");
     assert_eq!(parsed.subject().expect("subject"), subject);
-    assert_eq!(
-        parsed
-            .to()
-            .expect("to")
-            .first()
-            .expect("to[0]")
-            .address()
-            .expect("to addr"),
-        "rcpt@example.com",
-    );
-    assert_eq!(
-        parsed
-            .cc()
-            .expect("cc")
-            .first()
-            .expect("cc[0]")
-            .address()
-            .expect("cc addr"),
-        "cc@example.com",
-    );
+    assert_eq!(first_address(parsed.to()), "rcpt@example.com");
+    assert_eq!(first_address(parsed.cc()), "cc@example.com");
     assert!(
         parsed.bcc().is_none(),
         "Bcc header leaked into the sent DATA"
@@ -428,17 +395,19 @@ async fn assert_send_email_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSend
             .contains("hello from the send_email e2e"),
     );
 
-    // The best-effort Sent copy actually landed in IMAP — exactly one.
+    // The best-effort Sent copy landed in IMAP — exactly one — and is the
+    // same Bcc-free bytes that went on the wire (#432): a regression that
+    // archived the pre-stripping bytes would leak the blind recipient into
+    // Sent while still matching the subject search. One search serves the
+    // count check and the byte-level read-back.
+    let sent_search = search_folder(server, "Sent", subject).await;
     assert_eq!(
-        count_in_folder(server, "Sent", subject).await,
+        match_count(&sent_search),
         1,
         "send_email did not APPEND a copy to Sent",
     );
-
-    // The Sent copy must be the same Bcc-free bytes that went on the wire
-    // (#432): a regression that archived the pre-stripping bytes would leak
-    // the blind recipient into Sent while still matching the subject search.
-    let sent_copy = fetch_newest_in_folder(server, "Sent", subject).await;
+    let uid = newest_uid(&sent_search).expect("a Sent copy UID");
+    let sent_copy = fetch_body(server, "Sent", uid).await;
     let parsed_copy = MessageParser::new()
         .parse(&sent_copy)
         .expect("parse Sent copy");
@@ -487,16 +456,7 @@ fn assert_forward_wrapper(raw: &[u8], expected_to: &str, original_body: &str) {
         subject.starts_with("Fwd:"),
         "forward subject not prefixed: {subject}",
     );
-    assert_eq!(
-        parsed
-            .to()
-            .expect("to")
-            .first()
-            .expect("to[0]")
-            .address()
-            .expect("to addr"),
-        expected_to,
-    );
+    assert_eq!(first_address(parsed.to()), expected_to);
 
     assert!(
         message_body_contains(&parsed, original_body),
@@ -520,6 +480,7 @@ fn message_body_contains(msg: &mail_parser::Message<'_>, needle: &str) -> bool {
 }
 
 async fn assert_forward_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender, uid: u32) {
+    let before = spy.call_count();
     let result = call_tool(
         server,
         "forward",
@@ -533,17 +494,14 @@ async fn assert_forward_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender,
     .await
     .expect("forward failed");
 
-    assert_eq!(result["meta"]["sent"], serde_json::json!(true));
-    assert_eq!(result["meta"]["source_uid"], serde_json::json!(uid));
-    assert_eq!(
-        result["meta"]["sent_copy"]["failed"],
-        serde_json::json!(false)
-    );
+    assert_eq!(result["meta"]["sent"], true);
+    assert_eq!(result["meta"]["source_uid"], uid);
+    assert_eq!(result["meta"]["sent_copy"]["failed"], false);
 
-    // Second capture on this fake — the first was the send_email above.
+    // forward produced exactly one new submission on the fake.
     let calls = spy.calls();
-    assert_eq!(calls.len(), 2, "expected a second captured send");
-    let fwd = &calls[1];
+    assert_eq!(calls.len(), before + 1, "expected one captured send");
+    let fwd = calls.last().expect("a captured send");
     assert_eq!(fwd.envelope.to, vec!["fwd-rcpt@example.com"]);
 
     // The on-wire forward wraps the original as a base64 message/rfc822 part
@@ -554,17 +512,48 @@ async fn assert_forward_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender,
     // Reapplying the full wrapper check (not just presence) guards against a
     // forward Sent-copy path that diverges from the sent bytes, mirroring the
     // send_email Bcc read-back.
+    let sent_search = search_folder(server, "Sent", FORWARD_OK_SUBJECT).await;
     assert_eq!(
-        count_in_folder(server, "Sent", FORWARD_OK_SUBJECT).await,
+        match_count(&sent_search),
         1,
         "forward did not APPEND a copy to Sent",
     );
-    let sent_copy = fetch_newest_in_folder(server, "Sent", FORWARD_OK_SUBJECT).await;
+    let sent_copy = fetch_body(
+        server,
+        "Sent",
+        newest_uid(&sent_search).expect("a Sent copy UID"),
+    )
+    .await;
     assert_forward_wrapper(&sent_copy, "fwd-rcpt@example.com", FORWARD_OK_BODY);
+}
+
+/// Shared tail for the two SMTP-failure scenarios: the tool must surface
+/// `ERR_SMTP_PROTOCOL`, the rejected send must still have been captured by
+/// the fake, and no Sent copy may exist (the failure short-circuits before
+/// the APPEND). `before` is the fake's call count captured before the call.
+async fn assert_smtp_rejected(
+    server: &ImapMcpServer,
+    spy: &FakeSmtpSender,
+    before: usize,
+    err: &rimap_core::RimapError,
+    sent_subject: &str,
+) {
+    assert_eq!(err.code(), rimap_core::ErrorCode::SmtpProtocol);
+    assert_eq!(
+        spy.call_count(),
+        before + 1,
+        "the rejected send should still be captured",
+    );
+    assert_eq!(
+        match_count(&search_folder(server, "Sent", sent_subject).await),
+        0,
+        "a failed send must not leave a Sent copy",
+    );
 }
 
 async fn assert_send_email_smtp_failure(server: &ImapMcpServer, spy: &FakeSmtpSender) {
     let subject = "e2e-smtp-send-failure";
+    let before = spy.call_count();
     let err = call_tool(
         server,
         "send_email",
@@ -577,22 +566,11 @@ async fn assert_send_email_smtp_failure(server: &ImapMcpServer, spy: &FakeSmtpSe
     .await
     .expect_err("send_email must fail when SMTP rejects");
 
-    assert_eq!(err.code(), rimap_core::ErrorCode::SmtpProtocol);
-    // The send was attempted (captured) but the failure short-circuits before
-    // the Sent APPEND, so nothing is written to Sent.
-    assert_eq!(
-        spy.call_count(),
-        1,
-        "the rejected send should still be captured"
-    );
-    assert_eq!(
-        count_in_folder(server, "Sent", subject).await,
-        0,
-        "a failed send must not leave a Sent copy",
-    );
+    assert_smtp_rejected(server, spy, before, &err, subject).await;
 }
 
 async fn assert_forward_smtp_failure(server: &ImapMcpServer, spy: &FakeSmtpSender, uid: u32) {
+    let before = spy.call_count();
     let err = call_tool(
         server,
         "forward",
@@ -605,16 +583,5 @@ async fn assert_forward_smtp_failure(server: &ImapMcpServer, spy: &FakeSmtpSende
     .await
     .expect_err("forward must fail when SMTP rejects");
 
-    assert_eq!(err.code(), rimap_core::ErrorCode::SmtpProtocol);
-    // send_email failure was capture 1; this forward attempt is capture 2.
-    assert_eq!(
-        spy.call_count(),
-        2,
-        "the rejected forward should still be captured"
-    );
-    assert_eq!(
-        count_in_folder(server, "Sent", FORWARD_FAIL_SUBJECT).await,
-        0,
-        "a failed forward must not leave a Sent copy",
-    );
+    assert_smtp_rejected(server, spy, before, &err, FORWARD_FAIL_SUBJECT).await;
 }
