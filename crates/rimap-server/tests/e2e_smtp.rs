@@ -1,0 +1,531 @@
+//! Dovecot e2e for `send_email` and `forward` through the dispatch handler.
+//!
+//! `send_email` and `forward` are the highest-consequence tools — they emit
+//! mail off-box — yet only their pure envelope/message-building helpers were
+//! unit-tested before this file (#454). These tests drive both tools through
+//! the real dispatch pipeline (`execute_tool_for_test` → posture guard →
+//! audit envelope → handler) with a [`FakeSmtpSender`] injected on the
+//! `AccountState` seam (#453), against a real Dovecot IMAP fixture.
+//!
+//! They assert the four things the audit finding called out:
+//! 1. Both tools are driven end-to-end via the injected SMTP fake.
+//! 2. The on-wire RFC 5322 bytes the fake captured carry the expected
+//!    headers/recipients, exclude `Bcc` from the DATA (#432), and wrap the
+//!    forwarded original as a base64 `message/rfc822` part.
+//! 3. The best-effort copy lands in the Sent folder — verified by reading
+//!    the folder back over IMAP, independent of the tool's self-reported
+//!    `sent_copy`.
+//! 4. A rejecting fake surfaces `ERR_SMTP_PROTOCOL`, and no Sent copy is
+//!    written when the send itself fails.
+//!
+//! # Why in-process, not the stdio wire
+//!
+//! The wire harness (`e2e_wire.rs`) spawns the production binary, which
+//! builds SMTP solely from config — there is no seam to inject a fake into a
+//! subprocess. The `AccountState.smtp` trait object exists precisely so the
+//! fake can be injected on the in-process path, which still exercises the
+//! full dispatch pipeline. See the module doc on `e2e.rs` for the same
+//! single-container, in-process rationale.
+//!
+//! Skips silently when no container runtime is available. Set
+//! `RIMAP_REQUIRE_DOCKER=1` to fail loudly instead.
+
+#![expect(clippy::expect_used, reason = "tests")]
+#![expect(clippy::panic, reason = "test diagnostics")]
+
+// Import dovecot directly (not via support/mod.rs) so this binary does not
+// compile the wire driver it doesn't use.
+#[path = "support/dovecot/mod.rs"]
+mod dovecot;
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use mail_parser::MessageParser;
+use rimap_audit::{AuditOptions, AuditWriter, Seq};
+use rimap_authz::DispatchGuard;
+use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
+use rimap_authz::matrix::EffectiveMatrix;
+use rimap_authz::rate_limit::Governor;
+use rimap_config::credential::CredentialStore;
+use rimap_config::model::{ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig};
+use rimap_config::validate::ValidatedAccountConfig;
+use rimap_core::account::AccountId;
+use rimap_core::posture::Posture;
+use rimap_imap::{Connection, ConnectionConfig};
+use rimap_smtp::testing::FakeSmtpSender;
+use tempfile::TempDir;
+
+use dovecot::{DovecotHarness, HarnessError};
+use rimap_server::mcp::server::ImapMcpServer;
+
+// ── Fixtures ────────────────────────────────────────────────────────
+
+const ACCOUNT_USERNAME: &str = "rimap-test";
+
+const FORWARD_OK_SUBJECT: &str = "e2e-smtp-forward-ok-source";
+const FORWARD_OK_BODY: &str = "original body forwarded on the happy path";
+const FORWARD_FAIL_SUBJECT: &str = "e2e-smtp-forward-fail-source";
+const FORWARD_FAIL_BODY: &str = "original body forwarded on the failing path";
+
+struct StaticCreds(String);
+
+impl CredentialStore for StaticCreds {
+    fn get_password(
+        &self,
+        _account: &str,
+    ) -> Result<Option<secrecy::SecretString>, rimap_config::ConfigError> {
+        Ok(Some(secrecy::SecretString::from(self.0.clone())))
+    }
+
+    #[expect(clippy::panic, clippy::panic_in_result_fn, reason = "test stub")]
+    fn set_password(
+        &self,
+        _account: &str,
+        _password: &str,
+    ) -> Result<(), rimap_config::ConfigError> {
+        panic!("tests do not write credentials")
+    }
+}
+
+// ── Server builder ──────────────────────────────────────────────────
+
+/// One in-process server plus the tempdirs its audit/download roots live in.
+/// The tempdirs must outlive the server, so callers keep the whole struct.
+struct ServerScope {
+    _audit_dir: TempDir,
+    _download_dir: TempDir,
+    server: ImapMcpServer,
+}
+
+/// Build a `Full`-posture in-process server for `harness`, with `fake`
+/// injected as the account's SMTP sender. Send/forward require `Full`
+/// (`Readonly`/`DraftSafe` deny them), and rate limits are set generous so
+/// this suite exercises delivery, not throttling.
+fn build_server(harness: &DovecotHarness, fake: FakeSmtpSender) -> ServerScope {
+    let audit_dir = TempDir::new().expect("audit tempdir");
+    let download_dir = TempDir::new().expect("download tempdir");
+
+    let audit = AuditWriter::open(&AuditOptions {
+        path: audit_dir.path().join("audit.jsonl"),
+        rotate_bytes: 0,
+        rotate_keep: 0,
+        retention_seconds: None,
+        fail_open: false,
+        initial_seq: Seq::FIRST,
+    })
+    .expect("audit open");
+
+    let account_cfg = test_account_config(harness);
+    let imap = test_connection(harness, &audit);
+    let guard = test_guard(&account_cfg);
+    let folder_guard = rimap_authz::FolderGuard::new(
+        &account_cfg.security.protected_folders,
+        &account_cfg.security.expunge_folders,
+    );
+    let id = account_cfg.id.clone();
+    let state = rimap_server::boot::registry::AccountState {
+        id: id.clone(),
+        imap,
+        smtp: Some(Box::new(fake)),
+        guard,
+        folder_guard,
+        download_dir: Arc::from(download_dir.path().to_path_buf().into_boxed_path()),
+        special_use: rimap_imap::SpecialUseMap::default(),
+    };
+    let mut accounts = BTreeMap::new();
+    accounts.insert(id, state);
+    let registry = rimap_server::boot::registry::AccountRegistry::new(accounts);
+
+    let (cancellation_sender, _cancellation_rx) = rimap_audit::cancellation_channel();
+    let server = ImapMcpServer::new(registry, audit, cancellation_sender);
+
+    ServerScope {
+        _audit_dir: audit_dir,
+        _download_dir: download_dir,
+        server,
+    }
+}
+
+fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
+    ValidatedAccountConfig {
+        id: AccountId::default_account(),
+        imap: ImapConfig {
+            host: "127.0.0.1".into(),
+            port: harness.port(),
+            username: ACCOUNT_USERNAME.into(),
+            encryption: ImapEncryption::Tls,
+            tls_fingerprint_sha256: None,
+            connect_timeout_seconds: 10,
+            command_timeout_seconds: 30,
+        },
+        smtp: None,
+        security: SecurityConfig {
+            posture: Posture::Full,
+            ..SecurityConfig::default()
+        },
+        limits: LimitsConfig {
+            commands_per_second: 1000,
+            drafts_per_minute: 1000,
+            sends_per_minute: 1000,
+            ..LimitsConfig::default()
+        },
+        tool_overrides: BTreeMap::new(),
+        tls_fingerprint: Some(*harness.fingerprint()),
+        fallback_mode: rimap_config::model::FallbackMode::default(),
+    }
+}
+
+fn test_connection(harness: &DovecotHarness, audit: &AuditWriter) -> Connection {
+    let conn_cfg = ConnectionConfig {
+        account: None,
+        account_id: AccountId::default_account(),
+        host: "127.0.0.1".into(),
+        port: harness.port(),
+        encryption: rimap_imap::ImapEncryption::Tls,
+        username: ACCOUNT_USERNAME.into(),
+        pinned_fingerprint: Some(*harness.fingerprint()),
+        connect_timeout: Duration::from_secs(10),
+        command_timeout: Duration::from_secs(30),
+        max_fetch_body_bytes: 5_242_880,
+        max_append_bytes: 10_485_760,
+    };
+    let store: Arc<dyn CredentialStore> = Arc::new(StaticCreds("testpass".into()));
+    let creds: Arc<dyn rimap_core::CredentialResolver> =
+        Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
+            store,
+            rimap_config::model::FallbackMode::KeyringThenEnv,
+            rimap_config::credential::Protocol::Imap,
+        ));
+    let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
+    Connection::new(conn_cfg, sink, creds)
+}
+
+fn test_guard(config: &ValidatedAccountConfig) -> DispatchGuard<SystemClock> {
+    let matrix = EffectiveMatrix::build(config.security.posture, &config.tool_overrides);
+    let breaker = CircuitBreaker::new(SystemClock::new(), BreakerConfig::default_spec());
+    let governor = Governor::new(
+        config.limits.commands_per_second,
+        config.limits.drafts_per_minute,
+        config.limits.sends_per_minute,
+    )
+    .expect("governor");
+    DispatchGuard::new(matrix, breaker, governor)
+}
+
+// ── Dispatch + IMAP helpers ─────────────────────────────────────────
+
+async fn call_tool(
+    server: &ImapMcpServer,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, rimap_core::RimapError> {
+    let tool = std::str::FromStr::from_str(tool_name).map_err(
+        |e: rimap_core::tool::ParseToolNameError| rimap_core::RimapError::Internal(e.to_string()),
+    )?;
+    server.execute_tool_for_test(None, tool, args).await
+}
+
+/// Number of messages in `folder` whose `Subject` contains `subject`. The
+/// Sent-folder assertions read the copy back over IMAP this way rather than
+/// trusting the tool's self-reported `sent_copy`.
+async fn count_in_folder(server: &ImapMcpServer, folder: &str, subject: &str) -> u64 {
+    let result = call_tool(
+        server,
+        "search",
+        serde_json::json!({ "folder": folder, "subject": subject }),
+    )
+    .await
+    .expect("search failed");
+    result["meta"]["total_matched"]
+        .as_u64()
+        .expect("total_matched")
+}
+
+fn forward_source(subject: &str, body: &str) -> Vec<u8> {
+    format!(
+        "From: origin@example.com\r\n\
+         To: {ACCOUNT_USERNAME}@localhost\r\n\
+         Subject: {subject}\r\n\
+         Date: Sat, 04 Jul 2026 10:00:00 +0000\r\n\
+         Message-ID: <{subject}@example.com>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         {body}\r\n"
+    )
+    .into_bytes()
+}
+
+/// APPEND a to-be-forwarded message to INBOX and return its server UID.
+async fn seed_forward_source(server: &ImapMcpServer, subject: &str, body: &str) -> u32 {
+    let account = server.registry.resolve(None).expect("resolve account");
+    account
+        .imap
+        .append_message("INBOX", &forward_source(subject, body), &[], &[])
+        .await
+        .expect("APPEND to INBOX failed");
+
+    let result = call_tool(
+        server,
+        "search",
+        serde_json::json!({ "folder": "INBOX", "subject": subject }),
+    )
+    .await
+    .expect("search INBOX failed");
+    let messages = result["untrusted"]["messages"]
+        .as_array()
+        .expect("messages array");
+    let uid = messages
+        .iter()
+        .filter_map(|m| m["uid"].as_u64())
+        .max()
+        .expect("seeded message has a UID");
+    u32::try_from(uid).expect("uid fits u32")
+}
+
+// ── The test ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn e2e_send_email_and_forward_through_dispatch() {
+    let harness = match DovecotHarness::try_start() {
+        Ok(h) => h,
+        Err(HarnessError::DockerUnavailable) => return,
+        Err(e) => panic!("Dovecot harness failed: {e}"),
+    };
+    harness.create_mailbox("Sent");
+
+    // The happy-path server and its rejecting counterpart share one Dovecot
+    // container but hold independent SMTP fakes and rate governors.
+    let ok_fake = FakeSmtpSender::new();
+    let ok = build_server(&harness, ok_fake.clone());
+
+    let ok_uid = seed_forward_source(&ok.server, FORWARD_OK_SUBJECT, FORWARD_OK_BODY).await;
+    let fail_uid = seed_forward_source(&ok.server, FORWARD_FAIL_SUBJECT, FORWARD_FAIL_BODY).await;
+
+    assert_send_email_happy_path(&ok.server, &ok_fake).await;
+    assert_forward_happy_path(&ok.server, &ok_fake, ok_uid).await;
+
+    let bad_fake = FakeSmtpSender::rejecting("550 5.7.1 blocked by policy");
+    let bad = build_server(&harness, bad_fake.clone());
+
+    assert_send_email_smtp_failure(&bad.server, &bad_fake).await;
+    assert_forward_smtp_failure(&bad.server, &bad_fake, fail_uid).await;
+}
+
+async fn assert_send_email_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender) {
+    let subject = "e2e-smtp-send-happy";
+    let result = call_tool(
+        server,
+        "send_email",
+        serde_json::json!({
+            "to": [{"address": "rcpt@example.com"}],
+            "cc": [{"address": "cc@example.com"}],
+            "bcc": [{"address": "blind@secret.example"}],
+            "subject": subject,
+            "body_text": "hello from the send_email e2e",
+        }),
+    )
+    .await
+    .expect("send_email failed");
+
+    assert_eq!(result["meta"]["sent"], serde_json::json!(true));
+    assert_eq!(
+        result["meta"]["smtp_status"],
+        serde_json::json!("delivered")
+    );
+    assert_eq!(
+        result["meta"]["sent_copy"]["folder"],
+        serde_json::json!("Sent")
+    );
+    assert_eq!(
+        result["meta"]["sent_copy"]["failed"],
+        serde_json::json!(false)
+    );
+
+    // The fake captured exactly one submission.
+    let calls = spy.calls();
+    assert_eq!(calls.len(), 1, "expected one captured send");
+    let sent = &calls[0];
+
+    // Envelope: MAIL FROM is the account username; RCPT TO unions To+Cc+Bcc
+    // so blind recipients are still delivered.
+    assert_eq!(sent.envelope.from, ACCOUNT_USERNAME);
+    assert_eq!(
+        sent.envelope.to,
+        vec!["rcpt@example.com", "cc@example.com", "blind@secret.example"],
+    );
+
+    // On-wire RFC 5322 bytes: headers + recipients, and no Bcc in the DATA.
+    let parsed = MessageParser::new()
+        .parse(&sent.raw)
+        .expect("parse sent bytes");
+    assert_eq!(parsed.subject().expect("subject"), subject);
+    assert_eq!(
+        parsed
+            .to()
+            .expect("to")
+            .first()
+            .expect("to[0]")
+            .address()
+            .expect("to addr"),
+        "rcpt@example.com",
+    );
+    assert_eq!(
+        parsed
+            .cc()
+            .expect("cc")
+            .first()
+            .expect("cc[0]")
+            .address()
+            .expect("cc addr"),
+        "cc@example.com",
+    );
+    assert!(
+        parsed.bcc().is_none(),
+        "Bcc header leaked into the sent DATA"
+    );
+    let raw_text = String::from_utf8_lossy(&sent.raw);
+    assert!(
+        !raw_text.contains("blind@secret.example"),
+        "blind recipient leaked into the sent DATA",
+    );
+    assert!(
+        parsed
+            .body_text(0)
+            .expect("body")
+            .contains("hello from the send_email e2e"),
+    );
+
+    // The best-effort Sent copy actually landed in IMAP.
+    assert_eq!(
+        count_in_folder(server, "Sent", subject).await,
+        1,
+        "send_email did not APPEND a copy to Sent",
+    );
+}
+
+async fn assert_forward_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender, uid: u32) {
+    let result = call_tool(
+        server,
+        "forward",
+        serde_json::json!({
+            "folder": "INBOX",
+            "uid": uid,
+            "to": [{"address": "fwd-rcpt@example.com"}],
+            "comment": "please see the forwarded message below",
+        }),
+    )
+    .await
+    .expect("forward failed");
+
+    assert_eq!(result["meta"]["sent"], serde_json::json!(true));
+    assert_eq!(result["meta"]["source_uid"], serde_json::json!(uid));
+    assert_eq!(
+        result["meta"]["sent_copy"]["failed"],
+        serde_json::json!(false)
+    );
+
+    // Second capture on this fake — the first was the send_email above.
+    let calls = spy.calls();
+    assert_eq!(calls.len(), 2, "expected a second captured send");
+    let fwd = &calls[1];
+    assert_eq!(fwd.envelope.to, vec!["fwd-rcpt@example.com"]);
+
+    let raw_text = String::from_utf8_lossy(&fwd.raw);
+    assert!(
+        raw_text.contains("message/rfc822"),
+        "forward missing message/rfc822 wrapper",
+    );
+    assert!(
+        raw_text.to_ascii_lowercase().contains("base64"),
+        "forward wrapper must be base64-encoded, not a raw/8bit part",
+    );
+    assert!(
+        !raw_text.contains(FORWARD_OK_BODY),
+        "forwarded original leaked unencoded onto the wire",
+    );
+
+    let parsed = MessageParser::new()
+        .parse(&fwd.raw)
+        .expect("parse forward bytes");
+    let fwd_subject = parsed.subject().expect("forward subject");
+    assert!(
+        fwd_subject.starts_with("Fwd:"),
+        "forward subject not prefixed: {fwd_subject}",
+    );
+    assert_eq!(
+        parsed
+            .to()
+            .expect("to")
+            .first()
+            .expect("to[0]")
+            .address()
+            .expect("to addr"),
+        "fwd-rcpt@example.com",
+    );
+
+    // The forward's Sent copy landed in IMAP.
+    assert_eq!(
+        count_in_folder(server, "Sent", FORWARD_OK_SUBJECT).await,
+        1,
+        "forward did not APPEND a copy to Sent",
+    );
+}
+
+async fn assert_send_email_smtp_failure(server: &ImapMcpServer, spy: &FakeSmtpSender) {
+    let subject = "e2e-smtp-send-failure";
+    let err = call_tool(
+        server,
+        "send_email",
+        serde_json::json!({
+            "to": [{"address": "rcpt@example.com"}],
+            "subject": subject,
+            "body_text": "this send is rejected at SMTP",
+        }),
+    )
+    .await
+    .expect_err("send_email must fail when SMTP rejects");
+
+    assert_eq!(err.code(), rimap_core::ErrorCode::SmtpProtocol);
+    // The send was attempted (captured) but the failure short-circuits before
+    // the Sent APPEND, so nothing is written to Sent.
+    assert_eq!(
+        spy.call_count(),
+        1,
+        "the rejected send should still be captured"
+    );
+    assert_eq!(
+        count_in_folder(server, "Sent", subject).await,
+        0,
+        "a failed send must not leave a Sent copy",
+    );
+}
+
+async fn assert_forward_smtp_failure(server: &ImapMcpServer, spy: &FakeSmtpSender, uid: u32) {
+    let err = call_tool(
+        server,
+        "forward",
+        serde_json::json!({
+            "folder": "INBOX",
+            "uid": uid,
+            "to": [{"address": "fwd-rcpt@example.com"}],
+        }),
+    )
+    .await
+    .expect_err("forward must fail when SMTP rejects");
+
+    assert_eq!(err.code(), rimap_core::ErrorCode::SmtpProtocol);
+    // send_email failure was capture 1; this forward attempt is capture 2.
+    assert_eq!(
+        spy.call_count(),
+        2,
+        "the rejected forward should still be captured"
+    );
+    assert_eq!(
+        count_in_folder(server, "Sent", FORWARD_FAIL_SUBJECT).await,
+        0,
+        "a failed forward must not leave a Sent copy",
+    );
+}
