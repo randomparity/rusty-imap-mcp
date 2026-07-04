@@ -129,11 +129,93 @@ send_email = "deny"
     )
 }
 
+/// Build the two-account TOML for `e2e_wire_folder_management.rs` (#456).
+///
+/// The `destructive` account drives the create -> rename -> delete
+/// round-trip and the folder-guard denials. `delete_folder` runs
+/// `FolderGuard::check_expunge` after `check_protected`, so the folder it
+/// deletes must be in `expunge_folders`; the round-trip renames into
+/// `e2e-folder-dst`, which is why that name — and only that name — is
+/// allowlisted. `INBOX`/`Sent`/`Drafts` stay protected so the
+/// `ERR_PROTECTED_FOLDER` cases fire, and a never-allowlisted folder
+/// exercises the `ERR_EXPUNGE_DENIED` path on `delete_folder`.
+///
+/// The `full` account exists only to prove the posture boundary on the
+/// wire: `full` advertises `create_folder`/`rename_folder` but not
+/// `delete_folder` (destructive-only), and calling `full.delete_folder`
+/// is refused with `ERR_POSTURE_DENIED`.
+///
+/// Both accounts deny `send_email`: the `full` and `destructive` postures
+/// enable it, but the config validator requires an `[smtp]` section for a
+/// send-capable tool, and this suite exercises the folder path only.
+///
+/// The `e2e-folder-dst` literal in `expunge_folders` MUST stay in sync
+/// with the `DST_FOLDER` constant in `e2e_wire_folder_management.rs`.
+pub fn build_dovecot_folder_config(
+    fingerprint_hex: &str,
+    port: u16,
+    audit_path: &Path,
+    allowed_base: &Path,
+    download_dir: &Path,
+) -> String {
+    format!(
+        r#"
+[audit]
+path = "{audit_path}"
+allowed_base_dir = "{allowed_base}"
+
+[attachments]
+download_dir = "{download_dir}"
+
+[defaults.credentials]
+fallback = "keyring-then-env"
+
+[[accounts]]
+name = "destructive"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = {port}
+username = "rimap-test"
+encryption = "tls"
+tls_fingerprint_sha256 = "{fingerprint_hex}"
+
+[accounts.security]
+posture = "destructive"
+protected_folders = ["INBOX", "Sent", "Drafts"]
+expunge_folders = ["e2e-folder-dst"]
+
+[accounts.security.tools]
+send_email = "deny"
+
+[[accounts]]
+name = "full"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = {port}
+username = "rimap-test"
+encryption = "tls"
+tls_fingerprint_sha256 = "{fingerprint_hex}"
+
+[accounts.security]
+posture = "full"
+
+[accounts.security.tools]
+send_email = "deny"
+"#,
+        audit_path = audit_path.display(),
+        allowed_base = allowed_base.display(),
+        download_dir = download_dir.display(),
+    )
+}
+
 /// Per-binary dead-code suppression. `mcp_wire_conformance.rs`
 /// compiles this module through `support/wire/mod.rs` but never calls
 /// these builders; if we relied on `#[expect(dead_code)]` instead, that
 /// expectation would be unfulfilled in the binaries that *do* use them
-/// (`e2e_wire.rs`, `e2e_wire_destructive.rs`) and
+/// (`e2e_wire.rs`, `e2e_wire_destructive.rs`,
+/// `e2e_wire_folder_management.rs`) and
 /// `clippy::allow_attributes = "deny"` forbids `#[allow]`. Referencing
 /// each function inside a never-called helper marks it as used in every
 /// compilation unit.
@@ -144,4 +226,5 @@ send_email = "deny"
 fn force_use_for_dead_code_link() {
     let _ = build_dovecot_config;
     let _ = build_dovecot_destructive_config;
+    let _ = build_dovecot_folder_config;
 }
