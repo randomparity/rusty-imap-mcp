@@ -42,6 +42,17 @@ pub trait SmtpSender: Send + Sync {
 `send_raw` (kept as the real implementation; the trait impl only wraps the
 future in `Box::pin`). No behavior change to the live path.
 
+**Load-bearing assumption — verify first.** The `+ Send` bound on
+`SendRawFuture` requires that lettre's `AsyncTransport::send_raw` future is
+itself `Send`. This is unproven until it compiles. The plan's **first task is
+a compile spike**: define the trait + `impl SmtpSender for SmtpClient` and run
+`cargo check -p rimap-smtp`; do not build anything else until the `Send`
+future compiles. Fallback if lettre's future turns out `!Send`: the seam still
+works with the `+ Send` bound dropped, but `AccountState` then loses `Send`
+and the registry impact must be reassessed before proceeding. (lettre 0.11.21
+with `tokio1-rustls-tls` is expected to yield a `Send` future, but the spike,
+not this sentence, is the proof.)
+
 `AccountState.smtp` changes from `Option<SmtpClient>` to
 `Option<Box<dyn SmtpSender>>`. Every existing consumer already goes through
 `Option::is_some()` or `as_ref()…send_raw()`, so no call site changes except
@@ -92,8 +103,18 @@ impl FakeSmtpSender {
     pub fn calls(&self) -> Vec<CapturedSend>;   // snapshot of captured sends
     pub fn call_count(&self) -> usize;
 }
+impl Default for FakeSmtpSender { /* delegates to new() */ }
 impl SmtpSender for FakeSmtpSender { /* records the call, returns the outcome */ }
 ```
+
+`FakeSmtpSender::new()` takes no arguments, so a matching `impl Default` is
+mandatory: the feature-gated fake is non-test-cfg code compiled by
+`just lint` (`--all-features`), and clippy `pedantic`'s `new_without_default`
+is a `-D warnings` failure without it. The fake records the call by cloning
+the envelope and copying `raw` into an owned `CapturedSend` (it cannot store
+the borrowed `&'a` arguments), locks the `Mutex` only to push, and drops the
+guard before the future resolves — no lock is held across an await
+(`await_holding_lock` is denied).
 
 Only the two externally-constructible `SmtpError` shapes are offered as
 outcomes: success (canned response string) and `Rejected { reason }`. The
@@ -109,9 +130,16 @@ lint bar for non-test (feature-gated) code.
 - No connection pooling, retries, or any change to `SmtpClient`'s live
   behavior. The inherent `send_raw` is untouched; the trait delegates to it.
 - No functional tests of `send_email`/`forward` themselves — that is #454,
-  which consumes this seam. #453 ships a seam-level proof test only (inject a
-  `FakeSmtpSender`, dispatch through `&dyn SmtpSender`, assert capture +
-  outcome).
+  which consumes this seam. #453 ships a seam-level proof test that **must
+  exercise the rimap-server wiring**, not just the bare trait: build an
+  `AccountState` (via `test_support`) whose `smtp` field holds
+  `Some(Box::new(FakeSmtpSender::new()))`, dispatch a send through that
+  `AccountState`'s `smtp`, and assert the fake captured the RFC 5322 bytes +
+  envelope and returned the configured outcome. A rimap-smtp-only test that
+  calls the fake through a bare `&dyn SmtpSender` does **not** satisfy the
+  acceptance criterion ("wired through `rimap-server` so a test can inject the
+  fake"). A separate rimap-smtp unit test additionally covers the fake's own
+  capture/outcome behavior in isolation.
 - No `async-trait` dependency; no generic `AccountState`.
 
 ## Considered & rejected
