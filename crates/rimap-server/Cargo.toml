@@ -106,6 +106,7 @@ mail-parser = { workspace = true }
 rimap-audit = { path = "../rimap-audit", version = "0.1.0", features = ["test-injection"] }
 rimap-config = { path = "../rimap-config", version = "0.1.0", features = ["test-support"] }
 rimap-imap = { path = "../rimap-imap", version = "0.1.0", features = ["test-support"] }
+rimap-smtp = { path = "../rimap-smtp", version = "0.1.0", features = ["test-support"] }
 # Self dev-dep enables the `test-support` feature unconditionally for
 # integration tests, so `ImapMcpServer::execute_tool_for_test` is in
 # scope without every test harness passing `--features test-support`.

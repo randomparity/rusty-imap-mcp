@@ -8,6 +8,11 @@
 
 pub mod client;
 pub mod error;
+pub mod sender;
+
+#[cfg(feature = "test-support")]
+pub mod testing;
 
 pub use crate::client::{SendEnvelope, SmtpClient};
 pub use crate::error::SmtpError;
+pub use crate::sender::{SendRawFuture, SmtpSender};

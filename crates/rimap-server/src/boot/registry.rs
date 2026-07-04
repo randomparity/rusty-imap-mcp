@@ -20,7 +20,7 @@ use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::RimapError;
 use rimap_core::account::AccountId;
 use rimap_imap::{Connection, ConnectionConfig, SpecialUseMap};
-use rimap_smtp::SmtpClient;
+use rimap_smtp::SmtpSender;
 
 /// In-memory, unkeyed governor limiter used for infrastructure tools.
 type InfrastructureLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
@@ -56,8 +56,10 @@ pub struct AccountState {
     pub id: AccountId,
     /// IMAP connection for this account.
     pub imap: Connection,
-    /// Optional SMTP client (present when sending is configured).
-    pub smtp: Option<SmtpClient>,
+    /// Optional SMTP sender (present when sending is configured). A
+    /// trait object so tests can inject an in-memory fake in place of
+    /// the real `SmtpClient`.
+    pub smtp: Option<Box<dyn SmtpSender>>,
     /// Rate-limit and circuit-breaker guard.
     pub guard: DispatchGuard<SystemClock>,
     /// Folder-level access guard.
@@ -522,5 +524,39 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn account_state_dispatches_send_through_injected_fake() {
+        // Acceptance for #453: an AccountState can hold a fake sender and
+        // dispatch to it with no live SMTP server. The `spy` clone shares
+        // the injected fake's capture log, so we can inspect what the
+        // seam submitted after boxing it into the AccountState.
+        use rimap_smtp::SendEnvelope;
+        use rimap_smtp::testing::FakeSmtpSender;
+
+        use crate::test_support::make_test_account_state;
+
+        let fake = FakeSmtpSender::new();
+        let spy = fake.clone();
+
+        let mut state = make_test_account_state("sender-seam");
+        state.smtp = Some(Box::new(fake));
+
+        let envelope = SendEnvelope {
+            from: "me@test.invalid".into(),
+            to: vec!["you@test.invalid".into()],
+        };
+        let smtp = state.smtp.as_ref().unwrap();
+        let response = smtp
+            .send_raw(&envelope, b"From: me\r\n\r\nbody")
+            .await
+            .unwrap();
+
+        assert_eq!(response, "250 2.0.0 OK");
+        assert_eq!(spy.call_count(), 1);
+        let calls = spy.calls();
+        assert_eq!(calls[0].envelope.to, vec!["you@test.invalid".to_string()]);
+        assert_eq!(calls[0].raw, b"From: me\r\n\r\nbody");
     }
 }
