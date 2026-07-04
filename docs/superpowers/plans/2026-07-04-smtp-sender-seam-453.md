@@ -41,9 +41,62 @@ start Task 2 until `cargo check -p rimap-smtp` is green here.**
   - `pub trait SmtpSender: Send + Sync { fn send_raw<'a>(&'a self, envelope: &'a SendEnvelope, raw: &'a [u8]) -> SendRawFuture<'a>; }`
   - `impl SmtpSender for SmtpClient`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test (module wired, trait absent)**
 
-Create `crates/rimap-smtp/src/sender.rs`:
+So the failure is real (an *undeclared* module is silently uncompiled, not
+failed), wire the module into `lib.rs` first, then write only the test that
+references the not-yet-existing trait.
+
+Modify `crates/rimap-smtp/src/lib.rs` — add the module declaration and re-exports:
+
+```rust
+//! SMTP client for rusty-imap-mcp.
+//!
+//! Thin wrapper around `lettre` providing connection management,
+//! TLS via `rustls`, and error mapping. Does not construct messages —
+//! message building is handled by the server layer.
+
+#![deny(missing_docs)]
+
+pub mod client;
+pub mod error;
+pub mod sender;
+
+pub use crate::client::{SendEnvelope, SmtpClient};
+pub use crate::error::SmtpError;
+pub use crate::sender::{SendRawFuture, SmtpSender};
+```
+
+Create `crates/rimap-smtp/src/sender.rs` with **only** the test (no trait yet):
+
+```rust
+//! `SmtpSender` — the mockable seam over one-shot SMTP delivery.
+
+#[cfg(test)]
+mod tests {
+    use crate::sender::SmtpSender;
+    use crate::SmtpClient;
+
+    fn assert_impls_sender<T: SmtpSender>() {}
+
+    #[test]
+    fn smtp_client_implements_sender() {
+        // Compile-time proof that SmtpClient: SmtpSender (+ Send + Sync,
+        // via the supertrait bounds). This is the spike's assertion:
+        // it only compiles once lettre's send future is Send.
+        assert_impls_sender::<SmtpClient>();
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p rimap-smtp --lib sender 2>&1 | tail -20`
+Expected: compile FAIL — `cannot find trait SmtpSender` / unresolved `crate::sender::SmtpSender` and the `SendRawFuture` re-export in `lib.rs`. This is a genuine failure because the module is now part of the crate.
+
+- [ ] **Step 3: Write the trait + `SmtpClient` impl**
+
+Replace `crates/rimap-smtp/src/sender.rs` with the full module (test retained):
 
 ```rust
 //! `SmtpSender` — the mockable seam over one-shot SMTP delivery.
@@ -95,7 +148,8 @@ impl SmtpSender for SmtpClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::sender::SmtpSender;
+    use crate::SmtpClient;
 
     fn assert_impls_sender<T: SmtpSender>() {}
 
@@ -109,34 +163,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p rimap-smtp --lib sender 2>&1 | tail -20`
-Expected: compile FAIL — `sender` module not declared in `lib.rs` (unresolved module / `SendRawFuture` unknown).
-
-- [ ] **Step 3: Wire the module into `lib.rs`**
-
-Modify `crates/rimap-smtp/src/lib.rs` — add the module declaration and re-exports:
-
-```rust
-//! SMTP client for rusty-imap-mcp.
-//!
-//! Thin wrapper around `lettre` providing connection management,
-//! TLS via `rustls`, and error mapping. Does not construct messages —
-//! message building is handled by the server layer.
-
-#![deny(missing_docs)]
-
-pub mod client;
-pub mod error;
-pub mod sender;
-
-pub use crate::client::{SendEnvelope, SmtpClient};
-pub use crate::error::SmtpError;
-pub use crate::sender::{SendRawFuture, SmtpSender};
-```
-
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run to verify it passes**
 
 Run: `cargo check -p rimap-smtp && cargo test -p rimap-smtp --lib sender 2>&1 | tail -20`
 Expected: PASS — `smtp_client_implements_sender` compiles and passes. This confirms lettre's send future is `Send`.
