@@ -8,6 +8,8 @@
 
 pub mod client;
 pub mod error;
+pub mod sender;
 
 pub use crate::client::{SendEnvelope, SmtpClient};
 pub use crate::error::SmtpError;
+pub use crate::sender::{SendRawFuture, SmtpSender};
