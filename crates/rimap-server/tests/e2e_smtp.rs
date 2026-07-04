@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, PartType};
 use rimap_audit::{AuditOptions, AuditWriter, Seq};
 use rimap_authz::DispatchGuard;
 use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
@@ -457,6 +457,68 @@ async fn assert_send_email_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSend
     );
 }
 
+/// Assert `raw` is a well-formed forward: a base64 `message/rfc822` wrapper
+/// addressed to `expected_to` with a `Fwd:`-prefixed subject, whose original
+/// never leaks unencoded and whose wrapper decodes back to `original_body`.
+///
+/// The decode check is load-bearing: the three string checks alone would
+/// still pass a regression that emitted an empty (dropped) base64 part, so
+/// the parse confirms the original actually survived the round trip.
+fn assert_forward_wrapper(raw: &[u8], expected_to: &str, original_body: &str) {
+    let raw_text = String::from_utf8_lossy(raw);
+    assert!(
+        raw_text.contains("message/rfc822"),
+        "forward missing message/rfc822 wrapper",
+    );
+    assert!(
+        raw_text.to_ascii_lowercase().contains("base64"),
+        "forward wrapper must be base64-encoded, not a raw/8bit part",
+    );
+    assert!(
+        !raw_text.contains(original_body),
+        "forwarded original leaked unencoded into the bytes",
+    );
+
+    let parsed = MessageParser::new()
+        .parse(raw)
+        .expect("parse forward bytes");
+    let subject = parsed.subject().expect("forward subject");
+    assert!(
+        subject.starts_with("Fwd:"),
+        "forward subject not prefixed: {subject}",
+    );
+    assert_eq!(
+        parsed
+            .to()
+            .expect("to")
+            .first()
+            .expect("to[0]")
+            .address()
+            .expect("to addr"),
+        expected_to,
+    );
+
+    assert!(
+        message_body_contains(&parsed, original_body),
+        "base64 message/rfc822 wrapper did not decode back to the original body",
+    );
+}
+
+/// Whether any text part of `msg` — including inside a nested
+/// `message/rfc822` part — contains `needle`. `mail_parser` exposes a
+/// decoded `message/rfc822` as `PartType::Message` with its own parts, so a
+/// forward's original is reachable only by recursing into it.
+fn message_body_contains(msg: &mail_parser::Message<'_>, needle: &str) -> bool {
+    msg.parts.iter().any(|p| match &p.body {
+        PartType::Text(t) => t.contains(needle),
+        PartType::Message(nested) => message_body_contains(nested, needle),
+        PartType::Html(_)
+        | PartType::Binary(_)
+        | PartType::InlineBinary(_)
+        | PartType::Multipart(_) => false,
+    })
+}
+
 async fn assert_forward_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender, uid: u32) {
     let result = call_tool(
         server,
@@ -484,45 +546,21 @@ async fn assert_forward_happy_path(server: &ImapMcpServer, spy: &FakeSmtpSender,
     let fwd = &calls[1];
     assert_eq!(fwd.envelope.to, vec!["fwd-rcpt@example.com"]);
 
-    let raw_text = String::from_utf8_lossy(&fwd.raw);
-    assert!(
-        raw_text.contains("message/rfc822"),
-        "forward missing message/rfc822 wrapper",
-    );
-    assert!(
-        raw_text.to_ascii_lowercase().contains("base64"),
-        "forward wrapper must be base64-encoded, not a raw/8bit part",
-    );
-    assert!(
-        !raw_text.contains(FORWARD_OK_BODY),
-        "forwarded original leaked unencoded onto the wire",
-    );
+    // The on-wire forward wraps the original as a base64 message/rfc822 part
+    // addressed to the forward recipient, decoding back to the original.
+    assert_forward_wrapper(&fwd.raw, "fwd-rcpt@example.com", FORWARD_OK_BODY);
 
-    let parsed = MessageParser::new()
-        .parse(&fwd.raw)
-        .expect("parse forward bytes");
-    let fwd_subject = parsed.subject().expect("forward subject");
-    assert!(
-        fwd_subject.starts_with("Fwd:"),
-        "forward subject not prefixed: {fwd_subject}",
-    );
-    assert_eq!(
-        parsed
-            .to()
-            .expect("to")
-            .first()
-            .expect("to[0]")
-            .address()
-            .expect("to addr"),
-        "fwd-rcpt@example.com",
-    );
-
-    // The forward's Sent copy landed in IMAP.
+    // The Sent copy landed — and is the same wrapper, read back over IMAP.
+    // Reapplying the full wrapper check (not just presence) guards against a
+    // forward Sent-copy path that diverges from the sent bytes, mirroring the
+    // send_email Bcc read-back.
     assert_eq!(
         count_in_folder(server, "Sent", FORWARD_OK_SUBJECT).await,
         1,
         "forward did not APPEND a copy to Sent",
     );
+    let sent_copy = fetch_newest_in_folder(server, "Sent", FORWARD_OK_SUBJECT).await;
+    assert_forward_wrapper(&sent_copy, "fwd-rcpt@example.com", FORWARD_OK_BODY);
 }
 
 async fn assert_send_email_smtp_failure(server: &ImapMcpServer, spy: &FakeSmtpSender) {
