@@ -2432,6 +2432,7 @@ dependencies = [
  "lettre",
  "rimap-config",
  "rimap-core",
+ "rimap-smtp",
  "thiserror 2.0.18",
  "tokio",
 ]
