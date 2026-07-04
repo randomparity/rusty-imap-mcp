@@ -194,12 +194,124 @@ quoted, but we never emit caller path separators).
 For `forward`, the `message/rfc822` wrapper counts toward
 `MAX_TOTAL_MESSAGE_BYTES`; an oversized original is rejected before send.
 
+## Scope update (2026-07-03) — attachments + HTML accepted by maintainer
+
+`forward` shipped in PR #430. Two follow-on decisions the maintainer took on
+2026-07-03 lift the deferrals below and put attachments and HTML body **in
+scope** for the remainder of #408:
+
+### Decision 1 — attachments use the shared sandbox root, risk documented
+
+The blocking finding was that `download_dir` is one process-global root shared
+by every account, so a sandbox read-back is a cross-account exfiltration
+channel. Of the two resolutions (partition per-account vs. accept-and-document
+the shared root), the maintainer chose **accept-and-document**: attachments are
+readable from anywhere under the single shared root; no change to where
+`download_attachment` / `export_messages` write; the shared-sandbox trust model
+is stated explicitly in `docs/postures.md` and the `create_draft` / `send_email`
+tool descriptions.
+
+Consequence for the trust model: an operator running multiple accounts under
+one server accepts that those accounts **share a file staging area** — a file
+one account downloads or exports can be attached to outbound mail by any
+account. This is an accepted product posture, not a defect. It does not widen
+the boundary beyond "files the server itself wrote, or the operator placed, in
+the download root"; it does not permit reading arbitrary host paths. The
+containment primitive (`read_sandboxed_file`) still enforces
+canonicalize + `starts_with(root)` + held-fd no-follow read, exactly as
+`resolve_dest_dir` does for writes.
+
+`AttachmentInput`, the caps (`MAX_ATTACHMENTS`, `MAX_ATTACHMENT_BYTES`,
+`MAX_TOTAL_MESSAGE_BYTES`), the MIME construction (`multipart/mixed`), and the
+security invariants specified above are unchanged and now implemented.
+
+### Decision 2 — HTML body accepted, gated at `full`, text/plain mandatory
+
+Agent-authored HTML body is **in scope**. Design:
+
+- `ComposeInput` gains `body_html: Option<String>`. `body_text` **remains
+  required**, so a `text/plain` alternative is *always* present — the message
+  is emitted as `multipart/alternative` (text first, sanitized HTML second),
+  wrapped in `multipart/mixed` when attachments are also present.
+- **Sanitization reuses the inbound ammonia pipeline.** A new public
+  `rimap_content` entry point (`sanitize_outbound_html`) runs the agent's HTML
+  through the same tag-allowlist / script-strip / remote-content-strip /
+  `javascript:`-drop sanitizer used for inbound mail (`html::sanitize`), so the
+  server never emits agent-supplied `<script>`, event handlers, remote images,
+  or `javascript:` URLs. Anything stripped is surfaced to the caller as
+  `security_warnings` in the tool response `meta`, so an operator can see the
+  HTML was altered. Size-capped at `MAX_BODY_BYTES` (1 MiB), same as `body_text`.
+- **Posture gate = `full`, via a new sub-capability.** The posture matrix
+  already promises HTML bodies at `full` (`docs/postures.md`), and there is a
+  precedent (`fetch_message.include_html`). A new `ToolName::CreateDraftHtml`
+  (`"create_draft.include_html"`, matrix row `[false, false, true, true]`) is
+  resolved at the `refine_tool_name` seam when a `create_draft` call carries a
+  non-empty `body_html`, so a draft-safe agent can still create plain-text
+  drafts but HTML requires `full`. `send_email` is already `full`, so
+  `send_email` + `body_html` needs **no** separate capability (the same gate
+  already applies); adding one would be a redundant no-op, so it is omitted.
+- Capability count 26 → 27; `POSTURE_MATRIX` len +1; exhaustive matches,
+  dispatch route (`CreateDraftHtml` → `create_draft::handle`), catalog
+  advertisement, redaction schema (`create_draft.include_html` →
+  `create_draft_schema`), `dump-tool-*` counts, conformance `wire.test.ts`
+  counts, README inventory, and `docs/postures.md` all updated.
+
+### Attachment wiring (no new tool)
+
+`create_draft` and `send_email` inputs gain `attachments`. `build_message` reads
+each entry from the shared sandbox via `read_sandboxed_file(download_dir, …)`,
+enforces the per-file and total caps, injection-guards `filename` /
+`content_type`, reduces `filename` to its basename, sniffs `content_type` when
+absent, and adds each part with `MessageBuilder::attachment`. The `attachments`
+array is added to the `create_draft` / `send_email` redaction schemas with
+`path` and `filename` as `RedactString` (local paths, not secrets, but redacted
+to avoid leaking sandbox layout). Schema fixtures regenerate via
+`just regen-tool-schemas`.
+
+### Security review outcome (2026-07-03, implementation round)
+
+Two agents (mcp-security-reviewer, email-imap-security-reviewer) reviewed the
+attachments + HTML scope update before implementation. All blocking findings
+were addressed in the code:
+
+- **Aggregate memory cap enforced incrementally.** The 25 MiB total budget is
+  applied *during* the read loop (`read_attachments` caps each read at
+  `min(MAX_ATTACHMENT_BYTES, remaining)`), so 20×10 MiB cannot materialize
+  ~200 MiB before rejection. Peak resident bytes stay bounded by the total.
+- **Per-file bound on the held fd.** `read_sandboxed_file` `.take(cap+1)`s the
+  held file descriptor and rejects on the actual read length; the pre-read stat
+  is fd-relative (not a second path resolution) and only an early-reject.
+- **`content_type` validated as a strict RFC 2045 `type/subtype` token** (no
+  `;`, parameters, or whitespace), since `mail_builder` writes it verbatim.
+  Attachment bytes are added as `BodyPart::Binary`, which base64-encodes any
+  non-`text/*` part.
+- **One `body_html_is_present` predicate** shared by the `refine_tool_name`
+  authz seam and the MIME builder, so whitespace-only HTML neither elevates the
+  capability nor emits a `text/html` part. Regression-tested.
+- **Audit provenance.** Attachment paths/filenames are redacted in the request
+  args; attachment basenames + byte counts are recorded in the `tool_end`
+  `result_summary.attachments_sent` as the compensating control for the accepted
+  shared-sandbox exfil channel. `body_html` added to both compose redaction
+  schemas.
+- **Adversarial coverage.** Unit tests assert `<script>`, event handlers,
+  `javascript:` URLs, and remote `img src` are stripped from the *emitted*
+  message bytes, and that the tree is `multipart/alternative` (text first)
+  nested in `multipart/mixed` when attachments are present. The inbound
+  `injection-corpus` harness is for parsing received mail and does not model
+  outbound composition, so these live as `message_builder` unit tests.
+- **Leaf-symlink no-follow.** `read_sandboxed_file` canonicalizes the *parent*
+  (not the full path) and rejects a symlink final component, so an in-root
+  symlink is not silently followed and an escaping one is rejected by
+  `starts_with(root)`.
+
 ## Deferred, with rationale
 
-- **HTML body** (issue item 3, "lowest value … fine to defer or reject"):
-  deferred. Agent-authored HTML adds a sanitize/validate surface and a
-  required `text/plain` alternative for marginal value; no agent workflow
-  needs it today. Recorded out of scope.
+- **~~HTML body~~** — **now in scope** (see Decision 2 above). This bullet is
+  retained for history; the deferral no longer applies.
+- **Per-account sandbox partitioning** — not done; the maintainer accepted the
+  shared-root model (Decision 1). If a future deployment needs hard
+  cross-account file isolation, partitioning `<root>/<account_id>/` is the
+  follow-up (tracked separately if that need arises).
 - **Draft-safe `forward` variant** (a `$PendingReview` forward draft):
   deferred. The codebase models "send" and "save draft" as *separate tools*
   (`send_email` vs `create_draft`), not as one tool that changes behavior by

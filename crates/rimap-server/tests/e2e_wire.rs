@@ -131,7 +131,7 @@ async fn wire_e2e_full_session_draft_safe() {
     harness.send_initialized().await;
 
     assert_tools_list(&mut harness).await;
-    let uid = drive_account_scoped_tools(&mut harness).await;
+    let uid = drive_account_scoped_tools(&mut harness, &download_dir).await;
     assert_move_message(&mut harness, uid).await;
 
     // Bind the returned tempdir guard so the audit file outlives the
@@ -144,7 +144,7 @@ async fn wire_e2e_full_session_draft_safe() {
 }
 
 /// Drive the account-scoped tools and return the UID of the seeded message.
-async fn drive_account_scoped_tools(harness: &mut Harness) -> u32 {
+async fn drive_account_scoped_tools(harness: &mut Harness, download_dir: &std::path::Path) -> u32 {
     // 1. use_account → draftsafe.
     let _ = call_tool(harness, "use_account", json!({ "account": "draftsafe" })).await;
 
@@ -230,7 +230,125 @@ async fn drive_account_scoped_tools(harness: &mut Harness) -> u32 {
     )
     .await;
 
+    // 12. create_draft with a sandbox-sourced attachment (#408): the file is
+    //     read from the download sandbox, appended to the real Drafts folder,
+    //     and the stored message is re-fetched to prove the attachment
+    //     round-trips through the IMAP server.
+    assert_create_draft_with_attachment(harness, download_dir).await;
+
+    // 13. HTML body requires full posture; the draftsafe account must be
+    //     denied at the wire (create_draft.include_html capability gate).
+    assert_html_body_denied_at_draftsafe(harness).await;
+
     uid
+}
+
+/// Functional round-trip for a sandbox-sourced attachment (#408): place a file
+/// in the download sandbox, create a draft referencing it, then re-fetch the
+/// appended draft from Dovecot and assert the attachment is present.
+async fn assert_create_draft_with_attachment(
+    harness: &mut Harness,
+    download_dir: &std::path::Path,
+) {
+    let payload = b"%PDF-1.4 e2e-wire attachment payload".to_vec();
+    let att_path = download_dir.join("e2e-wire-report.pdf");
+    std::fs::write(&att_path, &payload).expect("write sandbox attachment");
+
+    let subject = "wire e2e attachment draft";
+    let draft = call_tool(
+        harness,
+        "draftsafe.create_draft",
+        json!({
+            "to": [{"address": "dest@example.com"}],
+            "subject": subject,
+            "body_text": "see attached",
+            "attachments": [{ "path": att_path.to_str().expect("utf8 path") }],
+        }),
+    )
+    .await;
+
+    // The response meta records the attachment provenance (basename + bytes).
+    let meta_atts = draft["meta"]["attachments"]
+        .as_array()
+        .expect("meta.attachments array");
+    assert_eq!(meta_atts.len(), 1, "expected one attachment: {draft}");
+    assert_eq!(
+        meta_atts[0]["filename"].as_str(),
+        Some("e2e-wire-report.pdf"),
+    );
+    assert_eq!(
+        meta_atts[0]["bytes"].as_u64(),
+        Some(payload.len() as u64),
+        "attachment byte count must match the sandbox file",
+    );
+
+    let folder = draft["meta"]["folder"].as_str().expect("draft folder");
+
+    // APPENDUID is optional per server (Dovecot omits it here), so locate the
+    // appended draft by subject rather than trusting `meta.uid`.
+    let search = call_tool(
+        harness,
+        "draftsafe.search",
+        json!({ "folder": folder, "subject": subject }),
+    )
+    .await;
+    let uid = search["untrusted"]["messages"]
+        .as_array()
+        .expect("draft search messages")
+        .iter()
+        .filter_map(|m| m["uid"].as_u64())
+        .max()
+        .expect("appended draft must be found by subject");
+
+    // Re-fetch the appended draft from the server and confirm the attachment
+    // survived the build → APPEND → IMAP store round-trip.
+    let listed = call_tool(
+        harness,
+        "draftsafe.list_attachments",
+        json!({ "folder": folder, "uid": uid }),
+    )
+    .await;
+    let attachments = listed["untrusted"]["attachments"]
+        .as_array()
+        .expect("attachments array");
+    assert!(
+        attachments
+            .iter()
+            .any(|a| a["filename"].as_str() == Some("e2e-wire-report.pdf")),
+        "attachment not found on the appended draft: {listed}",
+    );
+}
+
+/// The `create_draft.include_html` capability requires `full` posture, so a
+/// `body_html` on the draft-safe account must be denied at the wire — proving
+/// the `refine_tool_name` → posture-gate seam end-to-end (#408).
+async fn assert_html_body_denied_at_draftsafe(harness: &mut Harness) {
+    let resp = harness
+        .request(
+            "tools/call",
+            json!({
+                "name": "draftsafe.create_draft",
+                "arguments": {
+                    "to": [{"address": "dest@example.com"}],
+                    "subject": "wire e2e html gate",
+                    "body_text": "plain fallback",
+                    "body_html": "<p>rich</p>",
+                },
+            }),
+        )
+        .await;
+
+    // Posture denial is a tool-execution error: no JSON-RPC error envelope,
+    // but the CallToolResult carries isError = true.
+    assert!(
+        resp["error"].is_null(),
+        "posture denial must not be a JSON-RPC error: {resp}",
+    );
+    assert_eq!(
+        resp["result"]["isError"].as_bool(),
+        Some(true),
+        "draftsafe create_draft with body_html must be denied: {resp}",
+    );
 }
 
 async fn assert_tools_list(harness: &mut Harness) {

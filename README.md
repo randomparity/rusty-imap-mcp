@@ -130,6 +130,11 @@ Prefer to start from a full annotated config? Copy
 - **Manage:** `send_email`, `forward`, `delete_message`, `create_folder`,
   `rename_folder`, `expunge`, `delete_folder`
 
+`create_draft` and `send_email` accept optional sandbox-sourced `attachments`
+(read only from the download root; see
+[Compose attachments and HTML](docs/postures.md#compose-attachments-and-html))
+and a sanitized `body_html` alternative (gated at `full`).
+
 `search`'s content-search arguments (`advanced_query`, `body`, `text`,
 `bcc`, `headers`) and `fetch_message`'s `include_html` argument are
 gated sub-capabilities (`search.advanced_query`,

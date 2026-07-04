@@ -233,6 +233,156 @@ pub(crate) fn write_attachment(
     ))
 }
 
+/// Read a file from inside the download sandbox, enforcing containment and a
+/// size cap.
+///
+/// Mirrors [`resolve_dest_dir`]'s containment for the read direction: the
+/// requested path is canonicalized and checked with `starts_with(root)`, the
+/// parent is opened once via ambient authority as a held [`Dir`], and the final
+/// component is read fd-relative. The final component is rejected if it is a
+/// symlink (no-follow), if it is not a regular file, or if its size exceeds
+/// `max_bytes` — the size is checked from `symlink_metadata` **before** any
+/// bytes are read, and the read itself is hard-capped at `max_bytes` so a file
+/// swapped larger between the stat and the read still cannot exhaust memory.
+///
+/// The accepted trust boundary is the shared download root: any file the server
+/// downloaded/exported, or the operator placed, under `root` is readable. This
+/// primitive does not widen that boundary — a path resolving outside `root`
+/// (including via a symlink whose target escapes) is refused.
+///
+/// # Errors
+///
+/// Returns `RimapError::invalid_input` when the path cannot be canonicalized,
+/// escapes `root`, is a symlink or non-regular file, or exceeds `max_bytes`.
+/// Returns `RimapError::InternalSourced` if the held directory or file cannot be
+/// opened. On non-Unix platforms the no-follow guarantee is unavailable, so the
+/// reader fails closed with `RimapError::Internal`.
+#[cfg(unix)]
+pub(crate) fn read_sandboxed_file(
+    root: &Path,
+    requested: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, RimapError> {
+    use std::io::Read as _;
+
+    let requested_path = PathBuf::from(requested);
+    // Canonicalize the PARENT only, never the full path: canonicalizing the
+    // full path would resolve a final-component symlink and defeat the leaf
+    // no-follow guarantee. The final component is opened by its original name so
+    // `symlink_metadata` below can reject a symlink leaf even when its target is
+    // itself inside the root.
+    let parent = requested_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty());
+    let (parent, name) = match (parent, requested_path.file_name()) {
+        (Some(parent), Some(name)) => (parent, name.to_owned()),
+        _ => {
+            return Err(RimapError::invalid_input(
+                "attachment path must be an absolute file path inside the download sandbox",
+            ));
+        }
+    };
+    let canonical_parent = parent.canonicalize().map_err(|e| {
+        RimapError::invalid_input(format!("cannot resolve attachment directory: {e}"))
+    })?;
+    // Canonicalize the root too: the configured download root may itself
+    // contain a symlink component (e.g. macOS `/var` → `/private/var`, or an
+    // operator-symlinked staging dir), so comparing the canonical parent
+    // against a raw root would spuriously reject in-sandbox files.
+    let canonical_root = root.canonicalize().map_err(|e| {
+        RimapError::invalid_input(format!("cannot resolve download sandbox root: {e}"))
+    })?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(RimapError::invalid_input(
+            "attachment path is outside the download sandbox",
+        ));
+    }
+
+    // The single ambient (path-following) step. Everything after is fd-relative
+    // to this held directory descriptor, closing the resolve→read swap window.
+    let dir = Dir::open_ambient_dir(&canonical_parent, ambient_authority()).map_err(|e| {
+        RimapError::InternalSourced {
+            message: "failed to open attachment directory".into(),
+            source: Box::new(e),
+        }
+    })?;
+
+    let meta = dir
+        .symlink_metadata(&name)
+        .map_err(|e| RimapError::invalid_input(format!("cannot stat attachment: {e}")))?;
+    if meta.is_symlink() {
+        return Err(RimapError::invalid_input(
+            "attachment path is a symlink; refusing to follow",
+        ));
+    }
+    if !meta.is_file() {
+        return Err(RimapError::invalid_input(
+            "attachment path is not a regular file",
+        ));
+    }
+    if meta.len() > max_bytes as u64 {
+        return Err(RimapError::invalid_input(format!(
+            "attachment too large ({} bytes); max is {max_bytes}",
+            meta.len()
+        )));
+    }
+
+    let file = dir.open(&name).map_err(|e| RimapError::InternalSourced {
+        message: "failed to open attachment file".into(),
+        source: Box::new(e),
+    })?;
+    let mut buf = Vec::new();
+    // Hard-cap the read at max_bytes + 1 so a file grown after the stat is
+    // detected (buf > max_bytes) rather than read unbounded.
+    file.take(max_bytes as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| RimapError::InternalSourced {
+            message: "failed to read attachment file".into(),
+            source: Box::new(e),
+        })?;
+    if buf.len() > max_bytes {
+        return Err(RimapError::invalid_input(format!(
+            "attachment too large (>{max_bytes} bytes)"
+        )));
+    }
+    Ok(buf)
+}
+
+/// Fail-closed stub for non-Unix platforms.
+///
+/// The no-follow / containment guarantees rely on the same POSIX semantics the
+/// writer uses. Rather than read a file without them, the sandbox refuses.
+///
+/// # Errors
+///
+/// Always returns `RimapError::Internal`.
+#[cfg(not(unix))]
+pub(crate) fn read_sandboxed_file(
+    _root: &Path,
+    _requested: &str,
+    _max_bytes: usize,
+) -> Result<Vec<u8>, RimapError> {
+    Err(RimapError::Internal(
+        "sandboxed attachment reads require a Unix platform (no-follow support)".into(),
+    ))
+}
+
+/// Async wrapper around [`read_sandboxed_file`] that runs on a blocking thread.
+///
+/// # Errors
+///
+/// Propagates whatever [`read_sandboxed_file`] returns. Also returns
+/// `RimapError::Internal` if the blocking task panics.
+pub async fn read_sandboxed_file_async(
+    root: Arc<Path>,
+    requested: String,
+    max_bytes: usize,
+) -> Result<Vec<u8>, RimapError> {
+    tokio::task::spawn_blocking(move || read_sandboxed_file(&root, &requested, max_bytes))
+        .await
+        .unwrap_or_else(|e| Err(crate::mcp::spawn_blocking_panic_error(e)))
+}
+
 /// Async wrapper around [`resolve_dest_dir`] that runs on a blocking thread.
 ///
 /// # Errors
@@ -512,6 +662,144 @@ mod tests {
             temps.is_empty(),
             "temp not cleaned on exhaustion: {temps:?}"
         );
+    }
+
+    // --- read_sandboxed_file (#408 attachments) ---
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_reads_inside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("doc.pdf"), b"hello").unwrap();
+        let data =
+            read_sandboxed_file(&root, root.join("doc.pdf").to_str().unwrap(), 1024).unwrap();
+        assert_eq!(data, b"hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_rejects_path_outside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap().join("sandbox");
+        std::fs::create_dir_all(&root).unwrap();
+        // A real file that exists but lives outside the sandbox root.
+        let outside = tmp.path().canonicalize().unwrap().join("secret.txt");
+        std::fs::write(&outside, b"top secret").unwrap();
+        let err = read_sandboxed_file(&root, outside.to_str().unwrap(), 1024).unwrap_err();
+        assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);
+        assert!(err.to_string().contains("outside the download sandbox"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_rejects_symlink_escaping_root() {
+        // A symlink INSIDE the sandbox pointing OUTSIDE must not be followed:
+        // canonicalize resolves it to the outside target, and starts_with(root)
+        // then rejects it. Guards the exfiltration vector.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap().join("sandbox");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().canonicalize().unwrap().join("passwd");
+        std::fs::write(&outside, b"root:x:0:0").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let err =
+            read_sandboxed_file(&root, root.join("link").to_str().unwrap(), 1024).unwrap_err();
+        assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);
+        // The outside file's bytes must never be returned.
+        assert!(!err.to_string().contains("root:x"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_rejects_oversized_before_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("big.bin"), vec![0u8; 2048]).unwrap();
+        let err =
+            read_sandboxed_file(&root, root.join("big.bin").to_str().unwrap(), 1024).unwrap_err();
+        assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);
+        assert!(err.to_string().contains("too large"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_accepts_at_size_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("exact.bin"), vec![7u8; 1024]).unwrap();
+        let data =
+            read_sandboxed_file(&root, root.join("exact.bin").to_str().unwrap(), 1024).unwrap();
+        assert_eq!(data.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_rejects_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let err =
+            read_sandboxed_file(&root, root.join("nope.txt").to_str().unwrap(), 1024).unwrap_err();
+        assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_rejects_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("subdir")).unwrap();
+        let err =
+            read_sandboxed_file(&root, root.join("subdir").to_str().unwrap(), 1024).unwrap_err();
+        assert_eq!(err.code(), rimap_core::ErrorCode::InvalidInput);
+        assert!(err.to_string().contains("not a regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_reads_from_nested_subdir() {
+        // A file the operator/exporter placed in a nested subdir of the shared
+        // root is readable — confirms containment allows legitimate depth, not
+        // only the root's immediate children.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let nested = root.join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("f.bin"), b"deep").unwrap();
+        let data =
+            read_sandboxed_file(&root, nested.join("f.bin").to_str().unwrap(), 1024).unwrap();
+        assert_eq!(data, b"deep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_sandboxed_file_accepts_symlinked_non_canonical_root() {
+        // The configured download root may itself be reached through a symlink
+        // (macOS `/var`→`/private/var`, or an operator-symlinked staging dir).
+        // Passing that non-canonical root must still admit an in-sandbox file:
+        // the containment check canonicalizes BOTH sides. Regression guard for
+        // the bug the e2e_wire attachment round-trip surfaced.
+        let tmp = tempfile::tempdir().unwrap();
+        let real_root = tmp.path().canonicalize().unwrap().join("real_root");
+        std::fs::create_dir_all(&real_root).unwrap();
+        std::fs::write(real_root.join("doc.pdf"), b"payload").unwrap();
+
+        // A symlink that points at the real root; use it as the configured root.
+        let link_root = tmp.path().canonicalize().unwrap().join("link_root");
+        std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+        // Reference the file through the symlinked root path (as a caller who
+        // was handed a path under the configured, non-canonical root would).
+        let requested = link_root.join("doc.pdf");
+        let data = read_sandboxed_file(&link_root, requested.to_str().unwrap(), 1024).unwrap();
+        assert_eq!(data, b"payload");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn read_sandboxed_file_fails_closed_on_non_unix() {
+        let err = read_sandboxed_file(Path::new("/"), "/x", 1024).unwrap_err();
+        assert_eq!(err.code(), rimap_core::ErrorCode::Internal);
     }
 
     #[test]

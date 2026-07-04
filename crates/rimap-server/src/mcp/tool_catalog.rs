@@ -223,7 +223,15 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
              to review and send from their own mail client. This ends the \
              workflow: the draft cannot be sent through this server, so do \
              not follow up with send_email (that would send a duplicate \
-             and bypass the human-review gate).",
+             and bypass the human-review gate). Optional attachments are \
+             read from the server's download sandbox by path (only files the \
+             server downloaded/exported or the operator placed there; max 20 \
+             files, 10 MiB each, 25 MiB total). Optional body_html is \
+             sanitized (scripts, event handlers, remote content, and \
+             javascript: URLs are stripped) and always sent alongside the \
+             required plain-text body_text as a text/plain alternative; \
+             supplying body_html requires the full posture \
+             (create_draft.include_html).",
             envelope_schema::<CreateDraftInput>(),
             envelope_schema::<ToolResponse<CreateDraftMeta, ()>>(),
         ),
@@ -233,7 +241,12 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
              is an autonomous send; when a human should review first, use \
              create_draft instead. Requires the full or destructive \
              posture; a lower posture is denied with ERR_POSTURE_DENIED \
-             (see the rimap://docs/postures resource).",
+             (see the rimap://docs/postures resource). Optional attachments \
+             are read from the server's download sandbox by path (only files \
+             the server downloaded/exported or the operator placed there; max \
+             20 files, 10 MiB each, 25 MiB total). Optional body_html is \
+             sanitized and always sent alongside the required plain-text \
+             body_text as a text/plain alternative.",
             envelope_schema::<SendEmailInput>(),
             envelope_schema::<ToolResponse<SendEmailMeta, ()>>(),
         ),
@@ -351,7 +364,9 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
         // (e.g. `SearchAdvanced` shares `search`; `FetchMessageHtml`
         // shares `fetch_message`) are advertised under the parent entry,
         // so they have no standalone definition.
-        ToolName::SearchAdvanced | ToolName::FetchMessageHtml => return None,
+        ToolName::SearchAdvanced | ToolName::FetchMessageHtml | ToolName::CreateDraftHtml => {
+            return None;
+        }
     };
     Some(parts)
 }
@@ -394,8 +409,11 @@ mod tests {
     fn tool_definition_covers_all_mcp_tools() {
         // Sub-capabilities are surfaced via their parent tool's schema, not
         // as standalone MCP tools, so they do not appear in `TOOL_DEFS`.
-        const SUB_CAPABILITIES: &[ToolName] =
-            &[ToolName::SearchAdvanced, ToolName::FetchMessageHtml];
+        const SUB_CAPABILITIES: &[ToolName] = &[
+            ToolName::SearchAdvanced,
+            ToolName::FetchMessageHtml,
+            ToolName::CreateDraftHtml,
+        ];
         let expected = ToolName::all().len() - SUB_CAPABILITIES.len();
         let defs: Vec<_> = ToolName::all()
             .into_iter()
@@ -408,6 +426,7 @@ mod tests {
     fn sub_capabilities_return_none() {
         assert!(TOOL_DEFS.get(&ToolName::SearchAdvanced).is_none());
         assert!(TOOL_DEFS.get(&ToolName::FetchMessageHtml).is_none());
+        assert!(TOOL_DEFS.get(&ToolName::CreateDraftHtml).is_none());
     }
 
     #[test]

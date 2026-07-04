@@ -6,9 +6,11 @@
 
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
+use mail_builder::headers::content_type::ContentType;
 use mail_builder::headers::message_id::MessageId;
+use mail_builder::mime::MimePart;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::boot::registry::AccountState;
 
@@ -27,11 +29,43 @@ pub(crate) const MAX_SUBJECT_LEN: usize = 1000;
 pub(crate) const MAX_BODY_BYTES: usize = 1_048_576;
 pub(crate) const MAX_REFERENCES: usize = 50;
 
+/// Maximum number of attachments on a single composed message.
+pub(crate) const MAX_ATTACHMENTS: usize = 20;
+
+/// Per-file read cap for a sandbox-sourced attachment. A sandbox file larger
+/// than this is rejected without being fully read (see
+/// [`crate::tools::retrieval::sandbox::read_sandboxed_file`]).
+pub(crate) const MAX_ATTACHMENT_BYTES: usize = 10 * 1_048_576;
+
+/// Total composed-message budget: `body_text` plus the sum of attachment sizes
+/// (raw bytes, before base64 inflation). Keeps a single message within common
+/// MTA limits and bounds server memory.
+pub(crate) const MAX_TOTAL_MESSAGE_BYTES: usize = 25 * 1_048_576;
+
 /// Upper bound on the size of the original message a `forward` will
 /// re-send. The fetched message is base64-wrapped as a `message/rfc822`
 /// part (≈ +33% on the wire), so this raw cap keeps the outgoing message
 /// within common MTA limits while bounding server memory.
 pub(crate) const MAX_FORWARD_ORIGINAL_BYTES: usize = 25 * 1_048_576;
+
+/// A single attachment sourced from the download sandbox.
+///
+/// `path` must resolve inside the shared download-sandbox root; the bytes are
+/// read via the sandbox containment primitive. The trust boundary is the shared
+/// root: an agent can attach any file the server itself downloaded/exported or
+/// the operator placed there, never an arbitrary host path.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct AttachmentInput {
+    /// Path to a file within the download-sandbox root.
+    pub path: String,
+    /// Override attachment name. Defaults to the file's basename. Reduced to a
+    /// basename regardless, so caller path separators are never emitted.
+    pub filename: Option<String>,
+    /// MIME content type. Defaults to a magic-byte sniff, then
+    /// `application/octet-stream`.
+    pub content_type: Option<String>,
+}
 
 /// Common input fields shared by `create_draft` and `send_email`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -45,8 +79,15 @@ pub struct ComposeInput {
     pub bcc: Option<Vec<AddressInput>>,
     /// Email subject.
     pub subject: String,
-    /// Plain text body.
+    /// Plain text body. Always sent, and used as the `text/plain` alternative
+    /// when `body_html` is present.
     pub body_text: String,
+    /// Optional sanitized HTML body. When present, the message is
+    /// `multipart/alternative` (text first, sanitized HTML second). Requires
+    /// `full` posture for `create_draft` (`create_draft.include_html`).
+    pub body_html: Option<String>,
+    /// Attachments sourced from the download sandbox.
+    pub attachments: Option<Vec<AttachmentInput>>,
     /// UID of message to reply to (for threading headers).
     #[serde(
         default,
@@ -87,6 +128,19 @@ pub(crate) fn validate_compose_input(input: &ComposeInput) -> Result<(), rimap_c
             "body_text too large ({} bytes); max is {MAX_BODY_BYTES}",
             input.body_text.len()
         )));
+    }
+
+    if let Some(html) = input.body_html.as_deref().filter(|h| !h.is_empty())
+        && html.len() > MAX_BODY_BYTES
+    {
+        return Err(rimap_core::RimapError::invalid_input(format!(
+            "body_html too large ({} bytes); max is {MAX_BODY_BYTES}",
+            html.len()
+        )));
+    }
+
+    if let Some(attachments) = &input.attachments {
+        validate_attachments(attachments)?;
     }
 
     validate_addresses("To", &input.to)?;
@@ -228,6 +282,71 @@ pub(crate) fn build_forward_message(
         })
 }
 
+/// Validate attachment metadata: count cap plus per-entry `path`,
+/// `filename`, and `content_type` guards. Byte-size and sandbox containment
+/// are enforced at read time (see [`build_message`]).
+pub(crate) fn validate_attachments(
+    attachments: &[AttachmentInput],
+) -> Result<(), rimap_core::RimapError> {
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(rimap_core::RimapError::invalid_input(format!(
+            "too many attachments ({}); max is {MAX_ATTACHMENTS}",
+            attachments.len()
+        )));
+    }
+    for att in attachments {
+        if att.path.is_empty() {
+            return Err(rimap_core::RimapError::invalid_input(
+                "attachment path must not be empty",
+            ));
+        }
+        if let Some(name) = &att.filename {
+            validate_header_text("attachment filename", name)?;
+        }
+        if let Some(ct) = &att.content_type {
+            validate_content_type(ct)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a caller-supplied MIME `content_type` as a bare `type/subtype`
+/// token per RFC 2045.
+///
+/// `mail_builder` writes the content-type string **verbatim** into the part's
+/// `Content-Type` header with no escaping, so this guard is load-bearing: it
+/// rejects not only the CR/LF/NUL header-injection bytes but also `;`,
+/// whitespace, quotes, and any parameter syntax that would let a caller inject
+/// MIME parameters or a second header token. Exactly one `/` separates a
+/// non-empty type from a non-empty subtype; every character must be an RFC 2045
+/// token char.
+pub(crate) fn validate_content_type(value: &str) -> Result<(), rimap_core::RimapError> {
+    fn is_token_char(b: u8) -> bool {
+        // RFC 2045 token: any US-ASCII char except SPACE, CTLs, and tspecials.
+        b.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?=".contains(&b)
+    }
+    let reject = || {
+        rimap_core::RimapError::invalid_input("attachment content_type is not a valid MIME type")
+    };
+    let (ty, sub) = value.split_once('/').ok_or_else(reject)?;
+    if ty.is_empty() || sub.is_empty() {
+        return Err(reject());
+    }
+    if !ty.bytes().all(is_token_char) || !sub.bytes().all(is_token_char) {
+        return Err(reject());
+    }
+    Ok(())
+}
+
+/// Whether a `body_html` value counts as "present" for both the posture-gate
+/// seam (`refine_tool_name`) and the MIME builder. A single predicate keeps the
+/// authz decision and the emitted structure in agreement: whitespace-only HTML
+/// neither elevates the capability nor produces a `text/html` part.
+#[must_use]
+pub(crate) fn body_html_is_present(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
 /// Reject strings that could inject RFC 5322 headers.
 pub(crate) fn validate_header_text(field: &str, value: &str) -> Result<(), rimap_core::RimapError> {
     if value
@@ -347,34 +466,182 @@ pub(crate) async fn apply_threading_headers<'a>(
     Ok(builder.references(MessageId::new_list(ref_ids.into_iter())))
 }
 
-/// Build raw RFC 5322 bytes from compose input, applying threading
-/// if `in_reply_to_uid` is set.
+/// Basename + byte count of one attachment placed on a composed message.
+/// Surfaced in the tool response and recorded in the audit `result_summary`
+/// so an incident responder can see which sandbox file left the boundary,
+/// even though the raw `path` is redacted in the request args.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AttachmentSummary {
+    /// Basename of the attached file (never a full sandbox path).
+    pub filename: String,
+    /// Raw byte length of the attachment before base64 inflation.
+    pub bytes: u64,
+}
+
+/// A fully-built outbound message plus the observations a handler surfaces.
+pub(crate) struct BuiltMessage {
+    /// Raw RFC 5322 bytes ready for APPEND or SMTP send.
+    pub raw: Vec<u8>,
+    /// Warnings from sanitizing an HTML body (empty when no HTML body).
+    pub security_warnings: Vec<rimap_content::SecurityWarning>,
+    /// One entry per attachment, in caller order.
+    pub attachments: Vec<AttachmentSummary>,
+}
+
+/// Resolve an attachment's outbound filename: the explicit override or the
+/// source path's basename, reduced to a basename either way so a caller can
+/// never emit path separators into the MIME `filename` parameter.
+fn attachment_filename(att: &AttachmentInput) -> String {
+    let raw = att.filename.as_deref().unwrap_or(att.path.as_str());
+    std::path::Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("attachment")
+        .to_string()
+}
+
+/// Resolve an attachment's content type: the (already-validated) caller
+/// override, else a magic-byte sniff, else `application/octet-stream`.
+fn attachment_content_type(att: &AttachmentInput, bytes: &[u8]) -> String {
+    att.content_type.clone().unwrap_or_else(|| {
+        crate::tools::retrieval::sandbox::sniff_mime(bytes)
+            .unwrap_or_else(|| "application/octet-stream".to_string())
+    })
+}
+
+/// One attachment read from the sandbox, resolved and ready to attach.
+#[derive(Debug)]
+struct AttachmentRead {
+    filename: String,
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+/// Read every attachment from the sandbox under an *incremental* byte budget.
+///
+/// The running total seeds with `body_text` plus the raw `body_html` length (an
+/// upper bound on the sanitized HTML). Each read is capped at
+/// `min(MAX_ATTACHMENT_BYTES, remaining_total)`, so peak resident bytes never
+/// exceed `MAX_TOTAL_MESSAGE_BYTES` no matter how many large files the shared
+/// sandbox holds — an over-budget set is rejected on the read that crosses the
+/// budget, never silently truncated.
+async fn read_attachments(
+    download_dir: &std::sync::Arc<std::path::Path>,
+    input: &ComposeInput,
+) -> Result<Vec<AttachmentRead>, rimap_core::RimapError> {
+    let Some(inputs) = &input.attachments else {
+        return Ok(Vec::new());
+    };
+    let mut total: usize = input.body_text.len();
+    if let Some(html) = input
+        .body_html
+        .as_deref()
+        .filter(|h| body_html_is_present(h))
+    {
+        total = total.saturating_add(html.len());
+    }
+    let mut out = Vec::with_capacity(inputs.len());
+    for att in inputs {
+        let remaining = MAX_TOTAL_MESSAGE_BYTES.saturating_sub(total);
+        let cap = remaining.min(MAX_ATTACHMENT_BYTES);
+        let bytes = crate::tools::retrieval::sandbox::read_sandboxed_file_async(
+            std::sync::Arc::clone(download_dir),
+            att.path.clone(),
+            cap,
+        )
+        .await?;
+        total = total.saturating_add(bytes.len());
+        out.push(AttachmentRead {
+            filename: attachment_filename(att),
+            content_type: attachment_content_type(att, &bytes),
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+/// Layer the optional sanitized HTML alternative and the already-read
+/// attachments onto `builder`, then serialize.
+///
+/// HTML and attachments are added to the same builder [`build_message_headers`]
+/// returned, so the `include_bcc` handling (#432) is untouched. Attachment
+/// bytes are added as `BodyPart::Binary`, which `mail_builder` base64-encodes
+/// for any non-`text/*` content type; a `text/*` attachment uses a safe CTE
+/// (bare-LF normalized to CRLF, QP for 8-bit). Framing is further protected by
+/// `mail_builder`'s unguessable random boundary.
+fn assemble_message(
+    mut builder: MessageBuilder<'_>,
+    input: &ComposeInput,
+    reads: Vec<AttachmentRead>,
+) -> Result<BuiltMessage, rimap_core::RimapError> {
+    let mut security_warnings = Vec::new();
+    if let Some(html) = input
+        .body_html
+        .as_deref()
+        .filter(|h| body_html_is_present(h))
+    {
+        let sanitized = rimap_content::sanitize_outbound_html(html)
+            .map_err(|e| rimap_core::RimapError::invalid_input(format!("body_html: {e}")))?;
+        security_warnings = sanitized.warnings;
+        builder = builder.html_body(sanitized.body_html);
+    }
+
+    let mut attachments = Vec::with_capacity(reads.len());
+    for read in reads {
+        attachments.push(AttachmentSummary {
+            filename: read.filename.clone(),
+            bytes: read.bytes.len() as u64,
+        });
+        // Set the filename in BOTH the Content-Type `name` parameter and the
+        // Content-Disposition `filename` parameter. `mail_builder`'s
+        // `.attachment()` helper writes only the disposition, but many clients
+        // (and this server's own `list_attachments`, which reads the Content-Type
+        // `name`) key off the `name` param — so a disposition-only filename
+        // round-trips as an unnamed part. Emitting both matches standard mailer
+        // behavior. The bytes are `BodyPart::Binary`, so a non-`text/*` type is
+        // base64-encoded.
+        let content_type =
+            ContentType::new(read.content_type).attribute("name", read.filename.clone());
+        let part = MimePart::new(content_type, read.bytes).attachment(read.filename);
+        builder.attachments.get_or_insert_with(Vec::new).push(part);
+    }
+
+    let raw = builder
+        .write_to_vec()
+        .map_err(|e| rimap_core::RimapError::InternalSourced {
+            message: "failed to build message".into(),
+            source: Box::new(e),
+        })?;
+    Ok(BuiltMessage {
+        raw,
+        security_warnings,
+        attachments,
+    })
+}
+
+/// Build raw RFC 5322 bytes from compose input: headers + text body, optional
+/// threading, an optional sanitized HTML alternative, and sandbox-sourced
+/// attachments read under an incremental byte budget.
 pub(crate) async fn build_message(
     account: &AccountState,
     from_addr: &str,
     input: &ComposeInput,
     include_bcc: bool,
-) -> Result<Vec<u8>, rimap_core::RimapError> {
-    let builder = build_message_headers(from_addr, input, include_bcc);
+) -> Result<BuiltMessage, rimap_core::RimapError> {
+    let mut builder = build_message_headers(from_addr, input, include_bcc);
 
-    let builder = if let Some(reply_uid) = input.in_reply_to_uid {
-        Box::pin(apply_threading_headers(
+    if let Some(reply_uid) = input.in_reply_to_uid {
+        builder = Box::pin(apply_threading_headers(
             account,
             builder,
             reply_uid,
             input.in_reply_to_folder.as_deref(),
         ))
-        .await?
-    } else {
-        builder
-    };
+        .await?;
+    }
 
-    builder
-        .write_to_vec()
-        .map_err(|e| rimap_core::RimapError::InternalSourced {
-            message: "failed to build message".into(),
-            source: Box::new(e),
-        })
+    let reads = read_attachments(&account.download_dir, input).await?;
+    assemble_message(builder, input, reads)
 }
 
 #[cfg(test)]
@@ -403,6 +670,8 @@ mod tests {
             bcc: None,
             subject: "Test subject".into(),
             body_text: "Hello, world!".into(),
+            body_html: None,
+            attachments: None,
             in_reply_to_uid: None,
             in_reply_to_folder: None,
         };
@@ -542,6 +811,8 @@ mod tests {
             bcc: None,
             subject: "Test".into(),
             body_text: "body".into(),
+            body_html: None,
+            attachments: None,
             in_reply_to_uid: None,
             in_reply_to_folder: None,
         }
@@ -794,6 +1065,8 @@ mod tests {
             bcc: Some(vec![]),
             subject: "Test".into(),
             body_text: "body".into(),
+            body_html: None,
+            attachments: None,
             in_reply_to_uid: None,
             in_reply_to_folder: None,
         };
@@ -820,6 +1093,8 @@ mod tests {
             }]),
             subject: "Hi".into(),
             body_text: "body".into(),
+            body_html: None,
+            attachments: None,
             in_reply_to_uid: None,
             in_reply_to_folder: None,
         }
@@ -1081,5 +1356,257 @@ mod tests {
             })
             .collect();
         assert!(validate_recipient_set(&many, None, None).is_err());
+    }
+
+    // --- attachments + HTML (#408) ---
+
+    use super::{
+        AttachmentInput, AttachmentRead, MAX_ATTACHMENTS, assemble_message,
+        attachment_content_type, attachment_filename, body_html_is_present, build_message_headers,
+        validate_attachments, validate_content_type,
+    };
+
+    fn att(path: &str) -> AttachmentInput {
+        AttachmentInput {
+            path: path.to_string(),
+            filename: None,
+            content_type: None,
+        }
+    }
+
+    #[test]
+    fn validate_attachments_over_count_cap_rejected() {
+        let many: Vec<AttachmentInput> = (0..=MAX_ATTACHMENTS)
+            .map(|i| att(&format!("/d/f{i}")))
+            .collect();
+        let err = validate_attachments(&many).unwrap_err();
+        assert_eq!(err.code(), rimap_core::error::ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn validate_attachments_at_count_cap_ok() {
+        let ok: Vec<AttachmentInput> = (0..MAX_ATTACHMENTS)
+            .map(|i| att(&format!("/d/f{i}")))
+            .collect();
+        assert!(validate_attachments(&ok).is_ok());
+    }
+
+    #[test]
+    fn validate_attachments_empty_path_rejected() {
+        assert!(validate_attachments(&[att("")]).is_err());
+    }
+
+    #[test]
+    fn validate_attachments_filename_injection_rejected() {
+        let mut a = att("/d/f");
+        a.filename = Some("evil\r\nBcc: x@evil".into());
+        assert!(validate_attachments(std::slice::from_ref(&a)).is_err());
+    }
+
+    #[test]
+    fn validate_attachments_content_type_injection_rejected() {
+        let mut a = att("/d/f");
+        a.content_type = Some("text/plain\r\nX-Injected: 1".into());
+        assert!(validate_attachments(std::slice::from_ref(&a)).is_err());
+    }
+
+    #[test]
+    fn validate_content_type_accepts_plain_token() {
+        assert!(validate_content_type("application/pdf").is_ok());
+        assert!(validate_content_type("text/plain").is_ok());
+        assert!(validate_content_type("image/svg+xml").is_ok());
+    }
+
+    #[test]
+    fn validate_content_type_rejects_parameters_and_whitespace() {
+        // mail_builder writes the content-type verbatim, so a parameter or
+        // whitespace must be rejected here — this guard is load-bearing.
+        assert!(validate_content_type("text/plain; name=\"x\"").is_err());
+        assert!(validate_content_type("text/ plain").is_err());
+        assert!(validate_content_type("application/octet-stream ").is_err());
+        assert!(validate_content_type("text").is_err());
+        assert!(validate_content_type("/plain").is_err());
+        assert!(validate_content_type("text/").is_err());
+        assert!(validate_content_type("a/b/c").is_err());
+    }
+
+    #[test]
+    fn body_html_present_predicate() {
+        assert!(body_html_is_present("<p>x</p>"));
+        assert!(!body_html_is_present(""));
+        assert!(!body_html_is_present("   \t\n"));
+    }
+
+    #[test]
+    fn attachment_filename_reduces_to_basename() {
+        // No override → basename of the path; a filename override is also
+        // reduced to a basename so no path separator ever reaches the header.
+        assert_eq!(
+            attachment_filename(&att("/srv/dl/report.pdf")),
+            "report.pdf"
+        );
+        let mut a = att("/srv/dl/report.pdf");
+        a.filename = Some("../../etc/passwd".into());
+        assert_eq!(attachment_filename(&a), "passwd");
+    }
+
+    #[test]
+    fn attachment_content_type_sniffs_then_falls_back() {
+        // Declared type wins; else sniff; else octet-stream.
+        let mut a = att("/d/f");
+        a.content_type = Some("application/pdf".into());
+        assert_eq!(attachment_content_type(&a, b"anything"), "application/pdf");
+
+        let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        assert_eq!(attachment_content_type(&att("/d/f"), &png), "image/png");
+
+        assert_eq!(
+            attachment_content_type(&att("/d/f"), b"not a known magic"),
+            "application/octet-stream",
+        );
+    }
+
+    fn html_input(body_text: &str, body_html: Option<&str>) -> ComposeInput {
+        ComposeInput {
+            to: to_one("dest@example.com"),
+            cc: None,
+            bcc: None,
+            subject: "s".into(),
+            body_text: body_text.into(),
+            body_html: body_html.map(str::to_string),
+            attachments: None,
+            in_reply_to_uid: None,
+            in_reply_to_folder: None,
+        }
+    }
+
+    #[test]
+    fn assemble_html_produces_multipart_alternative_and_strips_script() {
+        let input = html_input("plain fallback", Some("<p>hi</p><script>alert(1)</script>"));
+        let builder = build_message_headers("me@example.com", &input, false);
+        let built = assemble_message(builder, &input, Vec::new()).unwrap();
+        let text = String::from_utf8_lossy(&built.raw);
+        assert!(
+            text.contains("multipart/alternative"),
+            "expected alternative"
+        );
+        assert!(
+            text.contains("text/plain"),
+            "text/plain alternative missing"
+        );
+        assert!(text.contains("text/html"), "text/html part missing");
+        // Hostile agent HTML must not survive into the emitted bytes.
+        assert!(!text.contains("<script"), "script leaked into sent bytes");
+        assert!(!text.contains("alert(1)"), "script body leaked");
+        // The sanitizer stripped a script → a warning must be surfaced.
+        assert!(!built.security_warnings.is_empty());
+    }
+
+    #[test]
+    fn assemble_empty_html_emits_plain_text_only() {
+        let input = html_input("just text", Some("   "));
+        let builder = build_message_headers("me@example.com", &input, false);
+        let built = assemble_message(builder, &input, Vec::new()).unwrap();
+        let text = String::from_utf8_lossy(&built.raw);
+        assert!(!text.contains("multipart/alternative"));
+        assert!(built.security_warnings.is_empty());
+    }
+
+    fn read_of(content_type: &str, filename: &str, bytes: &[u8]) -> AttachmentRead {
+        AttachmentRead {
+            filename: filename.to_string(),
+            content_type: content_type.to_string(),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn assemble_attachment_produces_multipart_mixed() {
+        use mail_parser::MimeHeaders as _;
+        let input = html_input("body", None);
+        let builder = build_message_headers("me@example.com", &input, false);
+        let reads = vec![read_of("application/pdf", "report.pdf", b"%PDF-1.4 data")];
+        let built = assemble_message(builder, &input, reads).unwrap();
+        let text = String::from_utf8_lossy(&built.raw);
+        assert!(text.contains("multipart/mixed"));
+        assert!(text.contains("report.pdf"));
+        assert_eq!(built.attachments.len(), 1);
+        assert_eq!(built.attachments[0].filename, "report.pdf");
+        // Non-text part is base64; raw payload must not appear verbatim.
+        assert!(
+            !text.contains("%PDF-1.4 data"),
+            "attachment not base64-encoded"
+        );
+        // The filename must round-trip through a parser: it is set in both the
+        // Content-Type `name` and the Content-Disposition `filename`, so a
+        // reader keying off either recovers it (regression guard for the null
+        // filename the e2e attachment round-trip surfaced).
+        let parsed = mail_parser::MessageParser::new().parse(&built.raw).unwrap();
+        let names: Vec<&str> = parsed
+            .attachments()
+            .filter_map(|a| a.attachment_name())
+            .collect();
+        assert!(
+            names.contains(&"report.pdf"),
+            "attachment_name did not round-trip; got {names:?}",
+        );
+    }
+
+    #[test]
+    fn assemble_html_and_attachment_nests_alternative_in_mixed() {
+        let input = html_input("body", Some("<p>rich</p>"));
+        let builder = build_message_headers("me@example.com", &input, false);
+        let reads = vec![read_of("application/pdf", "a.pdf", b"data")];
+        let built = assemble_message(builder, &input, reads).unwrap();
+        let text = String::from_utf8_lossy(&built.raw);
+        assert!(text.contains("multipart/mixed"));
+        assert!(text.contains("multipart/alternative"));
+        assert!(text.contains("text/plain"));
+        assert!(text.contains("text/html"));
+    }
+
+    #[tokio::test]
+    async fn read_attachments_enforces_incremental_total_budget() {
+        // 20 files of 2 MiB each = 40 MiB > MAX_TOTAL_MESSAGE_BYTES (25 MiB):
+        // the read that crosses the budget must fail, so the whole message is
+        // rejected rather than materializing 40 MiB.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let two_mib = vec![0u8; 2 * 1_048_576];
+        let mut attachments = Vec::new();
+        for i in 0..20 {
+            let p = root.join(format!("f{i}.bin"));
+            std::fs::write(&p, &two_mib).unwrap();
+            attachments.push(super::AttachmentInput {
+                path: p.to_str().unwrap().to_string(),
+                filename: None,
+                content_type: None,
+            });
+        }
+        let mut input = html_input("body", None);
+        input.attachments = Some(attachments);
+        let root_arc: std::sync::Arc<std::path::Path> = std::sync::Arc::from(root);
+        let err = super::read_attachments(&root_arc, &input)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), rimap_core::error::ErrorCode::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn read_attachments_small_set_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let p = root.join("doc.pdf");
+        std::fs::write(&p, b"%PDF-1.4").unwrap();
+        let mut input = html_input("body", None);
+        input.attachments = Some(vec![super::AttachmentInput {
+            path: p.to_str().unwrap().to_string(),
+            filename: None,
+            content_type: None,
+        }]);
+        let root_arc: std::sync::Arc<std::path::Path> = std::sync::Arc::from(root);
+        let reads = super::read_attachments(&root_arc, &input).await.unwrap();
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].bytes, b"%PDF-1.4");
     }
 }

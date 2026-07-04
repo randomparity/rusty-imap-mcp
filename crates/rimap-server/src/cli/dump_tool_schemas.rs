@@ -189,7 +189,10 @@ mod tests {
         for tn in ToolName::all() {
             // Sub-capabilities share a wire name with their parent; they are
             // not separately dumped.
-            if matches!(tn, ToolName::SearchAdvanced | ToolName::FetchMessageHtml) {
+            if matches!(
+                tn,
+                ToolName::SearchAdvanced | ToolName::FetchMessageHtml | ToolName::CreateDraftHtml
+            ) {
                 continue;
             }
             assert!(

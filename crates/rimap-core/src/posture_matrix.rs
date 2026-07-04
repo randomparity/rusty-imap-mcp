@@ -9,9 +9,9 @@ use crate::tool::ToolName;
 
 /// Compile-time truth table. `true` = allowed by base posture.
 ///
-/// Layout: outer by [`ToolName`] (24 tools),
+/// Layout: outer by [`ToolName`] (25 tools),
 /// inner `[readonly, draft_safe, full, destructive]`.
-pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 24] = [
+pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 25] = [
     (ToolName::ListFolders, [true, true, true, true]),
     (ToolName::Search, [true, true, true, true]),
     (ToolName::SearchAdvanced, [false, false, true, true]),
@@ -31,6 +31,10 @@ pub const POSTURE_MATRIX: [(ToolName, [bool; 4]); 24] = [
     (ToolName::ListLabels, [true, true, true, true]),
     (ToolName::MoveMessage, [false, true, true, true]),
     (ToolName::CreateDraft, [false, true, true, true]),
+    // create_draft.include_html: an HTML draft body is a richer surface than
+    // plain text; gated at full like fetch_message.include_html, even though
+    // plain create_draft is allowed at draft_safe.
+    (ToolName::CreateDraftHtml, [false, false, true, true]),
     // v2 tools:
     (ToolName::SendEmail, [false, false, true, true]),
     // forward: re-sends an existing message via SMTP; gated identically

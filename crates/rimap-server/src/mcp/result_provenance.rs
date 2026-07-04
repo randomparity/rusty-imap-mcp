@@ -22,6 +22,12 @@ pub(super) fn result_provenance(tool: ToolName, value: &serde_json::Value) -> Re
     match tool {
         ToolName::ExportMessages => export_provenance(value),
         ToolName::DownloadAttachment => download_provenance(value),
+        // Compose tools record attachment provenance so the accepted
+        // shared-sandbox exfil channel stays auditable even though the request
+        // args redact attachment paths.
+        ToolName::CreateDraft | ToolName::CreateDraftHtml | ToolName::SendEmail => {
+            compose_provenance(value)
+        }
         ToolName::ListFolders
         | ToolName::Search
         | ToolName::SearchAdvanced
@@ -36,8 +42,6 @@ pub(super) fn result_provenance(tool: ToolName, value: &serde_json::Value) -> Re
         | ToolName::RemoveLabel
         | ToolName::ListLabels
         | ToolName::MoveMessage
-        | ToolName::CreateDraft
-        | ToolName::SendEmail
         | ToolName::Forward
         | ToolName::DeleteMessage
         | ToolName::Expunge
@@ -46,6 +50,34 @@ pub(super) fn result_provenance(tool: ToolName, value: &serde_json::Value) -> Re
         | ToolName::DeleteFolder
         | ToolName::UseAccount
         | ToolName::ListAccounts => ResultSummary::default(),
+    }
+}
+
+/// `create_draft` / `send_email`: record each attachment's basename + byte
+/// count from the response `meta.attachments`, so an incident responder can see
+/// which sandbox files left the boundary. The field names are the contract with
+/// `AttachmentSummary`; the `tests` module serializes a real meta so a rename
+/// fails an assertion.
+fn compose_provenance(value: &serde_json::Value) -> ResultSummary {
+    let attachments = value
+        .get("meta")
+        .and_then(|m| m.get("attachments"))
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            let mut out = Vec::with_capacity(arr.len());
+            for entry in arr {
+                let filename = string_field(entry, "filename");
+                let bytes = entry.get("bytes").and_then(serde_json::Value::as_u64);
+                if let (Some(filename), Some(bytes)) = (filename, bytes) {
+                    out.push(rimap_audit::record::AttachmentProvenance { filename, bytes });
+                }
+            }
+            out
+        })
+        .unwrap_or_default();
+    ResultSummary {
+        attachments_sent: attachments,
+        ..ResultSummary::default()
     }
 }
 
@@ -123,6 +155,49 @@ mod tests {
     /// does, so a meta field rename breaks this test at compile time.
     fn value_of<M: serde::Serialize>(meta: M) -> serde_json::Value {
         serde_json::to_value(ToolResponse::<M, ()>::meta_only(meta)).expect("serialize meta")
+    }
+
+    #[test]
+    fn compose_records_attachment_provenance_from_meta() {
+        use crate::tools::compose::message_builder::AttachmentSummary;
+        use crate::tools::compose::send_email::{SendEmailMeta, SentCopyInfo};
+
+        let meta = SendEmailMeta {
+            sent: true,
+            message_id: Some("<id@example.com>".to_string()),
+            smtp_status: "delivered".to_string(),
+            sent_copy: SentCopyInfo::succeeded("Sent", Some(7)),
+            attachments: vec![
+                AttachmentSummary {
+                    filename: "report.pdf".to_string(),
+                    bytes: 2048,
+                },
+                AttachmentSummary {
+                    filename: "photo.png".to_string(),
+                    bytes: 4096,
+                },
+            ],
+        };
+        let summary = result_provenance(ToolName::SendEmail, &value_of(meta));
+        assert_eq!(summary.attachments_sent.len(), 2);
+        assert_eq!(summary.attachments_sent[0].filename, "report.pdf");
+        assert_eq!(summary.attachments_sent[0].bytes, 2048);
+        assert_eq!(summary.attachments_sent[1].filename, "photo.png");
+    }
+
+    #[test]
+    fn compose_without_attachments_records_empty_provenance() {
+        use crate::tools::compose::create_draft::CreateDraftMeta;
+
+        let meta = CreateDraftMeta {
+            folder: "Drafts".to_string(),
+            uid: Some(1),
+            message_id: None,
+            keywords: vec!["$PendingReview"],
+            attachments: vec![],
+        };
+        let summary = result_provenance(ToolName::CreateDraftHtml, &value_of(meta));
+        assert!(summary.attachments_sent.is_empty());
     }
 
     #[test]
