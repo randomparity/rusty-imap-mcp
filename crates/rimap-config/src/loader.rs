@@ -43,18 +43,39 @@ pub fn resolve_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
         .map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
+/// Read `path` to a string, classifying an absent file as
+/// [`ConfigError::NotFound`] and any other I/O failure as
+/// [`ConfigError::Read`].
+///
+/// Splitting `NotFound` out lets a first-run invocation surface actionable
+/// setup guidance instead of a raw "No such file or directory" error, while
+/// genuine read failures (permissions, path is a directory) still report the
+/// underlying I/O error for diagnosis.
+fn read_config_string(path: &Path) -> Result<String, ConfigError> {
+    std::fs::read_to_string(path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            ConfigError::NotFound {
+                path: path.to_path_buf(),
+            }
+        } else {
+            ConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })
+}
+
 /// Load and deserialize a config file from the given path. Does **not**
 /// validate semantic constraints — that's [`crate::validate::validate_multi`]
 /// (reached via [`load_and_validate`]).
 ///
 /// # Errors
-/// Returns `ConfigError::Read` if the file cannot be read, or
-/// `ConfigError::Parse` if the TOML is malformed.
+/// Returns `ConfigError::NotFound` if the file does not exist,
+/// `ConfigError::Read` for any other read failure, or `ConfigError::Parse`
+/// if the TOML is malformed.
 pub fn load_from_path(path: &Path) -> Result<Config, ConfigError> {
-    let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let contents = read_config_string(path)?;
     toml::from_str::<Config>(&contents).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
@@ -115,10 +136,7 @@ enum DetectedFormat {
 /// legacy. Returns [`ConfigError::MixedConfigFormat`] if both shapes
 /// appear in the same document.
 fn classify_format(path: &Path) -> Result<DetectedFormat, ConfigError> {
-    let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let contents = read_config_string(path)?;
 
     // Parse once. The top level of any syntactically valid TOML document is
     // a table, so deserialization into `toml::Value` gives us a structured
@@ -232,11 +250,23 @@ search = "allow"
     }
 
     #[test]
-    fn missing_file_returns_read_error() {
+    fn missing_file_returns_not_found_error() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nope.toml");
         let err = load_from_path(&path).unwrap_err();
-        assert!(matches!(err, crate::error::ConfigError::Read { .. }));
+        assert!(matches!(err, ConfigError::NotFound { .. }));
+    }
+
+    #[test]
+    fn unreadable_path_returns_read_error() {
+        // Reading a directory as a file fails with a non-`NotFound` I/O error,
+        // which must still classify as `Read`, not `NotFound`.
+        let dir = TempDir::new().unwrap();
+        let err = load_from_path(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Read { .. }),
+            "expected Read for a present-but-unreadable path, got: {err:?}"
+        );
     }
 
     #[test]

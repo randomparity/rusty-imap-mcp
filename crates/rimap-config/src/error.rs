@@ -12,6 +12,24 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    /// No config file exists at the resolved path (`io::ErrorKind::NotFound`).
+    ///
+    /// Distinguished from [`ConfigError::Read`] so a first-run invocation with
+    /// no config yet can surface actionable setup guidance instead of a raw
+    /// "No such file or directory" I/O error. The consumer composes the
+    /// operator-facing hint (the server binary points at `config.example.toml`
+    /// and the quickstart guides); this Display stays terse.
+    ///
+    /// The path is embedded under the same startup-time, operator-supplied
+    /// rationale documented on [`ConfigError::AuditPathOutsideBase`]: it fires
+    /// only at startup against a path the operator chose (`--config`,
+    /// `RUSTY_IMAP_MCP_CONFIG`, or the platform default), and the path is the
+    /// actionable information the operator needs.
+    #[error("config file not found: `{path}`")]
+    NotFound {
+        /// Resolved path that does not exist.
+        path: PathBuf,
+    },
     /// The config file could not be read from disk.
     #[error("failed to read config file `{path}`: {source}")]
     Read {
@@ -190,6 +208,22 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_found_display_names_path_and_is_terse() {
+        let err = ConfigError::NotFound {
+            path: PathBuf::from("/home/op/.config/rusty-imap-mcp/config.toml"),
+        };
+        let display = format!("{err}");
+        assert!(
+            display.contains("/home/op/.config/rusty-imap-mcp/config.toml"),
+            "display should name the resolved path: {display}"
+        );
+        assert!(
+            display.contains("not found"),
+            "display should read as a not-found error: {display}"
+        );
+    }
 
     #[test]
     fn no_credential_display_omits_username() {
