@@ -286,6 +286,14 @@ Pre-built binaries for five targets:
 
 ### Changed
 
+- Launching the server when no config file exists at the resolved path now
+  prints actionable first-run guidance to stderr — naming the missing path
+  and pointing at `config.example.toml`, the Gmail and Proton Bridge
+  quickstarts, and the `--config` / `RUSTY_IMAP_MCP_CONFIG` overrides —
+  instead of a raw `tracing::error!` "No such file or directory" line that
+  GUI/stdio MCP clients discard. A new `ConfigError::NotFound` variant
+  distinguishes an absent file from other read failures. stdout (the MCP
+  transport) is untouched. Issue #469 (audit finding M-11).
 - Added static remediation guidance for folder-policy and posture
   denials to the `expunge`, `create_folder`, `rename_folder`,
   `delete_folder`, and `send_email` descriptions. Runtime denial errors
