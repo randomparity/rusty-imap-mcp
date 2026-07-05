@@ -412,6 +412,82 @@ mod tests {
     }
 
     #[test]
+    fn parse_multipart_alternative_surfaces_sanitized_body_html() {
+        let raw = b"From: a@example\r\n\
+                    Content-Type: multipart/alternative; boundary=\"BOUND\"\r\n\
+                    \r\n\
+                    --BOUND\r\n\
+                    Content-Type: text/plain; charset=utf-8\r\n\
+                    \r\n\
+                    plain version\r\n\
+                    --BOUND\r\n\
+                    Content-Type: text/html; charset=utf-8\r\n\
+                    \r\n\
+                    <html><body><p>html version</p>\
+                    <script>alert(1)</script></body></html>\r\n\
+                    --BOUND--\r\n";
+        let content = parse_message(raw).unwrap();
+        // text/plain remains the primary body.
+        assert_eq!(content.untrusted.body_text, "plain version");
+        // The text/html alternative is now surfaced as sanitized body_html.
+        let body_html = content
+            .untrusted
+            .body_html
+            .as_deref()
+            .unwrap_or_else(|| panic!("multipart/alternative must surface body_html"));
+        assert!(body_html.contains("<p>"), "body_html={body_html:?}");
+        assert!(
+            body_html.contains("html version"),
+            "body_html={body_html:?}"
+        );
+        // Sanitized: the script payload must not survive into body_html.
+        assert!(!body_html.contains("<script"), "body_html={body_html:?}");
+        assert!(!body_html.contains("alert(1)"), "body_html={body_html:?}");
+        // The HTML's extracted plain text lands in alternate_parts, not primary.
+        assert!(
+            content
+                .untrusted
+                .alternate_parts
+                .iter()
+                .any(|p| p.contains("html version")),
+            "alternate_parts={:?}",
+            content.untrusted.alternate_parts
+        );
+        assert!(!content.untrusted.body_text.contains("html version"));
+    }
+
+    #[test]
+    fn parse_multipart_alternative_html_hidden_content_warns() {
+        // A hidden-content payload in the HTML alternative must be
+        // detected — proving the alternative flows through the same
+        // sanitization pipeline as the primary HTML body.
+        let raw = b"From: a@example\r\n\
+                    Content-Type: multipart/alternative; boundary=\"BOUND\"\r\n\
+                    \r\n\
+                    --BOUND\r\n\
+                    Content-Type: text/plain; charset=utf-8\r\n\
+                    \r\n\
+                    plain version\r\n\
+                    --BOUND\r\n\
+                    Content-Type: text/html; charset=utf-8\r\n\
+                    \r\n\
+                    <html><body><p>ok</p>\
+                    <div style=\"display:none\">hidden instructions</div>\
+                    </body></html>\r\n\
+                    --BOUND--\r\n";
+        let content = parse_message(raw).unwrap();
+        assert!(
+            content
+                .security_warnings
+                .iter()
+                .any(|w| matches!(w.code, WarningCode::HtmlHiddenContentDetected)),
+            "expected HtmlHiddenContentDetected from the HTML alternative, got {:?}",
+            content.security_warnings
+        );
+        assert!(content.untrusted.body_html.is_some());
+    }
+
+    #[test]
     fn content_html_only_populates_body_html_and_body_text() {
         let raw = b"From: a@example\r\n\
                     Content-Type: text/html; charset=utf-8\r\n\
