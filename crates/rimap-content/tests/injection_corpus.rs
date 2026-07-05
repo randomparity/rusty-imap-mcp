@@ -35,6 +35,10 @@ struct Expected {
     #[serde(default)]
     must_not_contain: Vec<String>,
     #[serde(default)]
+    body_html_must_contain: Vec<String>,
+    #[serde(default)]
+    body_html_must_not_contain: Vec<String>,
+    #[serde(default)]
     warning_codes: Vec<String>,
     #[serde(default)]
     forbidden_warning_codes: Vec<String>,
@@ -120,8 +124,45 @@ fn assert_fixture(name: &str, dir: &Path, expected: &Expected) -> Result<(), Str
 
 fn assert_ok_body(name: &str, content: &Content, expected: &Expected) -> Result<(), String> {
     assert_body_substrings(name, &content.untrusted.body_text, expected)?;
+    assert_body_html_substrings(name, content.untrusted.body_html.as_deref(), expected)?;
     assert_warning_codes(name, &content.security_warnings, expected)?;
     assert_meta_fields(name, &content.meta, expected)
+}
+
+/// Assert `body_html_must_contain` / `body_html_must_not_contain`
+/// against `content.untrusted.body_html`, so a fixture can prove the
+/// surfaced HTML is sanitized (e.g. `<script>` stripped) independently
+/// of the plain-text `body_text` checks. A fixture requiring HTML
+/// substrings when no `body_html` was surfaced is a failure.
+fn assert_body_html_substrings(
+    name: &str,
+    body_html: Option<&str>,
+    expected: &Expected,
+) -> Result<(), String> {
+    if expected.body_html_must_contain.is_empty() && expected.body_html_must_not_contain.is_empty()
+    {
+        return Ok(());
+    }
+    let Some(html) = body_html else {
+        return Err(format!(
+            "{name}: body_html assertions declared but no body_html was surfaced"
+        ));
+    };
+    for needle in &expected.body_html_must_contain {
+        if !html.contains(needle) {
+            return Err(format!(
+                "{name}: body_html missing required substring {needle:?} (body_html={html:?})"
+            ));
+        }
+    }
+    for needle in &expected.body_html_must_not_contain {
+        if html.contains(needle) {
+            return Err(format!(
+                "{name}: body_html contains forbidden substring {needle:?} (body_html={html:?})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn assert_body_substrings(name: &str, body: &str, expected: &Expected) -> Result<(), String> {
