@@ -222,6 +222,22 @@ impl DovecotHarness {
         assert!(status.success(), "doveadm mailbox delete {name} failed",);
     }
 
+    /// Stop the container so the published host port stops accepting
+    /// connections. Used by fault-injection tests that need the server's
+    /// next IMAP connect to be refused (`ERR_CONNECTION_LOST`). `Drop`
+    /// still runs `compose down -v`, which cleans up a stopped project.
+    pub fn stop(&self) {
+        let status = Command::new(runtime())
+            .arg("compose")
+            .arg("-p")
+            .arg(&self.project)
+            .arg("stop")
+            .current_dir(&self.compose_dir)
+            .status()
+            .expect("compose stop spawn failed");
+        assert!(status.success(), "compose stop failed");
+    }
+
     pub fn fingerprint(&self) -> &TlsFingerprint {
         &self.fingerprint
     }
@@ -340,17 +356,23 @@ fn is_port_collision(stderr: &str) -> bool {
         || s.contains("bind for 127.0.0.1")
 }
 
-/// Per-binary dead-code suppression for items only some e2e binaries use.
-/// `delete_mailbox` is exercised by `e2e.rs` but not by `e2e_wire.rs` /
-/// `e2e_wire_cancellation.rs`; referencing it in a never-called function marks
-/// it used in every compilation unit (the same pattern as `fixtures.rs`'s
-/// `force_use_for_dead_code_link`). `clippy::allow_attributes = "deny"` forbids
-/// a bare `#[allow]`, and a `#![expect(dead_code)]` would be unfulfilled in the
-/// binaries that do call it.
+/// Per-binary dead-code suppression for `DovecotHarness` methods that
+/// only some e2e binaries call — `delete_mailbox` (e2e.rs),
+/// `create_mailbox` (the mailbox-seeding wire suites), and `stop`
+/// (`e2e_wire_fault_injection.rs`). That suite seeds
+/// straight into the always-present INBOX, so it calls neither
+/// `create_mailbox` nor `delete_mailbox`. Referencing each in a
+/// never-called function marks it used in every compilation unit (the
+/// same pattern as `fixtures.rs`'s `force_use_for_dead_code_link`).
+/// `clippy::allow_attributes = "deny"` forbids a bare `#[allow]`, and a
+/// `#![expect(dead_code)]` would be unfulfilled in the binaries that do
+/// call it.
 #[expect(
     dead_code,
     reason = "type-link to suppress per-binary dead-code for delete_mailbox"
 )]
 fn force_use_for_dead_code_link(h: &DovecotHarness) {
     h.delete_mailbox("");
+    let _ = DovecotHarness::create_mailbox;
+    let _ = DovecotHarness::stop;
 }
