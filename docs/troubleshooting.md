@@ -46,6 +46,59 @@ this folder`) by design.
 Genuine protocol problems — an unknown tool name, malformed arguments, or
 a rejected protocol version — are still returned as JSON-RPC errors.
 
+## Stale connection after idle (`ERR_CONNECTION_LOST`)
+
+After a period of inactivity, the IMAP server (or an intervening NAT
+device or firewall) may silently close the TCP connection.
+`rusty-imap-mcp` caches one session per account and doesn't notice the
+drop until the next tool call tries to use it; that call fails with
+`isError: true` and `structuredContent.error_code = "ERR_CONNECTION_LOST"`.
+
+Internally, the failed call drops the dead session so the *next* call
+lazy-reconnects — but it does **not** auto-retry the command that just
+failed (see `with_session` in
+`crates/rimap-imap/src/connection/dispatch.rs`). **A retry is expected
+and normal**: simply re-issue the same tool call once; it opens a fresh
+connection and typically succeeds.
+
+If the retry *also* fails with `ERR_CONNECTION_LOST`, the cause isn't an
+idle timeout — the host is unreachable or refusing new connections (see
+the `connect failed` row in
+[Common root causes](#common-root-causes) below). Both a TCP connect
+failure (`ImapError::Connect`) and a mid-command connection drop
+(`ImapError::ConnectionLost`) map to this same error code
+(`crates/rimap-imap/src/error.rs`), so distinguish them by behavior: one
+retry after idle succeeding points to an idle drop, while every attempt
+failing points to an unreachable or down server.
+
+## Rate limit hit (`ERR_RATE_LIMITED`)
+
+A tool call fails with `isError: true`,
+`structuredContent.error_code = "ERR_RATE_LIMITED"`, and a
+`retry_after_ms` field giving the minimum wait, in milliseconds, before
+the call is likely to succeed.
+
+`rusty-imap-mcp` enforces three independent, per-process rate limiters
+(`crates/rimap-authz/src/rate_limit.rs`):
+
+| Limiter | Config field | Default |
+|---------|--------------|---------|
+| All tool calls | `commands_per_second` | 10/s (burst = 2×) |
+| `create_draft` | `drafts_per_minute` | 5/min |
+| `send_email` | `sends_per_minute` | 3/min |
+
+Wait at least `retry_after_ms` before retrying, or raise the relevant
+field under `[limits]` (single-account config) or `[defaults.limits]` /
+per-account `[accounts.limits]` (multi-account config) — see the
+[`[limits]` section](configuration.md#limits-section) of the
+configuration reference.
+
+`ERR_RATE_LIMITED` is distinct from `ERR_CIRCUIT_OPEN`: the rate limiter
+caps call *volume*, while the circuit breaker trips after
+`circuit_breaker_error_threshold` upstream IMAP errors within
+`circuit_breaker_window_seconds` and stays open regardless of how slowly
+you retry.
+
 ## "Connection closed" / "MCP error -32000" from your MCP client
 
 A generic transport error from the client (Claude Desktop, Claude Code,
@@ -83,8 +136,10 @@ RIMAP_LOG=debug rusty-imap-mcp 2>/tmp/rimap.log
 | `audit file ... is already locked` | Another `rusty-imap-mcp` process holds the audit lock | Each MCP client must use a distinct `[audit].path`; see [Running multiple MCP clients](audit-log.md#running-multiple-mcp-clients) |
 | `path ... is not writable: directory does not exist` | Audit log parent directory missing | Create it; `audit.path` must be absolute (no `~` — the TOML parser does not expand `~`) |
 | `audit path ... is not contained in allowed base ...` | `audit.path` is outside the platform-default base | Move the audit file under the default base, or set `audit.allowed_base_dir` explicitly |
+| `connect failed` (wrapping `Connection refused` or `Operation timed out`) | TCP connect to the IMAP host/port failed before any TLS handshake started — wrong host/port, a firewall, or (Proton Bridge) the Bridge app isn't running | Verify `host`/`port` under `[imap]`, confirm the port is listening (`nc -zv <host> <port>`); for Proton Bridge, confirm the app is running and its IMAP port (Bridge settings) matches `config.toml`. The same failure surfaces at runtime as a tool-call error with `error_code = "ERR_CONNECTION_LOST"` |
 | `ERR_TLS` | TLS handshake failure | Verify network reachability to the IMAP host on port 993 |
 | `ERR_TLS: ... UnknownIssuer` | Server cert chains to a CA not in the compiled `webpki-roots` bundle (corporate internal CA, self-signed cert, or a TLS-inspection proxy presenting an internal CA) | Pin the leaf cert: capture via `--dry-run` and add `tls_fingerprint_sha256` to `[imap]`. See [Optional: pin the TLS certificate](quickstart-gmail.md#optional-pin-the-tls-certificate) for the procedure; pinning skips chain validation entirely |
+| `ERR_TLS: fingerprint mismatch (observed=..., expected=...)` | Server's leaf-cert fingerprint no longer matches the pinned `tls_fingerprint_sha256` — most commonly Proton Bridge regenerating its self-signed cert after a reinstall or update | Re-run `--dry-run` to capture the new fingerprint and update `tls_fingerprint_sha256` in `[imap]`. See [Optional: pin the TLS certificate](quickstart-gmail.md#optional-pin-the-tls-certificate) |
 | `Capabilities ...: unavailable (...)` | Preflight could not complete | Inspect the parenthesised cause — typically DNS, connectivity, or TLS |
 | `ERR_CONFIG` | TOML parse or validation error | Check syntax and field names against [configuration.md](configuration.md) |
 | No credential found in keyring | `rusty-imap-mcp login` was never run for this account | Run `rusty-imap-mcp login --host <h> --username <u>` |
