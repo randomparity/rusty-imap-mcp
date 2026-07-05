@@ -84,6 +84,8 @@ pub(super) fn extract_bodies(
         }
     }
 
+    surface_alternative_html(message, primary_html_part_id, &mut state, warnings)?;
+
     Ok(BodyExtraction {
         primary_text: state.primary_text.unwrap_or_default(),
         alternates: state.alternates,
@@ -177,6 +179,46 @@ fn sanitize_html_part(
         }
         Err(err) => Err(err),
     }
+}
+
+/// Surface the primary `text/html` part when it was not already
+/// reached by the `text_body` walk.
+///
+/// For `multipart/alternative`, mail-parser lists the `text/plain`
+/// part in `text_body` and the `text/html` part in `html_body`, so the
+/// main loop never visits the HTML part and `state.body_html` stays
+/// `None`. This routes that part through the identical
+/// [`sanitize_html_part`] path used for the in-loop primary HTML body,
+/// so the surfaced HTML receives the same sanitization, hidden-content
+/// detection, and anchor-href lookalike auditing. `text/plain` remains
+/// the primary body: because `state.primary_text` is already set, the
+/// HTML's extracted text lands in `alternates`.
+///
+/// No-ops when there is no primary HTML part, when HTML was already
+/// surfaced (HTML-only messages, where the part is in `text_body`), or
+/// when the aggregate body budget is already exhausted.
+fn surface_alternative_html(
+    message: &Message<'_>,
+    primary_html_part_id: Option<usize>,
+    state: &mut BodyWalkState,
+    warnings: &mut Vec<SecurityWarning>,
+) -> Result<(), ContentError> {
+    let Some(part_id) = primary_html_part_id else {
+        return Ok(());
+    };
+    if state.body_html.is_some() || state.body_truncated {
+        return Ok(());
+    }
+    if state.total_bytes >= MAX_TOTAL_BODY_BYTES {
+        return Ok(());
+    }
+    let Some(part) = message.parts.get(part_id) else {
+        return Ok(());
+    };
+    let PartType::Html(cow) = &part.body else {
+        return Ok(());
+    };
+    sanitize_html_part(part, cow.as_bytes(), state, warnings)
 }
 
 /// Read the `charset` attribute off a part's Content-Type header.
