@@ -66,6 +66,32 @@ Why this is fine:
   paths, so even acquiring both would not deadlock — but in practice
   nothing in Sprint 3 holds both at once.
 
+### Operator impact: concurrent calls to one account serialize
+
+Because the session lock is held for the full duration of an IMAP
+command, **concurrent tool calls against the same account do not run in
+parallel** — they queue and execute one at a time, in the order they
+acquire the lock. This is a direct, intentional consequence of RFC 3501
+(one in-flight tagged command per session), not a bug.
+
+The practical effect: a slow command (e.g. a large `FETCH` or a
+`SEARCH` against a big mailbox) head-of-line-blocks every other queued
+call on that account until it completes or the server's
+`command_timeout_seconds` fires (default 30s — see
+[configuration.md](../configuration.md)). A caller waiting on a queued
+command can therefore see latency up to the full timeout even though
+its own command would otherwise be fast.
+
+This only affects calls scoped to the *same* account. Different
+accounts each have their own `Connection` and session lock, so they
+never block one another — see
+[multi-account.md](../multi-account.md#per-account-isolation). An
+operator who needs true parallelism for one account's workload has no
+in-process workaround today; running multiple server instances against
+separate credentials for that account is the only way to get
+concurrent sessions (subject to the IMAP server's own per-account
+connection limits).
+
 ## Quick reference
 
 | Lock | Type | Held across `.await`? | Why |
