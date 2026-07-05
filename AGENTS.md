@@ -42,9 +42,10 @@ the wire-driven Dovecot e2e harness for tool dispatch + audit-log attribution.
 ## Repository status
 
 The workspace (v0.1.0) is feature-complete. The eight member crates under `crates/` implement
-22 posture-gated MCP tools + 2 infrastructure tools (24 `ToolName` variants),
-multi-account support, SMTP sending, an audit log, and a content pipeline with
-look-alike detection. Five platform targets are built via the release workflow.
+24 advertised MCP tools (22 posture-gated + 2 infrastructure), backed by 27 `ToolName`
+capability variants (three are full-posture sub-capabilities of `search`, `fetch_message`,
+and `create_draft`), multi-account support, SMTP sending, an audit log, and a content
+pipeline with look-alike detection. Five platform targets are built via the release workflow.
 
 ## Development commands
 
@@ -154,10 +155,11 @@ are the ones that trip people up or aren't obvious from the lint set.
   must be clean. This is the baseline, not the goal.
 - **No `println!` / `eprintln!` / `dbg!` / `todo!` in non-test source.**
   `print_stdout` and `print_stderr` are denied workspace-wide because stdout is
-  reserved for MCP transport (stderr is held in reserve for a future `tracing`
-  subscriber). In tests, debug output via these macros is allowed. In `main.rs`
-  and library code, use `tracing` (coming in Sprint 1) or `writeln!` on a
-  captured handle.
+  reserved for MCP transport; diagnostics go to stderr through the `tracing`
+  subscriber that ships today (`boot/logging.rs`, wired in `main.rs`; filter
+  controlled by `RIMAP_LOG` / `RUST_LOG`, default `info`). In tests, debug
+  output via these macros is allowed. In `main.rs` and library code, use
+  `tracing` or `writeln!` on a captured handle.
 - **No `#[allow(...)]` attributes.** `allow_attributes = "deny"`. Use
   `#[expect(...)]` with a comment explaining why if you must suppress a lint.
 - **No `unwrap()` in non-test code.** `unwrap_used` is denied. Prefer `?`,
@@ -231,10 +233,12 @@ Some changes deserve extra scrutiny. When touching:
   or introduce a `<Kind>Inputs` shim with `From<Inputs> for record::<Kind>`
   when the on-disk record carries derived fields. Never positional. The rule
   is documented on `AuditWriter::log_auth`.
-- **`rimap-authz` posture matrix:** the matrix has 22 tools x 4 postures
-  (readonly, draft-safe, full, destructive) plus 2 infrastructure tools
-  (use_account, list_accounts) that bypass posture checks. Additions to the
-  tool set must update the matrix in `rimap-core` first, then the
+- **`rimap-authz` posture matrix:** the matrix has 25 capabilities x 4 postures
+  (readonly, draft-safe, full, destructive) — 22 posture-gated tools plus 3
+  full-posture sub-capabilities (`search.advanced_query`,
+  `fetch_message.include_html`, `create_draft.include_html`) — plus 2
+  infrastructure tools (use_account, list_accounts) that bypass posture checks.
+  Additions to the tool set must update the matrix in `rimap-core` first, then the
   matrix-driven tool advertisement in `rimap-server`. Tools denied by the
   active posture must not be advertised via `list_tools`.
 - **TLS fingerprint verifier** (`rimap-imap`): the custom `ServerCertVerifier`
