@@ -19,6 +19,7 @@ use rimap_authz::DispatchGuard;
 use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
 use rimap_authz::rate_limit::Governor;
+use rimap_config::ConfigError;
 use rimap_config::credential::{CredentialStore, KeyringStore, Protocol};
 use rimap_config::loader::{load_and_validate, resolve_config_path};
 use rimap_config::login::{run_login, tty_prompt};
@@ -49,10 +50,46 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            tracing::error!("{e:#}");
+            emit_startup_error(&e);
             ExitCode::FAILURE
         }
     }
+}
+
+/// Report a startup failure and return exit failure.
+///
+/// A missing config file on first launch is an operator setup problem, not a
+/// server fault, so it bypasses the `tracing` subscriber — whose output GUI
+/// and stdio MCP clients routinely discard or bury — and writes clean,
+/// actionable setup guidance directly to stderr. Every other error keeps the
+/// structured `tracing::error!` path. stdout is never touched: it is reserved
+/// for the MCP transport.
+fn emit_startup_error(err: &anyhow::Error) {
+    if let Some(ConfigError::NotFound { path }) = err.downcast_ref::<ConfigError>() {
+        // stderr is unbuffered; a failed write has nowhere left to go, so drop it.
+        let mut stderr = std::io::stderr().lock();
+        let _ = write!(stderr, "{}", format_missing_config_guidance(path));
+    } else {
+        tracing::error!("{err:#}");
+    }
+}
+
+/// Compose the first-run "no config file" guidance: name the resolved path and
+/// point the operator at the annotated example config and the provider
+/// quickstart guides. Pure and newline-terminated so callers only `write!` it.
+fn format_missing_config_guidance(path: &std::path::Path) -> String {
+    format!(
+        "No configuration file was found at:\n    \
+         {path}\n\n\
+         Create one to get started. See the annotated example configuration and \
+         the quickstart guide for your provider:\n    \
+         config.example.toml               - annotated example configuration\n    \
+         docs/quickstart-gmail.md          - Gmail setup\n    \
+         docs/quickstart-proton-bridge.md  - Proton Mail Bridge setup\n\n\
+         You can point at a different location with --config <PATH> or the \
+         RUSTY_IMAP_MCP_CONFIG environment variable.\n",
+        path = path.display(),
+    )
 }
 
 /// Disambiguates the failure source of the init-phase `tokio::select!`
@@ -697,6 +734,54 @@ mod resolve_download_dir_tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
+    }
+}
+
+#[cfg(test)]
+mod startup_error_tests {
+    use std::path::{Path, PathBuf};
+
+    use rimap_config::ConfigError;
+
+    use super::format_missing_config_guidance;
+
+    #[test]
+    fn missing_config_guidance_is_actionable() {
+        let msg = format_missing_config_guidance(Path::new("/opt/rimap/config.toml"));
+        assert!(
+            msg.contains("/opt/rimap/config.toml"),
+            "names the path: {msg}"
+        );
+        assert!(
+            msg.contains("config.example.toml"),
+            "points at the example config: {msg}"
+        );
+        assert!(
+            msg.contains("docs/quickstart-gmail.md"),
+            "points at the Gmail quickstart: {msg}"
+        );
+        assert!(
+            msg.contains("docs/quickstart-proton-bridge.md"),
+            "points at the Proton Bridge quickstart: {msg}"
+        );
+        assert!(
+            msg.contains("RUSTY_IMAP_MCP_CONFIG"),
+            "mentions the env-var override: {msg}"
+        );
+    }
+
+    #[test]
+    fn not_found_survives_context_wrapping() {
+        // `load_validated_multi` wraps the config error with `.with_context`;
+        // `emit_startup_error` must still recover `NotFound` from the chain.
+        let err = anyhow::Error::from(ConfigError::NotFound {
+            path: PathBuf::from("/x/config.toml"),
+        })
+        .context("loading config /x/config.toml");
+        assert!(matches!(
+            err.downcast_ref::<ConfigError>(),
+            Some(ConfigError::NotFound { .. })
+        ));
     }
 }
 
