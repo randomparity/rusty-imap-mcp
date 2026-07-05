@@ -231,8 +231,8 @@ jobs:
               p                     { print }
           ' CHANGELOG.md > RELEASE_NOTES.md
           if [ ! -s RELEASE_NOTES.md ]; then
-            echo "Warning: no release notes extracted for ${TAG}"
-            cp CHANGELOG.md RELEASE_NOTES.md
+            echo "::error::No CHANGELOG.md section found for ${TAG} (expected a '## [${VERSION}]' heading). Add a dated release section before tagging." >&2
+            exit 1
           fi
           head -20 RELEASE_NOTES.md
       - name: Create draft release
