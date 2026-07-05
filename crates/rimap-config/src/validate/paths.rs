@@ -351,6 +351,45 @@ mod tests {
         assert!(enforce_audit_containment(&audit).is_ok());
     }
 
+    /// Regression guard for the example configs shipping an audit path
+    /// outside the platform default containment base (#465).
+    ///
+    /// `tests/config_example.rs` deserializes and validates the repo-root
+    /// example configs, but it retargets `audit.path` at a fresh tempdir
+    /// before validating — so a literal `audit.path` that disagrees with
+    /// `default_audit_base()` (e.g. `.local/state` vs. the real default of
+    /// `.local/share`) never gets exercised there. This test reads the
+    /// examples' literal `audit.path`, substitutes the example's
+    /// `/home/alice` placeholder for the real `$HOME`, and checks the
+    /// result against the actual `default_audit_base()` — the same check
+    /// `enforce_audit_containment` performs when `allowed_base_dir` is
+    /// unset (the shipped default; it's commented out in both examples).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn example_audit_paths_are_contained_in_default_base_verbatim() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let home = std::env::var("HOME").expect("HOME must be set on Linux test runners");
+        let base = default_audit_base().expect("resolve default audit base");
+
+        for example in ["config.example.toml", "config.multi-account.example.toml"] {
+            let contents = std::fs::read_to_string(repo_root.join(example))
+                .unwrap_or_else(|e| panic!("read {example}: {e}"));
+            let parsed: toml::Value = toml::from_str(&contents).expect("parse example as TOML");
+            let literal_path = parsed["audit"]["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{example}: audit.path is not a string"));
+            let real_path = PathBuf::from(literal_path.replacen("/home/alice", &home, 1));
+            assert!(
+                real_path.starts_with(&base),
+                "{example}: audit.path {literal_path:?} resolves to {real_path:?} \
+                 under the caller's real $HOME, which is not contained in the \
+                 platform default audit base {base:?}; a verbatim copy of this \
+                 example would fail startup containment on Linux with \
+                 `allowed_base_dir` left unset",
+            );
+        }
+    }
+
     #[cfg(unix)]
     fn attachments_with(download_dir: &Path) -> AttachmentsConfig {
         AttachmentsConfig {

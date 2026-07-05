@@ -134,8 +134,8 @@ circuit_breaker_window_seconds = 30
 # --------------------------------------------------------------------------
 [audit]
 # Where the audit log is written. Use an absolute path. On Linux the
-# conventional location is under $XDG_STATE_HOME.
-path = "/home/alice/.local/state/rusty-imap-mcp/audit.jsonl"
+# conventional location is under $XDG_DATA_HOME.
+path = "/home/alice/.local/share/rusty-imap-mcp/audit.jsonl"
 # Rotate when the active file reaches this many bytes (default 10 MiB).
 rotate_bytes = 10485760
 # Keep this many rotated files (default 5).
@@ -148,9 +148,9 @@ provenance_window_seconds = 60
 # If true, keep serving when an audit write fails (insecure; default false).
 fail_open = false
 # Optional containment base: `audit.path` must resolve to a path under this
-# directory or startup fails. Defaults to the platform state dir. Set to "/"
+# directory or startup fails. Defaults to the platform data dir. Set to "/"
 # to opt out of containment entirely (not recommended).
-# allowed_base_dir = "/home/alice/.local/state/rusty-imap-mcp"
+# allowed_base_dir = "/home/alice/.local/share/rusty-imap-mcp"
 
 # --------------------------------------------------------------------------
 # [attachments] — download sandbox

@@ -89,12 +89,12 @@ fallback = "keyring-then-env"
 # [audit] — global, applies to all accounts (path required)
 # --------------------------------------------------------------------------
 [audit]
-path = "/home/alice/.local/state/rusty-imap-mcp/audit.jsonl"
+path = "/home/alice/.local/share/rusty-imap-mcp/audit.jsonl"
 rotate_bytes = 10485760
 rotate_keep = 5
 provenance_window_seconds = 60
 fail_open = false
-# allowed_base_dir = "/home/alice/.local/state/rusty-imap-mcp"
+# allowed_base_dir = "/home/alice/.local/share/rusty-imap-mcp"
 
 # --------------------------------------------------------------------------
 # [attachments] — global download sandbox
