@@ -110,9 +110,9 @@ Fetch one message's envelope metadata and sanitized text body by folder and uid 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `folder` | string | yes | IMAP folder containing the message. |
-| `include_headers` | array or null | no | Opt-in allowlist of raw header names to return (e.g. `["List-Unsubscribe", "List-Id"]`). Matching is case-insensitive; repeated headers are returned as an array of values. Requested names that are not present on the message are simply omitted from the response (not an error). At most 16 names per call; each value is sanitized and length-capped like every other header. Values appear under `untrusted.headers` because header content is attacker-controlled. Available at every posture `fetch_message` is (no separate capability gate). |
+| `include_headers` | array or null | no | Opt-in allowlist of raw header names to return (e.g. `["List-Unsubscribe", "List-Id"]`). Matching is case-insensitive; repeated headers are returned as an array of values. Requested names that are not present on the message are simply omitted from the response (not an error). At most 16 names per call; each value is sanitized and length-capped like every other header. Values appear under `untrusted.headers` because header content is attacker-controlled. Available at every posture that permits `fetch_message`; there is no separate capability gate for headers. |
 | `include_html` | boolean or null | no | Include sanitized HTML body in the response. |
-| `max_body_bytes` | integer or string (nullable) | no | Truncate body text (and HTML if included) to this many bytes. |
+| `max_body_bytes` | integer or string (nullable) | no | Truncate body text (and HTML if included) to this many bytes. When omitted, the full sanitized body is returned with no size cap; set this to bound response size for long messages or threads. Whenever truncation occurs (from this cap or otherwise), `meta.truncated` is `true`. |
 | `uid` | integer or string | yes | UID of the message to fetch. |
 
 ### Response
