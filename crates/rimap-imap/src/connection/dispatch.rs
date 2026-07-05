@@ -9,23 +9,108 @@ use crate::error::ImapError;
 
 use super::{Connection, ImapSession};
 
+/// Whether an operation may be transparently reconnected-and-retried after an
+/// idle disconnect.
+///
+/// Retrying re-sends the command against a freshly reconnected session. That
+/// is safe only when the command has no server-visible side effect, because a
+/// mid-command disconnect can leave the server having *already applied* the
+/// first send (an `APPEND` that landed, a `MOVE`/`EXPUNGE` that committed, a
+/// `STORE` that toggled a flag). Re-sending such a command would double-apply
+/// it, so mutating ops must never auto-retry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Idempotency {
+    /// Read-only op with no server-visible side effect (`LIST`, `STATUS`,
+    /// `SELECT`/`EXAMINE`, `SEARCH`, `FETCH`, `BODY.PEEK`). Safe to retry once.
+    ReadOnly,
+    /// Mutating op (`STORE`, `MOVE`, `APPEND`, `EXPUNGE`, folder
+    /// create/rename/delete). Never auto-retried — a re-send could
+    /// double-apply.
+    Mutating,
+}
+
+/// Transport-level failures that mean the cached session is dead and must be
+/// dropped before the next command reuses it.
+///
+/// `SizeLimit` aborts a fetch mid-stream, leaving the IMAP response
+/// half-consumed, so the session must be dropped. (`append` is the only other
+/// `SizeLimit` producer; it checks size before sending, so invalidating a
+/// healthy session there is a harmless reconnect.)
+fn is_transport_failure<T>(result: &Result<T, ImapError>) -> bool {
+    matches!(
+        result,
+        Err(ImapError::ConnectionLost | ImapError::SizeLimit { .. } | ImapError::Timeout { .. })
+    )
+}
+
+/// Whether `result` warrants one transparent reconnect-and-retry.
+///
+/// Fires only for an idempotent op that lost its connection — the stale-idle
+/// case. A `Timeout` is excluded (the command may still be running
+/// server-side) and so is `SizeLimit` (a deterministic rejection, not a
+/// transient disconnect).
+fn should_reconnect<T>(idempotency: Idempotency, result: &Result<T, ImapError>) -> bool {
+    idempotency == Idempotency::ReadOnly && matches!(result, Err(ImapError::ConnectionLost))
+}
+
 impl Connection {
-    /// Run an IMAP operation with a command timeout and automatic session
-    /// invalidation on connection-level failures.
+    /// Run an IMAP operation under a command timeout, transparently recovering
+    /// from an idle disconnect.
     ///
-    /// The closure receives a mutable reference to the live `Session`.
-    /// If it returns `ImapError::ConnectionLost` or `ImapError::Timeout`, the
-    /// cached session is dropped so the next call lazy-reconnects.
-    pub(super) async fn with_session<T, F>(
+    /// The closure receives a mutable reference to the live `Session`. On a
+    /// transport-level failure (`ConnectionLost`, `SizeLimit`, or `Timeout`)
+    /// the cached session is dropped so the next call lazy-reconnects.
+    ///
+    /// When `idempotency` is [`Idempotency::ReadOnly`] and the failure is
+    /// [`ImapError::ConnectionLost`] — the signature of a session the server
+    /// closed during an idle gap — the operation is reconnected and retried
+    /// **once**, so the first resumed tool call recovers instead of surfacing
+    /// `ERR_CONNECTION_LOST`. [`Idempotency::Mutating`] ops are never retried;
+    /// a re-sent write could double-apply. The loop is bounded to two attempts
+    /// so a persistently broken server cannot storm.
+    ///
+    /// `make_body` is a *factory*: it is called once per attempt to produce a
+    /// fresh single-use body closure. A factory (rather than one reusable
+    /// `AsyncFn` body) is required because passing this crate's real per-op
+    /// closures through a multi-call `AsyncFn` generic trips a spurious
+    /// higher-ranked lifetime error (E0477) at the caller's monomorphization
+    /// site; a `Fn() -> AsyncFnOnce` factory keeps the looser, working
+    /// `AsyncFnOnce` bound on the body.
+    ///
+    /// The control flow here mirrors the test-only `with_reconnect` helper; the
+    /// two share the [`should_reconnect`] / [`is_transport_failure`] predicates
+    /// that carry all the retry-policy logic.
+    pub(super) async fn with_session<T, Mk, B>(
         &self,
         op_name: &'static str,
-        body: F,
+        idempotency: Idempotency,
+        make_body: Mk,
     ) -> Result<T, ImapError>
     where
-        F: for<'s> AsyncFnOnce(&'s mut ImapSession) -> Result<T, ImapError>,
+        Mk: Fn() -> B,
+        B: for<'s> AsyncFnOnce(&'s mut ImapSession) -> Result<T, ImapError>,
+    {
+        let first = self.attempt(op_name, make_body()).await;
+        if is_transport_failure(&first) {
+            self.invalidate().await;
+        }
+        if !should_reconnect(idempotency, &first) {
+            return first;
+        }
+        let second = self.attempt(op_name, make_body()).await;
+        if is_transport_failure(&second) {
+            self.invalidate().await;
+        }
+        second
+    }
+
+    /// A single timeout-guarded run of `body` against the live session.
+    async fn attempt<T, B>(&self, op_name: &'static str, body: B) -> Result<T, ImapError>
+    where
+        B: for<'s> AsyncFnOnce(&'s mut ImapSession) -> Result<T, ImapError>,
     {
         let dur = self.inner.cfg.command_timeout;
-        let result = crate::time::with_timeout(op_name, dur, async {
+        crate::time::with_timeout(op_name, dur, async {
             let mut guard = self.session().await?;
             let session =
                 guard
@@ -35,24 +120,14 @@ impl Connection {
                     )))?;
             body(session).await
         })
-        .await;
-        // SizeLimit aborts a fetch mid-stream, leaving the IMAP response
-        // half-consumed, so the session must be dropped. (`append` is the
-        // only other SizeLimit producer; it checks size before sending, so
-        // invalidating a healthy session there is a harmless reconnect.)
-        if let Err(
-            ImapError::ConnectionLost | ImapError::SizeLimit { .. } | ImapError::Timeout { .. },
-        ) = &result
-        {
-            self.invalidate().await;
-        }
-        result
+        .await
     }
 
     /// `LIST` against `pattern` (e.g. `"*"`, `"INBOX/*"`).
     ///
-    /// Drops the cached session on `ConnectionLost` so the next call
-    /// lazy-reconnects without auto-retrying the failed command.
+    /// A read-only op: on `ConnectionLost` it reconnects and retries once
+    /// (see [`Self::with_session`]) so a stale idle session recovers
+    /// transparently.
     ///
     /// # Errors
     ///
@@ -62,8 +137,8 @@ impl Connection {
         &self,
         pattern: &str,
     ) -> Result<Vec<crate::types::Folder>, ImapError> {
-        self.with_session("list", async |session| {
-            crate::ops::folders::list(session, pattern).await
+        self.with_session("list", Idempotency::ReadOnly, || {
+            async |session| crate::ops::folders::list(session, pattern).await
         })
         .await
     }
@@ -82,8 +157,8 @@ impl Connection {
         &self,
         pattern: &str,
     ) -> Result<Vec<(crate::types::Folder, Option<crate::types::FolderStatus>)>, ImapError> {
-        self.with_session("list_folders_with_status", async move |session| {
-            crate::ops::folders::list_with_status(session, pattern).await
+        self.with_session("list_folders_with_status", Idempotency::ReadOnly, || {
+            async move |session| crate::ops::folders::list_with_status(session, pattern).await
         })
         .await
     }
@@ -98,8 +173,8 @@ impl Connection {
         folder: &str,
         items: crate::types::StatusItems,
     ) -> Result<crate::types::FolderStatus, ImapError> {
-        self.with_session("status", async |session| {
-            crate::ops::folders::status(session, folder, items).await
+        self.with_session("status", Idempotency::ReadOnly, || {
+            async |session| crate::ops::folders::status(session, folder, items).await
         })
         .await
     }
@@ -114,8 +189,8 @@ impl Connection {
         folder: &str,
         read_only: bool,
     ) -> Result<crate::types::SelectedFolder, ImapError> {
-        self.with_session("select", async |session| {
-            crate::ops::folders::select(session, folder, read_only).await
+        self.with_session("select", Idempotency::ReadOnly, || {
+            async |session| crate::ops::folders::select(session, folder, read_only).await
         })
         .await
     }
@@ -133,8 +208,8 @@ impl Connection {
         folder: &str,
         query: crate::types::SearchQuery,
     ) -> Result<(Vec<crate::types::Uid>, Option<u32>), ImapError> {
-        self.with_session("search", async |session| {
-            crate::ops::search::search(session, folder, query).await
+        self.with_session("search", Idempotency::ReadOnly, || {
+            async |session| crate::ops::search::search(session, folder, query.clone()).await
         })
         .await
     }
@@ -153,8 +228,11 @@ impl Connection {
         own_message_id: Option<&str>,
         ancestor_ids: &[String],
     ) -> Result<(Vec<crate::types::Uid>, Option<u32>), ImapError> {
-        self.with_session("thread_related", async |session| {
-            crate::ops::search::thread_related(session, folder, own_message_id, ancestor_ids).await
+        self.with_session("thread_related", Idempotency::ReadOnly, || {
+            async |session| {
+                crate::ops::search::thread_related(session, folder, own_message_id, ancestor_ids)
+                    .await
+            }
         })
         .await
     }
@@ -178,8 +256,10 @@ impl Connection {
         spec: crate::types::FetchSpec,
         expected_uidvalidity: Option<u32>,
     ) -> Result<(Vec<crate::types::FetchedMessage>, Option<u32>), ImapError> {
-        self.with_session("fetch", async |session| {
-            crate::ops::fetch::fetch(session, folder, uids, spec, expected_uidvalidity).await
+        self.with_session("fetch", Idempotency::ReadOnly, || {
+            async |session| {
+                crate::ops::fetch::fetch(session, folder, uids, spec, expected_uidvalidity).await
+            }
         })
         .await
     }
@@ -252,12 +332,19 @@ impl Connection {
         expected_uidvalidity: Option<u32>,
         limit: u64,
     ) -> Result<Vec<u8>, ImapError> {
-        self.with_session("fetch_body", async |session| {
-            let server_size =
-                crate::ops::fetch::preflight_fetch_size(session, folder, uid, expected_uidvalidity)
-                    .await?;
-            crate::ops::fetch::preflight_size_check(server_size, limit)?;
-            crate::ops::fetch::fetch_body(session, folder, uid, limit, expected_uidvalidity).await
+        self.with_session("fetch_body", Idempotency::ReadOnly, || {
+            async |session| {
+                let server_size = crate::ops::fetch::preflight_fetch_size(
+                    session,
+                    folder,
+                    uid,
+                    expected_uidvalidity,
+                )
+                .await?;
+                crate::ops::fetch::preflight_size_check(server_size, limit)?;
+                crate::ops::fetch::fetch_body(session, folder, uid, limit, expected_uidvalidity)
+                    .await
+            }
         })
         .await
     }
@@ -285,12 +372,14 @@ impl Connection {
         action: crate::types::FlagAction,
         expected_uidvalidity: Option<u32>,
     ) -> Result<(Vec<crate::types::Uid>, Option<u32>), ImapError> {
-        self.with_session("store", async |session| {
-            let selected = crate::ops::folders::select(session, folder, false).await?;
-            let uid_validity = selected.uid_validity;
-            crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
-            let updated = crate::ops::store::store(session, uids, flags, action).await?;
-            Ok((updated, uid_validity))
+        self.with_session("store", Idempotency::Mutating, || {
+            async |session| {
+                let selected = crate::ops::folders::select(session, folder, false).await?;
+                let uid_validity = selected.uid_validity;
+                crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
+                let updated = crate::ops::store::store(session, uids, flags, action).await?;
+                Ok((updated, uid_validity))
+            }
         })
         .await
     }
@@ -323,18 +412,20 @@ impl Connection {
     ) -> Result<crate::ops::move_message::MoveOutcome, ImapError> {
         let has_move = self.has_move_capability();
         let has_uidplus = self.has_uidplus_capability();
-        self.with_session("move", async |session| {
-            crate::ops::folders::select(session, source_folder, false).await?;
-            crate::ops::move_message::move_messages(
-                session,
-                source_folder,
-                dest_folder,
-                uids,
-                expected_source_uidvalidity,
-                has_move,
-                has_uidplus,
-            )
-            .await
+        self.with_session("move", Idempotency::Mutating, || {
+            async |session| {
+                crate::ops::folders::select(session, source_folder, false).await?;
+                crate::ops::move_message::move_messages(
+                    session,
+                    source_folder,
+                    dest_folder,
+                    uids,
+                    expected_source_uidvalidity,
+                    has_move,
+                    has_uidplus,
+                )
+                .await
+            }
         })
         .await
     }
@@ -361,8 +452,10 @@ impl Connection {
         keywords: &[&str],
     ) -> Result<crate::types::AppendResult, ImapError> {
         let limit = self.inner.cfg.max_append_bytes;
-        self.with_session("append", async |session| {
-            crate::ops::append::append(session, folder, message, flags, keywords, limit).await
+        self.with_session("append", Idempotency::Mutating, || {
+            async |session| {
+                crate::ops::append::append(session, folder, message, flags, keywords, limit).await
+            }
         })
         .await
     }
@@ -393,20 +486,22 @@ impl Connection {
     ) -> Result<(crate::ops::delete::DeleteResult, Option<u32>), ImapError> {
         let has_move = self.has_move_capability();
         let has_uidplus = self.has_uidplus_capability();
-        self.with_session("delete_message", async |session| {
-            let selected = crate::ops::folders::select(session, folder, false).await?;
-            let uid_validity = selected.uid_validity;
-            crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
-            let result = crate::ops::delete::delete_message(
-                session,
-                uid,
-                folder,
-                trash_folder,
-                has_move,
-                has_uidplus,
-            )
-            .await?;
-            Ok((result, uid_validity))
+        self.with_session("delete_message", Idempotency::Mutating, || {
+            async |session| {
+                let selected = crate::ops::folders::select(session, folder, false).await?;
+                let uid_validity = selected.uid_validity;
+                crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
+                let result = crate::ops::delete::delete_message(
+                    session,
+                    uid,
+                    folder,
+                    trash_folder,
+                    has_move,
+                    has_uidplus,
+                )
+                .await?;
+                Ok((result, uid_validity))
+            }
         })
         .await
     }
@@ -423,11 +518,13 @@ impl Connection {
     /// Returns `ImapError::ConnectionLost` or `ImapError::Timeout` on transport failure,
     /// or a protocol error if the server rejects the command.
     pub async fn expunge(&self, folder: &str) -> Result<(Vec<crate::types::Uid>, u32), ImapError> {
-        self.with_session("expunge", async |session| {
-            let deleted_uids = crate::ops::expunge::count_deleted(session, folder).await?;
-            crate::ops::folders::select(session, folder, false).await?;
-            let count = crate::ops::expunge::expunge(session).await?;
-            Ok((deleted_uids, count))
+        self.with_session("expunge", Idempotency::Mutating, || {
+            async |session| {
+                let deleted_uids = crate::ops::expunge::count_deleted(session, folder).await?;
+                crate::ops::folders::select(session, folder, false).await?;
+                let count = crate::ops::expunge::expunge(session).await?;
+                Ok((deleted_uids, count))
+            }
         })
         .await
     }
@@ -440,8 +537,8 @@ impl Connection {
     /// or `ImapError::Timeout` on transport failure, or a protocol error if the
     /// server rejects the command.
     pub async fn create_folder(&self, name: &str) -> Result<(), ImapError> {
-        self.with_session("create_folder", async |session| {
-            crate::ops::folder_management::create_folder(session, name).await
+        self.with_session("create_folder", Idempotency::Mutating, || {
+            async |session| crate::ops::folder_management::create_folder(session, name).await
         })
         .await
     }
@@ -456,8 +553,10 @@ impl Connection {
     /// `ImapError::Timeout` on transport failure, or a protocol error if the
     /// server rejects the command.
     pub async fn rename_folder(&self, old_name: &str, new_name: &str) -> Result<(), ImapError> {
-        self.with_session("rename_folder", async |session| {
-            crate::ops::folder_management::rename_folder(session, old_name, new_name).await
+        self.with_session("rename_folder", Idempotency::Mutating, || {
+            async |session| {
+                crate::ops::folder_management::rename_folder(session, old_name, new_name).await
+            }
         })
         .await
     }
@@ -471,9 +570,185 @@ impl Connection {
     /// `ImapError::Timeout` on transport failure, or a protocol error if
     /// the server rejects the command.
     pub async fn delete_folder(&self, name: &str) -> Result<(), ImapError> {
-        self.with_session("delete_folder", async |session| {
-            crate::ops::folder_management::delete_folder(session, name).await
+        self.with_session("delete_folder", Idempotency::Mutating, || {
+            async |session| crate::ops::folder_management::delete_folder(session, name).await
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::{Idempotency, is_transport_failure, should_reconnect};
+    use crate::error::ImapError;
+
+    /// Mirror of [`Connection::with_session`]'s retry loop, decoupled from a
+    /// live session so the loop behavior can be exercised with scripted
+    /// `attempt` / `invalidate` closures. It shares the exact
+    /// [`should_reconnect`] / [`is_transport_failure`] predicates the real loop
+    /// uses, so the retry *policy* is verified against the same code the
+    /// production path runs; only the four direct method calls are stand-ins.
+    /// (The production loop cannot itself be generic over these closures —
+    /// doing so trips an `AsyncFn` lifetime error at the real call sites.)
+    async fn with_reconnect<T, A, I>(
+        idempotency: Idempotency,
+        attempt: A,
+        invalidate: I,
+    ) -> Result<T, ImapError>
+    where
+        A: AsyncFn() -> Result<T, ImapError>,
+        I: AsyncFn(),
+    {
+        let first = attempt().await;
+        if is_transport_failure(&first) {
+            invalidate().await;
+        }
+        if !should_reconnect(idempotency, &first) {
+            return first;
+        }
+        let second = attempt().await;
+        if is_transport_failure(&second) {
+            invalidate().await;
+        }
+        second
+    }
+
+    fn protocol_err() -> ImapError {
+        ImapError::Protocol(async_imap::error::Error::Bad("x".to_string()))
+    }
+
+    #[test]
+    fn should_reconnect_only_for_read_op_connection_lost() {
+        let cases: &[(Idempotency, Result<u8, ImapError>, bool)] = &[
+            (Idempotency::ReadOnly, Err(ImapError::ConnectionLost), true),
+            (Idempotency::Mutating, Err(ImapError::ConnectionLost), false),
+            (
+                Idempotency::ReadOnly,
+                Err(ImapError::Timeout { op: "fetch" }),
+                false,
+            ),
+            (
+                Idempotency::ReadOnly,
+                Err(ImapError::SizeLimit { limit: 1 }),
+                false,
+            ),
+            (Idempotency::ReadOnly, Err(protocol_err()), false),
+            (Idempotency::ReadOnly, Ok(1), false),
+        ];
+        for (idempotency, result, expected) in cases {
+            assert_eq!(
+                should_reconnect(*idempotency, result),
+                *expected,
+                "for {idempotency:?} / {result:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn is_transport_failure_covers_dead_session_errors_only() {
+        assert!(is_transport_failure::<u8>(&Err(ImapError::ConnectionLost)));
+        assert!(is_transport_failure::<u8>(&Err(ImapError::SizeLimit {
+            limit: 1
+        })));
+        assert!(is_transport_failure::<u8>(&Err(ImapError::Timeout {
+            op: "x"
+        })));
+        assert!(!is_transport_failure::<u8>(&Ok(1)));
+        assert!(!is_transport_failure::<u8>(&Err(protocol_err())));
+    }
+
+    /// Drive `with_reconnect` with a scripted `attempt` (indexed by call
+    /// count) and count attempts + invalidations. Returns
+    /// `(result, attempts, invalidations)`.
+    async fn run(
+        idempotency: Idempotency,
+        script: impl Fn(usize) -> Result<u8, ImapError>,
+    ) -> (Result<u8, ImapError>, usize, usize) {
+        let attempts = Cell::new(0usize);
+        let invalidations = Cell::new(0usize);
+        let out = with_reconnect(
+            idempotency,
+            async || {
+                let n = attempts.get();
+                attempts.set(n + 1);
+                script(n)
+            },
+            async || invalidations.set(invalidations.get() + 1),
+        )
+        .await;
+        (out, attempts.get(), invalidations.get())
+    }
+
+    #[tokio::test]
+    async fn read_op_recovers_transparently_after_idle_disconnect() {
+        // First resumed call hits a stale session (ConnectionLost); the retry
+        // against a fresh session succeeds — the caller never sees the error.
+        let (out, attempts, invalidations) = run(Idempotency::ReadOnly, |n| {
+            if n == 0 {
+                Err(ImapError::ConnectionLost)
+            } else {
+                Ok(7)
+            }
+        })
+        .await;
+        assert!(matches!(out, Ok(7)), "retry should recover, got {out:?}");
+        assert_eq!(attempts, 2, "one retry after the lost connection");
+        assert_eq!(invalidations, 1, "stale session dropped before the retry");
+    }
+
+    #[tokio::test]
+    async fn mutating_op_does_not_auto_retry() {
+        // A write that loses its connection must surface the error, not
+        // re-send (which could double-apply). Only one attempt is made.
+        let (out, attempts, invalidations) = run(Idempotency::Mutating, |n| {
+            if n == 0 {
+                Err(ImapError::ConnectionLost)
+            } else {
+                Ok(7) // must never be reached
+            }
+        })
+        .await;
+        assert!(
+            matches!(out, Err(ImapError::ConnectionLost)),
+            "write must propagate ConnectionLost, got {out:?}",
+        );
+        assert_eq!(attempts, 1, "write must not retry");
+        assert_eq!(invalidations, 1, "dead session still invalidated");
+    }
+
+    #[tokio::test]
+    async fn read_op_retry_is_bounded_to_two_attempts() {
+        // A persistently dead server must not storm: at most one retry.
+        let (out, attempts, invalidations) =
+            run(Idempotency::ReadOnly, |_| Err(ImapError::ConnectionLost)).await;
+        assert!(
+            matches!(out, Err(ImapError::ConnectionLost)),
+            "second failure propagates, got {out:?}",
+        );
+        assert_eq!(attempts, 2, "bounded to exactly two attempts");
+        assert_eq!(invalidations, 2, "invalidate after each failure");
+    }
+
+    #[tokio::test]
+    async fn read_op_timeout_is_not_retried() {
+        // A timeout may mean the command is still running server-side; do not
+        // resend even for a read.
+        let (out, attempts, invalidations) = run(Idempotency::ReadOnly, |_| {
+            Err(ImapError::Timeout { op: "fetch" })
+        })
+        .await;
+        assert!(matches!(out, Err(ImapError::Timeout { .. })), "got {out:?}");
+        assert_eq!(attempts, 1, "timeout is not retried");
+        assert_eq!(invalidations, 1);
+    }
+
+    #[tokio::test]
+    async fn healthy_read_op_runs_once_without_invalidating() {
+        let (out, attempts, invalidations) = run(Idempotency::ReadOnly, |_| Ok(7)).await;
+        assert!(matches!(out, Ok(7)));
+        assert_eq!(attempts, 1, "no retry on success");
+        assert_eq!(invalidations, 0, "healthy session is kept");
     }
 }
