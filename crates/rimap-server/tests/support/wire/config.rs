@@ -210,6 +210,59 @@ send_email = "deny"
     )
 }
 
+/// Build a single-account `full`-posture TOML for the `e2e_wire.rs`
+/// full-posture round-trips (#460). The `full` posture is the least
+/// privilege that permits both `search.advanced_query` (`SearchAdvanced`)
+/// and `fetch_message.include_html` (`FetchMessageHtml`) — both are denied
+/// under `draft-safe` and `readonly` — so it is the posture under which
+/// those two sub-capabilities are exercised as ALLOW round-trips.
+///
+/// `send_email` is denied via a tool override: the `full` posture enables
+/// it, but the config validator requires an `[smtp]` section for a
+/// send-capable tool, and this path exercises IMAP retrieval only. Same
+/// pattern as [`build_dovecot_destructive_config`] and
+/// [`build_dovecot_folder_config`].
+pub fn build_dovecot_full_config(
+    fingerprint_hex: &str,
+    port: u16,
+    audit_path: &Path,
+    allowed_base: &Path,
+    download_dir: &Path,
+) -> String {
+    format!(
+        r#"
+[audit]
+path = "{audit_path}"
+allowed_base_dir = "{allowed_base}"
+
+[attachments]
+download_dir = "{download_dir}"
+
+[defaults.credentials]
+fallback = "keyring-then-env"
+
+[[accounts]]
+name = "full"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = {port}
+username = "rimap-test"
+encryption = "tls"
+tls_fingerprint_sha256 = "{fingerprint_hex}"
+
+[accounts.security]
+posture = "full"
+
+[accounts.security.tools]
+send_email = "deny"
+"#,
+        audit_path = audit_path.display(),
+        allowed_base = allowed_base.display(),
+        download_dir = download_dir.display(),
+    )
+}
+
 /// Per-binary dead-code suppression. `mcp_wire_conformance.rs`
 /// compiles this module through `support/wire/mod.rs` but never calls
 /// these builders; if we relied on `#[expect(dead_code)]` instead, that
@@ -227,4 +280,5 @@ fn force_use_for_dead_code_link() {
     let _ = build_dovecot_config;
     let _ = build_dovecot_destructive_config;
     let _ = build_dovecot_folder_config;
+    let _ = build_dovecot_full_config;
 }
