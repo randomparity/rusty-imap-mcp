@@ -49,7 +49,7 @@ fn dry_run_exits_zero_and_prints_matrix() {
 }
 
 #[test]
-fn missing_config_exits_non_zero_with_error_log() {
+fn missing_config_prints_actionable_first_run_guidance() {
     let dir = TempDir::new().unwrap();
     let missing = dir.path().join("absent.toml");
     Command::cargo_bin("rusty-imap-mcp")
@@ -59,7 +59,13 @@ fn missing_config_exits_non_zero_with_error_log() {
         .arg("--dry-run")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("loading config"));
+        // stdout is reserved for the MCP transport and must stay clean.
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("No configuration file was found"))
+        .stderr(predicate::str::contains("absent.toml"))
+        .stderr(predicate::str::contains("config.example.toml"))
+        .stderr(predicate::str::contains("docs/quickstart-gmail.md"))
+        .stderr(predicate::str::contains("docs/quickstart-proton-bridge.md"));
 }
 
 #[test]
