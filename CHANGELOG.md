@@ -136,6 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `download_attachment` -- download attachment by part index
 - `list_labels` -- list custom IMAP keyword flags on a message
 
+`export_messages` (bulk raw mbox export of multiple UIDs to the download
+sandbox) is denied in every posture by default and enabled only via an
+`export_messages = "allow"` override in `[security.tools]`.
+
 **Mutation operations (draft-safe and above):**
 
 - `mark_read` / `mark_unread` -- set or clear `\Seen` flag
@@ -147,12 +151,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Full posture operations:**
 
 - `send_email` -- SMTP send with Sent folder copy
+- `forward` -- re-send an existing message as a `message/rfc822` wrapper
 - `delete_message` -- flag `\Deleted` and move to Trash
 - `create_folder` / `rename_folder` -- IMAP folder management
 
 Advanced IMAP `SEARCH` passthrough and sanitized HTML bodies are exposed
-as full-posture sub-capabilities of `search` and `fetch_message`
-(`advanced_query` / `include_html`), not as standalone tools.
+as full-posture sub-capabilities of `search`, `fetch_message`, and
+`create_draft` (`advanced_query` / `include_html` / `body_html`), not as
+standalone tools.
 
 **Destructive posture operations:**
 

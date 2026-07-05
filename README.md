@@ -51,10 +51,10 @@ security metadata, not raw attack surface.
 
 ### Email operations
 
-- 21 posture-gated tools: list, search, fetch, export, flag, label,
-  move, draft, send, folder management, attachment download
+- 22 posture-gated tools: list, search, fetch, export, flag, label,
+  move, draft, send, forward, folder management, attachment download
 - 2 infrastructure tools: `list_accounts`, `use_account`
-- 23 dispatchable tools total
+- 24 dispatchable tools total
 - Multi-account support with per-account posture, rate limits, and
   circuit breaker
 - SMTP sending with automatic Sent-folder copy via IMAP APPEND
@@ -118,7 +118,7 @@ Prefer to start from a full annotated config? Copy
 
 ## MCP tools
 
-**21 posture-gated tools:**
+**22 posture-gated tools:**
 
 - **Read:** `list_folders`, `search`, `fetch_message`,
   `list_attachments`, `download_attachment`, `list_labels`
@@ -136,16 +136,17 @@ Prefer to start from a full annotated config? Copy
 and a sanitized `body_html` alternative (gated at `full`).
 
 `search`'s content-search arguments (`advanced_query`, `body`, `text`,
-`bcc`, `headers`) and `fetch_message`'s `include_html` argument are
-gated sub-capabilities (`search.advanced_query`,
-`fetch_message.include_html`) requiring `full` posture or above — they
+`bcc`, `headers`), `fetch_message`'s `include_html` argument, and
+`create_draft`'s `body_html` argument are gated sub-capabilities
+(`search.advanced_query`, `fetch_message.include_html`,
+`create_draft.include_html`) requiring `full` posture or above — they
 are not separate MCP tools.
 
 **2 infrastructure tools** (always available):
 `use_account`, `list_accounts`
 
-23 dispatchable tools total. See [docs/postures.md](docs/postures.md)
-for the full 23-capability x 4-posture matrix (the two gated
+24 dispatchable tools total. See [docs/postures.md](docs/postures.md)
+for the full 25-capability x 4-posture matrix (the three gated
 sub-capabilities above are counted as separate rows there).
 
 ## Compatibility
