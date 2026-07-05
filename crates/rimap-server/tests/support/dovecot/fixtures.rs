@@ -80,6 +80,52 @@ pub fn multipart_with_attachment() -> Vec<u8> {
     body.into_bytes()
 }
 
+/// Subject of the HTML fixture. Distinct from the plain fixture's
+/// subject so the full-posture `advanced_query` round-trip can target it
+/// with a raw IMAP `SUBJECT` key.
+pub const HTML_SUBJECT: &str = "e2e-wire-html-body";
+
+/// Distinctive token embedded in the `text/html` body of
+/// [`html_body_message`]. Wrapped in safe markup that the content
+/// sanitizer preserves, so `fetch_message` with `include_html = true`
+/// returns a `body_html` still containing it.
+pub const HTML_MARKER: &str = "e2e-wire-html-marker";
+
+/// Returns the raw bytes of a `text/html` MIME message whose body carries
+/// [`HTML_MARKER`] inside safe markup. Suitable for
+/// `Connection::append_message`.
+///
+/// Exercises the full-posture `fetch_message.include_html` capability
+/// end-to-end: the HTML part is what makes `body_html` non-empty once the
+/// server-side sanitizer runs (`fetch_message` derives a plain `body_text`
+/// from the same HTML). The subject is [`HTML_SUBJECT`] so the companion
+/// `search.advanced_query` round-trip can locate it with a raw IMAP
+/// `SUBJECT` key.
+///
+/// This is an HTML-only message rather than `multipart/alternative`: the
+/// content parser only surfaces `body_html` for the message's primary
+/// displayable body, and in a `multipart/alternative` the `text/plain`
+/// part wins that slot, leaving the HTML alternative unsurfaced (see
+/// `rimap-content` `parse_multipart_alternative_picks_text_plain_first`).
+/// Bytes are CRLF-terminated as required by RFC 5322.
+pub fn html_body_message() -> Vec<u8> {
+    let body = format!(
+        "From: sender@example.com\r\n\
+         To: rimap-test@localhost\r\n\
+         Subject: {HTML_SUBJECT}\r\n\
+         Date: Sat, 12 May 2026 11:00:00 +0000\r\n\
+         Message-ID: <e2e-wire-html-body-001@example.com>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Transfer-Encoding: 7bit\r\n\
+         \r\n\
+         <html><body><p>Rich body for the e2e round-trip: \
+         <strong>{HTML_MARKER}</strong></p></body></html>\r\n",
+    );
+
+    body.into_bytes()
+}
+
 /// Per-binary dead-code suppression. `e2e.rs` compiles this module
 /// through `support/dovecot/mod.rs` but never calls any item here; if
 /// we relied on `#![expect(dead_code)]` instead, that expectation
@@ -97,5 +143,8 @@ fn force_use_for_dead_code_link() {
     let _: &str = ATTACHMENT_FILENAME;
     let _: &[u8] = ATTACHMENT_BYTES;
     let _: &str = PLAIN_BODY;
+    let _: &str = HTML_SUBJECT;
+    let _: &str = HTML_MARKER;
     let _ = multipart_with_attachment;
+    let _ = html_body_message;
 }
