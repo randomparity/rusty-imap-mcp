@@ -166,6 +166,15 @@ Each account has independent:
 - Security posture
 
 One account's rate limit or circuit breaker state does not affect
+another account.
+
+Isolation is per-account, not per-call: each account's single IMAP
+connection still serializes the concurrent tool calls made *within*
+that account, so a slow command on one account can delay other queued
+calls to the same account (but never to a different one). See
+[architecture/audit-locking.md](architecture/audit-locking.md#operator-impact-concurrent-calls-to-one-account-serialize)
+for the mechanism and [configuration.md](configuration.md#imap-section)
+for the timeout that bounds the delay.
 
 ## Per-account per-tool overrides
 
