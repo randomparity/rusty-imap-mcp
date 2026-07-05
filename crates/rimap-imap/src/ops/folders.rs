@@ -170,19 +170,25 @@ fn build_status_items(items: StatusItems) -> String {
 
 /// Classify an async-imap error into our `ImapError` taxonomy.
 ///
-/// Walks the `std::error::Error::source()` chain looking for a
-/// `std::io::Error` whose `ErrorKind` indicates a dead TCP connection
-/// (`ConnectionReset`, `ConnectionAborted`, `BrokenPipe`, `UnexpectedEof`,
-/// `NotConnected`). Those surface as `ConnectionLost` so the caller can
-/// drop the cached session and lazy-reconnect on the next op. Anything
-/// else becomes `Protocol`.
+/// Checks async-imap's payload-less `Error::ConnectionLost` variant first —
+/// emitted on idle-EOF / graceful stream close, with no `Io` payload or
+/// source chain to inspect — then walks the `std::error::Error::source()`
+/// chain looking for a `std::io::Error` whose `ErrorKind` indicates a dead
+/// TCP connection (`ConnectionReset`, `ConnectionAborted`, `BrokenPipe`,
+/// `UnexpectedEof`, `NotConnected`). Those surface as `ConnectionLost` so the
+/// caller can drop the cached session and lazy-reconnect on the next op.
+/// Anything else becomes `Protocol`.
 ///
 /// The previous implementation substring-matched the lowercased `Display`
 /// text, which missed async-imap's `Io(BrokenPipe)` formatting (the text
 /// "I/O error: Broken pipe" does not contain the word "connection") and
 /// left the session cached in a dead state. See #38 for the follow-up.
+///
+/// Before the `ConnectionLost` arm was added (#449), the unit variant fell
+/// through to `Protocol`, which `with_session`'s invalidation set excludes —
+/// the dead session stayed cached until process restart.
 pub(super) fn map_err(err: async_imap::error::Error) -> ImapError {
-    if is_connection_lost(&err) {
+    if matches!(err, async_imap::error::Error::ConnectionLost) || is_connection_lost(&err) {
         ImapError::ConnectionLost
     } else {
         ImapError::Protocol(err)
@@ -328,6 +334,20 @@ mod tests {
     fn map_err_routes_bad_response_to_protocol() {
         let mapped = map_err(async_imap::error::Error::Bad("BAD".to_string()));
         assert!(matches!(mapped, ImapError::Protocol(_)));
+    }
+
+    #[test]
+    fn map_err_routes_connection_lost_unit_variant_to_connection_lost() {
+        // Regression for #449: async-imap 0.11.2 emits the payload-less
+        // `Error::ConnectionLost` on idle-EOF / graceful stream close. It has
+        // no `Io` payload and no source chain, so the old `is_connection_lost`
+        // (which only inspected `Error::Io` and its source chain) fell
+        // through to `ImapError::Protocol`, which is excluded from
+        // `with_session`'s invalidation set — the dead session stayed cached
+        // forever. Assert the unit variant is classified as
+        // `ImapError::ConnectionLost` so the caller drops and reconnects.
+        let mapped = map_err(async_imap::error::Error::ConnectionLost);
+        assert!(matches!(mapped, ImapError::ConnectionLost));
     }
 
     #[test]
