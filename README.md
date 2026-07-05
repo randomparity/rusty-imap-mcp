@@ -183,7 +183,44 @@ Binaries are published for five targets on each
 [release](https://github.com/randomparity/rusty-imap-mcp/releases):
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
 `aarch64-apple-darwin`, `powerpc64le-unknown-linux-gnu`,
-`s390x-unknown-linux-gnu`. SHA256 checksums included.
+`s390x-unknown-linux-gnu`. Each release also attaches `SHA256SUMS.txt`
+and a [build provenance
+attestation](https://github.com/randomparity/rusty-imap-mcp/attestations)
+for every binary.
+
+### Installing a prebuilt binary
+
+1. Download the binary for your platform and `SHA256SUMS.txt` from the
+   [releases page](https://github.com/randomparity/rusty-imap-mcp/releases).
+2. Verify the checksum before running anything you downloaded:
+
+   ```bash
+   sha256sum --ignore-missing -c SHA256SUMS.txt
+   ```
+
+3. Make the binary executable and put it on your `$PATH`:
+
+   ```bash
+   chmod +x rusty-imap-mcp-<target-triple>
+   mv rusty-imap-mcp-<target-triple> ~/.local/bin/rusty-imap-mcp
+   ```
+
+4. **macOS only:** Gatekeeper quarantines binaries downloaded via a
+   browser and refuses to run them ("cannot be opened because the
+   developer cannot be verified"). The `aarch64-apple-darwin` binary is
+   not yet codesigned or notarized, so remove the quarantine attribute
+   before running it:
+
+   ```bash
+   xattr -d com.apple.quarantine ~/.local/bin/rusty-imap-mcp
+   ```
+
+   Alternatively, right-click the binary in Finder, choose **Open**,
+   and confirm the warning once.
+
+   Codesigning and notarization (and an MCPB bundle for one-click
+   Claude Desktop install) are tracked for a future release; until
+   then, always verify the SHA256 checksum first.
 
 ## Documentation
 
