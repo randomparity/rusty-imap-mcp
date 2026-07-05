@@ -188,7 +188,7 @@ fn build_status_items(items: StatusItems) -> String {
 /// through to `Protocol`, which `with_session`'s invalidation set excludes —
 /// the dead session stayed cached until process restart.
 pub(super) fn map_err(err: async_imap::error::Error) -> ImapError {
-    if matches!(err, async_imap::error::Error::ConnectionLost) || is_connection_lost(&err) {
+    if is_connection_lost(&err) {
         ImapError::ConnectionLost
     } else {
         ImapError::Protocol(err)
@@ -197,6 +197,14 @@ pub(super) fn map_err(err: async_imap::error::Error) -> ImapError {
 
 fn is_connection_lost(err: &async_imap::error::Error) -> bool {
     use std::error::Error as _;
+
+    // async-imap's payload-less unit variant, emitted on idle-EOF / graceful
+    // stream close. It carries no `Io` payload and no source chain, so it
+    // must be checked explicitly rather than falling into the chain walk
+    // below.
+    if matches!(err, async_imap::error::Error::ConnectionLost) {
+        return true;
+    }
 
     // Check the top-level error first — async-imap's `Io` variant wraps
     // the `io::ImapError` directly.
