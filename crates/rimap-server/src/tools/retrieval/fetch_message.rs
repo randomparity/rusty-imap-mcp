@@ -28,7 +28,11 @@ pub struct FetchMessageInput {
     pub uid: core::num::NonZeroU32,
     /// Include sanitized HTML body in the response.
     pub include_html: Option<bool>,
-    /// Truncate body text (and HTML if included) to this many bytes.
+    /// Truncate body text (and HTML if included) to this many bytes. When
+    /// omitted, the full sanitized body is returned with no size cap; set
+    /// this to bound response size for long messages or threads. Whenever
+    /// truncation occurs (from this cap or otherwise), `meta.truncated` is
+    /// `true`.
     #[serde(
         default,
         deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize"
@@ -42,8 +46,8 @@ pub struct FetchMessageInput {
     /// the response (not an error). At most 16 names per call; each value
     /// is sanitized and length-capped like every other header. Values
     /// appear under `untrusted.headers` because header content is
-    /// attacker-controlled. Available at every posture `fetch_message`
-    /// is (no separate capability gate).
+    /// attacker-controlled. Available at every posture that permits
+    /// `fetch_message`; there is no separate capability gate for headers.
     #[serde(default)]
     pub include_headers: Option<Vec<String>>,
 }
