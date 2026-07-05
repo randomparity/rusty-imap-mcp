@@ -253,13 +253,21 @@ Linux equivalents and broader credential management, see
 
 Edit your Claude Desktop config
 (`~/Library/Application Support/Claude/claude_desktop_config.json` on
-macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows).
+
+Claude Desktop launches the server without your shell's `$PATH`, so
+`command` must be the absolute path to the binary, not just its name.
+Find it with:
+
+```bash
+which rusty-imap-mcp
+```
 
 ```json
 {
   "mcpServers": {
     "email": {
-      "command": "rusty-imap-mcp"
+      "command": "/Users/you/.cargo/bin/rusty-imap-mcp"
     }
   }
 }
