@@ -51,20 +51,37 @@ a rejected protocol version — are still returned as JSON-RPC errors.
 After a period of inactivity, the IMAP server (or an intervening NAT
 device or firewall) may silently close the TCP connection.
 `rusty-imap-mcp` caches one session per account and doesn't notice the
-drop until the next tool call tries to use it; that call fails with
-`isError: true` and `structuredContent.error_code = "ERR_CONNECTION_LOST"`.
+drop until the next tool call tries to use it.
 
-Internally, the failed call drops the dead session so the *next* call
-lazy-reconnects — but it does **not** auto-retry the command that just
-failed (see `with_session` in
-`crates/rimap-imap/src/connection/dispatch.rs`). **A retry is expected
-and normal**: simply re-issue the same tool call once; it opens a fresh
-connection and typically succeeds.
+What happens next depends on whether that call is a read-only op or a
+mutating one (see `Idempotency` and `with_session` in
+`crates/rimap-imap/src/connection/dispatch.rs`):
 
-If the retry *also* fails with `ERR_CONNECTION_LOST`, the cause isn't an
-idle timeout — the host is unreachable or refusing new connections (see
-the `connect failed` row in
-[Common root causes](#common-root-causes) below). Both a TCP connect
+- **Read-only ops** (`list`, `status`, `search`, `fetch`, `select`, and
+  similar) are safe to re-send, because they have no server-visible side
+  effect. `with_session` drops the dead session and transparently
+  reconnects and retries the same command **once**, so the first tool
+  call made after an idle drop typically recovers on its own and
+  succeeds without ever surfacing an error. Only if that single retry
+  *also* fails with `ERR_CONNECTION_LOST` does the call return
+  `isError: true` — and at that point the cause isn't a one-off idle
+  drop, since the transparent retry already ruled that out (see below).
+- **Mutating ops** (`store`, `move`, `append`, `expunge`, folder
+  create/rename/delete) are never auto-retried, because a mid-command
+  disconnect can leave the server having already applied the first send;
+  re-sending it could double-apply the change (e.g. a double delete or
+  double append). A mutating call made against a stale session fails
+  immediately with `isError: true` and
+  `structuredContent.error_code = "ERR_CONNECTION_LOST"`. **A manual
+  retry is expected and normal here**: simply re-issue the same tool
+  call once; it opens a fresh connection and typically succeeds. This is
+  intentional, not a gap — automatically retrying a mutating op is
+  unsafe, so the caller must decide whether re-applying it is correct.
+
+If a retry — automatic (read-only) or manual (mutating) — *also* fails
+with `ERR_CONNECTION_LOST`, the cause isn't an idle timeout — the host
+is unreachable or refusing new connections (see the `connect failed` row
+in [Common root causes](#common-root-causes) below). Both a TCP connect
 failure (`ImapError::Connect`) and a mid-command connection drop
 (`ImapError::ConnectionLost`) map to this same error code
 (`crates/rimap-imap/src/error.rs`), so distinguish them by behavior: one
