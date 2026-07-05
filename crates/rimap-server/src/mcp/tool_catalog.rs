@@ -138,8 +138,11 @@ fn tool_def_parts(name: ToolName) -> Option<ToolDef> {
             "Find message UIDs in a folder by structured criteria (sender, \
              subject, date, flags, size). The UID-discovery step feeding \
              fetch_message, mark_read, move_message and other per-message \
-             tools; it also returns the folder's uid_validity those tools \
-             accept as a guard. Ordered oldest-first by UID (set \
+             tools; it also returns the folder's uid_validity, which \
+             mark_read/mark_unread, flag/unflag, \
+             add_label/remove_label/list_labels, move_message, \
+             delete_message, and export_messages accept as an optional \
+             guard against UID reuse. Ordered oldest-first by UID (set \
              newest_first to reverse); paginate with offset/limit and \
              next_offset. Set thread_of_uid to retrieve a whole \
              conversation instead of a filtered search.",
