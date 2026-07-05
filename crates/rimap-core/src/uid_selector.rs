@@ -35,14 +35,33 @@ pub const MAX_BATCH_UIDS: usize = 100;
 pub enum UidSelector {
     /// Single-message target.
     Single {
-        /// Non-zero message UID.
+        /// Non-zero message UID. Accepts the integer or digit-string
+        /// form (issue #461).
+        #[schemars(schema_with = "crate::lenient_int::schema_nonzero_u32")]
         uid: NonZeroU32,
     },
     /// Batch target (1 to 100 uids).
     Batch {
-        /// Non-empty, bounded batch of UIDs.
+        /// Non-empty, bounded batch of UIDs. Each element accepts the
+        /// integer or digit-string form (issue #461).
+        #[schemars(schema_with = "schema_bounded_uids")]
         uids: BoundedUids,
     },
+}
+
+/// JSON Schema for the `uids` batch: an array of 1..=`MAX_BATCH_UIDS`
+/// UIDs, each accepted as a positive integer or positive-integer string
+/// (issue #461). Emitted via `#[schemars(schema_with = ...)]` on the
+/// `Batch::uids` field so host pre-validation matches the lenient
+/// runtime decode.
+fn schema_bounded_uids(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let item = crate::lenient_int::schema_nonzero_u32(generator).to_value();
+    schemars::json_schema!({
+        "type": "array",
+        "items": item,
+        "minItems": 1,
+        "maxItems": MAX_BATCH_UIDS,
+    })
 }
 
 impl UidSelector {
@@ -86,16 +105,31 @@ impl TryFrom<Vec<NonZeroU32>> for BoundedUids {
     }
 }
 
+/// A `NonZeroU32` element that accepts either the integer or the
+/// digit-string wire form (issue #461), used to decode each `uids`
+/// batch entry through the shared lenient path.
+struct LenientNonZeroU32(NonZeroU32);
+
+impl<'de> Deserialize<'de> for LenientNonZeroU32 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::lenient_int::deserialize_nonzero_u32(deserializer).map(Self)
+    }
+}
+
 impl<'de> Deserialize<'de> for BoundedUids {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = Vec::<NonZeroU32>::deserialize(deserializer)?;
-        Self::try_from(raw).map_err(serde::de::Error::custom)
+        let raw = Vec::<LenientNonZeroU32>::deserialize(deserializer)?;
+        let uids = raw.into_iter().map(|w| w.0).collect::<Vec<_>>();
+        Self::try_from(uids).map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Deserialize)]
 struct UidSelectorWire {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::lenient_int::deserialize_opt_nonzero_u32"
+    )]
     uid: Option<NonZeroU32>,
     #[serde(default)]
     uids: Option<BoundedUids>,
@@ -238,5 +272,87 @@ mod tests {
         let err = serde_json::from_str::<Parent>(r#"{"folder": "INBOX", "uid": 1, "uids": [2]}"#)
             .unwrap_err();
         assert!(err.to_string().contains("exactly one"), "got: {err}");
+    }
+
+    // --- Stringified integer wire forms (issue #461) --------------------
+
+    #[test]
+    fn accepts_stringified_single_uid() {
+        let sel = parse(r#"{"uid": "42"}"#).unwrap();
+        assert_eq!(single_uid(&sel), Some(42));
+    }
+
+    #[test]
+    fn accepts_stringified_batch_uids() {
+        let sel = parse(r#"{"uids": ["1", "2", "3"]}"#).unwrap();
+        assert_eq!(batch_uids(&sel), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn accepts_mixed_int_and_string_batch_uids() {
+        let sel = parse(r#"{"uids": [1, "2", 3]}"#).unwrap();
+        assert_eq!(batch_uids(&sel), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn rejects_stringified_zero_uid() {
+        let err = parse(r#"{"uid": "0"}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("nonzero") || err.to_string().contains("non-zero"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_stringified_zero_in_batch() {
+        let err = parse(r#"{"uids": ["1", "0"]}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("nonzero") || err.to_string().contains("non-zero"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_digit_string_uid() {
+        let err = parse(r#"{"uid": "abc"}"#).unwrap_err();
+        assert!(err.to_string().contains("integer"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_non_digit_string_in_batch() {
+        let err = parse(r#"{"uids": ["1", "x"]}"#).unwrap_err();
+        assert!(err.to_string().contains("integer"), "got: {err}");
+    }
+
+    #[test]
+    fn flattens_stringified_uid_into_parent_struct() {
+        #[derive(Debug, Deserialize)]
+        struct Parent {
+            folder: String,
+            #[serde(flatten)]
+            target: UidSelector,
+        }
+
+        let p: Parent = serde_json::from_str(r#"{"folder": "INBOX", "uid": "42"}"#).unwrap();
+        assert_eq!(p.folder, "INBOX");
+        assert_eq!(single_uid(&p.target), Some(42));
+
+        let p: Parent = serde_json::from_str(r#"{"folder": "INBOX", "uids": ["1", "2"]}"#).unwrap();
+        assert_eq!(batch_uids(&p.target), Some(vec![1, 2]));
+    }
+
+    #[test]
+    fn schema_publishes_string_branch_for_uid_and_uids() {
+        let schema = schemars::schema_for!(UidSelector);
+        let value = serde_json::to_value(&schema).unwrap();
+        let text = value.to_string();
+        // The nonzero digit-string branch pattern must appear for both
+        // the single `uid` field and each `uids` array element, so host
+        // pre-validation accepts the stringified forms the runtime does.
+        let matches = text.matches("^[1-9][0-9]*$").count();
+        assert!(
+            matches >= 2,
+            "expected uid + uids-item string branches, found {matches}: {text}"
+        );
     }
 }

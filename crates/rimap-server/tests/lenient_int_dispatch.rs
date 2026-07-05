@@ -5,8 +5,19 @@
 #![expect(clippy::unwrap_used, reason = "integration tests")]
 
 use rimap_server::tools::compose::create_draft::CreateDraftInput;
+use rimap_server::tools::mailbox::flags::FlagInput;
 use rimap_server::tools::retrieval::search::SearchInput;
 use serde_json::json;
+
+fn flag_target_uids(input: &FlagInput) -> Vec<u32> {
+    input
+        .target
+        .clone()
+        .into_uids()
+        .iter()
+        .map(|u| u.get())
+        .collect()
+}
 
 #[test]
 fn search_input_accepts_integer_limit() {
@@ -121,4 +132,53 @@ fn create_draft_input_rejects_zero_reply_uid() {
         err.to_string().contains("nonzero") || err.to_string().contains("non-zero"),
         "got: {err}",
     );
+}
+
+// Batch mutation `target` (`uid`/`uids`) accepts stringified integers,
+// matching every other numeric param (#461). Exercised via `from_value`,
+// the path the MCP dispatch layer actually runs.
+
+#[test]
+fn flag_input_accepts_integer_uid() {
+    let v = json!({"folder": "INBOX", "uid": 42});
+    let input: FlagInput = serde_json::from_value(v).unwrap();
+    assert_eq!(flag_target_uids(&input), vec![42]);
+}
+
+#[test]
+fn flag_input_accepts_string_uid() {
+    let v = json!({"folder": "INBOX", "uid": "42"});
+    let input: FlagInput = serde_json::from_value(v).unwrap();
+    assert_eq!(flag_target_uids(&input), vec![42]);
+}
+
+#[test]
+fn flag_input_accepts_string_uids_batch() {
+    let v = json!({"folder": "INBOX", "uids": ["1", "2", "3"]});
+    let input: FlagInput = serde_json::from_value(v).unwrap();
+    assert_eq!(flag_target_uids(&input), vec![1, 2, 3]);
+}
+
+#[test]
+fn flag_input_accepts_mixed_int_and_string_uids_batch() {
+    let v = json!({"folder": "INBOX", "uids": [1, "2", 3]});
+    let input: FlagInput = serde_json::from_value(v).unwrap();
+    assert_eq!(flag_target_uids(&input), vec![1, 2, 3]);
+}
+
+#[test]
+fn flag_input_rejects_zero_string_uid() {
+    let v = json!({"folder": "INBOX", "uid": "0"});
+    let err = serde_json::from_value::<FlagInput>(v).unwrap_err();
+    assert!(
+        err.to_string().contains("nonzero") || err.to_string().contains("non-zero"),
+        "got: {err}",
+    );
+}
+
+#[test]
+fn flag_input_rejects_non_digit_string_uid() {
+    let v = json!({"folder": "INBOX", "uid": "abc"});
+    let err = serde_json::from_value::<FlagInput>(v).unwrap_err();
+    assert!(err.to_string().contains("integer"), "got: {err}");
 }

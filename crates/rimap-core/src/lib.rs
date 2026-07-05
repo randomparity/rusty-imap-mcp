@@ -10,6 +10,7 @@ pub use credential::{CredentialResolver, CredentialResolverError, CredentialSour
 pub mod error;
 pub mod folder_name;
 pub mod imap_encryption;
+pub mod lenient_int;
 pub mod posture;
 pub mod posture_matrix;
 pub mod tls;
