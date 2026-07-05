@@ -184,7 +184,9 @@ failures fail the tool call by default (`fail_open = false`). See
 ### 9. Rate limiting
 
 - Global rate limiter: `commands_per_second` (default 10/sec) with a
-  burst of 20.
+  burst of `2 x commands_per_second` (20 at the default). See
+  [configuration.md](configuration.md#limits-section) for the burst
+  formula, batch-loop interaction, and tuning guidance.
 - Separate stricter limit for `create_draft`: `drafts_per_minute`
   (default 5/min).
 - Separate stricter limit for `send_email`: `sends_per_minute`
