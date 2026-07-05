@@ -1,0 +1,18 @@
+{
+  "description": "multipart/alternative message whose text/html alternative carries a homograph anchor (Cyrillic 'а' in 'paypal.com') plus a <script> payload. The text/plain part is the primary body. Proves the HTML alternative is now surfaced (issue #500) AND routed through the same sanitization + lookalike pipeline: the anchor href fires lookalike_mixed_script, which only happens if the alternative's anchor hrefs reach lookalike::audit. body_text stays the benign plain part.",
+  "expect": "ok",
+  "must_contain": [
+    "Your PayPal balance is ready to withdraw."
+  ],
+  "must_not_contain": [
+    "<a href",
+    "<script",
+    "alert(1)"
+  ],
+  "warning_codes": [
+    "lookalike_mixed_script"
+  ],
+  "forbidden_warning_codes": [
+    "lookalike_homograph_domain"
+  ]
+}

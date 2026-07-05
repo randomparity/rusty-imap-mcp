@@ -1,0 +1,15 @@
+From: PayPal <service@paypal.com>
+To: victim@example.com
+Subject: Your balance
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="BOUND"
+
+--BOUND
+Content-Type: text/plain; charset=utf-8
+
+Your PayPal balance is ready to withdraw. Sign in at paypal.com.
+--BOUND
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Your PayPal balance is ready to withdraw.</p><p><a href="https://pаypal.com/login">Sign in</a></p><script>alert(1)</script></body></html>
+--BOUND--
