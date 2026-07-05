@@ -80,9 +80,19 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --no-tests=pass
-      - name: Phase 3 wire e2e — fail if zero tests selected
+      # The main --workspace pass above runs with the default silent-skip
+      # posture: container-gated e2e tests return early when no docker/podman
+      # runtime is present, so a runtime hiccup would let them all vanish while
+      # CI stays green. This step re-runs every container-gated e2e binary
+      # (binary(/e2e/) matches e2e, e2e_smtp, and the e2e_wire* family) under
+      # RIMAP_REQUIRE_DOCKER=1, which flips the harness from silent-skip to a
+      # hard failure. --no-tests=fail additionally guards against a binary being
+      # renamed or dropped (zero tests selected). The binary regex auto-covers
+      # any future e2e* binary without another CI edit.
+      - name: e2e suites — fail if container runtime unavailable or zero tests selected
         run: |
-          cargo nextest run -p rimap-server --test e2e_wire \
+          cargo nextest run -p rimap-server \
+            -E 'binary(/e2e/)' \
             --locked --no-tests=fail \
             --no-capture
         env:
