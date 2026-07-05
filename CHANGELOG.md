@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-07-05
 
 ### Fixed
 
@@ -101,124 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCP spec schema.
 - `.github/workflows/mcp-spec-drift.yml` — weekly check that opens a
   tracking issue when the vendored MCP schema differs from upstream.
-
-### Changed
-
-- Added static remediation guidance for folder-policy and posture
-  denials to the `expunge`, `create_folder`, `rename_folder`,
-  `delete_folder`, and `send_email` descriptions. Runtime denial errors
-  are deliberately scrubbed (`ProtectedFolder`/`ExpungeDenied` become
-  "operation denied for this folder"), leaving an agent no way to act;
-  the descriptions now name the stable `error_code` it will see
-  (`ERR_PROTECTED_FOLDER`, `ERR_EXPUNGE_DENIED`, `ERR_POSTURE_DENIED`),
-  the governing config key (`[security].protected_folders`,
-  `[security].expunge_folders`), that the policy cannot be overridden
-  through MCP, and the `rimap://docs/postures` resource. No runtime
-  behavior or error message changed. Issue #417.
-- Expanded the MCP tool descriptions from terse one-liners to 1-3
-  sentences of workflow and constraint guidance an agent can act on:
-  when to use each tool, the discovery tool that feeds it (`search` for
-  UIDs, `list_attachments` for `part_id`), the batch limit (single `uid`
-  or up to 100 `uids`), the two-step delete/expunge model, and plain-word
-  posture/config gating. `create_draft` now documents the `$PendingReview`
-  dead-end (the draft cannot be sent through the server; do not follow up
-  with `send_email`). Issue #404.
-- Stripped rustdoc artifacts from every published tool schema:
-  unresolvable Rust doc-link syntax (`` [`...`] ``), internal
-  function/constant names (`build_query`, `escape_wire_name`,
-  `MAX_BATCH_UIDS`), the generic-parameter (`M`/`U`) implementation
-  note on every tool's response envelope, `# Shape` design-rationale
-  essays aimed at reviewers rather than callers, and boilerplate
-  "Input for the `X` tool." schema roots that added nothing. Batch and
-  export size limits now appear as literal numbers (100 UIDs, 100 MiB)
-  where referenced. The `search` tool's posture-gated field
-  descriptions use plain language instead of the internal
-  "Content-oracle" / `SearchAdvanced` terms, pointing agents at
-  `rimap://accounts/<name>` instead — this piece was originally slated
-  for #406 but landed here. A new `dump-tool-catalog`-scanning test
-  guards against regressions. Issue #405.
-- The `rimap://accounts/<name>` resource now reports the account's
-  `posture`, making the server instructions' claim true and giving an
-  agent a self-service answer to a posture denial. The instructions now
-  also name the four postures (`readonly` / `draft-safe` / `full` /
-  `destructive`) and what each enables. `imap_host` stays in the
-  resource but remains omitted from the leaner `list_accounts` summary
-  (documented tiering). Issue #406.
-- Tool-execution failures are now returned as a `CallToolResult` with
-  `isError: true` instead of a JSON-RPC protocol error. Per the MCP
-  spec, a tool that ran but failed should report the failure inside the
-  result so the agent reliably sees the message and can self-correct.
-  This covers `NotFound`, `UidValidityChanged`, `RateLimited`,
-  `CircuitOpen`, `AttachmentTooLarge`, IMAP/SMTP/TLS/auth/connection/
-  timeout failures, and posture / folder-policy denials. The stable
-  `error_code` string and typed recovery `data` (`retry_after_ms`,
-  expected/actual UIDVALIDITY, `kind`/`limit`) now ride
-  `result.structuredContent` instead of `error.data`; the human-readable
-  message is the result's text content. Genuine protocol errors (unknown
-  tool, malformed params shape, account resolution, unsupported protocol
-  version) are unchanged and still returned as JSON-RPC errors. This is
-  an observable behavior change for existing clients that keyed on the
-  JSON-RPC `error` envelope for tool failures. Issue #402.
-- `rimap-config` now accepts configs with `accounts = []`. The server
-  boots in infrastructure-only mode (only `list_accounts` /
-  `use_account` are functionally useful). Unblocks the wire-conformance
-  harness. Removes `ConfigError::NoAccounts`.
-- `rimap_audit::reader::parse_line` now returns
-  `AuditError::Parse(serde_json::Error)` instead of `AuditError::Read`
-  with an empty path and a synthesized `io::Error`. The previous
-  Display rendered with empty backticks (``failed to read audit file
-  `` `` ``); the new variant renders as `failed to parse audit
-  record: ...`. The `Read` variant remains in use for `stream_records`,
-  which still has the real path and line number. `AuditError` is
-  `#[non_exhaustive]` so adding the variant is source-compatible for
-  downstream wildcard matches. Issue #255.
-- Bumped workspace `rand` from `0.9` to `0.10`. `rand 0.10` renames
-  the core trait `RngCore` → `Rng`; the only direct caller is
-  `rimap-audit`'s `RedactionSalt::new_random` (`crates/rimap-audit/src/redact/mod.rs:18`).
-  `governor 0.10`, `ulid 1.2`, and `proptest 1.11` still pin
-  `rand = "0.9"` at their latest releases, so `deny.toml` carries a
-  time-boxed `bans.skip` entry for `rand 0.9` / `rand_core 0.9` until
-  those upstreams publish `rand 0.10`–compatible versions. Issue #256.
-
-### Fixed
-
-- `list_folders` and `list_accounts` now advertise a proper
-  `"type": "object"` `inputSchema` instead of a bare `{}`. Spec-strict
-  MCP clients (e.g. `bobshell`'s Zod validator) reject any tool whose
-  `inputSchema.type` is not the string `"object"` and surface
-  `invalid_value` errors at tool-discovery time. `{}` is a valid JSON
-  Schema (matches anything) but the wrong shape for MCP. New
-  `every_tool_input_schema_declares_object_type` regression test
-  guards every entry in `TOOL_DEFS`.
-- `initialize` response now advertises the `tools` and `resources`
-  capabilities. Previously `get_info()` returned
-  `ServerCapabilities::default()` (all-`None` fields), so the wire
-  payload was `"capabilities": {}` and spec-strict MCP clients (e.g.
-  `bobshell`) refused to call `tools/list` with "No prompts or tools
-  found on the server." Permissive clients (Claude Desktop, IBM Bob
-  desktop) called `tools/list` anyway and were unaffected.
-
-## [0.1.0] - Unreleased
-
-### Changed
-
-- **Breaking (keyring):** Credential keyring entries are now namespaced by
-  account id (`<account-id>/<username>@<host>`) to prevent collisions in
-  multi-account deployments (#77). Existing entries under the legacy
-  `<username>@<host>` key continue to resolve via a transparent fallback
-  that emits a `tracing::warn!` — run
-  `rusty-imap-mcp migrate-keyring --account <id> --host <h> --username <u>`
-  once per account to migrate.
-- `rusty-imap-mcp login` gains a `--account <id>` argument (default
-  `default`), so multi-account deployments can store credentials under
-  the correct namespaced key. Single-account invocations remain
-  unchanged.
-- `ConfigError::NoCredential` and `ConfigError::Keychain` Display strings no
-  longer include the username; they now show the host and a short
-  `account_tag` hash for log correlation (#76).
-
-### Added
-
 - `[defaults.credentials]` / `[[accounts.credentials]]` TOML section with a
   `fallback` knob (`keyring-only` vs `keyring-then-env`, default
   `keyring-then-env`). Setting `keyring-only` disables the
@@ -243,7 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Full backward compatibility: existing single-account `[imap]` configs
   work unchanged as a synthetic `"default"` account.
 
-#### MCP tools (22 posture-gated + 2 infrastructure)
+#### MCP tools
 
 **Read operations (all postures):**
 
@@ -264,11 +146,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Full posture operations:**
 
-- `search_advanced` -- raw IMAP SEARCH query passthrough
-- `fetch_message_html` -- sanitized HTML body alongside text
 - `send_email` -- SMTP send with Sent folder copy
 - `delete_message` -- flag `\Deleted` and move to Trash
 - `create_folder` / `rename_folder` -- IMAP folder management
+
+Advanced IMAP `SEARCH` passthrough and sanitized HTML bodies are exposed
+as full-posture sub-capabilities of `search` and `fetch_message`
+(`advanced_query` / `include_html`), not as standalone tools.
 
 **Destructive posture operations:**
 
@@ -394,7 +278,117 @@ Pre-built binaries for five targets:
 - `justfile` with `just ci` as the local-CI equivalent
 - Dual MIT / Apache-2.0 license
 
-### Security Hardening (post-review)
+### Changed
+
+- Added static remediation guidance for folder-policy and posture
+  denials to the `expunge`, `create_folder`, `rename_folder`,
+  `delete_folder`, and `send_email` descriptions. Runtime denial errors
+  are deliberately scrubbed (`ProtectedFolder`/`ExpungeDenied` become
+  "operation denied for this folder"), leaving an agent no way to act;
+  the descriptions now name the stable `error_code` it will see
+  (`ERR_PROTECTED_FOLDER`, `ERR_EXPUNGE_DENIED`, `ERR_POSTURE_DENIED`),
+  the governing config key (`[security].protected_folders`,
+  `[security].expunge_folders`), that the policy cannot be overridden
+  through MCP, and the `rimap://docs/postures` resource. No runtime
+  behavior or error message changed. Issue #417.
+- Expanded the MCP tool descriptions from terse one-liners to 1-3
+  sentences of workflow and constraint guidance an agent can act on:
+  when to use each tool, the discovery tool that feeds it (`search` for
+  UIDs, `list_attachments` for `part_id`), the batch limit (single `uid`
+  or up to 100 `uids`), the two-step delete/expunge model, and plain-word
+  posture/config gating. `create_draft` now documents the `$PendingReview`
+  dead-end (the draft cannot be sent through the server; do not follow up
+  with `send_email`). Issue #404.
+- Stripped rustdoc artifacts from every published tool schema:
+  unresolvable Rust doc-link syntax (`` [`...`] ``), internal
+  function/constant names (`build_query`, `escape_wire_name`,
+  `MAX_BATCH_UIDS`), the generic-parameter (`M`/`U`) implementation
+  note on every tool's response envelope, `# Shape` design-rationale
+  essays aimed at reviewers rather than callers, and boilerplate
+  "Input for the `X` tool." schema roots that added nothing. Batch and
+  export size limits now appear as literal numbers (100 UIDs, 100 MiB)
+  where referenced. The `search` tool's posture-gated field
+  descriptions use plain language instead of the internal
+  "Content-oracle" / `SearchAdvanced` terms, pointing agents at
+  `rimap://accounts/<name>` instead — this piece was originally slated
+  for #406 but landed here. A new `dump-tool-catalog`-scanning test
+  guards against regressions. Issue #405.
+- The `rimap://accounts/<name>` resource now reports the account's
+  `posture`, making the server instructions' claim true and giving an
+  agent a self-service answer to a posture denial. The instructions now
+  also name the four postures (`readonly` / `draft-safe` / `full` /
+  `destructive`) and what each enables. `imap_host` stays in the
+  resource but remains omitted from the leaner `list_accounts` summary
+  (documented tiering). Issue #406.
+- Tool-execution failures are now returned as a `CallToolResult` with
+  `isError: true` instead of a JSON-RPC protocol error. Per the MCP
+  spec, a tool that ran but failed should report the failure inside the
+  result so the agent reliably sees the message and can self-correct.
+  This covers `NotFound`, `UidValidityChanged`, `RateLimited`,
+  `CircuitOpen`, `AttachmentTooLarge`, IMAP/SMTP/TLS/auth/connection/
+  timeout failures, and posture / folder-policy denials. The stable
+  `error_code` string and typed recovery `data` (`retry_after_ms`,
+  expected/actual UIDVALIDITY, `kind`/`limit`) now ride
+  `result.structuredContent` instead of `error.data`; the human-readable
+  message is the result's text content. Genuine protocol errors (unknown
+  tool, malformed params shape, account resolution, unsupported protocol
+  version) are unchanged and still returned as JSON-RPC errors. This is
+  an observable behavior change for existing clients that keyed on the
+  JSON-RPC `error` envelope for tool failures. Issue #402.
+- `rimap-config` now accepts configs with `accounts = []`. The server
+  boots in infrastructure-only mode (only `list_accounts` /
+  `use_account` are functionally useful). Unblocks the wire-conformance
+  harness. Removes `ConfigError::NoAccounts`.
+- `rimap_audit::reader::parse_line` now returns
+  `AuditError::Parse(serde_json::Error)` instead of `AuditError::Read`
+  with an empty path and a synthesized `io::Error`. The previous
+  Display rendered with empty backticks (``failed to read audit file
+  `` `` ``); the new variant renders as `failed to parse audit
+  record: ...`. The `Read` variant remains in use for `stream_records`,
+  which still has the real path and line number. `AuditError` is
+  `#[non_exhaustive]` so adding the variant is source-compatible for
+  downstream wildcard matches. Issue #255.
+- Bumped workspace `rand` from `0.9` to `0.10`. `rand 0.10` renames
+  the core trait `RngCore` → `Rng`; the only direct caller is
+  `rimap-audit`'s `RedactionSalt::new_random` (`crates/rimap-audit/src/redact/mod.rs:18`).
+  `governor 0.10`, `ulid 1.2`, and `proptest 1.11` still pin
+  `rand = "0.9"` at their latest releases, so `deny.toml` carries a
+  time-boxed `bans.skip` entry for `rand 0.9` / `rand_core 0.9` until
+  those upstreams publish `rand 0.10`–compatible versions. Issue #256.
+- **Breaking (keyring):** Credential keyring entries are now namespaced by
+  account id (`<account-id>/<username>@<host>`) to prevent collisions in
+  multi-account deployments (#77). Existing entries under the legacy
+  `<username>@<host>` key continue to resolve via a transparent fallback
+  that emits a `tracing::warn!` — run
+  `rusty-imap-mcp migrate-keyring --account <id> --host <h> --username <u>`
+  once per account to migrate.
+- `rusty-imap-mcp login` gains a `--account <id>` argument (default
+  `default`), so multi-account deployments can store credentials under
+  the correct namespaced key. Single-account invocations remain
+  unchanged.
+- `ConfigError::NoCredential` and `ConfigError::Keychain` Display strings no
+  longer include the username; they now show the host and a short
+  `account_tag` hash for log correlation (#76).
+
+### Fixed
+
+- `list_folders` and `list_accounts` now advertise a proper
+  `"type": "object"` `inputSchema` instead of a bare `{}`. Spec-strict
+  MCP clients (e.g. `bobshell`'s Zod validator) reject any tool whose
+  `inputSchema.type` is not the string `"object"` and surface
+  `invalid_value` errors at tool-discovery time. `{}` is a valid JSON
+  Schema (matches anything) but the wrong shape for MCP. New
+  `every_tool_input_schema_declares_object_type` regression test
+  guards every entry in `TOOL_DEFS`.
+- `initialize` response now advertises the `tools` and `resources`
+  capabilities. Previously `get_info()` returned
+  `ServerCapabilities::default()` (all-`None` fields), so the wire
+  payload was `"capabilities": {}` and spec-strict MCP clients (e.g.
+  `bobshell`) refused to call `tools/list` with "No prompts or tools
+  found on the server." Permissive clients (Claude Desktop, IBM Bob
+  desktop) called `tools/list` anyway and were unaffected.
+
+### Security
 
 - Namespace MCP tool names per account (`<account>.<tool>`) in multi-account
   configs to prevent cross-account posture bypass. Single-account configs
@@ -430,5 +424,4 @@ Pre-built binaries for five targets:
 - Replace `Mutex<Option<AccountId>>` in the account registry with
   `ArcSwapOption` to eliminate async-refactor footguns and mutex poisoning.
 
-[Unreleased]: https://github.com/randomparity/rusty-imap-mcp/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/randomparity/rusty-imap-mcp/releases/tag/v0.1.0
