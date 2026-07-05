@@ -326,7 +326,7 @@ async fn case_11_tcp_half_open_recovery() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    // Establish.
+    // Establish a cached session.
     let _ = h.connection.list_folders("*").await.unwrap();
 
     // Force the server-side TCP to die. `pkill -9 imap` is racy because
@@ -336,17 +336,37 @@ async fn case_11_tcp_half_open_recovery() {
     // reconnect below uses the same fingerprint.
     h.harness.restart().expect("dovecot restart");
 
-    // Next op should fail with ConnectionLost (or Protocol that maps to it).
-    let result = h.connection.list_folders("*").await;
+    // Read op: the first resumed call must recover transparently. The stale
+    // cached session yields ConnectionLost on the first attempt; with_session
+    // reconnects and retries once, so the caller sees a clean result rather
+    // than ERR_CONNECTION_LOST (#450).
+    let folders = h
+        .connection
+        .list_folders("*")
+        .await
+        .expect("read op should transparently recover after idle disconnect");
+    assert!(!folders.is_empty());
+
+    // Kill the (now healthy) session again to test the write path.
+    h.harness.restart().expect("dovecot restart");
+
+    // Write op: a mutating command must NOT auto-retry — re-sending after a
+    // mid-command disconnect could double-apply. The first resumed APPEND
+    // surfaces ConnectionLost; only the caller's next call reconnects.
+    let msg = support::fixtures::minimal_rfc5322("half-open-write");
+    let result = h.connection.append_message("INBOX", &msg, &[], &[]).await;
     match result {
         Err(ImapError::ConnectionLost | ImapError::Protocol(_)) => {}
         #[expect(clippy::panic, reason = "test failure path")]
-        other => panic!("expected ConnectionLost or Protocol error, got {other:?}"),
+        other => panic!("write must not auto-retry; expected ConnectionLost, got {other:?}"),
     }
 
-    // Following op should reconnect cleanly.
-    let folders = h.connection.list_folders("*").await.unwrap();
-    assert!(!folders.is_empty());
+    // The session was invalidated, so the caller's next APPEND reconnects and
+    // succeeds — proving the write path still recovers on the following call.
+    h.connection
+        .append_message("INBOX", &msg, &[], &[])
+        .await
+        .expect("follow-up append should reconnect");
 }
 
 #[tokio::test]
