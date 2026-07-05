@@ -106,6 +106,15 @@ single-account format).
 | `command_timeout_seconds` | u32 | 30 | Per-command timeout for IMAP operations |
 | `connect_timeout_seconds` | u32 | 10 | TCP + TLS handshake + greeting + CAPABILITY probe deadline |
 
+Each account holds a single IMAP connection, and concurrent tool calls
+against that account serialize on it: a slow command (a large `FETCH`
+or a `SEARCH` over a big mailbox) can head-of-line-block other queued
+calls on the same account for up to `command_timeout_seconds` before
+that command is cut off. Calls to different accounts are unaffected —
+each account has its own connection. See
+[architecture/audit-locking.md](architecture/audit-locking.md#operator-impact-concurrent-calls-to-one-account-serialize)
+for the mechanism.
+
 ### `imap.encryption`
 
 Transport encryption mode. Two values:
