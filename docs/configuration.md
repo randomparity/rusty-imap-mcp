@@ -375,6 +375,33 @@ Numeric limits for rate limiting, search, and size caps.
 | `circuit_breaker_error_threshold` | u32 | 5 | Error count within the window to trip the circuit breaker |
 | `circuit_breaker_window_seconds` | u32 | 30 | Sliding window for the circuit breaker error counter |
 
+The global rate limiter is a token bucket: it allows a **burst** of
+`2 x commands_per_second` calls before throttling down to a sustained
+rate of `commands_per_second` calls/sec. With the default
+`commands_per_second = 10`, that's a burst of 20.
+
+This matters for batch loops. An agent that lists 30 messages and then
+fetches each one individually spends its entire burst (20 calls) almost
+instantly, then the 21st call onward is admitted only once every
+`1 / commands_per_second` seconds (100ms at the default) until the
+bucket refills. Calls issued faster than that fail closed with
+`ERR_RATE_LIMITED` and a `retry_after_ms` hint (see
+[security-model.md](security-model.md#9-rate-limiting)) rather than
+queuing silently.
+
+Tuning guidance:
+
+- Raise `commands_per_second` if a workflow legitimately needs a higher
+  sustained throughput (the burst scales with it, `2x`).
+- An agent doing large batch operations should either pace calls to
+  stay under the sustained rate or back off on `ERR_RATE_LIMITED` using
+  the returned `retry_after_ms` instead of retrying immediately.
+- `drafts_per_minute` and `sends_per_minute` are separate, stricter
+  buckets that gate `create_draft` and `send_email` independently of
+  the global limiter. Each has a burst equal to its own rate (e.g.
+  `sends_per_minute = 3` allows a burst of 3), not the global bucket's
+  `2x` multiplier.
+
 ## `[audit]` section
 
 Audit log settings. `path` is required. Global (shared across all
