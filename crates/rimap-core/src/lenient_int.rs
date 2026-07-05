@@ -8,9 +8,15 @@
 //! the integer form or a digit-string form, and decodes the string
 //! form back to the canonical Rust type.
 //!
+//! Lives in `rimap-core` so tool-input types in both `rimap-core`
+//! (e.g. [`crate::uid_selector::UidSelector`]) and `rimap-server` can
+//! share one implementation; `rimap-server` re-exports it as
+//! `crate::tools::lenient_int`.
+//!
 //! # Exported pairs
 //!
-//! Apply each pair to a struct field via:
+//! Apply each pair to a struct field via (path shown for `rimap-server`
+//! consumers; within `rimap-core` use `crate::lenient_int::`):
 //!
 //! ```ignore
 //! #[serde(default, deserialize_with = "crate::tools::lenient_int::deserialize_opt_usize")]
@@ -204,17 +210,6 @@ const I64_MAX_AS_U64: u64 = i64::MAX as u64;
 /// any `u32`/`NonZeroU32` lenient field.
 const U32_MAX_AS_U64: u64 = u32::MAX as u64;
 
-/// Schema for `Option<usize>` accepted as integer, digit-string, or null.
-///
-/// Emitted via `#[schemars(schema_with = "lenient_int::schema_opt_usize")]`.
-///
-/// # Bounds
-///
-/// The integer branch caps `maximum` at `i64::MAX` (`9_223_372_036_854_775_807`)
-/// because [`deserialize_opt_usize`] decodes through `IntOrStr::Int(i64)`.
-/// Callers needing larger values must use the digit-string branch; pinning
-/// the schema ceiling keeps host-side pre-flight validation aligned with
-/// what the deserializer will actually accept (issue #292).
 /// Build a lenient `oneOf` schema accepting an integer in
 /// `[minimum, maximum]`, a digit-string matching `pattern`, and (when
 /// `nullable`) JSON null. Single source for the `schema_*` entry points
@@ -230,6 +225,17 @@ fn lenient_schema(minimum: u64, maximum: u64, pattern: &str, nullable: bool) -> 
     schemars::json_schema!({ "oneOf": variants })
 }
 
+/// Schema for `Option<usize>` accepted as integer, digit-string, or null.
+///
+/// Emitted via `#[schemars(schema_with = "lenient_int::schema_opt_usize")]`.
+///
+/// # Bounds
+///
+/// The integer branch caps `maximum` at `i64::MAX` (`9_223_372_036_854_775_807`)
+/// because [`deserialize_opt_usize`] decodes through `IntOrStr::Int(i64)`.
+/// Callers needing larger values must use the digit-string branch; pinning
+/// the schema ceiling keeps host-side pre-flight validation aligned with
+/// what the deserializer will actually accept (issue #292).
 pub fn schema_opt_usize(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     lenient_schema(0, I64_MAX_AS_U64, "^[0-9]+$", true)
 }

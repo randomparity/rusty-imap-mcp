@@ -11,7 +11,12 @@ pub mod admin;
 pub mod compose;
 pub(crate) mod content_parse;
 pub(crate) mod fetch_by_uid;
-pub(crate) mod lenient_int;
+/// Re-export of the shared lenient-integer helpers, relocated to
+/// `rimap-core` so tool-input types in both crates share one
+/// implementation (issue #461). Kept at this path so the many
+/// `deserialize_with`/`schema_with` string paths in tool inputs resolve
+/// unchanged.
+pub(crate) use rimap_core::lenient_int;
 pub mod mailbox;
 pub mod retrieval;
 pub(crate) mod validation;
