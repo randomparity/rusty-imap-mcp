@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A read tool call resumed after an idle gap now recovers transparently
+  instead of returning `ERR_CONNECTION_LOST` on the first try. When the IMAP
+  server has closed a cached session during inactivity, `with_session` now
+  reconnects and retries the command **once** — but only for idempotent
+  read-only ops (`list_folders`, `status`, `select`, `search`,
+  `thread_related`, `fetch`, `fetch_body`). Mutating ops (`store`, `move`,
+  `append`, `delete_message`, `expunge`, folder create/rename/delete) are
+  never auto-retried, since a re-sent write could double-apply after a
+  mid-command disconnect; they still invalidate the dead session and surface
+  the error to the caller. The retry is bounded to a single attempt. Issue
+  #450 (audit finding M-13); builds on #449.
+
 ### Added
 
 - Generated tool reference at [`docs/tools.md`](docs/tools.md): one section
