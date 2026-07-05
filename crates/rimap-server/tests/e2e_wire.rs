@@ -37,7 +37,7 @@ use dovecot::{DovecotHarness, HarnessError, fixtures};
 // binaries. `e2e_wire`-only items live one level deeper in the
 // sub-modules to avoid creating re-exports that appear dead from the
 // Phase 1 binary's perspective.
-use wire::config::build_dovecot_config;
+use wire::config::{build_dovecot_config, build_dovecot_full_config};
 use wire::schema::validator_for_tool_response;
 use wire::{Harness, PINNED_PROTOCOL_VERSION, assert_valid};
 
@@ -1015,6 +1015,13 @@ fn assert_readonly_audit_search_pairs(records: &[Value]) {
 }
 
 async fn seed_multipart_message(dovecot: &DovecotHarness) {
+    append_seed_to_inbox(dovecot, &fixtures::multipart_with_attachment()).await;
+}
+
+/// APPEND a raw MIME message into the seeded user's INBOX over a
+/// short-lived pinned-TLS connection. Shared by the plain-multipart and
+/// HTML-alternative seeds so both reference the same connection setup.
+async fn append_seed_to_inbox(dovecot: &DovecotHarness, raw: &[u8]) {
     let audit_dir = TempDir::new().expect("seed-audit tempdir");
     let audit = AuditWriter::open(&AuditOptions {
         path: audit_dir.path().join("seed.jsonl"),
@@ -1047,7 +1054,115 @@ async fn seed_multipart_message(dovecot: &DovecotHarness) {
     ));
     let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
     let conn = Connection::new(cfg, sink, creds);
-    conn.append_message("INBOX", &fixtures::multipart_with_attachment(), &[], &[])
+    conn.append_message("INBOX", raw, &[], &[])
         .await
-        .expect("APPEND multipart seed");
+        .expect("APPEND seed message");
+}
+
+/// Full-posture ALLOW round-trips for the two gated sub-capabilities that
+/// the draft-safe and readonly suites only ever exercise as denials (#460):
+///  - `search.advanced_query` (`SearchAdvanced`), and
+///  - `fetch_message.include_html` (`FetchMessageHtml`).
+///
+/// Both are denied under `draft-safe`/`readonly` (see
+/// `wire_e2e_readonly_posture_denial`), so this uses a dedicated single-
+/// account `full`-posture config. The seed is a `text/html` message whose
+/// HTML body is what makes `include_html` return a non-empty `body_html`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wire_e2e_full_posture_sub_capabilities() {
+    let dovecot = match DovecotHarness::try_start() {
+        Ok(d) => d,
+        Err(HarnessError::DockerUnavailable) => return,
+        Err(e) => panic!("Dovecot harness failed: {e}"),
+    };
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let audit_path = tempdir.path().join("audit.jsonl");
+    let allowed_base = tempdir.path().to_path_buf();
+    let download_dir = tempdir.path().join("downloads");
+    std::fs::create_dir_all(&download_dir).expect("mkdir download_dir");
+
+    append_seed_to_inbox(&dovecot, &fixtures::html_body_message()).await;
+
+    let config_path = tempdir.path().join("config.toml");
+    let fingerprint_hex = dovecot.fingerprint().to_hex();
+    let config = build_dovecot_full_config(
+        &fingerprint_hex,
+        dovecot.port(),
+        &audit_path,
+        &allowed_base,
+        &download_dir,
+    );
+    std::fs::write(&config_path, config).expect("write config");
+
+    let envs = [(PASSWORD_ENV_VAR, DOVECOT_PASSWORD)];
+    let mut harness = Harness::spawn_with_config(&config_path, tempdir, &envs).await;
+    let _ = harness.initialize_handshake().await;
+    harness.send_initialized().await;
+
+    let _ = call_tool(&mut harness, "use_account", json!({ "account": "full" })).await;
+
+    let uid = assert_search_advanced_query_allow(&mut harness).await;
+    assert_fetch_message_html_allow(&mut harness, uid).await;
+
+    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    assert!(status.success(), "binary exited non-zero: {status:?}");
+}
+
+/// `search.advanced_query` ALLOW round-trip under `full` posture: a raw
+/// IMAP boolean `OR` key (beyond what the structured search API can
+/// express) reaches Dovecot and returns the seeded HTML message. Returns
+/// its UID for the fetch round-trip.
+async fn assert_search_advanced_query_allow(harness: &mut Harness) -> u32 {
+    let advanced_query = format!(
+        "OR SUBJECT \"{}\" SUBJECT \"totally-absent-subject\"",
+        fixtures::HTML_SUBJECT,
+    );
+    let search_body = call_tool(
+        harness,
+        "full.search",
+        json!({ "folder": "INBOX", "advanced_query": advanced_query }),
+    )
+    .await;
+    let total = search_body["meta"]["total_matched"]
+        .as_u64()
+        .expect("total_matched");
+    assert!(
+        total >= 1,
+        "advanced_query must match the seeded HTML message, got {total}: {search_body}",
+    );
+    let messages = search_body["untrusted"]["messages"]
+        .as_array()
+        .expect("messages array");
+    assert!(
+        !messages.is_empty(),
+        "messages unexpectedly empty despite total_matched={total}",
+    );
+    let uid_u64 = messages[0]["uid"].as_u64().expect("uid is integer");
+    let uid = u32::try_from(uid_u64).expect("uid fits u32");
+    assert!(uid > 0);
+    uid
+}
+
+/// `fetch_message.include_html` ALLOW round-trip under `full` posture:
+/// `include_html = true` returns a sanitized `body_html` carrying the
+/// fixture's HTML marker, proving the HTML body round-trips through
+/// IMAP FETCH and the content sanitizer.
+async fn assert_fetch_message_html_allow(harness: &mut Harness, uid: u32) {
+    let fetch_body = call_tool(
+        harness,
+        "full.fetch_message",
+        json!({ "folder": "INBOX", "uid": uid, "include_html": true }),
+    )
+    .await;
+    let body_html = fetch_body["untrusted"]["body_html"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("body_html must be present with include_html=true: {fetch_body}")
+        });
+    assert!(
+        body_html.contains(fixtures::HTML_MARKER),
+        "body_html must contain the fixture marker {:?}: {body_html}",
+        fixtures::HTML_MARKER,
+    );
 }
