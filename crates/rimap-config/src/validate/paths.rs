@@ -368,13 +368,15 @@ mod tests {
     #[test]
     fn example_audit_paths_are_contained_in_default_base_verbatim() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let home = std::env::var("HOME").expect("HOME must be set on Linux test runners");
-        let base = default_audit_base().expect("resolve default audit base");
+        let home = std::env::var("HOME")
+            .unwrap_or_else(|_| panic!("HOME must be set on Linux test runners"));
+        let base = default_audit_base().unwrap_or_else(|| panic!("resolve default audit base"));
 
         for example in ["config.example.toml", "config.multi-account.example.toml"] {
             let contents = std::fs::read_to_string(repo_root.join(example))
                 .unwrap_or_else(|e| panic!("read {example}: {e}"));
-            let parsed: toml::Value = toml::from_str(&contents).expect("parse example as TOML");
+            let parsed: toml::Value = toml::from_str(&contents)
+                .unwrap_or_else(|e| panic!("{example}: parse as TOML: {e}"));
             let literal_path = parsed["audit"]["path"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{example}: audit.path is not a string"));
