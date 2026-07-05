@@ -10,12 +10,17 @@ use crate::mcp::response::ToolResponse;
 
 const MAX_FOLDER_NAME_BYTES: usize = 1024;
 
-/// Escape a folder name as a JSON-safe Unicode-escape string. Each
+/// Escape a folder name into a display-safe ASCII string. Each
 /// non-ASCII-printable codepoint becomes `\u{H..}` (one or more
 /// lowercase hex digits); ASCII printables in 0x20..0x7E (excluding
-/// backslash) are emitted literally. Clients round-trip by applying
-/// the inverse of this escape convention. Backslash is always escaped
-/// so the output can be safely embedded in a JSON string.
+/// backslash) are emitted literally, and backslash is always escaped.
+///
+/// This exists to surface the *raw bytes the server sent* as inert
+/// ASCII for diagnostics, so bidi / zero-width / Unicode Tag codepoints
+/// are neutralized rather than embedded live under the trusted `meta`
+/// envelope (#98). It is NOT a round-trip encoding: no server input
+/// path decodes it, and folders whose names required sanitization are
+/// not addressable by folder-input tools (see [`FolderEntry::name_wire`]).
 fn escape_wire_name(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for c in raw.chars() {
@@ -80,11 +85,18 @@ pub struct FolderEntry {
     /// Sanitized, display-safe folder name. Bidi / zero-width / Unicode
     /// Tag codepoints are stripped before this reaches the client.
     pub name: String,
-    /// Raw wire form of the folder name encoded as `\u{H..}` Unicode
-    /// escape sequences, populated only when `name` differs from what
-    /// the server sent. Pass this back for SELECT / STATUS / MOVE /
-    /// FETCH when `name_wire` is present; otherwise pass `name`
-    /// directly.
+    /// Display / diagnostic-only representation of the raw bytes the
+    /// server sent, encoded as `\u{H..}` Unicode escape sequences and
+    /// populated only when `name` differs from those bytes (i.e. the
+    /// sanitizer changed something). This is NOT an input token: no
+    /// tool decodes the escape, so passing it back verbatim will not
+    /// select the folder. A folder whose name required sanitization
+    /// (bidi / zero-width / control / Unicode Tag codepoints) is not
+    /// addressable by folder-input tools — the input validator rejects
+    /// those codepoints by design. Use this field to see what the
+    /// server sent; there is no supported way to operate on such a
+    /// folder. When `name_wire` is absent, `name` is the exact wire
+    /// name and is safe to pass to SELECT / STATUS / MOVE / FETCH.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_wire: Option<String>,
     /// Hierarchy delimiter character reported by the server.
@@ -186,7 +198,49 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::sanitize_folder_entries;
+    use crate::tools::validation::validate_folder_input;
     use rimap_imap::types::{Folder, FolderAttribute};
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "test assertion — None is a hard failure"
+    )]
+    fn name_wire_is_display_only_not_a_valid_folder_input() {
+        // Contract lock for #462: `name_wire` is a display/diagnostic
+        // representation of the raw wire bytes, NOT a round-trip input.
+        // A sanitizer-modified name populates `name_wire`, but the raw
+        // name it stands for carries a disallowed codepoint (U+202E) that
+        // `validate_folder_input` — the sole folder-input validator —
+        // rejects. There is therefore no valid input path that addresses
+        // this folder, which is exactly what the field doc must state.
+        let raw = "Inbox\u{202e}gnilleS";
+        let folders = vec![Folder {
+            name: raw.to_string(),
+            attributes: vec![FolderAttribute::HasNoChildren],
+            delimiter: Some('/'),
+            special_use: None,
+        }];
+        let (entries, _warnings) = sanitize_folder_entries(folders);
+        assert_eq!(entries.len(), 1);
+
+        let name_wire = entries[0]
+            .name_wire
+            .as_deref()
+            .expect("sanitizer-modified name should populate name_wire");
+
+        // The raw folder name is rejected on input by design.
+        assert!(
+            validate_folder_input("folder", raw).is_err(),
+            "raw sanitized folder name must be rejected by the input validator",
+        );
+        // The escaped wire form is not a verbatim round-trip token: it is
+        // a distinct ASCII string, not the raw name the server holds.
+        assert_ne!(
+            name_wire, raw,
+            "name_wire must not be a verbatim copy of the raw folder name",
+        );
+    }
 
     #[test]
     fn sanitizes_bidi_in_folder_name_and_emits_warning() {

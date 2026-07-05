@@ -33,7 +33,7 @@
           "type": "string"
         },
         "name_wire": {
-          "description": "Raw wire form of the folder name encoded as `\\u{H..}` Unicode\nescape sequences, populated only when `name` differs from what\nthe server sent. Pass this back for SELECT / STATUS / MOVE /\nFETCH when `name_wire` is present; otherwise pass `name`\ndirectly.",
+          "description": "Display / diagnostic-only representation of the raw bytes the\nserver sent, encoded as `\\u{H..}` Unicode escape sequences and\npopulated only when `name` differs from those bytes (i.e. the\nsanitizer changed something). This is NOT an input token: no\ntool decodes the escape, so passing it back verbatim will not\nselect the folder. A folder whose name required sanitization\n(bidi / zero-width / control / Unicode Tag codepoints) is not\naddressable by folder-input tools \u2014 the input validator rejects\nthose codepoints by design. Use this field to see what the\nserver sent; there is no supported way to operate on such a\nfolder. When `name_wire` is absent, `name` is the exact wire\nname and is safe to pass to SELECT / STATUS / MOVE / FETCH.",
           "type": [
             "string",
             "null"
