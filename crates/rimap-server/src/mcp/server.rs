@@ -366,46 +366,72 @@ fn call_tool_result_to_rimap_error(result: &CallToolResult) -> rimap_core::Rimap
 const TOOLS_PER_PAGE: usize = 25;
 
 impl ImapMcpServer {
-    /// Build the full, deterministically-ordered advertised tool catalog:
-    /// infrastructure tools first, then each account's advertised tools in
-    /// `accounts()` (`BTreeMap`) order. When an account is active (via
-    /// `use_account`) only that account's tools are included; every account
-    /// stays callable by its `<account>.<tool>` namespace regardless of the
-    /// active selection (dispatch does not consult it). Paginated by
-    /// `list_tools`.
+    /// Build the deterministically-ordered advertised tool catalog for this
+    /// server's registry and its session-active selection. Delegates to
+    /// [`build_tool_catalog_for`]. Paginated by `list_tools`.
     fn build_tool_catalog(&self) -> Vec<Tool> {
-        let mut tools: Vec<Tool> = Vec::new();
-
-        // Infrastructure tools — always advertised, never namespaced.
-        for name in [ToolName::UseAccount, ToolName::ListAccounts] {
-            if let Some(def) = TOOL_DEFS.get(&name) {
-                tools.push(def.clone());
-            }
-        }
-
-        let accounts = self.registry.accounts();
-        let use_bare_names = is_legacy_single_account(accounts);
-        let active = self.registry.active_name();
-
-        for (id, state) in accounts {
-            if let Some(active_name) = active.as_deref()
-                && id.as_str() != active_name
-            {
-                continue;
-            }
-            let matrix = state.guard.matrix();
-            let posture = matrix.posture();
-            for &tn in &matrix.advertised() {
-                let Some(base_def) = TOOL_DEFS.get(&tn) else {
-                    continue;
-                };
-                let def = build_advertised_tool(base_def, id.as_str(), posture, !use_bare_names);
-                tools.push(def);
-            }
-        }
-
-        tools
+        build_tool_catalog_for(
+            self.registry.accounts(),
+            self.registry.active_name().as_deref(),
+        )
     }
+}
+
+/// Build the deterministically-ordered advertised tool catalog for a given
+/// account set and session-active selection.
+///
+/// Infrastructure tools (`use_account`, `list_accounts`) always lead. Then:
+/// in a multi-account deployment with no active account, nothing more is
+/// advertised (reveal-on-select, #439) — per-account tools appear only once
+/// `use_account` selects one. Otherwise each account's posture-advertised
+/// tools follow in `accounts` (`BTreeMap`) order, filtered to the active
+/// account when one is selected. A sole account (default-named or not)
+/// auto-selects via `resolve(None)`, so its tools stay advertised initially.
+///
+/// Advertising is a display concern only: every `<account>.<tool>` stays
+/// callable by namespace regardless of the active selection — #401's dispatch
+/// architecture is unchanged.
+#[must_use]
+fn build_tool_catalog_for(
+    accounts: &std::collections::BTreeMap<AccountId, AccountState>,
+    active: Option<&str>,
+) -> Vec<Tool> {
+    let mut tools: Vec<Tool> = Vec::new();
+
+    // Infrastructure tools — always advertised, never namespaced.
+    for name in [ToolName::UseAccount, ToolName::ListAccounts] {
+        if let Some(def) = TOOL_DEFS.get(&name) {
+            tools.push(def.clone());
+        }
+    }
+
+    // Reveal-on-select (#439): a genuine multi-account deployment with no
+    // active account advertises infra tools only. Single-account deployments
+    // auto-select their sole account, so they keep advertising its tools.
+    if accounts.len() > 1 && active.is_none() {
+        return tools;
+    }
+
+    let use_bare_names = is_legacy_single_account(accounts);
+
+    for (id, state) in accounts {
+        if let Some(active_name) = active
+            && id.as_str() != active_name
+        {
+            continue;
+        }
+        let matrix = state.guard.matrix();
+        let posture = matrix.posture();
+        for &tn in &matrix.advertised() {
+            let Some(base_def) = TOOL_DEFS.get(&tn) else {
+                continue;
+            };
+            let def = build_advertised_tool(base_def, id.as_str(), posture, !use_bare_names);
+            tools.push(def);
+        }
+    }
+
+    tools
 }
 
 /// Decode an opaque `tools/list` cursor (a decimal catalog offset) into a
@@ -1420,6 +1446,84 @@ mod pagination_tests {
             next, None,
             "single-account catalog of {single_len} tools must fit one page \
              (TOOLS_PER_PAGE={TOOLS_PER_PAGE}); bump the page size",
+        );
+    }
+}
+
+#[cfg(test)]
+mod advertise_on_select_tests {
+    use std::collections::BTreeMap;
+
+    use rimap_core::account::AccountId;
+
+    use super::build_tool_catalog_for;
+    use crate::boot::registry::AccountState;
+    use crate::test_support::make_test_account_state;
+
+    fn registry_map(names: &[&str]) -> BTreeMap<AccountId, AccountState> {
+        let mut accounts = BTreeMap::new();
+        for name in names {
+            let state = make_test_account_state(name);
+            accounts.insert(state.id.clone(), state);
+        }
+        accounts
+    }
+
+    fn tool_names(tools: &[rmcp::model::Tool]) -> Vec<String> {
+        tools.iter().map(|t| t.name.to_string()).collect()
+    }
+
+    #[test]
+    fn multi_account_no_active_advertises_infra_only() {
+        let accounts = registry_map(&["personal", "work"]);
+        let names = tool_names(&build_tool_catalog_for(&accounts, None));
+        assert_eq!(
+            names,
+            vec!["use_account".to_string(), "list_accounts".to_string()],
+            "multi-account with no active selection must advertise infra tools only",
+        );
+    }
+
+    #[test]
+    fn multi_account_active_reveals_only_that_account() {
+        let accounts = registry_map(&["personal", "work"]);
+        let names = tool_names(&build_tool_catalog_for(&accounts, Some("work")));
+        assert!(
+            names.iter().any(|n| n.starts_with("work.")),
+            "active account's namespaced tools must be advertised; got {names:?}",
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("personal.")),
+            "non-active account's tools must not be advertised; got {names:?}",
+        );
+        assert!(
+            names.contains(&"use_account".to_string())
+                && names.contains(&"list_accounts".to_string()),
+            "infra tools stay advertised when an account is active",
+        );
+    }
+
+    #[test]
+    fn single_non_default_account_advertises_its_tools_with_no_active() {
+        let accounts = registry_map(&["solo"]);
+        let names = tool_names(&build_tool_catalog_for(&accounts, None));
+        assert!(
+            names.iter().any(|n| n.starts_with("solo.")),
+            "a sole non-default account auto-selects, so its tools stay advertised; got {names:?}",
+        );
+    }
+
+    #[test]
+    fn legacy_single_default_advertises_bare_tools_with_no_active() {
+        let accounts = registry_map(&["default"]);
+        let names = tool_names(&build_tool_catalog_for(&accounts, None));
+        assert!(
+            names.iter().any(|n| n == "search"),
+            "legacy single-default advertises bare (un-namespaced) tools; got {names:?}",
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("default.")),
+            "legacy single-default must not namespace tools; got {names:?}",
         );
     }
 }
