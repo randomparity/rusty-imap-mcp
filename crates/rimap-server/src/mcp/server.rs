@@ -725,13 +725,19 @@ impl ServerHandler for ImapMcpServer {
 /// Whether flipping the active account from `prior` to `now` changes the
 /// set of accounts `list_tools` advertises.
 ///
-/// `None` means "advertise every account"; `Some(x)` means "advertise
-/// only account `x`". Going unset → set narrows the catalog only when
-/// more than one account is configured (with a single account the
-/// advertised set is already just that account); set → set changes it
-/// only when the selected account differs. Used to suppress a
+/// Under reveal-on-select (#439), `None` means "advertise infrastructure
+/// tools only" and `Some(x)` means "advertise infra + account `x`". Going
+/// unset → set (or set → unset) changes the advertised set only when more
+/// than one account is configured; with a single account the sole account's
+/// tools are advertised either way (auto-select). set → set changes it only
+/// when the selected account differs. Used to suppress a
 /// `notifications/tools/list_changed` emission when a `use_account` call
 /// leaves the advertised list unchanged.
+///
+/// The helper is blind to each account's advertised-set *contents*: when the
+/// newly-selected account advertises an empty tool set (all tools denied),
+/// the true delta is empty yet this returns `true`, firing a single harmless
+/// spurious `list_changed`. Documented and intentionally not suppressed.
 #[must_use]
 fn active_selection_changes_advertisement(
     prior: Option<&str>,
@@ -1238,9 +1244,10 @@ mod list_changed_gating_tests {
 
     #[test]
     fn first_selection_changes_only_with_multiple_accounts() {
-        // None -> Some narrows the union to one account. With >1 account
-        // that is an observable change; with exactly one configured
-        // account the union was already that single account.
+        // None -> Some reveals one account's tools (#439: None advertises
+        // infra tools only). With >1 account that is an observable change;
+        // with exactly one configured account its tools were already
+        // advertised (auto-select), so nothing changes.
         assert!(active_selection_changes_advertisement(
             None,
             Some("work"),
@@ -1256,8 +1263,8 @@ mod list_changed_gating_tests {
     #[test]
     fn clearing_selection_mirrors_first_selection() {
         // Some -> None (not reachable via use_account today, but the
-        // helper is total): widening back to the union is observable only
-        // when more than one account exists.
+        // helper is total): returning to infra-only advertisement is
+        // observable only when more than one account exists.
         assert!(active_selection_changes_advertisement(
             Some("work"),
             None,
@@ -1273,6 +1280,21 @@ mod list_changed_gating_tests {
     #[test]
     fn no_selection_either_side_is_no_change() {
         assert!(!active_selection_changes_advertisement(None, None, 5));
+    }
+
+    #[test]
+    fn empty_advertised_account_selection_still_reports_change() {
+        // Documented #439 edge: the helper is advertised-set-content-blind,
+        // so selecting an account that advertises an empty tool set (all
+        // tools denied) still reports a change and fires a harmless spurious
+        // list_changed. Pin it so a future "suppress when the selected
+        // account is empty" optimization is a conscious change, not an
+        // accident.
+        assert!(
+            active_selection_changes_advertisement(None, Some("x"), 2),
+            "None -> Some with >1 account reports a change regardless of the \
+             selected account's advertised-set size",
+        );
     }
 }
 
