@@ -90,16 +90,19 @@ are identical to #401's:
 The helper's logic and its unit tests stay green. Only its doc comment
 changes (from "`None` means advertise every account" to Option A semantics).
 
-**One edge is not identical to #401** and the "identical" claim is scoped
-accordingly: if the selected account advertises an *empty* tool set (reachable
-via a `[security.tools]` override that denies every tool), the true delta for
-`None → Some(x)` is infra → infra — *no* change — yet the helper still returns
-`count > 1 = true` and fires a `notifications/tools/list_changed`. Under #401
-that transition always removed other accounts' tools, so it was a genuine
-change even for an empty account. The consequence under Option A is a single
-spurious, best-effort notification prompting one redundant re-fetch — harmless,
-and not worth complicating the gate to suppress. The test plan pins this edge
-with a unit case rather than leaving the "identical" claim unqualified.
+**The deltas are identical to #401 except when a selected account advertises
+an empty tool set** (reachable via a `[security.tools]` override that denies
+every tool). In that class the helper over-reports: `None → Some(x)` with `x`
+empty is really infra → infra (no change), and `Some(p) → Some(n)` where both
+advertise nothing is infra → infra (no change), yet the helper returns `true`
+in both and fires a `notifications/tools/list_changed`. Under #401 those
+transitions always added/removed other accounts' tools, so they were genuine
+changes. The consequence under Option A is a single spurious, best-effort
+notification prompting one redundant re-fetch — harmless in every case in this
+class, and not worth complicating the gate to suppress. All empty-advertised
+spurious notifications are the same harmless class; the test plan pins one
+representative (`None → Some(empty)`) unit case rather than leaving the claim
+unqualified, and intentionally does not enumerate the rest.
 
 ## Considered & rejected
 
@@ -171,8 +174,12 @@ different accounts' `inputSchema` simultaneously. Under Option A the advertised
 set is at most infra + the single active account, so two concurrent clients
 **cannot** simultaneously observe two different accounts' tool schemas via
 `tools/list`: client B selecting `personal` yanks `work.*` out of client A's
-advertised set and fires `list_changed` at A. This *is* made worse by Option A
-for the shared-process multi-client case. It is scoped out on two grounds:
+advertised set. Worse, the `list_changed` notification reaches **only the
+calling session** — `context.peer.notify_tool_list_changed()` targets client B,
+the caller (`server.rs`), with no cross-session broadcast — so client A gets
+*no* signal and sees its advertised catalog change silently on its next
+`tools/list`. This *is* made worse by Option A for the shared-process
+multi-client case. It is scoped out on two grounds:
 the deployed shape is single-client stdio (see
 `2026-05-02-multi-client-stdio-design.md`), and per-account tool-*name*
 discovery remains available to every session, slot-independent, via
@@ -187,10 +194,24 @@ concurrently in one process are not a supported configuration.
     the catalog is unit-testable socket-free via `make_test_account_state`.
   - `SERVER_INSTRUCTIONS_MULTI_ACCOUNT`: rewrite "`use_account` narrows" →
     "server advertises `use_account`/`list_accounts` initially; `use_account`
-    reveals the chosen account's tools."
+    reveals the chosen account's tools." The rewrite **must preserve** two
+    guarantees the rest of this spec depends on: (1) "every account stays
+    callable by `<account>.<tool>` regardless of the active selection" — the
+    namespace-dispatch fallback the Client-compatibility section relies on for
+    clients that never select; and (2) the single-account "auto-selects"
+    wording. It must keep containing the literal `use_account` and `auto-selects`
+    and must **not** introduce the phrase `"With more than one account
+    configured"` (see the in-file constant tests below).
   - `active_selection_changes_advertisement`: update doc comment only.
 - `crates/rimap-server/tests/server_capabilities.rs`: update the exact-text
   fixture for the rewritten instructions.
+- `crates/rimap-server/src/mcp/server.rs` in-file constant tests to reconcile
+  with the rewritten text (they pin the guarantees above):
+  `instructions_constants_tests::server_instructions_constants_exist_and_differ`
+  (multi text must contain `use_account`; single must not) and
+  `multi_account_text_acknowledges_single_account_auto_resolve` (multi text
+  must contain `auto-selects`, must not contain `"With more than one account
+  configured"`).
 - `docs/multi-account.md`: update the "Account selection" / "`use_account`"
   section to describe reveal-on-select.
 
