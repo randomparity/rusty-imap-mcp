@@ -90,6 +90,17 @@ are identical to #401's:
 The helper's logic and its unit tests stay green. Only its doc comment
 changes (from "`None` means advertise every account" to Option A semantics).
 
+**One edge is not identical to #401** and the "identical" claim is scoped
+accordingly: if the selected account advertises an *empty* tool set (reachable
+via a `[security.tools]` override that denies every tool), the true delta for
+`None → Some(x)` is infra → infra — *no* change — yet the helper still returns
+`count > 1 = true` and fires a `notifications/tools/list_changed`. Under #401
+that transition always removed other accounts' tools, so it was a genuine
+change even for an empty account. The consequence under Option A is a single
+spurious, best-effort notification prompting one redundant re-fetch — harmless,
+and not worth complicating the gate to suppress. The test plan pins this edge
+with a unit case rather than leaving the "identical" claim unqualified.
+
 ## Considered & rejected
 
 - **Do nothing / keep #401 default, rely on #411 pagination.** Pagination
@@ -117,13 +128,56 @@ changes (from "`None` means advertise every account" to Option A semantics).
   (initial payload ~2 KB vs ~616 KB for 3 full-posture accounts). It calls
   `use_account`, receives `notifications/tools/list_changed`, re-fetches
   `tools/list`, and sees the selected account's namespaced tools.
-- The server-process-wide `active` slot (#401's known consequence) is
-  inherited unchanged: `use_account` affects advertisement for every client
-  session sharing the process. Not made worse by Option A.
 - A client that already knows a namespace can still dispatch
   `<account>.<tool>` without selecting — decision 2 preserves this.
 - Single-account deployments: zero behavior change (advertised set, byte
   count, and pagination all identical to today).
+
+### Client compatibility — this is a real, intended trade-off
+
+Option A deliberately replaces #401's *always-visible* multi-account catalog
+with a select-then-see handshake. That is a behavior change for clients, and
+this section states the contract rather than assuming a cooperative client.
+
+**Assumed client contract (multi-account only):** to discover and call an
+account's tools, a client must either (a) act on the `instructions` text —
+which directs it to `use_account` — or (b) call `use_account` on its own, and
+then re-fetch `tools/list` (proactively after the call, or on receipt of the
+`notifications/tools/list_changed` it triggers).
+
+**What a non-conforming multi-account client sees:**
+
+- A client that never calls `use_account` sees only `use_account` +
+  `list_accounts`. It can *still dispatch* any `<account>.<tool>` it knows by
+  name (decision 2), and it can enumerate each account's available tool
+  **names** — without touching the process-wide active slot — via the
+  `rimap://accounts/<name>` MCP resource (`available_tools`,
+  `server.rs`). That resource is the schema-free discovery fallback; it does
+  not expose full `inputSchema`, so a client that needs a tool's input schema
+  must select the account. This is the accepted floor: naive non-agent clients
+  that ignore both `instructions` and the accounts resource are out of scope —
+  the server is an agent-facing MCP server whose highest-authority text tells
+  the agent to select an account.
+- A client that ignores `notifications/tools/list_changed` still sees the
+  selected account's tools if it re-fetches `tools/list` after `use_account`
+  returns; the notification is an optimization, not the only path.
+
+**Concurrent clients sharing one process — a genuine regression, scoped:**
+`active` is a single process-wide slot (#401's known consequence:
+`AccountRegistry` holds one `ArcSwapOption<AccountId>`; `use_account` flips it
+for every session sharing the process). Under #401 every session always saw
+every account's full tool definitions, so two clients could observe two
+different accounts' `inputSchema` simultaneously. Under Option A the advertised
+set is at most infra + the single active account, so two concurrent clients
+**cannot** simultaneously observe two different accounts' tool schemas via
+`tools/list`: client B selecting `personal` yanks `work.*` out of client A's
+advertised set and fires `list_changed` at A. This *is* made worse by Option A
+for the shared-process multi-client case. It is scoped out on two grounds:
+the deployed shape is single-client stdio (see
+`2026-05-02-multi-client-stdio-design.md`), and per-account tool-*name*
+discovery remains available to every session, slot-independent, via
+`rimap://accounts/<name>`. Callers needing full schemas for multiple accounts
+concurrently in one process are not a supported configuration.
 
 ## Implementation surface
 
@@ -153,6 +207,12 @@ Unit (socket-free, `make_test_account_state`, via `build_tool_catalog_for`):
 - `legacy_single_default_advertises_bare_tools`: one `default` account,
   `active=None` → infra + bare tools (unchanged).
 
+- `selecting_empty_tool_account_still_reports_change`: 2 accounts where the
+  selected one advertises an empty tool set (`[security.tools]` denies all),
+  `active=None → Some(x)`; assert `active_selection_changes_advertisement`
+  returns `true` (documents the harmless spurious-`list_changed` edge from the
+  "list_changed change detection" section rather than leaving it unpinned).
+
 The 2-entry assertion in `multi_account_no_active_advertises_infra_only` is
 the structural proxy for the byte win (payload = infra defs only); byte-count
 assertions are intentionally avoided as brittle.
@@ -160,12 +220,33 @@ assertions are intentionally avoided as brittle.
 Instructions text: existing `server_capabilities.rs` fixture assertion,
 updated to the rewritten constant, keeps the constant honest.
 
-Conformance + multi-account e2e: the existing wire suites must stay green; add
-a wire assertion (or extend `e2e_wire_tool_advertisement.rs`) that a
-multi-account boot advertises infra-only before `use_account` and the selected
-account's tools after, if the harness supports two accounts against the shared
-Dovecot fixture without disproportionate cost; otherwise cover reveal-on-select
-at the unit seam and keep the existing e2e green.
+Conformance + multi-account e2e (hard requirement, no waiver): add a
+wire-driven multi-account test — a new `e2e_wire_*` binary or an extension of
+`e2e_wire_tool_advertisement.rs` — that boots a **two-account** config against
+the shared Dovecot fixture (both accounts may target the same Dovecot user, as
+the existing per-posture advertisement test already targets one user across
+four servers) and asserts the reveal-on-select handshake on the wire:
+
+1. Initial `tools/list` (walking cursor pagination) advertises exactly the
+   infra tools — no `<account>.<tool>` entries.
+2. After a `use_account` call succeeds, a re-fetched `tools/list` advertises
+   the selected account's namespaced tools and none of the other account's.
+
+This exercises the two-request client cycle the unit seam cannot observe. The
+`list_changed` emission itself is already wire-asserted for the
+selection-changes case by the existing suites; this test does not duplicate
+that. Container-gated with the same silent-skip / `RIMAP_REQUIRE_DOCKER=1`
+convention as the sibling `e2e_wire_*` suites.
+
+### Payload measurement — where "recorded" lives
+
+The before/after payload numbers (~616 KB → ~2 KB for 3 full-posture accounts)
+are recorded in this spec's Context section and restated in the PR
+description; they are **illustrative, not asserted** (byte counts vary with
+account count/posture/tool set). The regression guard for the win is the
+`multi_account_no_active_advertises_infra_only` 2-entry structural assertion,
+which fails loudly if any future change re-adds account tools to the initial
+multi-account catalog. No byte-count test is added.
 
 ## Rollback
 
