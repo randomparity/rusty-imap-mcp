@@ -167,8 +167,7 @@ are the ones that trip people up or aren't obvious from the lint set.
   `#[expect(clippy::unwrap_used)]` the whole `mod tests`.
 - **No panics in `Result` functions.** `panic_in_result_fn` is denied. If you
   need to bail, return an error.
-- **`thiserror` for library crates, `anyhow` for `rimap-server`** (when those
-  dependencies land in Sprint 1).
+- **`thiserror` for library crates, `anyhow` for `rimap-server`.**
 - **100-char line length.** See `rustfmt.toml`.
 - **Absolute imports only.** No relative `..` paths.
 - **Google-style docstrings** on non-trivial public APIs. Every public crate
@@ -181,7 +180,7 @@ are the ones that trip people up or aren't obvious from the lint set.
 - **Newtypes over primitives.** `MessageUid(u32)`, not `u32`. Enums for state
   machines, not boolean flags.
 
-## Testing expectations (starting Sprint 1)
+## Testing expectations
 
 - **TDD for feature code.** Write the failing test first, run it to see it
   fail, write the minimal implementation, re-run, commit.
