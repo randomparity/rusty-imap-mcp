@@ -85,10 +85,19 @@ impl std::fmt::Debug for AccountState {
     }
 }
 
-/// Holds all configured accounts and the session-scoped active
-/// account selection.
+/// Holds all configured accounts and the active account selection.
+///
+/// The active selection is **process-wide**, not per-session: there is one
+/// `AccountRegistry` per process and the current stdio transport serves a
+/// single client session, so "process-wide" and "session" coincide today.
+/// Under reveal-on-select (#439) this slot also drives `tools/list`
+/// advertisement (`None` → infrastructure tools only; `Some(x)` → account
+/// `x`'s tools). stdio single-session only — revisit this coupling before
+/// adding any multiplexed (HTTP/SSE) transport, where one client's
+/// `use_account` would flip every session's advertised catalog.
 pub struct AccountRegistry {
     accounts: BTreeMap<AccountId, AccountState>,
+    /// Process-wide active account selection (see the struct doc).
     active: ArcSwapOption<AccountId>,
     /// Process-wide rate limiter for infrastructure tools
     /// (`use_account`, `list_accounts`). Prevents an injected prompt
