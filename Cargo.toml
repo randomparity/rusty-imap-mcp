@@ -152,26 +152,27 @@ unicode-script = "0.5.8"
 #
 # Our direct phf declaration disables defaults; phf_macros still
 # enters the graph transitively via cssparser, which is acknowledged
-# in the proc-macro enumeration above.
+# in the proc-macro enumeration below.
 #
 # Transitively-introduced proc-macros entering the graph with the Sprint 4b
 # dep additions (each executes arbitrary Rust at build time, so SC-PROC-01
-# requires per-crate acknowledgement):
-#   - phf_macros 0.11.3       (pulled via ammonia → cssparser 0.35 → web_atoms 0.1)
-#   - phf_macros 0.13.1       (pulled via scraper → selectors 0.38 → cssparser 0.37)
-#   - cssparser-macros 0.6.1  (pulled via ammonia → cssparser 0.35)
-#   - cssparser-macros 0.7.0  (pulled via scraper → selectors 0.38 → cssparser 0.37)
-#   - match_token 0.35.0
-#   - derive_more-impl 2.1.1
+# requires per-crate acknowledgement). After the html5ever 0.35 → 0.39
+# unification (ammonia 4.1.3 / scraper 0.27 / cssparser 0.37 now share a
+# single tokenizer, retiring the 0.35-era duplicates and the standalone
+# match_token proc-macro), the resolved set is:
+#   - phf_macros 0.13.1       (pulled via cssparser 0.37 → phf 0.13)
+#   - cssparser-macros 0.7.0  (pulled via cssparser 0.37)
+#   - derive_more-impl 2.1.1  (pulled via scraper → selectors 0.38 → derive_more 2.1)
+# cssparser 0.37 itself is shared by ammonia 4.1.3 and scraper → selectors 0.38.
 #
-# Provenance: all six live under the rust-phf (Steven Fackler / Chris
+# Provenance: all three live under the rust-phf (Steven Fackler / Chris
 # Morgan) and servo / rust-scraper (Mozilla / rust-lang) ecosystems — the
 # same trust anchors already vetted for scraper, ammonia, and cssparser
 # themselves. No build.rs tricks, no network/fs/process access in their
 # proc-macro sources; their sole purpose is compile-time codegen for
-# perfect-hash tables, CSS selector parsing, HTML5 token matching, and
-# derive-macro expansion respectively. No RUSTSEC advisories apply to any
-# of these versions as of 2026-07-08, and `cargo deny check` passes against
+# perfect-hash tables, CSS tokenizer parsing, and derive-macro expansion
+# respectively. No RUSTSEC advisories apply to any of these versions as of
+# 2026-07-08, and `cargo deny check` passes against
 # the full graph (advisories, bans, licenses, sources). Our direct phf /
 # phf_codegen were bumped 0.13.1 -> 0.14.0 (MIT; rust-phf / Steven Fackler;
 # crates.io) and re-audited v0.14 on 2026-07-08 (SC-PROC-01): no new build.rs
