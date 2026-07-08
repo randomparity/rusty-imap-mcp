@@ -4,7 +4,7 @@
 
 **Goal:** Adapt the server source to rmcp 2.1's MCP-2025-11-25-aligned model API so the workspace compiles, all existing tests pass, and the first release ships on rmcp 2.x.
 
-**Architecture:** The dependency bump (rmcp `2.0`/lock 2.1.0, phf 0.14) is already committed by dependabot (`3d87b1bb`). This plan is the *source* adaptation only: rmcp 2.0 removed `RawResource` and the `Resource.raw` field (flat builder now) and renamed the `Content` enum to `ContentBlock`. The break is 8 compiler errors in exactly two files. No behavior changes; existing wire/e2e/conformance tests are the specification.
+**Architecture:** The dependency bump (rmcp `2.0`/lock 2.1.0, phf 0.14) is already committed by dependabot (`3d87b1bb`). This plan is the *source* adaptation only: rmcp 2.0 removed `RawResource` and the `Resource.raw` field (flat builder now) and renamed the `Content` enum to `ContentBlock`. The break is 11 sites in exactly two files (8 surface on `cargo check`; 3 test-module reads appear once the lib compiles). No behavior changes; existing wire/e2e/conformance tests are the specification.
 
 **Tech Stack:** Rust (workspace), rmcp 2.1.0 (stdio `transport-io`), tokio, `cargo`/`clippy`/`cargo-deny`, Node `mcp-conformance`.
 
@@ -19,7 +19,7 @@
 
 ## Verified facts (compiler + rmcp 2.1 source, already checked)
 
-- Full break set = 8 errors in 2 files: `error.rs` (`Content` import + `Content::text`), `server.rs` (`RawResource` import + 3 `Resource { raw: … }` sites). Nothing else in lib/bins/tests uses the removed symbols.
+- Full break set = **11 sites in 2 files**: `error.rs` (`Content` import + `Content::text`); `server.rs` (`RawResource` import, 3 `Resource { raw: … }` production sites, **and 3 `r.raw.{uri,mime_type}` reads in the `static_doc_resource_tests` module at :902/905/908**). A lib+bins `cargo check` reports only the first 8 because the lib fails to compile before its test module is built; the 3 test-module reads (`E0609 no field 'raw'`) surface once the lib compiles. The unrelated `.raw` hits in `registry.rs` / `tools/compose/*` are the SMTP message-builder's byte field, **not** rmcp `Resource`.
 - rmcp 2.1 API present: `Resource::new(uri,name).with_description(_).with_mime_type(_)` (resource.rs:41/60/65); `ContentBlock::text` (content.rs:280); `CallToolResult::error(Vec<ContentBlock>)` and `::structured(Value)` (model.rs:3047/3069).
 - `phf_codegen` `build.rs` and `ToolAnnotations::from_raw` compile unchanged under 0.14 / 2.1 → **spec's conditional phf-`build.rs` commit is NOT needed** (omit it).
 - `ProtocolVersion` deserialize is still lenient (unknown strings → `Cow::Owned`, model.rs:198-209) → the anti-downgrade control and the existing `mcp_wire_negative.rs` garbage-version tests remain valid guards (F1/F2 satisfied by existing tests).
@@ -88,18 +88,22 @@ to:
     let mut result = CallToolResult::error(vec![ContentBlock::text(message)]);
 ```
 
-- [ ] **Step 4: Run the guard tests**
+- [ ] **Step 4: Do not test yet — the lib cannot compile until Task 3**
 
-Run: `cargo test -p rimap-server --lib mcp::error::`
-Expected: PASS (error.rs now compiles; `to_error_call_result` tests green). Note: `server.rs` still has errors, so scope the test filter to the module; full-lib build turns green after Task 3.
+`cargo test --lib` builds the *entire* `rimap-server` lib test binary; a
+`mcp::error::` filter only selects which tests RUN, not which modules compile.
+While `server.rs` still references removed symbols (production sites + the
+`r.raw` test reads), the lib test binary will not link, so no `error.rs` test
+can run yet. Apply Steps 2–3 and proceed to Task 3; `error.rs`'s tests are
+verified in Task 3 Step 7 once the whole crate compiles.
 
 ---
 
 ### Task 3: Migrate `server.rs` `Resource` construction (3 sites) + drop `RawResource`
 
 **Files:**
-- Modify: `crates/rimap-server/src/mcp/server.rs:23` (import), `:565-570` (account), `:821-828` (postures), `:830-…` (workflows)
-- Test (guard): `crates/rimap-server/tests/e2e_wire.rs` (`resources/list` `:783`, `resources/read` `:755`)
+- Modify: `crates/rimap-server/src/mcp/server.rs:23` (import), `:565-570` (account), `:821-828` (postures), `:830-…` (workflows), **`:902/905/908` (`static_doc_resource_tests` `r.raw` reads)**
+- Test (guard): `crates/rimap-server/tests/e2e_wire.rs` (`resources/list` `:783`, `resources/read` `:755`); `server.rs` `static_doc_resource_tests`
 
 **Interfaces:**
 - Consumes: `Resource::new(uri,name).with_description(_).with_mime_type(_)`.
@@ -162,15 +166,26 @@ to:
 
 Apply the identical transform to the `WORKFLOWS_DOC_URI` block: replace `Resource { raw: RawResource::new(WORKFLOWS_DOC_URI, "workflows").with_description(…).with_mime_type("text/markdown"), annotations: None }` with `Resource::new(WORKFLOWS_DOC_URI, "workflows").with_description(…).with_mime_type("text/markdown")`, preserving the exact description string and the surrounding `vec![ … ]` comma.
 
-- [ ] **Step 5: Verify the workspace compiles**
+- [ ] **Step 5: Migrate the test-module `.raw` reads (`server.rs:902/905/908`)**
+
+`Resource` is flat in 2.1 (`uri`, `mime_type` fields; no `raw` wrapper), so the
+`static_doc_resource_tests` assertions must drop `.raw`. Change:
+```rust
+                r.raw.mime_type.as_deref(),
+```
+to `r.mime_type.as_deref(),`; change `r.raw.uri,` to `r.uri,`; and change
+`resources.iter().map(|r| r.raw.uri.as_str())` to
+`resources.iter().map(|r| r.uri.as_str())`.
+
+- [ ] **Step 6: Verify the whole workspace compiles**
 
 Run: `cargo check --workspace --all-targets`
-Expected: no errors (all 8 resolved).
+Expected: no errors (all 11 sites resolved — 8 lib/prod + 3 test-module reads).
 
-- [ ] **Step 6: Run the resource wire guards**
+- [ ] **Step 7: Run the resource + error guards (both files, now that the crate links)**
 
-Run: `cargo test -p rimap-server --test e2e_wire`
-Expected: PASS — `resources/list` and `resources/read` emit valid shapes against the 2025-11-25 schema fixture.
+Run: `cargo test -p rimap-server --lib mcp::error:: mcp::server:: && cargo test -p rimap-server --test e2e_wire`
+Expected: PASS — `error.rs` `to_error_call_result` tests, `static_doc_resource_tests`, and the `resources/list` + `resources/read` wire guards all green against the 2025-11-25 schema fixture.
 
 ---
 
