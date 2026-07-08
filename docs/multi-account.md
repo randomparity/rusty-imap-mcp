@@ -105,6 +105,12 @@ account named in the prefix:
 { "name": "work.search", "arguments": { "folder": "INBOX", "limit": 10 } }
 ```
 
+In a multi-account deployment the initial `tools/list` (before any
+`use_account` selection) advertises only the infrastructure tools
+(`use_account`, `list_accounts`); a chosen account's namespaced tools are
+revealed after `use_account` selects it (see below). Single-account
+deployments advertise their sole account's tools immediately.
+
 The bare tool name (e.g. `search`) is rejected with `INVALID_PARAMS`
 whenever more than the single legacy `default` account is configured.
 With exactly one account configured, the server auto-selects it. The
@@ -123,13 +129,20 @@ selector, so no tool schema declares an `account` property.
 { "account": "work" }
 ```
 
-The active selection narrows the `tools/list` advertisement to that
-account's tools (plus the always-advertised `use_account` /
-`list_accounts`). It is a convenience for focusing the catalog — it does
-**not** gate dispatch. Every account's tools stay callable by their
-`<account>.<tool>` name regardless of which account is active. When the
-selection changes the advertised set, the server emits
+In a multi-account deployment, `tools/list` advertises only the
+infrastructure tools (`use_account`, `list_accounts`) until an account is
+selected. Calling `use_account` reveals the chosen account's namespaced
+tools; the server emits `notifications/tools/list_changed`, so a client
+re-fetches `tools/list` to see them. This is a display concern only — it
+does **not** gate dispatch: every account's tools stay callable by their
+`<account>.<tool>` name regardless of which account is active, and a client
+can enumerate an account's tool names without selecting it (and without
+disturbing other sessions) by reading the `rimap://accounts/<name>`
+resource. When the selection changes the advertised set, the server emits
 `notifications/tools/list_changed`.
+
+With exactly one account configured, the server auto-selects it, so that
+account's tools are advertised immediately without any `use_account` call.
 
 `use_account` bypasses posture checks, rate limiting, and circuit
 breaker -- it is an infrastructure tool, not an IMAP operation.

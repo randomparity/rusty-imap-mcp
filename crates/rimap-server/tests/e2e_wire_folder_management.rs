@@ -130,32 +130,25 @@ async fn wire_e2e_folder_create_rename_delete() {
     assert_folder_audit_records(&audit_path);
 }
 
-/// The advertisement posture for the two accounts: the `destructive`
-/// namespace advertises all three folder mutations, but the `full`
-/// namespace advertises only `create_folder`/`rename_folder` —
-/// `delete_folder` is destructive-only.
-///
-/// The two-account catalog exceeds one `tools/list` page
-/// (`TOOLS_PER_PAGE`), so this walks the `nextCursor` pagination to
-/// collect the complete advertisement before asserting.
+/// Before any `use_account` selection, a multi-account server advertises
+/// only the infrastructure tools (reveal-on-select, #439) — the per-account
+/// namespaced folder tools are revealed after selection. The per-posture
+/// exact advertised sets (e.g. that a `full` account advertises
+/// `create_folder`/`rename_folder` but not `delete_folder`, while a
+/// `destructive` account advertises all three) are covered by
+/// `e2e_wire_tool_advertisement.rs`; the reveal handshake by
+/// `e2e_wire_multi_account_advertisement.rs`. Every namespaced folder tool
+/// this test drives stays dispatchable by `<account>.<tool>` regardless of
+/// the active selection, so no `use_account` is needed for the steps below.
 async fn assert_folder_tools_advertised(harness: &mut Harness) {
     let names = collect_all_advertised_tools(harness).await;
-
-    for required in [
-        "destructive.create_folder",
-        "destructive.rename_folder",
-        "destructive.delete_folder",
-        "full.create_folder",
-        "full.rename_folder",
-    ] {
-        assert!(
-            names.iter().any(|n| n == required),
-            "namespace must advertise {required}; got {names:?}",
-        );
-    }
-    assert!(
-        !names.iter().any(|n| n == "full.delete_folder"),
-        "delete_folder is destructive-only; full must not advertise it: {names:?}",
+    let mut names_sorted = names.clone();
+    names_sorted.sort();
+    assert_eq!(
+        names_sorted,
+        vec!["list_accounts".to_string(), "use_account".to_string()],
+        "multi-account initial tools/list must advertise infra tools only \
+         before use_account (reveal-on-select, #439); got {names:?}",
     );
 }
 

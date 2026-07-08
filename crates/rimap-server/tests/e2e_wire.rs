@@ -130,7 +130,7 @@ async fn wire_e2e_full_session_draft_safe() {
     assert!(init_result["capabilities"]["tools"].is_object());
     harness.send_initialized().await;
 
-    assert_tools_list(&mut harness).await;
+    assert_initial_catalog_infra_only(&mut harness).await;
     let uid = drive_account_scoped_tools(&mut harness, &download_dir).await;
     assert_move_message(&mut harness, uid).await;
 
@@ -145,8 +145,10 @@ async fn wire_e2e_full_session_draft_safe() {
 
 /// Drive the account-scoped tools and return the UID of the seeded message.
 async fn drive_account_scoped_tools(harness: &mut Harness, download_dir: &std::path::Path) -> u32 {
-    // 1. use_account → draftsafe.
+    // 1. use_account → draftsafe. This reveals the draftsafe namespace in
+    //    tools/list (reveal-on-select, #439).
     let _ = call_tool(harness, "use_account", json!({ "account": "draftsafe" })).await;
+    assert_draftsafe_revealed(harness).await;
 
     // 2. list_accounts (infrastructure).
     let accounts_body = call_tool(harness, "list_accounts", json!({})).await;
@@ -351,7 +353,35 @@ async fn assert_html_body_denied_at_draftsafe(harness: &mut Harness) {
     );
 }
 
-async fn assert_tools_list(harness: &mut Harness) {
+/// Before any `use_account` selection, a multi-account server advertises
+/// only the infrastructure tools (reveal-on-select, #439). Per-posture
+/// exact advertised sets are covered by `e2e_wire_tool_advertisement.rs`;
+/// the full reveal handshake by `e2e_wire_multi_account_advertisement.rs`.
+async fn assert_initial_catalog_infra_only(harness: &mut Harness) {
+    let tools_list = harness.request("tools/list", json!({})).await;
+    assert_valid(&tools_list["result"], "ListToolsResult");
+    let mut names: Vec<String> = tools_list["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["list_accounts".to_string(), "use_account".to_string()],
+        "multi-account initial tools/list must advertise infra tools only \
+         before use_account (reveal-on-select, #439)",
+    );
+    assert!(
+        tools_list["result"]["nextCursor"].is_null(),
+        "infra-only catalog fits one page; unexpected nextCursor",
+    );
+}
+
+/// After `use_account("draftsafe")`, the catalog reveals the selected
+/// account's namespaced tools and no other account's.
+async fn assert_draftsafe_revealed(harness: &mut Harness) {
     let tools_list = harness.request("tools/list", json!({})).await;
     assert_valid(&tools_list["result"], "ListToolsResult");
     let tools: BTreeMap<String, Value> = tools_list["result"]["tools"]
@@ -382,21 +412,12 @@ async fn assert_tools_list(harness: &mut Harness) {
         assert!(tools.contains_key(required), "missing tool: {required}");
     }
 
-    for forbidden in [
-        "readonly.move_message",
-        "readonly.create_draft",
-        "readonly.mark_read",
-        "readonly.mark_unread",
-        "readonly.flag",
-        "readonly.unflag",
-        "readonly.add_label",
-        "readonly.remove_label",
-    ] {
-        assert!(
-            !tools.contains_key(forbidden),
-            "readonly namespace must not advertise {forbidden}",
-        );
-    }
+    assert!(
+        !tools.keys().any(|n| n.starts_with("readonly.")),
+        "after selecting draftsafe, no readonly namespace tools may be \
+         advertised (reveal-on-select shows only the active account): {:?}",
+        tools.keys().collect::<Vec<_>>(),
+    );
 }
 
 async fn assert_search(harness: &mut Harness) -> u32 {
@@ -710,7 +731,7 @@ async fn wire_e2e_readonly_posture_denial() {
     let _ = harness.initialize_handshake().await;
     harness.send_initialized().await;
 
-    assert_readonly_tools_list(&mut harness).await;
+    assert_initial_catalog_infra_only(&mut harness).await;
     assert_readonly_success_path(&mut harness).await;
     assert_readonly_resource_reports_posture(&mut harness).await;
     assert_static_doc_resources_readable(&mut harness).await;
@@ -797,29 +818,6 @@ async fn assert_static_doc_resources_readable(harness: &mut Harness) {
 }
 
 /// Verify tools/list advertisement posture for the readonly namespace.
-async fn assert_readonly_tools_list(harness: &mut Harness) {
-    let tools_list = harness.request("tools/list", json!({})).await;
-    assert_valid(&tools_list["result"], "ListToolsResult");
-    let names: Vec<&str> = tools_list["result"]["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
-    assert!(
-        names.contains(&"draftsafe.move_message"),
-        "draftsafe.move_message must be advertised; got {names:?}",
-    );
-    assert!(
-        names.contains(&"readonly.list_folders"),
-        "readonly.list_folders must be advertised; got {names:?}",
-    );
-    assert!(
-        !names.contains(&"readonly.move_message"),
-        "readonly.move_message must not be advertised; got {names:?}",
-    );
-}
-
 /// Readonly success path: drive `list_folders` end-to-end.
 async fn assert_readonly_success_path(harness: &mut Harness) {
     let readonly_folders = call_tool(harness, "readonly.list_folders", json!({})).await;
