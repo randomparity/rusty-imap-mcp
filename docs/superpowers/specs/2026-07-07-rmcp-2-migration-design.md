@@ -52,12 +52,22 @@ introduce no new attack surface (the vulnerable code is not built).
   force-updated this branch once this session, so if the push is rejected as
   non-fast-forward, re-fetch and rebase our commits onto the new head — never
   force-push over a dependabot update.
-- `Cargo.toml` keeps `rmcp = { version = "2.0", ... }` (caret admits 2.1.0);
-  `cargo update -p rmcp` resolves `Cargo.lock` to **2.1.0**.
-- Two commits, so `git bisect` can separate concerns:
-  1. `deps: migrate to rmcp 2.1 API` (includes the SC-PROC-01 rmcp/rmcp-macros
-     re-audit and the `Cargo.toml` audit-comment refresh)
-  2. `deps: bump phf to 0.14 (SC-PROC-01 re-audit)`
+- `Cargo.toml` on the branch already reads `rmcp = "2.0"` and `phf = "0.14.0"`;
+  `Cargo.lock` already resolves rmcp **2.1.0** and phf **0.14.0**. This entire
+  dependency bump is a **single pre-existing dependabot commit** (`3d87b1bb`,
+  "bump the cargo-major group … 3 updates") — so rmcp and phf are **not
+  bisect-separable**; a regression bisect lands on the grouped commit, not on
+  one dependency. Do not claim otherwise.
+- Our added commits split by **kind of work**, not by dependency (the deps are
+  already committed):
+  1. `deps: migrate to rmcp 2.1 API` — the v1→v2 source sites in
+     `server.rs` / `error.rs` / `tool_catalog.rs`, plus the new/kept
+     downgrade-rejection tests (F1/F2).
+  2. `chore: SC-PROC-01 re-audit for rmcp 2.1 and phf 0.14` — refresh **both**
+     stale `Cargo.toml` audit comments (rmcp and phf), plus any `phf_codegen`
+     `build.rs` source change the 0.14 bump forces (see risk items). No
+     `Cargo.toml`/`Cargo.lock` *version* change — that already happened in
+     `3d87b1bb`.
 
 ## Concrete code changes
 
@@ -88,6 +98,11 @@ builder; `Content::text` → `ContentBlock::text`.
   `annotations: None`. Enumerate rmcp 2.1's `Resource` fields and confirm no
   newly-defaulting field (e.g. `title`) silently appears in emitted descriptors.
 - `schemars` ↔ `rmcp` version compatibility in the resolved lock.
+- **`phf_codegen` 0.14 in `crates/rimap-content/build.rs`** — phf is not
+  comment-only: `phf_codegen` runs at build time (`build.rs`) and `phf` provides
+  runtime lookup maps (`lib.rs`). The 0.13→0.14 bump may change the
+  `phf_codegen` builder API; if so, `build.rs` needs a source change (the build
+  is the oracle). Do not assume phf is a pure version bump.
 
 **Input side / security-relevant (behavior, not just shape) — F1, F2:**
 
@@ -104,10 +119,18 @@ builder; `Content::text` → `ContentBlock::text`.
   `ProtocolVersion(Cow::Owned(s))` so unknown/hostile version strings route into
   the server's controlled error envelope. If rmcp 2.0 made `ProtocolVersion` a
   strict enum, a garbage version now fails at transport deserialize, **bypassing
-  `unsupported_protocol_version_error`**. Confirm leniency is unchanged with a
-  test feeding a garbage version string through `initialize`. This is the one
-  path the conformance suite does **not** cover — it validates emitted output
-  shapes, not client→server input strictness.
+  `unsupported_protocol_version_error`**. This is the one path the conformance
+  suite does **not** cover — it validates emitted output shapes, not
+  client→server input strictness.
+  **Test mechanism (must be at the deserialize boundary):** the test must
+  deserialize a full `initialize` request JSON frame — a garbage
+  `protocolVersion` embedded inside the `InitializeRequestParams` object, parsed
+  through the same path the transport uses — and assert it surfaces as the
+  crafted `unsupported_protocol_version_error` envelope. A test that constructs
+  the `ProtocolVersion` in-process via `version_from_str` (`server.rs:1015`) and
+  calls the `initialize` handler directly does **not** exercise the container
+  deserialize boundary where a strictness regression manifests, and would give
+  false assurance.
 
 ## Protocol version / conformance
 
@@ -148,15 +171,20 @@ on minor bump"); a major bump plainly qualifies.
 Dispatch the `supply-chain-reviewer` agent to confirm — do not assume — and
 record its actual findings in the commits:
 
-- **rmcp 2.1 + rmcp-macros 2.1** (commit 1): source diff carries no new
-  `build.rs` / network / fs / process access; proc-macro remains
+- **rmcp 2.1 + rmcp-macros 2.1** (comment refresh in commit 2): source diff
+  carries no new `build.rs` / network / fs / process access; proc-macro remains
   Apache-2.0 OR MIT. Mitigating fact to record: the 1.8→2.1 bump added **no new
   crate names** to the compiled graph, so the delta is the changed
   `rmcp`/`rmcp-macros` source itself, not new transitive surface. Refresh the
   stale `Cargo.toml:194-198` comment to "Reviewed v2.1."
 - **phf / phf_codegen 0.14** (commit 2): license unchanged (expected
   MIT/Apache-2.0); no new `build.rs` / network / fs / process access in the
-  macro source; `cargo-deny` green (advisories, bans, licenses, sources).
+  macro source; `cargo-deny` green (advisories, bans, licenses, sources). The
+  phf audit block at `Cargo.toml:90-183` is **also stale** — it attests "no
+  RUSTSEC advisories … as of 2026-05-20" against the pre-bump versions, and its
+  own "Re-audit trigger: any minor version bump of … the phf family (SC-PROC-01)"
+  fires on exactly this bump. Refresh its provenance date and version
+  attestation in commit 2, not just the rmcp comment.
 
 If any check fails, that bump is not mergeable as-is and is escalated separately
 from the rest of the migration.
