@@ -24,11 +24,13 @@
 - `phf_codegen` `build.rs` and `ToolAnnotations::from_raw` compile unchanged under 0.14 / 2.1 → **spec's conditional phf-`build.rs` commit is NOT needed** (omit it).
 - `ProtocolVersion` deserialize is still lenient (unknown strings → `Cow::Owned`, model.rs:198-209) → the anti-downgrade control and the existing `mcp_wire_negative.rs` garbage-version tests remain valid guards (F1/F2 satisfied by existing tests).
 
-## Commits (per spec, phf-build commit dropped)
+## Commits (per spec, phf-build commit dropped; deny-skip commit added)
 
-1. `deps: migrate to rmcp 2.1 API` — Tasks 1–4 (error.rs + server.rs + guard-test confirmation).
-2. *(omitted — phf `build.rs` needs no change).*
-3. `chore: SC-PROC-01 re-audit for rmcp 2.1 and phf 0.14` — Task 6 (comment-only).
+1. `deps: migrate to rmcp 2.1 API` — Tasks 1–4 (error.rs + server.rs + guard-test confirmation). Build+test+clippy+fmt green.
+2. `build: skip transitive phf 0.13 duplicate under cargo-deny` — Task 5b (deny.toml). **Discovered during build:** the phf 0.14 bump is a *duplicate*, not a replacement — `cssparser 0.37` (ammonia/scraper stack) still pins phf 0.13, and `deny.toml`'s `multiple-versions = "deny"` errors on it. Makes `cargo deny` green.
+3. `chore: SC-PROC-01 re-audit for rmcp 2.1 and phf 0.14` — Task 6 (Cargo.toml comment-only).
+
+*(The spec's conditional phf-`build.rs` commit is omitted — verified `build.rs` compiles unchanged under phf_codegen 0.14.)*
 
 ---
 
@@ -218,10 +220,15 @@ These existing tests already cover F1/F2 at the deserialize boundary → **no ne
 Run: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 2: Tests (stable) + drift + deny**
+- [ ] **Step 2: Tests (stable) + drift**
 
-Run: `cargo test --workspace && cargo deny check`
+Run: `cargo test --workspace`
 Expected: all pass. Also run the schema/doc drift gates the repo uses (`just` targets or the CI equivalents for `tool-schema drift` / `tools-doc drift`) and `mcp-conformance` (Node) if runnable locally; otherwise rely on CI.
+
+- [ ] **Step 2b (Task 5b): cargo-deny — skip the phf 0.13/0.14 duplicate**
+
+Run `cargo deny check` → fails `bans` with duplicate `phf`/`phf_codegen`/`phf_generator`/`phf_shared` (0.13 via `cssparser 0.37`, 0.14 direct). Add a justified `skip` block to `deny.toml`'s `[bans].skip` for the four phf-family crates at version `0.13`, matching the file's existing upstream-pin-duplicate pattern. Re-run `cargo deny check bans` → `bans ok`. Commit as commit 2 (`build: skip transitive phf 0.13 duplicate under cargo-deny`).
+Note: 3 pre-existing `unmatched-skip-root` warnings (`windows-sys 0.52`, `html5ever 0.35`, `cssparser 0.35`) and a `license-not-encountered` warning are present on `origin/main` too (verified byte-identical lock) — out of scope; flag in the PR body, do not fix here (removing the `html5ever 0.35` skip would drag in a substantive dual-tokenizer security-note change).
 
 - [ ] **Step 3: MSRV check**
 

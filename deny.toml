@@ -131,6 +131,18 @@ skip = [
     # crates.io releases — `cargo update` cannot unify across the 2.x/3.x
     # major split. Revisit when `fs-set-times` bumps to io-lifetimes 3.
     { name = "io-lifetimes", version = "2" },
+
+    # The phf family is duplicated by our direct `phf`/`phf_codegen` 0.14 bump
+    # (rimap-content's confusables perfect-hash table, Sprint 4b) versus the
+    # phf 0.13 line pulled transitively through `cssparser 0.37`
+    # (← ammonia 4.1 / scraper 0.27 / selectors 0.38 / web_atoms). cssparser
+    # pins phf 0.13 at its latest release; we cannot lift it without forking the
+    # ammonia/scraper HTML-sanitization stack, and our direct dep tracks the
+    # newest phf. Revisit when cssparser publishes a phf 0.14 release.
+    { name = "phf", version = "0.13" },
+    { name = "phf_codegen", version = "0.13" },
+    { name = "phf_generator", version = "0.13" },
+    { name = "phf_shared", version = "0.13" },
 ]
 # Multiple `windows-sys` major lines coexist because each transitive
 # consumer (`directories`, `keyring`/`dbus-secret-service`, `rpassword`,
