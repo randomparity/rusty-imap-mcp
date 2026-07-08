@@ -45,9 +45,12 @@ allow = [
     # Attribution") is OSI-approved and strictly more permissive than
     # MIT — no attribution clause, no other obligations. Surfaced when
     # `--features fuzzing` (#266) promoted `jsonschema` from a dev-dep
-    # to a feature-gated regular dep; CI runs `cargo deny check` with
-    # `--all-features`, which activates `fuzzing` and pulls the subtree
-    # into the non-dev graph for the first time.
+    # to a feature-gated regular dep. Both `just deny` and CI (the
+    # `cargo-deny-action`, whose `arguments` input defaults to
+    # `--all-features`) scan with `--all-features`, activating `fuzzing`
+    # and pulling the subtree into the non-dev graph so this allowance is
+    # exercised. Drop it if the `just deny` recipe ever stops passing
+    # `--all-features`, or it will read as unused.
     "MIT-0",
 ]
 confidence-threshold = 0.93
@@ -147,67 +150,19 @@ skip = [
 # Multiple `windows-sys` major lines coexist because each transitive
 # consumer (`directories`, `keyring`/`dbus-secret-service`, `rpassword`,
 # `clap`/`anstream`, `tempfile`/`rustix`) pins to a different release of the
-# Windows ABI shim. Skipping the older subtrees keeps Windows targets in
+# Windows ABI shim. Skipping the older subtree keeps Windows targets in
 # cargo-deny scope without forcing a coordinated upgrade across unrelated
-# ecosystems. The newest version (0.61) remains the canonical one.
+# ecosystems. The newest version (0.61) remains the canonical one; only the
+# 0.59 subtree needs skipping to satisfy the 0.59-vs-0.61 duplicate.
 #
-# `windows-sys 0.52` is hard-pinned by `ring 0.17` (`= "0.52"`, a rustls
-# transitive via rimap-imap), so 0.52 is permanently in the graph and cannot
-# be lifted to 0.61 without forking ring/rustls. The flexible consumers
-# `rustix`/`tempfile`/`errno`/`io-extras`/`fs-set-times`/`winx` declare an
-# open `windows-sys` range that 0.52 satisfies, so cargo's resolver may
-# unify them onto ring's 0.52 node on any lockfile re-resolution (observed
-# when the cargo-minor-patch group regenerated Cargo.lock). Skip the 0.52
-# subtree for the same reason as 0.59. Revisit when `ring` publishes a
-# release using windows-sys >= 0.61.
+# `windows-sys 0.52` is pulled by `ring 0.17` only under
+# `cfg(all(target_arch = "aarch64", target_os = "windows"))`, i.e. exclusively
+# on `aarch64-pc-windows-msvc`. That target is not in the `[graph] targets`
+# list above, so 0.52 never enters cargo-deny's graph and needs no skip entry.
+# If a future lockfile brings 0.52 into a configured target, cargo-deny will
+# flag it and a `skip` can be added then.
 skip-tree = [
     { name = "windows-sys", version = "0.59" },
-    { name = "windows-sys", version = "0.52" },
-
-    # Sprint 4b: the html5ever ecosystem is mid-split. `scraper 0.26` (our
-    # HTML parser) has migrated to html5ever 0.39 / markup5ever 0.39 /
-    # web_atoms 0.2 / string_cache 0.9 / tendril 0.5, while `ammonia 4.1`
-    # (our sanitizer) still pins html5ever 0.35 and the matching older
-    # markup5ever/web_atoms/string_cache/tendril line. Both are the latest
-    # releases on crates.io (checked 2026-04-08). We cannot unify without
-    # forking ammonia or scraper. Skip the older subtrees rooted at
-    # html5ever 0.35 and cssparser 0.35 so cargo-deny accepts the duplicate
-    # versions of markup5ever, web_atoms, string_cache, string_cache_codegen,
-    # and tendril that they drag in.
-    #
-    # SECURITY NOTE (dual tokenizer). scraper 0.26 uses html5ever 0.39;
-    # ammonia 4.1 uses html5ever 0.35. The same HTML body is parsed twice
-    # in Sprint 4b's html pipeline — once by scraper for inspection
-    # (hidden-element detection, anchor href extraction) and once by
-    # ammonia for sanitization. Any divergence between the two html5ever
-    # versions' tokenization rules is a potential sanitizer-bypass vector:
-    # an attacker could craft input that parses one way in scraper's
-    # detectors and a different way in ammonia's output. The Sprint 4b
-    # pipeline runs BOTH engines on the same raw input by design:
-    # scraper inspects the unsanitized DOM to count hidden elements,
-    # strip-warnings, and href-mismatches (stages 4-6 in the plan), and
-    # ammonia produces the sanitized body_html rendering (stage 7).
-    # Neither engine's output is fed into the other -- they are parallel
-    # views of the same bytes. Divergence between the two html5ever
-    # versions therefore manifests as: scraper sees a script that
-    # ammonia did not, or vice versa; one engine resolves an anchor
-    # differently than the other; an attribute parses differently.
-    # Task 17's adversarial corpus MUST include at least one fixture
-    # exercising tokenizer divergence between html5ever 0.35 and 0.39
-    # so the divergence surface is observable in tests, not implicit.
-    # Task 10 must NOT reorder the pipeline to "sanitize first" --
-    # doing so would hollow out every HtmlHiddenContentStripped /
-    # HtmlScriptStripped / HtmlStyleStripped / HtmlRemoteImageStripped /
-    # HtmlLinkTextHrefMismatch warning by running detection against
-    # the already-clean output. Remove both skip-tree entries below
-    # when ammonia publishes a release that bumps to html5ever 0.39+ /
-    # cssparser 0.36+; track https://github.com/rust-ammonia/ammonia for
-    # the upstream bump.
-    # NOTE: cargo-deny interprets bare version strings as caret ranges
-    # (e.g., "0.35" matches ">=0.35.0, <0.36.0"). This is intentional
-    # here — ammonia floats its own transitive html5ever pin.
-    { name = "html5ever", version = "0.35" },
-    { name = "cssparser", version = "0.35" },
 ]
 # psl (via addr) uses a versioning scheme where the patch number
 # tracks the Public Suffix List snapshot date (e.g. 2.1.200). This

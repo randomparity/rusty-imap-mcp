@@ -54,11 +54,14 @@ fn build_ammonia_builder() -> Builder<'static> {
 /// warnings when the pre-sanitize count is non-zero. Returns the
 /// sanitized HTML string.
 ///
-/// The counting deliberately runs against the same `Html` value used
-/// by all earlier detection stages (html5ever 0.39 via scraper), not
-/// against ammonia's internal parse (html5ever 0.35). This means a
-/// crafted divergence between the two tokenizers is observable as a
-/// warning-count vs. `body_html` mismatch.
+/// The counting deliberately runs against the same pre-sanitize `Html`
+/// value used by all earlier detection stages (scraper's parse), not
+/// against ammonia's own internal parse — the point is to observe what
+/// ammonia *will* strip, on the same DOM the detectors saw. ammonia
+/// 4.1 and scraper 0.27 now share html5ever 0.39, so the two parses
+/// agree on tokenization; any residual divergence between them still
+/// surfaces as a warning-count vs. `body_html` mismatch, which the
+/// `html-tokenizer-divergence` snapshot fixture exercises.
 pub(super) fn sanitize_body(
     document: &Html,
     decoded: &str,
