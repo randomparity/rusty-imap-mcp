@@ -254,9 +254,11 @@ fuzz-list:
 test-epvme *args:
     ./scripts/test-epvme.sh {{args}}
 
-# Supply-chain audit.
+# Supply-chain audit. `--all-features` mirrors CI (the cargo-deny-action
+# defaults its `arguments` input to `--all-features`) so the fuzzing-gated
+# subtree — and its MIT-0 license allowance — is scanned locally too.
 deny:
-    cargo deny check
+    cargo deny --all-features check
 
 # Verify declared MSRV is still accurate.
 audit-msrv:
