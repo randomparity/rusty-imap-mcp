@@ -171,8 +171,13 @@ unicode-script = "0.5.8"
 # proc-macro sources; their sole purpose is compile-time codegen for
 # perfect-hash tables, CSS selector parsing, HTML5 token matching, and
 # derive-macro expansion respectively. No RUSTSEC advisories apply to any
-# of these versions as of 2026-05-20, and `cargo deny check` passes against
-# the full graph (advisories, bans, licenses, sources).
+# of these versions as of 2026-07-08, and `cargo deny check` passes against
+# the full graph (advisories, bans, licenses, sources). Our direct phf /
+# phf_codegen were bumped 0.13.1 -> 0.14.0 (MIT; rust-phf / Steven Fackler;
+# crates.io) and re-audited v0.14 on 2026-07-08 (SC-PROC-01): no new build.rs
+# and no fs/network/process access in the codegen source. The phf 0.13 line
+# stays in the graph transitively via cssparser 0.37 (ammonia/scraper), a
+# documented duplicate skipped in deny.toml.
 #
 # - yoke-derive 0.8.2 (unicode-org via ICU4X, pulled through idna_adapter)
 # - zerofrom-derive 0.1.7 (unicode-org via ICU4X, pulled through idna_adapter)
@@ -181,8 +186,8 @@ unicode-script = "0.5.8"
 #
 # Re-audit trigger: any minor version bump of scraper, ammonia, or the
 # phf family. (SC-PROC-01)
-phf = { version = "0.13.1", default-features = false }
-phf_codegen = "0.13.1"
+phf = { version = "0.14.0", default-features = false }
+phf_codegen = "0.14.0"
 
 # SMTP client (Sprint 2b)
 # lettre 0.11 provides async SMTP with rustls TLS. The tokio1-rustls-tls
@@ -191,12 +196,20 @@ phf_codegen = "0.13.1"
 lettre = { version = "0.11.21", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
 # MCP server (Sprint 5)
-# rmcp 1.4 is the Rust MCP SDK. Transitive proc-macros: rmcp-macros (the
-# macros feature). Reviewed v1.4: published by ModelContextProtocol org,
-# Apache-2.0 OR MIT, standard proc-macro2/quote/syn stack, no build.rs,
-# no network/fs/process access in macro source. Re-audit on minor bump.
-# (SC-PROC-01)
-rmcp = { version = "1.6", features = ["server", "macros", "transport-io"] }
+# rmcp 2.1 is the Rust MCP SDK (major bump 1.8 -> 2.1; aligns model types to
+# the MCP 2025-11-25 spec). Transitive proc-macro: rmcp-macros (the macros
+# feature). Reviewed v2.1 on 2026-07-08 (SC-PROC-01): published by the
+# ModelContextProtocol org, Apache-2.0, standard proc-macro2/quote/syn stack,
+# no new crate names in the graph. rmcp's build.rs is byte-identical to 1.8
+# and inert as a dependency (it only runs `git config core.hooksPath` inside
+# rmcp's own dev checkout, never present for a crates.io dep). Never enable
+# the optional `reqwest-native-tls` feature: rustls-only policy, and reqwest
+# is not in the graph. Re-audit on any bump — and specifically re-verify the
+# protocol-acceptance pin: server.rs gates on `ProtocolVersion::LATEST`, so an
+# rmcp bump that advances LATEST past 2025-11-25 would shift the accepted
+# protocol version with no code change (a security property distinct from the
+# version pin; the spec's stop-and-escalate rule applies).
+rmcp = { version = "2.0", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 infer = "0.19"
 

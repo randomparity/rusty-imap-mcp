@@ -20,8 +20,8 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ErrorCode as McpCode, ErrorData, Implementation,
     InitializeRequestParams, InitializeResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, RawResource, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 
@@ -562,12 +562,9 @@ impl ServerHandler for ImapMcpServer {
                 state.imap.username(),
                 state.imap.host(),
             );
-            Resource {
-                raw: RawResource::new(format!("rimap://accounts/{name}"), name)
-                    .with_description(desc)
-                    .with_mime_type("application/json"),
-                annotations: None,
-            }
+            Resource::new(format!("rimap://accounts/{name}"), name)
+                .with_description(desc)
+                .with_mime_type("application/json")
         }));
         Ok(ListResourcesResult::with_all_items(resources))
     }
@@ -818,25 +815,19 @@ fn build_advertised_tool(
 /// they describe the server's semantics rather than any account's state.
 fn static_doc_resources() -> Vec<Resource> {
     vec![
-        Resource {
-            raw: RawResource::new(POSTURES_DOC_URI, "postures")
-                .with_description(
-                    "Security posture matrix: the four levels, per-tool gating, \
-                     sub-capabilities, and the [security.tools] override mechanism.",
-                )
-                .with_mime_type("text/markdown"),
-            annotations: None,
-        },
-        Resource {
-            raw: RawResource::new(WORKFLOWS_DOC_URI, "workflows")
-                .with_description(
-                    "Agent workflows: search\u{2192}fetch\u{2192}act, UIDVALIDITY \
-                     pinning, attachment retrieval, the draft lifecycle, the \
-                     export_messages opt-in, and numeric limits.",
-                )
-                .with_mime_type("text/markdown"),
-            annotations: None,
-        },
+        Resource::new(POSTURES_DOC_URI, "postures")
+            .with_description(
+                "Security posture matrix: the four levels, per-tool gating, \
+                 sub-capabilities, and the [security.tools] override mechanism.",
+            )
+            .with_mime_type("text/markdown"),
+        Resource::new(WORKFLOWS_DOC_URI, "workflows")
+            .with_description(
+                "Agent workflows: search\u{2192}fetch\u{2192}act, UIDVALIDITY \
+                 pinning, attachment retrieval, the draft lifecycle, the \
+                 export_messages opt-in, and numeric limits.",
+            )
+            .with_mime_type("text/markdown"),
     ]
 }
 
@@ -899,13 +890,13 @@ mod static_doc_resource_tests {
         );
         for r in &resources {
             assert_eq!(
-                r.raw.mime_type.as_deref(),
+                r.mime_type.as_deref(),
                 Some("text/markdown"),
                 "resource {:?} must advertise text/markdown",
-                r.raw.uri,
+                r.uri,
             );
         }
-        let uris: Vec<&str> = resources.iter().map(|r| r.raw.uri.as_str()).collect();
+        let uris: Vec<&str> = resources.iter().map(|r| r.uri.as_str()).collect();
         assert!(uris.contains(&POSTURES_DOC_URI));
         assert!(uris.contains(&WORKFLOWS_DOC_URI));
     }

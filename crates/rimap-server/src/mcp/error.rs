@@ -9,7 +9,7 @@
 //! - -32005: attachment too large
 
 use rimap_core::{ErrorCode, RimapError};
-use rmcp::model::{CallToolResult, Content, ErrorCode as McpCode, ErrorData};
+use rmcp::model::{CallToolResult, ContentBlock, ErrorCode as McpCode, ErrorData};
 
 /// Posture denied (tool not allowed by current posture).
 pub const POSTURE_DENIED: McpCode = McpCode(-32001);
@@ -145,7 +145,7 @@ pub fn to_error_call_result(err: &RimapError) -> CallToolResult {
     // `CallToolResult` is `#[non_exhaustive]`; build via the `error`
     // constructor (sets `is_error = Some(true)`) then set the public
     // `structured_content` field.
-    let mut result = CallToolResult::error(vec![Content::text(message)]);
+    let mut result = CallToolResult::error(vec![ContentBlock::text(message)]);
     result.structured_content = Some(data);
     result
 }
