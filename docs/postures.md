@@ -57,6 +57,76 @@ also requires a server-private download root (config validation rejects a
 group/world-writable `download_dir` on Unix). See
 [configuration.md](configuration.md#the-export_messages-tool).
 
+## Availability by account configuration
+
+The matrix above answers *which capabilities a posture allows*. This table
+adds the account dimension: for a capability the posture allows, whether it is
+**advertised** in `tools/list` and whether it is **callable** via `call_tool`,
+across the account-configuration states. Advertising and callability can
+differ, because advertising is *reveal-on-select* — in a multi-account
+deployment a tool stays callable by its `<account>.<tool>` namespace even
+before it is advertised (a running server always has at least one account;
+zero accounts is rejected at config load).
+
+**Reading the account columns.** They assume the account's posture allows the
+capability (see *Min posture* and the matrix above); a capability the posture
+denies is neither advertised nor callable in any state. Cell values:
+
+- **adv + call** — advertised in `tools/list` and callable
+- **call-only** — callable via `<account>.<tool>` but not shown in `tools/list`
+- **adv + call †** — advertised and callable only while *this* account is the
+  active selection; call-only while another account is active
+
+| Tool | Min posture | Single account | Multi — none active | Multi — account active |
+|------|-------------|:--------------:|:-------------------:|:----------------------:|
+| `list_folders` | readonly | adv + call | call-only | adv + call † |
+| `search` | readonly | adv + call | call-only | adv + call † |
+| `fetch_message` | readonly | adv + call | call-only | adv + call † |
+| `list_attachments` | readonly | adv + call | call-only | adv + call † |
+| `download_attachment` | readonly | adv + call | call-only | adv + call † |
+| `list_labels` | readonly | adv + call | call-only | adv + call † |
+| `mark_read` | draft-safe | adv + call | call-only | adv + call † |
+| `mark_unread` | draft-safe | adv + call | call-only | adv + call † |
+| `flag` | draft-safe | adv + call | call-only | adv + call † |
+| `unflag` | draft-safe | adv + call | call-only | adv + call † |
+| `add_label` | draft-safe | adv + call | call-only | adv + call † |
+| `remove_label` | draft-safe | adv + call | call-only | adv + call † |
+| `move_message` | draft-safe | adv + call | call-only | adv + call † |
+| `create_draft` | draft-safe | adv + call | call-only | adv + call † |
+| `send_email` | full | adv + call | call-only | adv + call † |
+| `forward` | full | adv + call | call-only | adv + call † |
+| `delete_message` | full | adv + call | call-only | adv + call † |
+| `create_folder` | full | adv + call | call-only | adv + call † |
+| `rename_folder` | full | adv + call | call-only | adv + call † |
+| `expunge` | destructive | adv + call | call-only | adv + call † |
+| `delete_folder` | destructive | adv + call | call-only | adv + call † |
+| `export_messages` | override² | adv + call | call-only | adv + call † |
+| `use_account` | infra | adv + call | adv + call | adv + call |
+| `list_accounts` | infra | adv + call | adv + call | adv + call |
+
+† Advertised only while this account is the active selection (set via
+`use_account`); every account's posture-allowed tools stay callable by
+namespace regardless of which account is active.
+
+² `export_messages` is denied by every posture and callable only when
+`[security.tools]` sets `export_messages = "allow"` (see footnote ¹); this
+row assumes that override is present. Its advertising then follows the same
+account rules as the posture-gated tools.
+
+**The account columns are uniform across every posture-gated tool** — account
+configuration governs *advertising* the same way for all of them; posture
+governs *which* tools apply at all (the *Min posture* column and the matrix
+above). Only the two infrastructure tools differ: they are always advertised
+and callable, in every state.
+
+**Name form.** A lone account named `default` (legacy flat config, no
+`[[accounts]]`) advertises and accepts **bare** tool names (`search`). Any
+other single account, and every multi-account tool, uses the **namespaced**
+`<account>.<tool>` form (`work.search`). Sub-capabilities
+(`search.advanced_query`, `fetch_message.include_html`,
+`create_draft.include_html`) are gated inside their parent tool at `full`
+posture and are never advertised as standalone `tools/list` entries.
+
 ## Compose attachments and HTML
 
 `create_draft` and `send_email` accept optional `attachments` and `body_html`.
