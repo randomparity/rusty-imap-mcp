@@ -63,9 +63,13 @@ introduce no new attack surface (the vulnerable code is not built).
   1. `deps: migrate to rmcp 2.1 API` — the v1→v2 source sites in
      `server.rs` / `error.rs` / `tool_catalog.rs`, plus the new/kept
      downgrade-rejection tests (F1/F2).
-  2. `chore: SC-PROC-01 re-audit for rmcp 2.1 and phf 0.14` — refresh **both**
-     stale `Cargo.toml` audit comments (rmcp and phf), plus any `phf_codegen`
-     `build.rs` source change the 0.14 bump forces (see risk items). No
+  2. `deps: migrate to phf 0.14 build API` — **only if** the `phf_codegen` 0.14
+     bump forces a source change in `crates/rimap-content/build.rs` (the build
+     is the oracle; see risk items). This is source-migration work of the same
+     kind as commit 1, so it is its own commit — not folded into the audit
+     chore below. Omit this commit entirely if `build.rs` compiles unchanged.
+  3. `chore: SC-PROC-01 re-audit for rmcp 2.1 and phf 0.14` — refresh **both**
+     stale `Cargo.toml` audit comments (rmcp and phf), **comment-only**. No
      `Cargo.toml`/`Cargo.lock` *version* change — that already happened in
      `3d87b1bb`.
 
@@ -171,20 +175,20 @@ on minor bump"); a major bump plainly qualifies.
 Dispatch the `supply-chain-reviewer` agent to confirm — do not assume — and
 record its actual findings in the commits:
 
-- **rmcp 2.1 + rmcp-macros 2.1** (comment refresh in commit 2): source diff
+- **rmcp 2.1 + rmcp-macros 2.1** (comment refresh in commit 3): source diff
   carries no new `build.rs` / network / fs / process access; proc-macro remains
   Apache-2.0 OR MIT. Mitigating fact to record: the 1.8→2.1 bump added **no new
   crate names** to the compiled graph, so the delta is the changed
   `rmcp`/`rmcp-macros` source itself, not new transitive surface. Refresh the
   stale `Cargo.toml:194-198` comment to "Reviewed v2.1."
-- **phf / phf_codegen 0.14** (commit 2): license unchanged (expected
-  MIT/Apache-2.0); no new `build.rs` / network / fs / process access in the
-  macro source; `cargo-deny` green (advisories, bans, licenses, sources). The
-  phf audit block at `Cargo.toml:90-183` is **also stale** — it attests "no
-  RUSTSEC advisories … as of 2026-05-20" against the pre-bump versions, and its
-  own "Re-audit trigger: any minor version bump of … the phf family (SC-PROC-01)"
-  fires on exactly this bump. Refresh its provenance date and version
-  attestation in commit 2, not just the rmcp comment.
+- **phf / phf_codegen 0.14** (comment refresh in commit 3): license unchanged
+  (expected MIT/Apache-2.0); no new `build.rs` / network / fs / process access in
+  the macro source; `cargo-deny` green (advisories, bans, licenses, sources). The
+  phf audit block at `Cargo.toml:148-183` is **also stale** — it attests "no
+  RUSTSEC advisories … as of 2026-05-20" (line 174) against the pre-bump
+  versions, and its own "Re-audit trigger: any minor version bump of … the phf
+  family (SC-PROC-01)" (lines 182-183) fires on exactly this bump. Refresh its
+  provenance date and version attestation in commit 3, not just the rmcp comment.
 
 If any check fails, that bump is not mergeable as-is and is escalated separately
 from the rest of the migration.
