@@ -181,8 +181,8 @@ unicode-script = "0.5.8"
 #
 # Re-audit trigger: any minor version bump of scraper, ammonia, or the
 # phf family. (SC-PROC-01)
-phf = { version = "0.13.1", default-features = false }
-phf_codegen = "0.13.1"
+phf = { version = "0.14.0", default-features = false }
+phf_codegen = "0.14.0"
 
 # SMTP client (Sprint 2b)
 # lettre 0.11 provides async SMTP with rustls TLS. The tokio1-rustls-tls
@@ -196,7 +196,7 @@ lettre = { version = "0.11.21", default-features = false, features = ["tokio1-ru
 # Apache-2.0 OR MIT, standard proc-macro2/quote/syn stack, no build.rs,
 # no network/fs/process access in macro source. Re-audit on minor bump.
 # (SC-PROC-01)
-rmcp = { version = "1.6", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "2.0", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 infer = "0.19"
 
