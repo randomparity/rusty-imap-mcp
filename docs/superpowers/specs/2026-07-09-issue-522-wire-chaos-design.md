@@ -97,8 +97,10 @@ behavior, not wished behavior.
 - No change to the PR-blocking compose fixture (`docker-compose.yml`) or the
   existing `DovecotHarness`. The chaos layer is additive.
 - No Toxiproxy on the PR path. Wall-time is the reason the issue mandates nightly.
-- Not a general chaos framework. Four scenarios, one binary; the corpus grows by
-  adding scenarios, not by building a DSL.
+- Not a general chaos framework. Four scenarios (§Component 4), one binary; the
+  corpus grows by adding scenarios, not by building a DSL. Note the four scenarios
+  map to **five test functions** because scenario 4 splits into 4a/4b (two
+  processes, two caps — §Component 4).
 
 ## Design
 
@@ -186,11 +188,17 @@ future workflow edit drops or typos `RIMAP_CHAOS`, every scenario would return
 filter, not on tests that exist and return early). The gate itself cannot promote
 this to a panic — PR CI deliberately hits the `RIMAP_REQUIRE_DOCKER=1` +
 `RIMAP_CHAOS` unset combination and must stay green. The guard therefore lives in
-the nightly job, not the gate: each scenario, **after passing the gate**, emits a
-distinct stderr marker (`eprintln!` is allowed in tests) like
-`RIMAP_CHAOS_RAN <scenario>`; the nightly runs nextest with `--no-capture`, tees
-output to a log, and a following step asserts the marker count equals the scenario
-count, failing the job if any scenario silently skipped. This makes "the suite
+the nightly job, not the gate: each of the **five test functions** (scenario 1,
+2, 3, 4a, 4b), **after passing the gate**, emits a *distinct* stderr marker
+(`eprintln!` is allowed in tests): `RIMAP_CHAOS_RAN scenario1` … `scenario4b`.
+The nightly runs nextest with `--no-capture`, tees output to a log, and a
+following step asserts **each of the five distinct tokens is present** — a
+per-scenario presence check, not a total `grep -c == N`. Per-token presence is
+required because a raw total count is both numerically ambiguous (four scenarios
+but five tests) and foolable: one scenario silently early-returning (0 markers)
+while another double-emits (e.g. under a configured nextest retry, which
+re-prints the marker per attempt) leaves the total unchanged while a scenario
+tested nothing. Per-token presence closes both holes. This makes "each scenario
 actually exercised the code" an explicit, observable job invariant.
 
 ### Component 4 — `e2e_wire_chaos.rs` scenarios
@@ -254,8 +262,18 @@ arrives within 2s); scenario 2 uses a `timeout` toxic (stops all data,
 guaranteeing the in-flight FETCH exceeds `command_timeout`); scenario 4 uses a
 `bandwidth` toxic at ~64 KB/s with a ~2 MiB seed body for 4b (≈32s to deliver ≫
 2s) and a >`max_fetch_body_bytes` seed body for 4a. The invariant for scenarios
-2/4: the toxic is added *after* the warm-up, so connect + `SELECT` + `RFC822.SIZE`
-preflight already completed and only the target operation is starved.
+2/4: the toxic is added *after* the warm-up, so **connect + login** already
+completed and the *connect* is never the casualty — the target operation and
+**its own `RFC822.SIZE` preflight run under the active toxic**. This is
+deliberate and load-bearing for 4a: the small `RFC822.SIZE` response returns
+quickly even through the ~64 KB/s `bandwidth` toxic, so the size-check rejects
+*promptly* with `ERR_ATTACHMENT_TOO_LARGE` — that prompt rejection *under an
+active trickle* is the evidence that no body bytes were buffered (a regression
+that read the body first would instead stall to `command_timeout` and surface
+`ERR_TIMEOUT`). For 4b the preflight passes (cap raised above the body) and the
+subsequent BODY read is what starves → `ERR_TIMEOUT`. The warm-up must **not**
+pre-fetch the target message's `RFC822.SIZE`, or 4a would reject in the clear and
+prove nothing about buffering.
 
 **Seed path (single supported route).** The test is a host process; Dovecot's
 993/143 are **not** host-published, so the *only* reachable path is through a
@@ -309,8 +327,10 @@ New `.github/workflows/nightly-chaos.yml`, modeled on `mcp-fuzz-nightly.yml`:
 `cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-tests=fail
 --no-capture 2>&1 | tee chaos.log`
 with `RIMAP_CHAOS: "1"` and `RIMAP_REQUIRE_DOCKER: "1"`. A following step asserts
-the vacuous-green guard: `grep -c 'RIMAP_CHAOS_RAN' chaos.log` equals the scenario
-count, failing the job if any scenario silently early-returned (§Component 3).
+the vacuous-green guard: for **each** of the five distinct tokens
+(`RIMAP_CHAOS_RAN scenario1`…`scenario4b`), `grep -q` succeeds in `chaos.log`,
+failing the job if **any one** is absent (a per-scenario presence check, not a
+total count — §Component 3).
 All `uses:` pinned to 40-char SHA + version comment (zizmor/actionlint gates
 apply). Non-blocking (not in branch-protection required set). The job sets
 `timeout-minutes: 15` so a runaway suite (a container that never comes ready, a
@@ -348,8 +368,22 @@ mandatory if the job ever moves off ephemeral `ubuntu-latest` runners.
 - **STARTTLS reset races to a timeout.** `reset_peer` sends a real RST promptly,
   so the outcome is a prompt io error, not a stall to the connect budget — the
   `{ERR_TLS, ERR_CONNECTION_LOST}` set holds and `ERR_TIMEOUT` is not expected
-  here. If flake appears, the fallback is to widen the asserted set with a
-  logged rationale rather than to silently accept any code.
+  here. With `timeout: 0` the RST lands at/near connection open (on the first
+  downstream bytes, i.e. the plaintext greeting) *before* the TLS handshake, so
+  in practice the code is deterministically `ERR_CONNECTION_LOST`; the `ERR_TLS`
+  branch of the set is a superset allowance, not a promise. If flake appears, the
+  fallback is to widen the asserted set with a logged rationale rather than to
+  silently accept any code.
+- **Pre-login RST still emits exactly one `auth` record (confirm in first run).**
+  Scenario 3's "exactly one `auth` result=Failure" assertion depends on
+  `connect_inner` emitting its auth record even when the reset lands during the
+  greeting phase, *before* any LOGIN. The grounding survey verified `connect_inner`
+  emits exactly one auth event on every termination path including a pre-greeting
+  RST (`connection/mod.rs`), so this holds against today's code — but because it is
+  the sole basis for the audit half of scenario 3, the first nightly run confirms
+  it explicitly (mirroring the toxic-applies-to-open-connections confirmation). If
+  a future change moved auth emission to the post-login path, a pre-login RST would
+  emit zero and the assertion would fail `0 != 1` — caught, not masked.
 - **Toxiproxy image unavailable / control API slow to bind.** Readiness gate
   polls `GET /version` with the same 60s budget as Dovecot readiness; under
   `RIMAP_REQUIRE_DOCKER=1` a timeout panics with diagnostic context (compose
