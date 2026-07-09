@@ -120,29 +120,18 @@ fn format_response(response: &lettre::transport::smtp::response::Response) -> St
     )
 }
 
-/// Whether a server negative-reply code denotes an authentication failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplyClass {
-    Auth,
-    Rejected,
-}
-
-/// Recognized SMTP authentication reply codes: the unambiguous
-/// credential-failure codes only — permanent `534` (mechanism too weak),
-/// `535` (credentials invalid), `538` (encryption required for the mechanism);
-/// transient `432` (password transition needed). `530` ("must issue STARTTLS
-/// first" / "authentication required" / relay-denied) and `454` ("TLS not
-/// available" / temporary auth failure) are deliberately excluded: they carry
-/// transport-security meanings, so classifying them as `Auth` would mis-signal
-/// a STARTTLS/TLS condition as a credentials problem. They fall through to
-/// `Rejected` (`ERR_SMTP_PROTOCOL`).
-fn classify_reply_code(code: u16) -> ReplyClass {
+/// Whether a server negative-reply code is a recognized authentication
+/// failure: the unambiguous credential-failure codes only — permanent `534`
+/// (mechanism too weak), `535` (credentials invalid), `538` (encryption
+/// required for the mechanism); transient `432` (password transition needed).
+/// `530` ("must issue STARTTLS first" / "authentication required" /
+/// relay-denied) and `454` ("TLS not available" / temporary auth failure) are
+/// deliberately excluded: they carry transport-security meanings, so
+/// classifying them as `Auth` would mis-signal a STARTTLS/TLS condition as a
+/// credentials problem. They fall through to `Rejected` (`ERR_SMTP_PROTOCOL`).
+fn code_is_auth(code: u16) -> bool {
     const AUTH_CODES: [u16; 4] = [534, 535, 538, 432];
-    if AUTH_CODES.contains(&code) {
-        ReplyClass::Auth
-    } else {
-        ReplyClass::Rejected
-    }
+    AUTH_CODES.contains(&code)
 }
 
 /// Sanitize server-supplied reply text before it enters an error message that
@@ -226,9 +215,10 @@ impl SmtpErrorShape {
         } else if is_tls_error(err) {
             Self::Tls
         } else if let Some(code) = err.status() {
-            match classify_reply_code(u16::from(code)) {
-                ReplyClass::Auth => Self::Auth,
-                ReplyClass::Rejected => Self::Rejected,
+            if code_is_auth(u16::from(code)) {
+                Self::Auth
+            } else {
+                Self::Rejected
             }
         } else if err.is_response() {
             Self::Rejected
@@ -404,27 +394,27 @@ mod tests {
     }
 
     #[test]
-    fn reply_code_535_classifies_as_auth() {
-        assert_eq!(super::classify_reply_code(535), super::ReplyClass::Auth);
+    fn code_535_is_auth() {
+        assert!(super::code_is_auth(535));
     }
 
     #[test]
-    fn reply_code_454_classifies_as_rejected() {
+    fn code_454_is_not_auth() {
         // 454 ("TLS not available" / temporary auth) is transport-ambiguous and
         // deliberately not an auth code.
-        assert_eq!(super::classify_reply_code(454), super::ReplyClass::Rejected);
+        assert!(!super::code_is_auth(454));
     }
 
     #[test]
-    fn reply_code_530_classifies_as_rejected() {
+    fn code_530_is_not_auth() {
         // 530 ("must issue STARTTLS first" / relay-denied) is not a credential
         // failure.
-        assert_eq!(super::classify_reply_code(530), super::ReplyClass::Rejected);
+        assert!(!super::code_is_auth(530));
     }
 
     #[test]
-    fn reply_code_550_classifies_as_rejected() {
-        assert_eq!(super::classify_reply_code(550), super::ReplyClass::Rejected);
+    fn code_550_is_not_auth() {
+        assert!(!super::code_is_auth(550));
     }
 
     #[test]
@@ -445,8 +435,8 @@ mod tests {
     }
 
     #[test]
-    fn reply_code_450_classifies_as_rejected() {
-        assert_eq!(super::classify_reply_code(450), super::ReplyClass::Rejected);
+    fn code_450_is_not_auth() {
+        assert!(!super::code_is_auth(450));
     }
 
     #[test]
