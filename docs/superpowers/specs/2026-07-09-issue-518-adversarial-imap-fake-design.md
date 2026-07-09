@@ -209,8 +209,9 @@ The skip is currently **silent**. To satisfy the AC's "skip-**with-warning**"
 and give operators a signal that a server withheld/zeroed a UID (a hostile-input
 indicator per the threat model), the fetch loop **counts** skipped items
 (missing UID + zero UID) and emits a **single aggregated** `tracing::warn!`
-after the loop when the count is non-zero, carrying the skipped count and the
-folder. A per-item `warn!` is rejected: the skip is attacker-controlled, so
+after the loop when the count is non-zero, with a stable structured field
+`skipped_uids = <count>` (and the folder), so the event is matchable by field
+rather than by log-string parsing. A per-item `warn!` is rejected: the skip is attacker-controlled, so
 one-warn-per-item lets a hostile server amplify log volume 1:1 with its
 response stream — the exact threat the warn is meant to surface must not become
 a log-flood lever. One aggregated warn per fetch call is inert for conformant
@@ -223,8 +224,12 @@ convention). The dispatcher is thread-local, so scenario 3 pins
 `#[tokio::test(flavor = "current_thread")]` and `.await`s the `fetch` call
 **inside** the `with_default` guard scope — a current-thread runtime polls the
 future on the test thread, so the `warn!` fires on the thread the dispatcher
-covers. Assert exactly one captured warn event whose fields report
-`skipped == 2`.
+covers. Because that thread-local dispatcher also captures incidental warns from
+async-imap, rustls, and the co-scheduled `FakeImapServer` task, the assertion
+**filters** captured events to the fetch skip warn (by its target/message) and
+asserts exactly one *matching* event carrying `skipped_uids == 2` — not a raw
+total-event count, which would break on any unrelated warn on the shared
+dispatcher.
 
 **Scenario 4 — truncated response mid-literal, typed error no hang.** Log in,
 `SELECT`, then answer a `UID FETCH` with a `BODY[]` literal announcing `{100}`
@@ -240,6 +245,21 @@ detects the truncation itself rather than merely timing out. The timeout remains
 only as a no-hang backstop; making it large removes the flake surface the strict
 variant-exclusion would otherwise create, while keeping the AC-required "typed
 error, no hang" assertion meaningful.
+
+**Contingency (verified during TDD, not assumed).** Whether async-imap 0.11
+converts an EOF received after a `{100}` literal announcement but before 100
+bytes into an `Err` on the next `stream.next()` — versus a graceful `None` that
+would end `ops::fetch`'s `while let Some(msg)` loop and return `Ok(partial)` — is
+an assumption about async-imap internals, **not** settled fact. The build step
+MUST first capture the actual outcome of a mid-literal bare-drop against
+async-imap 0.11 and pin the observed `ImapError` variant (rather than the
+`Protocol | ConnectionLost` guess named here). **If** the mid-literal EOF is
+delivered as a graceful stream end (`Ok`), the harness switches to a truncation
+trigger that async-imap does surface as an error — e.g. truncating the *tagged
+completion line* itself (EOF before the tagged `OK`, so the command never
+completes) or announcing a malformed literal length — so the AC's "typed error"
+is actually reachable. The scenario is not considered done until the assertion
+observes a real `Err`.
 
 ### Component 3 — CONTRIBUTING note
 
@@ -261,9 +281,10 @@ host-runnable and PR-blocking; Dovecot is container-gated and silent-skips.
   async-imap bump that changes the dialog will fail these tests loudly — which
   is the intended tripwire, not a flake.
 - **Server response tag mismatch would hang.** async-imap correlates the tagged
-  completion by tag; a wrong tag would leave the client waiting. `SendTagged`
-  echoes the captured client tag, eliminating this class. Any residual hang is
-  bounded by the ~1s `command_timeout` and surfaces as `ImapError::Timeout`.
+  completion by tag; a wrong tag would leave the client waiting. `Reply`
+  echoes the tag captured by the preceding `Expect`, eliminating this class. Any
+  residual hang is bounded by the `command_timeout` and surfaces as
+  `ImapError::Timeout`.
 - **One connection per server.** Each scenario gets a fresh `FakeImapServer`
   (fresh port, fresh cert/pin). The test awaits the *client* call, then
   `join()`s the server; the server task returns on script completion or client
