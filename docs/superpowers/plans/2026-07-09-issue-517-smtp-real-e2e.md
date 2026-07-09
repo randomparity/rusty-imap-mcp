@@ -30,7 +30,7 @@
 - `crates/rimap-smtp/tests/support/smtp_responder.rs` (new) — scripted in-process SMTP responder.
 - `crates/rimap-smtp/tests/real_socket.rs` (new) — the four taxonomy scenarios driving `SmtpClient`.
 - `crates/rimap-smtp/tests/support/certs.rs` (new) — rcgen self-signed cert for the STARTTLS scenario.
-- `crates/rimap-smtp/Cargo.toml` — dev-deps: `tokio-rustls`, `rcgen`.
+- `crates/rimap-smtp/Cargo.toml` — add `tokio` to `[dependencies]` (Task 2); dev-deps: `tokio-rustls`, `rustls`, `rcgen` (+ extend `tokio` features).
 - `Cargo.toml` (workspace) — add `rcgen` and `ureq` to `[workspace.dependencies]`.
 - `crates/rimap-imap/tests/integration/smtp/docker-compose.yml` — re-pin Mailpit; add `MP_SMTP_AUTH_ALLOW_INSECURE`.
 - `crates/rimap-server/tests/support/mailpit/mod.rs`, `harness.rs` (new) — Mailpit container harness + HTTP retrieval.
@@ -258,6 +258,7 @@ lettre only times out TCP connect; a stalled server hangs `send_raw` forever. Wr
 
 **Files:**
 - Modify: `crates/rimap-smtp/src/client.rs`
+- Modify: `crates/rimap-smtp/Cargo.toml` (add `tokio` to `[dependencies]` — the wrapper runs in **library** code, and `tokio` is currently only a dev-dep).
 - Test: inline `#[tokio::test]` using a bare `TcpListener` that accepts then withholds the banner.
 
 **Interfaces:**
@@ -301,6 +302,13 @@ Expected: FAIL — the call hangs until the test harness times out (no operation
 
 - [ ] **Step 3: Add the deadline field + timeout wrapper**
 
+First add `tokio` to `crates/rimap-smtp/Cargo.toml` `[dependencies]` (the
+workspace feature set already includes `time`):
+
+```toml
+tokio = { workspace = true }
+```
+
 In `SmtpClient`:
 
 ```rust
@@ -342,7 +350,7 @@ Expected: PASS within ~1-2s.
 Run: `just fmt-check && cargo clippy -p rimap-smtp --all-targets --all-features --locked -- -D warnings`
 
 ```bash
-git add crates/rimap-smtp/src/client.rs
+git add crates/rimap-smtp/src/client.rs crates/rimap-smtp/Cargo.toml
 git commit -m "fix(smtp): bound whole send operation with a timeout"
 ```
 
@@ -356,7 +364,7 @@ A reusable test harness serving one scripted SMTP dialog per scenario, for Task 
 - Create: `crates/rimap-smtp/tests/support/mod.rs`
 - Create: `crates/rimap-smtp/tests/support/smtp_responder.rs`
 - Create: `crates/rimap-smtp/tests/support/certs.rs`
-- Modify: `crates/rimap-smtp/Cargo.toml` (dev-deps `tokio-rustls`, `rcgen`)
+- Modify: `crates/rimap-smtp/Cargo.toml` (dev-deps `tokio-rustls`, `rustls`, `rcgen`; extend `tokio` features)
 - Modify: `Cargo.toml` (workspace) — add `rcgen` to `[workspace.dependencies]`
 
 **Interfaces:**
@@ -828,7 +836,7 @@ Add the `forward` real-delivery scenario (mirrors `e2e_smtp.rs`'s forward assert
 **Files:**
 - Modify: `crates/rimap-server/tests/e2e_smtp_real.rs`
 
-- [ ] **Step 1: Add a `forward` test** — seed a source message into INBOX (reuse `seed_forward_source` from `e2e_smtp.rs`), call `forward`, assert `meta.sent == true`, fetch delivered bytes from Mailpit, and assert the `message/rfc822` base64 wrapper survived real delivery (reuse `assert_forward_wrapper`'s logic).
+- [ ] **Step 1: Add a `forward` test** — its own `#[tokio::test]` with its own Dovecot + Mailpit harnesses (same per-test isolation as Task 7; it cannot reference the happy-path test's local harness values). Seed a source message into INBOX (reuse `seed_forward_source` from `e2e_smtp.rs`), call `forward`, assert `meta.sent == true`, fetch delivered bytes from Mailpit, and assert the `message/rfc822` base64 wrapper survived real delivery (reuse `assert_forward_wrapper`'s logic).
 
 - [ ] **Step 2: Run the targeted suites**
 
