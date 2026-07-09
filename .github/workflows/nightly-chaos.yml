@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# A manual workflow_dispatch should not race the scheduled run (two serial
+# chaos suites would double the container load on one runner).
+concurrency:
+  group: nightly-chaos
+  cancel-in-progress: false
+
 jobs:
   chaos:
     name: wire-chaos e2e (Toxiproxy + Dovecot)
@@ -72,14 +78,17 @@ jobs:
 
       - name: Reap chaos stack (SIGKILL-safe cleanup)
         # A timeout-minutes expiry SIGKILLs the job and Rust `Drop` does not run,
-        # so `compose down` never fires. Reap by the harness's project-name prefix
-        # so a timed-out run leaks no containers/networks/ports. Harmless
+        # so `compose down -v` never fires. Reap the harness's `rimap-chaos-*`
+        # containers, networks, AND the per-project named `shared` volume so a
+        # timed-out run leaks no containers/networks/volumes/ports. Harmless
         # (ephemeral runner) but load-bearing if the job ever moves to a
-        # reusable/self-hosted runner.
+        # reusable/self-hosted runner; the filters are scoped to `rimap-chaos` so
+        # nothing outside this suite is touched.
         if: always()
         run: |
           docker ps -aq --filter name=rimap-chaos | xargs -r docker rm -f || true
-          docker network prune -f || true
+          docker volume ls -q --filter name=rimap-chaos | xargs -r docker volume rm -f || true
+          docker network ls -q --filter name=rimap-chaos | xargs -r docker network rm || true
 
       - name: Upload chaos log on failure
         if: failure()
