@@ -138,7 +138,16 @@ down -v`). Additions over `DovecotHarness`:
 
 - Reserves **three** host ports and injects them into compose env.
 - Brings up with `-f docker-compose.chaos.yml`; readiness = Dovecot fingerprint
-  present **and** a `GET /version` on the Toxiproxy control API returns 200.
+  present **and** `GET /version` on the Toxiproxy control API returns 200 **and**
+  `GET /proxies` shows both `imaps` and `starttls` present, `enabled`, and
+  pointing at the expected `dovecot:993` / `dovecot:143` upstreams. Checking the
+  proxies (not just `/version`) closes a vacuous-pass hole: a proxy that exists
+  but is mis-upstreamed would let `add_toxic` succeed while the server's
+  connection fails for the wrong reason (scenario 3 accepts `ERR_CONNECTION_LOST`,
+  so a bare connect failure would pass without a real reset injected). A
+  completely-missing proxy is already caught downstream (a toxic POST to a missing
+  proxy → 404 → control-plane panic), but the mis-upstreamed case needs the
+  readiness check.
 - `imaps_port()` / `starttls_port()` → host ports the server config points at.
 - A small `ToxiproxyControl` client over `ureq`: `add_toxic(proxy, spec)`,
   `remove_toxic(proxy, name)`, `reset()` (clears all toxics). Toxic specs are
@@ -168,11 +177,29 @@ down -v`). Additions over `DovecotHarness`:
 
 The nightly workflow sets `RIMAP_CHAOS=1` **and** `RIMAP_REQUIRE_DOCKER=1`.
 
+**Nightly vacuous-green guard.** Gate (1) is a double-edged sword: it correctly
+keeps the suite off PR CI (which sets `RIMAP_REQUIRE_DOCKER=1` but not
+`RIMAP_CHAOS`), but it means an *early-return counts as a nextest PASS*. If a
+future workflow edit drops or typos `RIMAP_CHAOS`, every scenario would return
+`Disabled`, the job would be **all-green while testing nothing**, and
+`--no-tests=fail` would not catch it (that flag only fires on a zero-*match*
+filter, not on tests that exist and return early). The gate itself cannot promote
+this to a panic — PR CI deliberately hits the `RIMAP_REQUIRE_DOCKER=1` +
+`RIMAP_CHAOS` unset combination and must stay green. The guard therefore lives in
+the nightly job, not the gate: each scenario, **after passing the gate**, emits a
+distinct stderr marker (`eprintln!` is allowed in tests) like
+`RIMAP_CHAOS_RAN <scenario>`; the nightly runs nextest with `--no-capture`, tees
+output to a log, and a following step asserts the marker count equals the scenario
+count, failing the job if any scenario silently skipped. This makes "the suite
+actually exercised the code" an explicit, observable job invariant.
+
 ### Component 4 — `e2e_wire_chaos.rs` scenarios
 
 One binary, `#[tokio::test(flavor = "multi_thread")]` per scenario. All start the
 chaos stack, **seed while no toxic is active**, and spawn the server with a chaos
-config (low `connect_timeout`/`command_timeout`, e.g. 2s each). Then the ordering
+config whose timeout budgets are **tuned per scenario to the stage under test**
+(see "Toxic parameters" below — a uniform tight budget would gate the
+must-succeed warm-up/recovery calls too, inviting flakiness). Then the ordering
 depends on *what stage the fault must hit* — the server's IMAP session is lazy and
 its connect runs **inside** the command-timeout guard on the first tool call, so
 *when* the toxic is added decides whether it hits connect or an operation:
@@ -204,16 +231,31 @@ impossible.
 After the assertions, remove the toxic and prove recovery. Shared wire-assert
 helper mirrors `e2e_wire_fault_injection.rs::assert_error_code`.
 
-**Toxic parameters and the connect-survival invariant.** Magnitudes are
-load-bearing. The invariant: for operation-targeting scenarios the toxic is added
-*after* the warm-up, so connect + `SELECT` + `RFC822.SIZE` preflight already
-completed and only the target operation is starved. Concrete starting values
-(tuned in the first run): `command_timeout = connect_timeout = 2s`; scenario 2
-uses a `timeout` toxic (stops all data, guaranteeing the in-flight FETCH exceeds
-2s); scenario 4 uses a `bandwidth` toxic at ~64 KB/s with a ~2 MiB seed body for
-4b (≈32s to deliver ≫ 2s) and a >`max_fetch_body_bytes` seed body for 4a.
-Scenario 1's toxic is *intended* to kill the connect, so no survival margin
-applies there.
+**Toxic parameters and per-scenario budgets.** Magnitudes and budgets are
+load-bearing. Because each scenario spawns its own server process with its own
+config, `connect_timeout` and `command_timeout` are decoupled and set to the
+stage under test — **only** the knob that gates the fault stage is lowered; the
+knob that gates a must-succeed call (warm-up connect, recovery connect) stays at
+the roomy default so a cold/loaded runner does not flake an assertion the design
+treats as guaranteed:
+
+- **Scenario 1** (fault *is* the connect): `connect_timeout = 2s` (low, the
+  greeting stall must trip fast); `command_timeout` = default.
+- **Scenarios 2, 4** (fault is a command-stage stall on an established session):
+  `connect_timeout` = default (10s) so the warm-up and recovery *connects* are
+  not gated; `command_timeout = 2s` so the stalled operation trips fast.
+- **Scenario 3** (fault *is* the connect, via a prompt RST): budgets = default;
+  `reset_peer` returns a prompt io error, so no low budget is needed and a
+  generous connect budget keeps the recovery connect flake-free.
+
+Concrete toxic values (starting points, tuned in the first run): scenario 1 uses
+a `timeout`/`latency` toxic that blocks data after TCP connect (greeting never
+arrives within 2s); scenario 2 uses a `timeout` toxic (stops all data,
+guaranteeing the in-flight FETCH exceeds `command_timeout`); scenario 4 uses a
+`bandwidth` toxic at ~64 KB/s with a ~2 MiB seed body for 4b (≈32s to deliver ≫
+2s) and a >`max_fetch_body_bytes` seed body for 4a. The invariant for scenarios
+2/4: the toxic is added *after* the warm-up, so connect + `SELECT` + `RFC822.SIZE`
+preflight already completed and only the target operation is starved.
 
 **Seed path (single supported route).** The test is a host process; Dovecot's
 993/143 are **not** host-published, so the *only* reachable path is through a
@@ -264,12 +306,28 @@ toxic.
 New `.github/workflows/nightly-chaos.yml`, modeled on `mcp-fuzz-nightly.yml`:
 `schedule` cron + `workflow_dispatch`; single job on `ubuntu-latest`; installs
 `cargo-nextest`; runs
-`cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-tests=fail`
-with `RIMAP_CHAOS: "1"` and `RIMAP_REQUIRE_DOCKER: "1"`. All `uses:` pinned to
-40-char SHA + version comment (zizmor/actionlint gates apply). Non-blocking (not
-in branch-protection required set). The job sets `timeout-minutes: 15` so a
-runaway suite (a container that never comes ready, a proxy that wedges) fails
-loudly instead of silently drifting past the wall-time rationale for nightly-only.
+`cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-tests=fail
+--no-capture 2>&1 | tee chaos.log`
+with `RIMAP_CHAOS: "1"` and `RIMAP_REQUIRE_DOCKER: "1"`. A following step asserts
+the vacuous-green guard: `grep -c 'RIMAP_CHAOS_RAN' chaos.log` equals the scenario
+count, failing the job if any scenario silently early-returned (§Component 3).
+All `uses:` pinned to 40-char SHA + version comment (zizmor/actionlint gates
+apply). Non-blocking (not in branch-protection required set). The job sets
+`timeout-minutes: 15` so a runaway suite (a container that never comes ready, a
+proxy that wedges) fails loudly instead of silently drifting past the wall-time
+rationale for nightly-only.
+
+Because a `timeout-minutes` expiry SIGKILLs the job and Rust `Drop` does **not**
+run on SIGKILL, an `if: always()` post-step reaps the chaos stack independently of
+`Drop`. Per-test compose projects carry unique names (the harness uses a
+`rimap-chaos-<uuid>` prefix, mirroring `DovecotHarness`'s `rimap-e2e-` scheme), so
+the reaper targets the **prefix**, not one project: force-remove containers named
+`rimap-chaos*` and prune the dangling compose networks
+(`<runtime> ps -aq --filter name=rimap-chaos | xargs -r <runtime> rm -f;
+<runtime> network prune -f`), all `|| true`. This leaks nothing — containers, the
+compose network, or reserved host ports — on a timed-out run. `Drop` remains the
+primary path for the normal case; this step is the SIGKILL backstop and becomes
+mandatory if the job ever moves off ephemeral `ubuntu-latest` runners.
 
 ## Failure modes & edge cases
 
