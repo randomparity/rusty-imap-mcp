@@ -138,8 +138,17 @@ capability enum is introduced — the raw line is the knob, matching the issue's
 "ordered expected-command → canned-response pairs" model.
 
 **Lifecycle.** `FakeImapServer::start(script) -> FakeImapServer` binds
-`127.0.0.1:0`, spawns a one-connection background task running the script over
-the TLS stream, and exposes:
+`127.0.0.1:0` and spawns a background task that **accepts in a loop**, replaying
+the same script over the TLS stream for **each** accepted connection, appending
+every client command line it reads to a shared `Arc<Mutex<Vec<String>>>`. An
+accept-loop (rather than a one-shot accept) is load-bearing: `Connection::fetch`
+is `Idempotency::ReadOnly`, and `with_session` transparently reconnects and
+retries **once** on `ImapError::ConnectionLost` (`dispatch.rs:52-53,93-104`), so
+a scenario whose failure surfaces as `ConnectionLost` (scenario 4's truncation
+is a candidate) opens a *second* connection — which must re-observe the same
+scripted behavior rather than hit a refused/dropped listener. The loop is bounded
+(a small cap, e.g. 4 accepts) so a misbehaving retry cannot storm. The server
+exposes:
 
 - `port() -> u16`,
 - `pin() -> TlsFingerprint` (leaf fingerprint for the client's
@@ -157,8 +166,10 @@ the TLS stream, and exposes:
   ASCII with no quotes, backslashes, or 8-bit bytes, so async-imap 0.11 encodes
   `LOGIN` as quoted strings and never as an IMAP literal (which the `Step`
   vocabulary cannot answer — see *Failure modes*),
-- `join() -> Result<Vec<String>, io::Error>` — await the server task; returns
-  the client command lines it recorded (for ordering assertions).
+- `recorded() -> Vec<String>` — a snapshot of the client command lines read so
+  far (for ordering assertions), read by the test *after* the client call
+  returns. (An accept-loop server task is never awaited to completion; the
+  listener closes and the task ends on `FakeImapServer::drop`.)
 
 The client `host` is `"127.0.0.1"`; `ServerName::try_from("127.0.0.1")` yields
 an IP server name, and the pinned verifier ignores it — no DNS, no `/etc/hosts`.
@@ -188,7 +199,9 @@ COPY+STORE+EXPUNGE fallback dialog that `Connection::move_messages`
 `SELECT <src>` → `UID COPY` → `STATUS <dest> (UIDVALIDITY)` → `UID STORE
 +FLAGS (\Deleted)` → plain `EXPUNGE`. Assert the returned
 `MoveOutcome.used_fallback == true` **and** `folder_wide_expunge == true`, and
-(via `join()`) that the client issued a plain `EXPUNGE`, not `UID EXPUNGE`.
+(via `recorded()`) that the client issued a plain `EXPUNGE`, not `UID EXPUNGE`.
+(Move is `Idempotency::Mutating`, so it is never retried — exactly one
+connection, and `recorded()` is unambiguous.)
 
 **Scenario 2 — `LOGINDISABLED`.** Greeting → `CAPABILITY` → untagged
 `* CAPABILITY IMAP4rev1 LOGINDISABLED` → tagged OK. The client's login flow
@@ -233,13 +246,15 @@ a log-flood lever. One aggregated warn per fetch call is inert for conformant
 servers and bounded for hostile ones. This is the spec's only shipped-code
 change; it is additive.
 
-Assert the warning fires using the repo's parallel-safe capture wiring
-(`tracing::dispatcher::with_default`, per the existing tracing-test
-convention). The dispatcher is thread-local, so scenario 3 pins
-`#[tokio::test(flavor = "current_thread")]` and `.await`s the `fetch` call
-**inside** the `with_default` guard scope — a current-thread runtime polls the
-future on the test thread, so the `warn!` fires on the thread the dispatcher
-covers. Because that thread-local dispatcher also captures incidental warns from
+Assert the warning fires using the repo's parallel-safe, thread-local capture
+wiring. The async form must use the **guard** API, not the closure API:
+`tracing::dispatcher::with_default(&d, f)` takes a *synchronous* `f: FnOnce()`
+and cannot wrap an `.await`, so scenario 3 uses
+`let _guard = tracing::dispatcher::set_default(&dispatch);` (returns a
+`DefaultGuard`) held across the `fetch().await`, under
+`#[tokio::test(flavor = "current_thread")]`. `set_default` is thread-local
+(parallel-safe, unlike `set_global_default`); a current-thread runtime polls the
+future on the test thread, so the `warn!` fires on the thread the guard covers. Because that thread-local dispatcher also captures incidental warns from
 async-imap, rustls, and the co-scheduled `FakeImapServer` task, the assertion
 **filters** captured events to the fetch skip warn (by its target/message) and
 asserts exactly one *matching* event whose `skipped_uids` equals the observed
@@ -277,6 +292,18 @@ completes) or announcing a malformed literal length — so the AC's "typed error
 is actually reachable. The scenario is not considered done until the assertion
 observes a real `Err`.
 
+**ReadOnly reconnect interaction.** `fetch` is `Idempotency::ReadOnly`, so if
+the truncation surfaces as `ImapError::ConnectionLost`, `with_session`
+invalidates the session and reconnects-and-retries **once**
+(`dispatch.rs:52-53,93-104`). The accept-loop server (see *Lifecycle*) re-serves
+the identical truncating dialog on that second connection, so the retry
+re-observes the truncation and the public `fetch` returns the truncation error
+after the bounded single retry — not a reconnect artifact or a hang. The TDD
+step records whether a reconnect occurred; the assertion is taken at the public
+`fetch` boundary (final `Err`, not `Timeout`). A truncation trigger that yields
+a non-retried `Protocol` error (e.g. the tagged-completion-line truncation) is
+equally acceptable and uses a single connection.
+
 ### Component 3 — CONTRIBUTING note
 
 Add a short subsection to `AGENTS.md` (the repo's contributor guide; there is
@@ -301,10 +328,14 @@ host-runnable and PR-blocking; Dovecot is container-gated and silent-skips.
   echoes the tag captured by the preceding `Expect`, eliminating this class. Any
   residual hang is bounded by the `command_timeout` and surfaces as
   `ImapError::Timeout`.
-- **One connection per server.** Each scenario gets a fresh `FakeImapServer`
-  (fresh port, fresh cert/pin). The test awaits the *client* call, then
-  `join()`s the server; the server task returns on script completion or client
-  disconnect, so no listener leaks across scenarios.
+- **Fresh server per scenario; accept-loop within a scenario.** Each scenario
+  gets a fresh `FakeImapServer` (fresh port, fresh cert/pin). Within a scenario
+  the server replays its script on each accepted connection (bounded accept
+  loop), so a client's transparent `ReadOnly` reconnect-and-retry re-observes
+  the same scripted behavior instead of a refused/dropped listener. The test
+  awaits the *client* call, reads `recorded()`, and drops the `FakeImapServer`
+  at scope end, which closes the listener and ends the task — no listener leaks
+  across scenarios.
 - **rcgen key/signature-scheme compatibility.** The pinned verifier still runs
   `verify_tls13_signature`/`verify_tls12_signature` against the ring provider;
   rcgen's default ECDSA-P256 leaf is in the supported set. If a future rcgen
@@ -338,8 +369,9 @@ host-runnable and PR-blocking; Dovecot is container-gated and silent-skips.
 - `just ci` green locally (`fmt-check`, `lint`, `test`, `deny`, hooks). No
   `.github/workflows` change, so no `actionlint`/`zizmor` delta. No new
   dependency, so no `cargo-deny` delta.
-- The added aggregated `warn!` (scenario 3) is asserted via
-  `tracing::dispatcher::with_default` under a pinned `current_thread` runtime.
+- The added aggregated `warn!` (scenario 3) is asserted via a
+  `tracing::dispatcher::set_default` guard held across the awaited call under a
+  pinned `current_thread` runtime.
 
 ## Considered & rejected
 
