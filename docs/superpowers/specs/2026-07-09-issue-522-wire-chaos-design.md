@@ -170,12 +170,50 @@ The nightly workflow sets `RIMAP_CHAOS=1` **and** `RIMAP_REQUIRE_DOCKER=1`.
 
 ### Component 4 — `e2e_wire_chaos.rs` scenarios
 
-One binary, `#[tokio::test(flavor = "multi_thread")]` per scenario. Each: start
-the chaos stack, **seed while no toxic is active**, spawn the server with a chaos
-config (low `connect_timeout`/`command_timeout`, e.g. 2s each), add the toxic,
-drive tools over the wire, assert the `ERR_*` code, drain and assert the audit
-JSONL, then remove the toxic and prove recovery. Shared wire-assert helper mirrors
-`e2e_wire_fault_injection.rs::assert_error_code`.
+One binary, `#[tokio::test(flavor = "multi_thread")]` per scenario. All start the
+chaos stack, **seed while no toxic is active**, and spawn the server with a chaos
+config (low `connect_timeout`/`command_timeout`, e.g. 2s each). Then the ordering
+depends on *what stage the fault must hit* — the server's IMAP session is lazy and
+its connect runs **inside** the command-timeout guard on the first tool call, so
+*when* the toxic is added decides whether it hits connect or an operation:
+
+- **Connect-targeting scenarios (1, 3).** The fault *is* a connect-handshake
+  fault. Add the toxic **before** the first server tool call, so the lazy connect
+  traverses it. Assert the `ERR_*` and the failing `auth` record.
+- **Operation-targeting scenarios (2, 4).** The fault must hit an operation on an
+  *already-established* session. Drive **one successful tool call first with no
+  toxic** (`use_account` + a `search`/`list_folders`) to force the lazy connect
+  and cache the session; assert that warm-up's `tool_end` is success. **Only then**
+  add the toxic and drive the operation that must stall. This is load-bearing: if
+  the toxic were added before the session exists, the connect would time out, the
+  subsequent `invalidate()` would be a no-op on an already-`None` session, and
+  "recovery" would be a first-ever connect — AC#2's *established-session
+  invalidation → lazy reconnect* contract would pass vacuously. The audit
+  assertion for scenario 2/4 therefore requires **a preceding successful
+  `tool_end` then a failing `tool_end`**, so a connect-time timeout cannot
+  masquerade as the mid-operation case.
+
+Assumption to confirm in the first nightly run: Toxiproxy applies a
+newly-added `latency`/`timeout`/`bandwidth` toxic to the *already-open*
+warm-up connection's live stream (not only to connections opened after the
+toxic). If a toxic proves to apply only to new connections, scenario 2/4 add the
+toxic and then force a reconnect (e.g. via an intervening invalidating op) before
+the stalling call; this contingency is noted so a green-but-wrong result is
+impossible.
+
+After the assertions, remove the toxic and prove recovery. Shared wire-assert
+helper mirrors `e2e_wire_fault_injection.rs::assert_error_code`.
+
+**Toxic parameters and the connect-survival invariant.** Magnitudes are
+load-bearing. The invariant: for operation-targeting scenarios the toxic is added
+*after* the warm-up, so connect + `SELECT` + `RFC822.SIZE` preflight already
+completed and only the target operation is starved. Concrete starting values
+(tuned in the first run): `command_timeout = connect_timeout = 2s`; scenario 2
+uses a `timeout` toxic (stops all data, guaranteeing the in-flight FETCH exceeds
+2s); scenario 4 uses a `bandwidth` toxic at ~64 KB/s with a ~2 MiB seed body for
+4b (≈32s to deliver ≫ 2s) and a >`max_fetch_body_bytes` seed body for 4a.
+Scenario 1's toxic is *intended* to kill the connect, so no survival margin
+applies there.
 
 **Seed path (single supported route).** The test is a host process; Dovecot's
 993/143 are **not** host-published, so the *only* reachable path is through a
@@ -205,17 +243,21 @@ count to the single call window, which contains the mis-count if it happens.
 | # | Scenario | Proxy | Toxic | Wire assertion | Audit assertion | Recovery |
 |---|----------|-------|-------|----------------|-----------------|----------|
 | 1 | Delayed **greeting** | `starttls` (143) | `timeout` (block data after TCP connect, > connect budget) — plaintext greeting is read before TLS on the STARTTLS path, so this stalls the greeting specifically | `ERR_TIMEOUT` | `auth` result=Failure, error_code=Timeout | remove toxic → next `list_folders` ok |
-| 2 | Mid-FETCH stall | `imaps` (993) | success first, then `latency`/`timeout` > command budget | `ERR_TIMEOUT` | `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next `search`/`fetch` ok (session was invalidated → reconnect) |
+| 2 | Mid-FETCH stall | `imaps` (993) | **warm-up call succeeds**, then `timeout` toxic added, then FETCH | `ERR_TIMEOUT` | preceding `tool_end` success **then** failing `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next `search`/`fetch` ok (session was invalidated → reconnect) |
 | 3 | RST during STARTTLS | `starttls` (143) | `reset_peer` (`timeout: 0`) | `ERR_TLS` **or** `ERR_CONNECTION_LOST` | **exactly one** `auth` result=Failure in the call window | remove toxic → next call over STARTTLS ok |
-| 4a | Over-cap body under trickle (buffering bound) | `imaps` (993) | `bandwidth` (slow); body **>** `max_fetch_body_bytes` | `ERR_ATTACHMENT_TOO_LARGE` **promptly** (≪ command budget) | `tool_end` error_code=`ERR_ATTACHMENT_TOO_LARGE` | remove toxic → next fetch ok |
-| 4b | Under-cap body trickled (time bound) | `imaps` (993) | `bandwidth` so body can't arrive in command budget; `max_fetch_body_bytes` raised above body | `ERR_TIMEOUT` | `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next fetch ok |
+| 4a | Over-cap body under trickle (buffering bound) | `imaps` (993) | warm-up ok, then `bandwidth` (slow); body **>** `max_fetch_body_bytes` | `ERR_ATTACHMENT_TOO_LARGE` **promptly** (≪ command budget) | success `tool_end` then `tool_end` error_code=`ERR_ATTACHMENT_TOO_LARGE` | remove toxic → next fetch ok |
+| 4b | Under-cap body trickled (time bound) | `imaps` (993) | warm-up ok, then `bandwidth` so body can't arrive in command budget; `max_fetch_body_bytes` raised above body | `ERR_TIMEOUT` | success `tool_end` then `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next fetch ok |
 
 Scenario 1 and 3 use the `starttls` proxy (`encryption = "starttls"`, port 143) —
 the first e2e_wire coverage of the STARTTLS path; scenario 1 there genuinely
 delays the *plaintext greeting* (on the `imaps`/993 path a data-blocking toxic
 stalls the TLS handshake first, never reaching the greeting). Scenarios 2/4 use
-the `imaps` proxy (`encryption = "tls"`, port 993). Scenarios 4a and 4b may be
-one `#[tokio::test]` with two phases or two tests; either satisfies the AC.
+the `imaps` proxy (`encryption = "tls"`, port 993). **Scenarios 4a and 4b are two
+separate `#[tokio::test]`s (two server processes).** They cannot share one process
+because `max_fetch_body_bytes` is fixed at process spawn (4a needs the body *over*
+the cap; 4b needs it *under* a raised cap), and a single process cannot present
+two caps. Both do the operation-targeting warm-up before adding the `bandwidth`
+toxic.
 
 ### Component 5 — nightly workflow
 
