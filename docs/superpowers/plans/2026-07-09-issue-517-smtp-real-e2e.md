@@ -371,14 +371,21 @@ A reusable test harness serving one scripted SMTP dialog per scenario, for Task 
 rcgen = "0.13"
 ```
 
-In `crates/rimap-smtp/Cargo.toml` `[dev-dependencies]`:
+In `crates/rimap-smtp/Cargo.toml` `[dev-dependencies]` — add `rustls` and
+`tokio-rustls` (the responder uses `rustls::ServerConfig` and
+`rustls::pki_types` directly, so `rustls` must be a declared dev-dep, not
+relied on transitively), and **extend** the existing `tokio` dev-dep features
+so the responder's `tokio::net` + `tokio::io` use does not depend on lettre's
+transitive feature unification:
 
 ```toml
+tokio = { workspace = true, features = ["test-util", "macros", "net", "io-util", "rt"] }
 tokio-rustls = { workspace = true }
+rustls = { workspace = true }
 rcgen = { workspace = true }
 ```
 
-Run: `cargo update -p rcgen --dry-run` is unnecessary; run `cargo fetch` and `just deny` to confirm the new dep passes advisories/licenses/bans.
+Run: `cargo fetch` and `just deny` to confirm the new deps pass advisories/licenses/bans.
 Expected: `just deny` clean. If a license/ban trips, stop and report — do not add an exception without approval.
 
 - [ ] **Step 2: Write `certs.rs`** (self-signed cert for 127.0.0.1):
@@ -406,8 +413,7 @@ pub fn self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
 //! Minimal scripted SMTP responder driving the real SmtpClient.
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, AsyncBufReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Debug, Clone, Copy)]
@@ -418,9 +424,16 @@ pub enum Scenario {
     RcptReject,
     /// Advertise + begin STARTTLS, present a self-signed cert → SmtpError::Tls.
     StarttlsBadCert,
-    /// Accept the connection, never send the 220 banner → SmtpError::Timeout.
-    TimeoutNoBanner,
 }
+```
+
+> **Timeout is NOT a responder scenario.** It is covered deterministically at
+> the lib level in Task 2 (a bare `std::net::TcpListener` that accepts and
+> withholds the banner). Do **not** add a `TimeoutNoBanner` variant here: an
+> enum variant never constructed in the `real_socket` test binary trips
+> `dead_code` under the `-D warnings` guardrail and blocks the commit.
+
+```rust
 
 pub struct Responder {
     pub port: u16,
@@ -440,10 +453,6 @@ impl Responder {
 }
 
 async fn serve(mut stream: TcpStream, scenario: Scenario) -> std::io::Result<()> {
-    if let Scenario::TimeoutNoBanner = scenario {
-        tokio::time::sleep(Duration::from_secs(5)).await; // withhold banner
-        return Ok(());
-    }
     stream.write_all(b"220 rimap-test ESMTP\r\n").await?;
     // Read EHLO.
     let mut reader = BufReader::new(&mut stream);
@@ -483,7 +492,6 @@ async fn serve(mut stream: TcpStream, scenario: Scenario) -> std::io::Result<()>
             let _ = acceptor.accept(stream).await; // handshake fails on the client
             Ok(())
         }
-        Scenario::TimeoutNoBanner => unreachable!(),
     }
 }
 ```
@@ -709,10 +717,11 @@ git commit -m "test(smtp): add Mailpit container harness with HTTP retrieval"
 Inject a real `SmtpClient` (pointed at Mailpit) into `AccountState.smtp`, backed by Dovecot for the Sent-copy read-back. Assert successful submission, multipart delivered-bytes, Bcc-excluded, and Sent-copy fail-open.
 
 **Files:**
-- Create: `crates/rimap-server/tests/e2e_smtp_real.rs`
+- Modify/replace: `crates/rimap-server/tests/e2e_smtp_real.rs` (created with a smoke test in Task 6; replace the smoke test with the real assertions).
 
 **Interfaces:**
 - Consumes: `support/dovecot/mod.rs` (via `#[path]`), `support/mailpit/mod.rs`, `MailpitHarness::fetch_raw_by_subject`, and the `build_server`/`test_account_config`/`call_tool`/`search_folder`/`fetch_body` helpers — copy the needed helpers from `e2e_smtp.rs` (or extract a shared `support/smtp_dispatch.rs`; keep it simple — duplication across two e2e binaries is acceptable and matches the repo's per-binary `#[path]` pattern).
+- Produces: `build_server_real(&DovecotHarness, &MailpitHarness) -> ServerScope`, where `ServerScope` keeps the download `TempDir` and exposes `download_dir(&self) -> &Path`.
 - The one change from `e2e_smtp.rs`: build a real sender instead of a fake:
 
 ```rust
@@ -743,6 +752,12 @@ async fn e2e_send_email_real_socket_delivers_and_copies() {
     dovecot.create_mailbox("Sent");
     let scope = build_server_real(&dovecot, &mailpit);
 
+    // Attachments are sourced from the account's download-sandbox root, not
+    // passed inline. Stage a file there, then reference it by basename.
+    // `AttachmentInput` (message_builder.rs) is { path, filename?, content_type? }.
+    std::fs::write(scope.download_dir().join("note.txt"), b"hello attachment")
+        .expect("stage attachment");
+
     // Multipart message with an attachment.
     let subject = "e2e-smtp-real-multipart";
     let result = call_tool(&scope.server, "send_email", serde_json::json!({
@@ -750,11 +765,7 @@ async fn e2e_send_email_real_socket_delivers_and_copies() {
         "bcc": [{"address": "blind@secret.example"}],
         "subject": subject,
         "body_text": "hello over a real socket",
-        "attachments": [{
-            "filename": "note.txt",
-            "content_base64": "aGVsbG8gYXR0YWNobWVudA==", // "hello attachment"
-            "mime_type": "text/plain"
-        }],
+        "attachments": [{ "path": "note.txt", "content_type": "text/plain" }],
     })).await.expect("send_email");
     assert_eq!(result["meta"]["sent"], true);
 
@@ -772,14 +783,27 @@ async fn e2e_send_email_real_socket_delivers_and_copies() {
 }
 ```
 
-Confirm the exact `send_email` attachment argument shape against `crates/rimap-server/src/tools/compose/send_email.rs` / the tool schema before finalizing (the field names above are illustrative — use the real ones).
+The attachment shape is verified against `AttachmentInput` in
+`crates/rimap-server/src/tools/compose/message_builder.rs` (`path` required,
+`filename`/`content_type` optional; bytes read from the download sandbox via
+`retrieval::sandbox::read_sandboxed_file`). `build_server_real` must therefore
+expose the account's `download_dir` — return the `TempDir` (as `e2e_smtp.rs`'s
+`ServerScope` keeps `_download_dir`) and add a `download_dir(&self) -> &Path`
+accessor so the test can stage `note.txt` before the call.
 
-- [ ] **Step 2: Add the Sent-copy fail-open assertion** — a second `#[tokio::test]` (or extend the first) that does NOT create the `Sent` mailbox, sends, and asserts:
+- [ ] **Step 2: Add the Sent-copy fail-open assertion** — a **second, independent** `#[tokio::test]` that starts its **own** Dovecot + Mailpit harnesses and does NOT call `create_mailbox("Sent")`, so the handler's Sent APPEND fails and fail-open engages:
 
 ```rust
 assert_eq!(result["meta"]["sent"], true);
 assert_eq!(result["meta"]["sent_copy"]["failed"], true);
 ```
+
+> **Isolation is load-bearing.** Each `#[tokio::test]` must own its Dovecot
+> container (`DovecotHarness::try_start()` mints a unique compose project via
+> `uuid_like`). Do NOT share one harness between the happy-path test (which
+> creates `Sent`) and this fail-open test — a shared container would already
+> have `Sent` and flip `failed` to `false`. This differs from `e2e_smtp.rs`,
+> which uses one shared harness for all its assertions.
 
 - [ ] **Step 3: Run (with runtimes) / verify silent-skip (without)**
 
@@ -838,6 +862,10 @@ git commit -m "test(smtp): real-socket forward e2e against Mailpit delivery"
 - Multi-arch re-pin + insecure-AUTH env — Task 5. ✓
 - Whole-operation timeout semantics/idempotency — documented in spec/ADR; behavior in Task 2. ✓
 
-**Placeholder scan:** attachment-argument shape (Task 7 Step 1) and exact Mailpit/rcgen API paths (Task 3/6) are flagged as "verify against source during build" rather than guessed — TDD surfaces a mismatch immediately. No silent TODOs.
+**Placeholder scan:** the attachment shape (Task 7) is now concrete —
+sandbox-file `path`/`content_type` verified against `AttachmentInput`. The only
+remaining "verify during build" items are the exact Mailpit HTTP endpoint paths
+(Task 6) and the rcgen 0.13 API surface (Task 3); both fail the TDD test loudly
+if wrong. No silent TODOs.
 
 **Type consistency:** `Scenario`, `Responder{port}`, `classify_reply_code(u16)->ReplyClass`, `SmtpError::Auth{reason}`, `MailpitHarness::{smtp_port,fetch_raw_by_subject}` are used consistently across tasks.
