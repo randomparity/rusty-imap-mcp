@@ -1,0 +1,90 @@
+name: Nightly Wire Chaos
+
+on:
+  schedule:
+    # 04:23 UTC daily — off-peak, staggered from the other scheduled jobs.
+    - cron: '23 4 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  chaos:
+    name: wire-chaos e2e (Toxiproxy + Dovecot)
+    runs-on: ubuntu-latest
+    # Hard wall-time cap: a runaway suite (a container that never comes ready, a
+    # proxy that wedges) fails loudly instead of drifting. The suite runs
+    # serially (nextest chaos-backed group) so wall-time is dominated by
+    # per-test container bring-up.
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: always
+      # Gate: RIMAP_CHAOS enables the otherwise silent-skipped suite;
+      # RIMAP_REQUIRE_DOCKER flips container failures from silent-skip to panic.
+      RIMAP_CHAOS: '1'
+      RIMAP_REQUIRE_DOCKER: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install libdbus-1-dev
+        # The keyring crate's `linux-native-sync-persistent` backend links
+        # against libdbus at build time. Matches the other Linux Rust jobs.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          shared-key: nightly-chaos
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+        with:
+          tool: cargo-nextest
+
+      - name: Run wire-chaos suite
+        run: |
+          set -o pipefail
+          cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' \
+            --no-tests=fail --no-capture 2>&1 | tee chaos.log
+
+      - name: Assert every scenario actually ran (vacuous-green guard)
+        # An early-return counts as a nextest PASS, and `--no-tests=fail` only
+        # catches a zero-match filter — not a scenario that silently skipped
+        # (e.g. RIMAP_CHAOS dropped). Require each scenario's distinct marker.
+        run: |
+          set -euo pipefail
+          for s in scenario1 scenario2 scenario3 scenario4a scenario4b; do
+            if ! grep -q "RIMAP_CHAOS_RAN ${s}" chaos.log; then
+              echo "::error::chaos ${s} did not run — the suite may have silently skipped (RIMAP_CHAOS unset or a gate regression)."
+              exit 1
+            fi
+          done
+          echo "All five chaos scenarios ran."
+
+      - name: Reap chaos stack (SIGKILL-safe cleanup)
+        # A timeout-minutes expiry SIGKILLs the job and Rust `Drop` does not run,
+        # so `compose down` never fires. Reap by the harness's project-name prefix
+        # so a timed-out run leaks no containers/networks/ports. Harmless
+        # (ephemeral runner) but load-bearing if the job ever moves to a
+        # reusable/self-hosted runner.
+        if: always()
+        run: |
+          docker ps -aq --filter name=rimap-chaos | xargs -r docker rm -f || true
+          docker network prune -f || true
+
+      - name: Upload chaos log on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chaos-log
+          path: chaos.log
+          retention-days: 7
