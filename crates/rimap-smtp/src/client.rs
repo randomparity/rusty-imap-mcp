@@ -24,6 +24,7 @@ pub struct SendEnvelope {
 /// connection — no persistent session or connection pool.
 pub struct SmtpClient {
     transport: AsyncSmtpTransport<Tokio1Executor>,
+    deadline: Duration,
 }
 
 impl SmtpClient {
@@ -53,7 +54,10 @@ impl SmtpClient {
 
         let transport = builder.credentials(creds).timeout(Some(timeout)).build();
 
-        Ok(Self { transport })
+        Ok(Self {
+            transport,
+            deadline: timeout,
+        })
     }
 
     /// Send raw RFC 5322 bytes with an explicit envelope.
@@ -68,11 +72,17 @@ impl SmtpClient {
     /// transport failures.
     pub async fn send_raw(&self, envelope: &SendEnvelope, raw: &[u8]) -> Result<String, SmtpError> {
         let lettre_env = build_lettre_envelope(envelope)?;
-        let response = self
-            .transport
-            .send_raw(&lettre_env, raw)
-            .await
-            .map_err(classify_smtp_error)?;
+        // lettre applies its timeout only to the TCP connect; bound the
+        // whole dialog (banner, EHLO, AUTH, MAIL/RCPT/DATA) so a stalled or
+        // hostile server cannot hang the send indefinitely. A timed-out send
+        // is indeterminate — the server may already have accepted the
+        // message — so callers must not blind-retry (see ADR-0001).
+        let send = self.transport.send_raw(&lettre_env, raw);
+        let response = match tokio::time::timeout(self.deadline, send).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => return Err(classify_smtp_error(e)),
+            Err(_elapsed) => return Err(SmtpError::Timeout),
+        };
         Ok(format_response(&response))
     }
 }
@@ -233,6 +243,40 @@ mod tests {
     fn client_builds_with_no_encryption() {
         let client = SmtpClient::new(&test_config(), "password");
         assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn send_raw_times_out_when_server_withholds_banner() {
+        // A listener that accepts the connection but never sends the 220
+        // greeting. lettre's connect succeeds; the banner read would hang,
+        // so the send_raw operation deadline must fire.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _keep = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
+
+        let cfg = SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            encryption: SmtpEncryption::None,
+            username: "user@example.com".into(),
+            command_timeout_seconds: 1,
+        };
+        let client = SmtpClient::new(&cfg, "pw").unwrap();
+        let env = SendEnvelope {
+            from: "a@example.com".into(),
+            to: vec!["b@example.com".into()],
+        };
+
+        let err = client
+            .send_raw(&env, b"From: a\r\n\r\nhi")
+            .await
+            .unwrap_err();
+        let SmtpError::Timeout = err else {
+            panic!("expected Timeout, got {err:?}");
+        };
     }
 
     #[test]

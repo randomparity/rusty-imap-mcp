@@ -27,6 +27,10 @@ rimap-config = { path = "../rimap-config", version = "0.1.0" }
 
 lettre = { workspace = true }
 thiserror = { workspace = true }
+# `send_raw` bounds the whole SMTP operation with `tokio::time::timeout`
+# (lettre only times out TCP connect). The workspace feature set includes
+# `time`.
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
