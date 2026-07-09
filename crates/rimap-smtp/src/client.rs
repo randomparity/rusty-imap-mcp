@@ -110,6 +110,25 @@ fn format_response(response: &lettre::transport::smtp::response::Response) -> St
     )
 }
 
+/// Whether a server negative-reply code denotes an authentication failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyClass {
+    Auth,
+    Rejected,
+}
+
+/// Recognized SMTP authentication reply codes (RFC 4954 / RFC 5321):
+/// permanent 530/534/535/538, transient 432/454. All other negative
+/// replies are ordinary rejections.
+fn classify_reply_code(code: u16) -> ReplyClass {
+    const AUTH_CODES: [u16; 6] = [530, 534, 535, 538, 432, 454];
+    if AUTH_CODES.contains(&code) {
+        ReplyClass::Auth
+    } else {
+        ReplyClass::Rejected
+    }
+}
+
 /// Coarse classification of an SMTP error derived from the public
 /// predicates on `lettre::transport::smtp::Error`. Separated from the
 /// error-to-variant mapping so the taxonomy can be unit-tested with
@@ -117,8 +136,10 @@ fn format_response(response: &lettre::transport::smtp::response::Response) -> St
 /// crate-private constructors, so variants cannot be fabricated directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SmtpErrorShape {
-    /// Server replied with a 4xx/5xx response code.
-    Response,
+    /// Server sent a negative reply that is not an auth failure.
+    Rejected,
+    /// Server sent an authentication-failure reply code.
+    Auth,
     /// The operation exceeded the configured timeout.
     Timeout,
     /// TLS handshake / certificate failure.
@@ -131,15 +152,23 @@ enum SmtpErrorShape {
 
 impl SmtpErrorShape {
     fn of(err: &lettre::transport::smtp::Error) -> Self {
-        // Order matters: timeout and TLS are checked before the broader
-        // `is_client` so they map to their specific taxonomy entries
-        // rather than collapsing into Connection/Transport.
-        if err.is_response() {
-            Self::Response
-        } else if err.is_timeout() {
+        // Timeout and TLS take precedence over the broader predicates. A
+        // well-formed negative reply carries a status code (`Transient`/
+        // `Permanent`), which `is_response` does NOT match — that predicate
+        // is only true for a response-*parse* error. Splitting the status
+        // code into Auth vs Rejected is what fixes the historical bug where
+        // every 4xx/5xx reply collapsed into Transport/Internal.
+        if err.is_timeout() {
             Self::Timeout
         } else if err.is_tls() {
             Self::Tls
+        } else if let Some(code) = err.status() {
+            match classify_reply_code(u16::from(code)) {
+                ReplyClass::Auth => Self::Auth,
+                ReplyClass::Rejected => Self::Rejected,
+            }
+        } else if err.is_response() {
+            Self::Rejected
         } else if err.is_client() {
             Self::Client
         } else {
@@ -151,7 +180,10 @@ impl SmtpErrorShape {
 /// Classify a lettre SMTP error into our error taxonomy.
 fn classify_smtp_error(err: lettre::transport::smtp::Error) -> SmtpError {
     match SmtpErrorShape::of(&err) {
-        SmtpErrorShape::Response => SmtpError::Rejected {
+        SmtpErrorShape::Rejected => SmtpError::Rejected {
+            reason: err.to_string(),
+        },
+        SmtpErrorShape::Auth => SmtpError::Auth {
             reason: err.to_string(),
         },
         SmtpErrorShape::Timeout => SmtpError::Timeout,
@@ -168,7 +200,8 @@ fn classify_smtp_error(err: lettre::transport::smtp::Error) -> SmtpError {
 #[cfg(test)]
 fn shape_to_variant_name(shape: SmtpErrorShape) -> &'static str {
     match shape {
-        SmtpErrorShape::Response => "Rejected",
+        SmtpErrorShape::Rejected => "Rejected",
+        SmtpErrorShape::Auth => "Auth",
         SmtpErrorShape::Timeout => "Timeout",
         SmtpErrorShape::Tls => "Tls",
         SmtpErrorShape::Client => "Connection",
@@ -264,8 +297,33 @@ mod tests {
     }
 
     #[test]
-    fn shape_response_maps_to_rejected_variant() {
-        assert_eq!(shape_to_variant_name(SmtpErrorShape::Response), "Rejected");
+    fn shape_rejected_maps_to_rejected_variant() {
+        assert_eq!(shape_to_variant_name(SmtpErrorShape::Rejected), "Rejected");
+    }
+
+    #[test]
+    fn shape_auth_maps_to_auth_variant() {
+        assert_eq!(shape_to_variant_name(SmtpErrorShape::Auth), "Auth");
+    }
+
+    #[test]
+    fn reply_code_535_classifies_as_auth() {
+        assert_eq!(super::classify_reply_code(535), super::ReplyClass::Auth);
+    }
+
+    #[test]
+    fn reply_code_454_classifies_as_auth() {
+        assert_eq!(super::classify_reply_code(454), super::ReplyClass::Auth);
+    }
+
+    #[test]
+    fn reply_code_550_classifies_as_rejected() {
+        assert_eq!(super::classify_reply_code(550), super::ReplyClass::Rejected);
+    }
+
+    #[test]
+    fn reply_code_450_classifies_as_rejected() {
+        assert_eq!(super::classify_reply_code(450), super::ReplyClass::Rejected);
     }
 
     #[test]
