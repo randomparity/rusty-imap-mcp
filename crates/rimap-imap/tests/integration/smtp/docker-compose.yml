@@ -6,6 +6,14 @@ services:
     # v1.29.5
     image: docker.io/axllent/mailpit@sha256:c5a6d0ba4d08187f70f305471da5fd9ad424fdfc2f25a2308226a786335dfa9f
     container_name: ${COMPOSE_PROJECT_NAME:-rimap-it}-smtp
+    # Attach to the default bridge instead of a per-project network. Each
+    # compose project otherwise allocates a dedicated bridge subnet, and the
+    # full test suite runs many Dovecot + Mailpit projects concurrently, which
+    # exhausts Docker's address pool ("all predefined address pools have been
+    # fully subnetted"). The sink only needs its published loopback ports, not
+    # inter-container networking, so the default bridge is sufficient and costs
+    # no subnet.
+    network_mode: "bridge"
     ports:
       # Loopback-only. Host ports pre-allocated by the Rust harness.
       - "127.0.0.1:${RIMAP_SMTP_HOST_PORT}:1025"    # SMTP
