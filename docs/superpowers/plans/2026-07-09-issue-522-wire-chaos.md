@@ -32,6 +32,7 @@
 - **Create** `crates/rimap-server/tests/support/chaos/harness.rs` — `ChaosHarness`, `ChaosSkip`, `ToxiproxyControl`, gate logic.
 - **Create** `crates/rimap-server/tests/support/chaos/audit.rs` — audit-drain/Seq-bracket assertion helper (pure, unit-tested).
 - **Create** `crates/rimap-server/tests/e2e_wire_chaos.rs` — the five scenario tests.
+- **Modify** `crates/rimap-server/tests/support/wire/harness.rs` — add a slow-tolerant `request_within(method, params, deadline)` (Task 3B); the existing `request()` caps reads at a shared 2s `REQUEST_TIMEOUT`, which the ≥2s chaos faults would trip.
 - **Create** `.github/workflows/nightly-chaos.yml` — scheduled nightly job + vacuous-green guard + SIGKILL cleanup.
 - **Modify** `AGENTS.md` — add a "Network chaos e2e (nightly, #522)" note under the container-runtime section.
 
@@ -502,6 +503,71 @@ git commit -m "test(chaos): add audit-drain Seq-bracket assertion helper"
 
 ---
 
+## Task 3B: Wire `Harness` slow-tolerant request path (prerequisite for Tasks 4–7)
+
+**Files:**
+- Modify: `crates/rimap-server/tests/support/wire/harness.rs`
+
+**Why:** `Harness::request()` reads each response under a shared
+`pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2)`
+(`support/wire/harness.rs:35`), enforced in `read_one_envelope`
+(`:347-360`, panics "response … did not arrive within 2s"). Chaos scenarios 1
+(connect budget 4s), 2 and 4b (command budget 2s + connect/dispatch overhead)
+deliberately make the server emit its typed `ERR_TIMEOUT` **after** 2s, so
+`request()` would panic before the asserted response arrives. Do **not** raise
+the shared const — it is deliberately tight so ordinary wire tests fail fast on
+hangs. Add an **additive** per-call slow path instead.
+
+**Interfaces:**
+- Produces (consumed by Tasks 4–7): `Harness::request_within(&mut self, method: &str, params: Value, deadline: Duration) -> Value` — identical to `request()` (assign id, write line, read + parse + schema-validate the response envelope, assert id match) but bounds the stdout read by `deadline` instead of `REQUEST_TIMEOUT`.
+
+- [ ] **Step 1: Read `request()` and `read_one_envelope()` and factor a per-call timeout**
+
+Refactor `read_one_envelope(&mut self, caller: &str)` to
+`read_one_envelope_within(&mut self, caller: &str, read_timeout: Duration)`, and
+have the existing `read_one_envelope` call it with `REQUEST_TIMEOUT` so **every
+current caller keeps identical 2s behavior**. Confirm all in-file callers
+(`request`, `recv_until_id`, `initialize_handshake`, …) still pass through the
+2s default.
+
+- [ ] **Step 2: Add `request_within`**
+
+Mirror `request()` exactly (id assignment, `send_line`, envelope read, schema
+validation, id-match assertion) but call `read_one_envelope_within(caller,
+deadline)`:
+
+```rust
+/// Like `request`, but bounds the response read by `deadline` instead of the
+/// shared 2s `REQUEST_TIMEOUT`. For chaos scenarios whose server-side timeout
+/// budget (connect/command) is >= 2s and would otherwise trip the fast-fail cap.
+pub async fn request_within(&mut self, method: &str, params: Value, deadline: Duration) -> Value {
+    // ... same body as `request`, but `read_one_envelope_within(method, deadline)`
+}
+```
+
+- [ ] **Step 3: Compile the whole test crate (no behavior change to existing tests)**
+
+Run: `cargo nextest run -p rimap-server --no-run` and then a fast existing wire test:
+`cargo nextest run -p rimap-server -E 'binary(e2e_wire) & test(/full_session/)' 2>&1 | tail` (or, if Docker-gated, at least `--no-run`).
+Expected: compiles; existing wire tests unchanged (they still use the 2s default).
+
+- [ ] **Step 4: Guardrails + commit**
+
+```bash
+just fmt && just lint
+git add crates/rimap-server/tests/support/wire/harness.rs
+git commit -m "test(wire): add request_within for slow-response chaos scenarios"
+```
+
+> Dead-code note: `request_within` is `pub` on the shared wire `Harness`, which
+> other e2e binaries also compile. If a binary that does not call it emits
+> `dead_code`, that mirrors how the repo already handles cross-binary support
+> items — reference it from the existing `force_use_for_dead_code_link` helpers
+> (`e2e_wire_fault_injection.rs:60`, `e2e_wire_destructive.rs`) as those files do
+> for other shared `Harness` methods. Add the reference if lint flags it.
+
+---
+
 ## Task 4: Scenario 1 — delayed greeting (STARTTLS) → `ERR_TIMEOUT`
 
 **Files:**
@@ -509,7 +575,7 @@ git commit -m "test(chaos): add audit-drain Seq-bracket assertion helper"
 - Consumes: `support/chaos` (Tasks 2–3), `support/wire` (`Harness`, `assert_valid`), `support/dovecot::fixtures`.
 
 **Interfaces:**
-- Produces: the binary all later scenarios extend. Establishes `build_chaos_config(..)`, `spawn_ready(..)`, `seed_through_proxy(..)`, `assert_error_code(..)`, and the per-scenario `RIMAP_CHAOS_RAN <name>` marker.
+- Produces: the binary all later scenarios extend. Establishes `build_chaos_config(..)`/`ChaosConfigParams`, `spawn_ready(..)`, `assert_error_code(..)`, and the per-scenario `RIMAP_CHAOS_RAN <name>` marker. (`seed_through_proxy`/`search_seed_uid` are authored in **Task 5**, their first caller — scenario 1 does not seed, so authoring them here would leave an unused private fn that fails the `-D warnings` `dead_code` gate.)
 
 - [ ] **Step 1: Expand the shell — add module imports, config builder, seed + assert helpers**
 
@@ -597,7 +663,7 @@ max_append_bytes = {max_append_bytes}
 
 > Confirm `[accounts.imap]` accepts `connect_timeout_seconds` / `command_timeout_seconds` and `[accounts.limits]` accepts `max_append_bytes` (fields exist in `rimap-config/src/model.rs`; `deny_unknown_fields` is on, so names must be exact).
 
-Add a seed helper that appends the fixture **through the proxy while no toxic is active** (adapt `e2e_wire_fault_injection.rs::seed_multipart_message`, but point the `ConnectionConfig` at the proxy `port` and the given `encryption`). Add `assert_error_code` copied from `e2e_wire_fault_injection.rs`. Add a marker helper:
+Add `assert_error_code` copied from `e2e_wire_fault_injection.rs`. Add a marker helper. (Do **not** author `seed_through_proxy`/`search_seed_uid` here — scenario 1 does not seed, so an unused private fn would fail `dead_code` under `-D warnings`; they land in Task 5.)
 
 ```rust
 fn mark_ran(scenario: &str) {
@@ -638,9 +704,11 @@ async fn chaos_delayed_greeting_times_out() {
         "attributes": { "timeout": 0 }
     }));
 
-    let resp = h.request("tools/call", serde_json::json!({
+    // Slow path: the fault emits ERR_TIMEOUT at ~connect_timeout (4s), which
+    // exceeds the wire Harness's 2s REQUEST_TIMEOUT — use request_within (Task 3B).
+    let resp = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.list_folders", "arguments": {}
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     assert_error_code(&resp, "ERR_TIMEOUT");
 
     // Audit: exactly the failing tool_end carries ERR_TIMEOUT; the connect
@@ -704,9 +772,25 @@ git commit -m "test(chaos): scenario 1 — delayed STARTTLS greeting → ERR_TIM
 **Files:**
 - Modify: `crates/rimap-server/tests/e2e_wire_chaos.rs` (add one test).
 
-**Interfaces:** consumes everything from Task 4.
+**Interfaces:** consumes everything from Task 4; **authors** `seed_through_proxy` and `search_seed_uid` (first used here).
 
-- [ ] **Step 1: Write the test (warm-up ordering is load-bearing)**
+- [ ] **Step 1: Author `seed_through_proxy` and `search_seed_uid`**
+
+`seed_through_proxy(chaos, port, encryption)` appends the fixture **through the
+proxy while no toxic is active** (adapt `e2e_wire_fault_injection.rs::seed_multipart_message`,
+pointing the `ConnectionConfig` at the proxy `port` + given `encryption`).
+**Critical (independent cap):** the seed path uses its **own**
+`ConnectionConfig`, whose `max_append_bytes` is separate from the server's TOML
+cap. `seed_multipart_message` hardcodes `max_append_bytes: 10_485_760` (10 MiB);
+scenario 4a seeds a >10 MiB body, so set the seed `ConnectionConfig`'s
+`max_append_bytes` to **`26_214_400` (25 MiB)** — otherwise the seed `APPEND`
+fails with `SizeLimit` before the scenario runs. Also add a
+`seed_body_through_proxy(chaos, port, encryption, raw: &[u8])` variant for the
+sized bodies in Task 7, sharing the same `max_append_bytes`. `search_seed_uid`
+is copied from `e2e_wire_fault_injection.rs` (drives `chaos.search` for the smoke
+subject, returns the max UID).
+
+- [ ] **Step 2: Write the test (warm-up ordering is load-bearing)**
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -734,10 +818,11 @@ async fn chaos_mid_fetch_stall_times_out_then_recovers() {
     chaos.toxics().add_toxic("imaps", serde_json::json!({
         "type": "timeout", "stream": "downstream", "attributes": { "timeout": 0 }
     }));
-    let resp = h.request("tools/call", serde_json::json!({
+    // command budget 2s + overhead > wire 2s cap → request_within (Task 3B).
+    let resp = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.fetch_message",
         "arguments": { "folder": "INBOX", "uid": uid }
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     assert_error_code(&resp, "ERR_TIMEOUT");
 
     // Recovery: remove toxic → session was invalidated → next call reconnects.
@@ -767,14 +852,14 @@ async fn chaos_mid_fetch_stall_times_out_then_recovers() {
 
 > Add `last_tool_call_matching_error(records, code) -> Option<(u64,u64)>` to `audit.rs` (variant of `last_tool_call` filtered to `tool_end.error_code == code`), plus a unit test for it in Task 3's style. Confirm `chaos.fetch_message` is the correct draft-safe tool name that fetches a body (check `docs/tools.md` / the tool catalog); if the body-fetch tool differs, use it.
 
-- [ ] **Step 2: Run under the gate**
+- [ ] **Step 3: Run under the gate**
 
 Run: `RIMAP_CHAOS=1 RIMAP_REQUIRE_DOCKER=1 cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-capture 2>&1 | tail -30`
 Expected: PASS; log has `RIMAP_CHAOS_RAN scenario2`.
 
 **First-run confirmation:** verify Toxiproxy applies the newly-added `timeout` toxic to the already-open warm-up connection (spec's stated assumption). If the toxic only affects new connections, the FETCH would succeed — in that case add an intervening step that forces the FETCH onto a stream the toxic governs (or reconnect), per the spec's contingency, and record it inline.
 
-- [ ] **Step 3: Guardrails + commit**
+- [ ] **Step 4: Guardrails + commit**
 
 ```bash
 just fmt && just lint
@@ -812,9 +897,10 @@ async fn chaos_starttls_reset_typed_error_one_auth() {
         "type": "reset_peer", "stream": "downstream", "attributes": { "timeout": 0 }
     }));
 
-    let resp = h.request("tools/call", serde_json::json!({
+    // reset_peer is prompt (<2s), but use request_within for uniformity/margin.
+    let resp = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.list_folders", "arguments": {}
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     // Typed TLS/connection error — assert on the set (see spec: TCP-layer reset
     // is not deterministic between plaintext-greeting and TLS-handshake phases).
     let code = resp["result"]["structuredContent"]["error_code"].as_str().unwrap_or("");
@@ -869,7 +955,7 @@ git commit -m "test(chaos): scenario 3 — STARTTLS reset typed error + one Auth
 **Files:**
 - Modify: `crates/rimap-server/tests/e2e_wire_chaos.rs` (add two tests, two server processes).
 
-**Interfaces:** consumes Task 4 helpers; needs a large-body seed. Add a `fixtures`-style helper that builds an `.eml` of a target byte size (e.g. repeat a filler body), or reuse an existing large-fixture builder if present. Seed via `seed_through_proxy` (fits `max_append_bytes = 26 MiB`).
+**Interfaces:** consumes Task 4 helpers and the Task-5 `seed_body_through_proxy`/`search_seed_uid`. Needs a large-body builder: add `fixtures::message_of_size(n: usize) -> Vec<u8>` in `support/dovecot/fixtures.rs` that builds a valid `.eml` of ~`n` bytes (headers + a repeated-filler body). Seed via `seed_body_through_proxy`, whose seed `ConnectionConfig` sets `max_append_bytes = 26_214_400` (Task 5 Step 1) — note this is the **seed** connection's own cap, independent of the server TOML `max_append_bytes`; the 10 MiB 4a body fits the 25 MiB seed cap but exceeds the server's small **fetch** cap.
 
 - [ ] **Step 1: Scenario 4a — over-cap body, prompt `ERR_ATTACHMENT_TOO_LARGE` under trickle**
 
@@ -895,10 +981,12 @@ async fn chaos_trickle_over_cap_rejects_promptly() {
         "type": "bandwidth", "stream": "downstream", "attributes": { "rate": 64 }
     }));
     let t0 = std::time::Instant::now();
-    let resp = h.request("tools/call", serde_json::json!({
+    // Preflight rejection is prompt but travels through the bandwidth toxic;
+    // give generous headroom (30s) — request_within (Task 3B), not the 2s cap.
+    let resp = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.download_attachment",
         "arguments": { "folder": "INBOX", "uid": uid, "part_id": "1" }
-    })).await;
+    }), std::time::Duration::from_secs(30)).await;
     assert_error_code(&resp, "ERR_ATTACHMENT_TOO_LARGE");
     assert!(t0.elapsed() < std::time::Duration::from_secs(20),
         "rejection must be prompt (preflight, not a body-read stall); took {:?}", t0.elapsed());
@@ -939,10 +1027,11 @@ async fn chaos_trickle_under_cap_times_out_then_recovers() {
     chaos.toxics().add_toxic("imaps", serde_json::json!({
         "type": "bandwidth", "stream": "downstream", "attributes": { "rate": 64 }
     }));
-    let resp = h.request("tools/call", serde_json::json!({
+    // ~2 MiB at 64 KB/s ≫ command budget 2s → ERR_TIMEOUT; slow path (Task 3B).
+    let resp = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.fetch_message",
         "arguments": { "folder": "INBOX", "uid": uid }
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     assert_error_code(&resp, "ERR_TIMEOUT");
 
     chaos.toxics().reset();
