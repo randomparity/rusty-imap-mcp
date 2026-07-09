@@ -200,10 +200,25 @@ the resolver was not called (a panicking resolver proves it, mirroring
 `list_folders`).
 
 **Scenario 3 — missing / zero UID FETCH, skip-with-warning.** Log in
-(advertising `UIDPLUS`), `SELECT`, then answer a `UID FETCH` with three items:
-one lacking the `UID` data item, one with `UID 0`, and one well-formed
-(`UID 5`). `Connection::fetch` → `ops::fetch` skips the first two at
-`fetch.rs:158-163` and returns only `UID 5`. Assert the single returned message.
+(advertising `UIDPLUS`), `EXAMINE` (read-only open — `Connection::fetch` →
+`ops::fetch` calls `folders::select(session, folder, true)`, which issues
+`EXAMINE`, not `SELECT`; `fetch.rs:136`), then answer a `UID FETCH` with three
+items: one lacking the `UID` data item, one with `UID 0`, and one well-formed
+(`UID 5`). `ops::fetch` skips the first two at `fetch.rs:158-163` and returns
+only `UID 5`. Assert the single returned message.
+
+**Contingency (verified during TDD, mirroring scenario 4).** The `UID 0`
+half is certain (`Uid::new(0)` returns `None`, `fetch.rs:161-163`). The
+missing-UID half assumes async-imap 0.11 surfaces a `* n FETCH (…)` line that
+omits the `UID` item as a value with `msg.uid == None` (the `else` at
+`fetch.rs:158`) rather than dropping or rejecting it during parsing. The build
+step MUST confirm how async-imap 0.11 surfaces a UID-less FETCH item and bind
+the assertion to the observed skip count — if the parser drops the UID-less
+item, only the `UID 0` item skips and the aggregated count is `1`, not `2`. The
+robust form asserts the two skip mechanisms independently (a UID-0 item is
+skipped; a UID-less item, however async-imap represents it, is skipped) and
+asserts `skipped_uids` equals the empirically observed total, rather than
+hardcoding `2` against an unverified parser assumption.
 
 The skip is currently **silent**. To satisfy the AC's "skip-**with-warning**"
 and give operators a signal that a server withheld/zeroed a UID (a hostile-input
@@ -227,12 +242,13 @@ future on the test thread, so the `warn!` fires on the thread the dispatcher
 covers. Because that thread-local dispatcher also captures incidental warns from
 async-imap, rustls, and the co-scheduled `FakeImapServer` task, the assertion
 **filters** captured events to the fetch skip warn (by its target/message) and
-asserts exactly one *matching* event carrying `skipped_uids == 2` — not a raw
-total-event count, which would break on any unrelated warn on the shared
-dispatcher.
+asserts exactly one *matching* event whose `skipped_uids` equals the observed
+skip count (see the scenario-3 contingency below) — not a raw total-event count,
+which would break on any unrelated warn on the shared dispatcher.
 
 **Scenario 4 — truncated response mid-literal, typed error no hang.** Log in,
-`SELECT`, then answer a `UID FETCH` with a `BODY[]` literal announcing `{100}`
+`EXAMINE` (the fetch path's read-only open, as in scenario 3 — not `SELECT`),
+then answer a `UID FETCH` with a `BODY[]` literal announcing `{100}`
 but `Send` fewer than 100 bytes followed by `Disconnect`. `Disconnect` bare-drops
 the TLS/TCP stream (prompt FIN, no `close_notify`), so async-imap's read sees
 EOF mid-literal on the loopback socket essentially immediately (sub-millisecond)
