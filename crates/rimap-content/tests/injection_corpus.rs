@@ -39,6 +39,8 @@ struct Expected {
     #[serde(default)]
     body_html_must_not_contain: Vec<String>,
     #[serde(default)]
+    alternate_parts_must_contain: Vec<String>,
+    #[serde(default)]
     warning_codes: Vec<String>,
     #[serde(default)]
     forbidden_warning_codes: Vec<String>,
@@ -125,8 +127,32 @@ fn assert_fixture(name: &str, dir: &Path, expected: &Expected) -> Result<(), Str
 fn assert_ok_body(name: &str, content: &Content, expected: &Expected) -> Result<(), String> {
     assert_body_substrings(name, &content.untrusted.body_text, expected)?;
     assert_body_html_substrings(name, content.untrusted.body_html.as_deref(), expected)?;
+    assert_alternate_parts_substrings(name, &content.untrusted.alternate_parts, expected)?;
     assert_warning_codes(name, &content.security_warnings, expected)?;
     assert_meta_fields(name, &content.meta, expected)
+}
+
+/// Assert every `alternate_parts_must_contain` needle appears in at
+/// least one entry of `content.untrusted.alternate_parts`. This lets a
+/// fixture prove that content which is surfaced but *segregated* out of
+/// the primary body — e.g. an unsigned sibling under `multipart/signed`
+/// — still lands in the untrusted namespace rather than being dropped or
+/// promoted into `meta`. A fixture declaring needles when no alternate
+/// part carries them is a failure.
+fn assert_alternate_parts_substrings(
+    name: &str,
+    alternate_parts: &[String],
+    expected: &Expected,
+) -> Result<(), String> {
+    for needle in &expected.alternate_parts_must_contain {
+        if !alternate_parts.iter().any(|part| part.contains(needle)) {
+            return Err(format!(
+                "{name}: no alternate part contains required substring {needle:?} \
+                 (alternate_parts={alternate_parts:?})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Assert `body_html_must_contain` / `body_html_must_not_contain`
@@ -263,6 +289,26 @@ fn assert_err_kind(name: &str, err: &ContentError, expected: &Expected) -> Resul
     } else {
         Err(format!("{name}: error_kind want={want:?} got={got:?}"))
     }
+}
+
+#[test]
+fn alternate_parts_must_contain_detects_presence_and_absence() {
+    let json = r#"{"description":"t","alternate_parts_must_contain":["payload"]}"#;
+    let expected: Expected = serde_json::from_str(json).unwrap();
+
+    let present = vec![
+        "harmless".to_string(),
+        "carries the payload here".to_string(),
+    ];
+    assert!(assert_alternate_parts_substrings("t", &present, &expected).is_ok());
+
+    let absent = vec!["harmless".to_string()];
+    let err = assert_alternate_parts_substrings("t", &absent, &expected)
+        .expect_err("missing needle must fail");
+    assert!(err.contains("payload"), "err={err}");
+
+    let empty: Vec<String> = Vec::new();
+    assert!(assert_alternate_parts_substrings("t", &empty, &expected).is_err());
 }
 
 #[test]
