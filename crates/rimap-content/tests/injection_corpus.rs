@@ -290,13 +290,34 @@ fn assert_meta_fields(
             meta.body_truncated
         ));
     }
-    for needle in &want_meta.attachment_filename_must_not_contain {
-        for (idx, att) in meta.attachments.iter().enumerate() {
-            if let Some(filename) = att.filename.as_deref()
-                && filename.contains(needle)
+    let filenames: Vec<Option<&str>> = meta
+        .attachments
+        .iter()
+        .map(|att| att.filename.as_deref())
+        .collect();
+    assert_filenames_free_of(
+        name,
+        &filenames,
+        &want_meta.attachment_filename_must_not_contain,
+    )
+}
+
+/// Assert no attachment filename contains any forbidden `needles`
+/// substring. `None` filenames are skipped. Split out of
+/// [`assert_meta_fields`] so the guard's Err path is unit-testable
+/// without constructing the `#[non_exhaustive]` `AttachmentMeta`.
+fn assert_filenames_free_of(
+    name: &str,
+    filenames: &[Option<&str>],
+    needles: &[String],
+) -> Result<(), String> {
+    for needle in needles {
+        for (idx, filename) in filenames.iter().enumerate() {
+            if let Some(fname) = filename
+                && fname.contains(needle)
             {
                 return Err(format!(
-                    "{name}: attachment[{idx}] filename {filename:?} \
+                    "{name}: attachment[{idx}] filename {fname:?} \
                      contains forbidden substring {needle:?}"
                 ));
             }
@@ -354,6 +375,31 @@ fn alternate_parts_must_not_contain_detects_leak() {
     let err = assert_alternate_parts_substrings("t", &leaked, &expected)
         .expect_err("forbidden needle present must fail");
     assert!(err.contains("payload"), "err={err}");
+}
+
+#[test]
+fn attachment_filename_must_not_contain_detects_traversal() {
+    let needles = vec!["../".to_string(), "etc/passwd".to_string()];
+
+    // Clean sanitized filename passes.
+    let clean = [Some("____etc_passwd")];
+    assert!(assert_filenames_free_of("t", &clean, &needles).is_ok());
+
+    // A None filename is skipped, not a false positive.
+    let none = [None, Some("report.pdf")];
+    assert!(assert_filenames_free_of("t", &none, &needles).is_ok());
+
+    // Empty needles is vacuously Ok.
+    let empty: Vec<String> = Vec::new();
+    assert!(assert_filenames_free_of("t", &clean, &empty).is_ok());
+
+    // An un-rewritten traversal filename on the second attachment fails,
+    // and the error names its index.
+    let leaked = [Some("safe.txt"), Some("../../etc/passwd")];
+    let err = assert_filenames_free_of("t", &leaked, &needles)
+        .expect_err("un-rewritten traversal must fail");
+    assert!(err.contains("attachment[1]"), "err={err}");
+    assert!(err.contains("etc/passwd"), "err={err}");
 }
 
 #[test]
