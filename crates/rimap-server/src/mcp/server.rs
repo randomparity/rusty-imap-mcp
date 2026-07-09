@@ -556,17 +556,6 @@ impl ServerHandler for ImapMcpServer {
         })
     }
 
-    // cargo-mutants: known-equivalent (test-infrastructure gap) — the
-    // `replace ... with Ok(Default::default())` stub on `list_resources`
-    // returns an empty `ListResourcesResult`, observably different
-    // from the per-account-populated list the real implementation
-    // returns. Unit-testing the mutation requires constructing an
-    // `rmcp::service::RequestContext<RoleServer>` for which rmcp
-    // exposes no public test constructor in this version. The
-    // mutation is covered end-to-end by the dovecot harness in
-    // `tests/e2e.rs`, which is environment-gated and skipped by
-    // cargo-mutants. Documented in `mutation-baseline.md` as a known
-    // coverage gap.
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
