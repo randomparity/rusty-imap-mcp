@@ -8,7 +8,16 @@
 
 [test-groups]
 container-backed = { max-threads = 4 }
+# The network-chaos binary (#522) spins TWO containers per test (Dovecot +
+# Toxiproxy) and uses tight timeout budgets; run it serially so container/CPU
+# contention cannot starve a healthy boot within its budget (which would flake
+# the connect/command-timeout assertions). Nightly-only, so wall-time is fine.
+chaos-backed = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'binary(dovecot) + binary(proton)'
 test-group = 'container-backed'
+
+[[profile.default.overrides]]
+filter = 'binary(e2e_wire_chaos)'
+test-group = 'chaos-backed'
