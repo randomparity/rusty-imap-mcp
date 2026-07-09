@@ -317,6 +317,25 @@ async fn seed_through_proxy(chaos: &ChaosHarness, port: u16, encryption: &str) {
     .await;
 }
 
+/// Build a valid RFC 5322 message of ~`n` bytes (headers + repeated-filler
+/// plaintext body). Subject is the smoke subject so `search_seed_uid` finds it.
+fn message_of_size(n: usize) -> Vec<u8> {
+    let header = "From: chaos@example.test\r\n\
+                  To: rimap-test@example.test\r\n\
+                  Subject: e2e-wire-test-smoke\r\n\
+                  Date: Wed, 09 Jul 2026 00:00:00 +0000\r\n\
+                  Message-ID: <chaos-size@example.test>\r\n\
+                  MIME-Version: 1.0\r\n\
+                  Content-Type: text/plain; charset=utf-8\r\n\r\n";
+    let filler = b"chaos-filler-line-0123456789ABCDEF\r\n";
+    let mut msg = Vec::with_capacity(n + header.len());
+    msg.extend_from_slice(header.as_bytes());
+    while msg.len() < n {
+        msg.extend_from_slice(filler);
+    }
+    msg
+}
+
 /// Drive `chaos.search` for the seeded smoke subject; return its max UID.
 async fn search_seed_uid(h: &mut Harness) -> u64 {
     let resp = h
@@ -565,4 +584,138 @@ async fn chaos_starttls_reset_typed_error_one_auth() {
         1,
         "exactly one auth Failure in the failing call window; got {recs:?}",
     );
+}
+
+/// Scenario 4a — an over-cap body under a slow byte-trickle is rejected PROMPTLY
+/// with `ERR_ATTACHMENT_TOO_LARGE` by the `RFC822.SIZE` pre-check, before any body
+/// bytes are read. Falsifiable against a buffering regression: if `fetch_body`
+/// regressed to read the body before checking size, the bandwidth toxic would
+/// stall it to `command_timeout` and surface `ERR_TIMEOUT` instead. The prompt
+/// rejection under an active trickle is the evidence that no body was buffered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chaos_trickle_over_cap_rejects_promptly() {
+    let Ok(chaos) = ChaosHarness::try_start() else {
+        return;
+    };
+    mark_ran("scenario4a");
+
+    // Seed a body well OVER the fetch cap (10 MiB body, 1 MiB cap).
+    seed_body_through_proxy(
+        &chaos,
+        chaos.imaps_port(),
+        "tls",
+        &message_of_size(10 * 1024 * 1024),
+    )
+    .await;
+
+    // command_timeout generous so the size rejection is unambiguously "prompt".
+    let mut h = spawn_ready(
+        &chaos,
+        chaos.imaps_port(),
+        "tls",
+        10,
+        30,
+        1_048_576,
+        ROOMY_APPEND,
+    )
+    .await;
+    let uid = search_seed_uid(&mut h).await;
+
+    // Slow trickle: the tiny RFC822.SIZE preflight returns fast even at ~64 KB/s;
+    // the size check then rejects before the body is read.
+    chaos.toxics().add_toxic(
+        "imaps",
+        &json!({ "type": "bandwidth", "stream": "downstream", "attributes": { "rate": 64 } }),
+    );
+    let t0 = std::time::Instant::now();
+    let resp = h
+        .request_within(
+            "tools/call",
+            json!({ "name": "chaos.fetch_message", "arguments": { "folder": "INBOX", "uid": uid } }),
+            Duration::from_secs(30),
+        )
+        .await;
+    assert_error_code(&resp, "ERR_ATTACHMENT_TOO_LARGE");
+    assert!(
+        t0.elapsed() < Duration::from_secs(20),
+        "rejection must be prompt (preflight, not a body-read stall); took {:?}",
+        t0.elapsed(),
+    );
+
+    // Recovery: a small metadata call (re-fetching the over-cap body would still
+    // be ERR_ATTACHMENT_TOO_LARGE); ERR_ATTACHMENT_TOO_LARGE is transport-neutral,
+    // so the session stays live and this needs no reconnect.
+    chaos.toxics().reset();
+    let ok = h
+        .request(
+            "tools/call",
+            json!({ "name": "chaos.list_folders", "arguments": {} }),
+        )
+        .await;
+    assert_ok(&ok, "recovery metadata call after over-cap rejection");
+
+    let (status, _tempdir) = h.shutdown_and_wait().await;
+    assert!(status.success(), "binary exited non-zero: {status:?}");
+}
+
+/// Scenario 4b — an under-cap body trickled below the command budget surfaces
+/// `ERR_TIMEOUT` (the time bound), the session is invalidated, and the next call
+/// recovers. The cap is raised above the body so the size guard does not fire;
+/// the `bandwidth` toxic makes the body unable to arrive within `command_timeout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chaos_trickle_under_cap_times_out_then_recovers() {
+    let Ok(chaos) = ChaosHarness::try_start() else {
+        return;
+    };
+    mark_ran("scenario4b");
+
+    // ~2 MiB body, UNDER the raised fetch cap; at ~64 KB/s it needs ~32s ≫ 2s.
+    seed_body_through_proxy(
+        &chaos,
+        chaos.imaps_port(),
+        "tls",
+        &message_of_size(2 * 1024 * 1024),
+    )
+    .await;
+
+    // command_timeout low (2s) so the trickled body times out; connect generous.
+    let mut h = spawn_ready(
+        &chaos,
+        chaos.imaps_port(),
+        "tls",
+        10,
+        2,
+        ROOMY_FETCH,
+        ROOMY_APPEND,
+    )
+    .await;
+    let uid = search_seed_uid(&mut h).await;
+
+    chaos.toxics().add_toxic(
+        "imaps",
+        &json!({ "type": "bandwidth", "stream": "downstream", "attributes": { "rate": 64 } }),
+    );
+    let resp = h
+        .request_within(
+            "tools/call",
+            json!({ "name": "chaos.fetch_message", "arguments": { "folder": "INBOX", "uid": uid } }),
+            Duration::from_secs(15),
+        )
+        .await;
+    assert_error_code(&resp, "ERR_TIMEOUT");
+
+    // Recovery reconnects AND fetches the 2 MiB body — request_within (the 2s
+    // request() cap would trip before the reconnect+fetch completes).
+    chaos.toxics().reset();
+    let ok = h
+        .request_within(
+            "tools/call",
+            json!({ "name": "chaos.fetch_message", "arguments": { "folder": "INBOX", "uid": uid } }),
+            Duration::from_secs(15),
+        )
+        .await;
+    assert_ok(&ok, "recovery fetch after byte-trickle timeout");
+
+    let (status, _tempdir) = h.shutdown_and_wait().await;
+    assert!(status.success(), "binary exited non-zero: {status:?}");
 }
