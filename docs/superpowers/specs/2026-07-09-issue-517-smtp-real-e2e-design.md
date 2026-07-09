@@ -90,6 +90,17 @@ in-process (Component 2 scenario 4). It is additive: the happy path completes
 well within the deadline, and the connect-phase timeout lettre already applies
 is left in place.
 
+`command_timeout_seconds` (default 30s) is knowingly repurposed here as the
+**whole-operation** deadline for the entire dialog (connect + EHLO + STARTTLS +
+AUTH + MAIL/RCPT + the full DATA upload + trailing `250`), not a per-command
+budget — lettre enforces no per-command read timeout, so a single operation
+deadline is the only lever available without a new config field. Consequence: a
+legitimately-progressing send of a large attachment over a slow uplink can hit
+the deadline and fail with `ERR_TIMEOUT`; 30s comfortably covers ordinary
+messages, and operators who send large attachments over slow links raise
+`command_timeout_seconds`. A distinct `smtp.operation_timeout_seconds` field was
+considered and rejected as disproportionate for this change (see ADR).
+
 ### Component 2 — in-process scripted SMTP responder (`rimap-smtp` tests)
 
 A test-only tokio TCP listener under `crates/rimap-smtp/tests/` that:
@@ -198,6 +209,13 @@ Container-gated (both Dovecot and Mailpit); nightly, not PR-blocking.
   deterministically in-process. A blackhole-address connect timeout is *not*
   used — it is environment-sensitive (an ICMP unreachable fast-fails as a
   connection error, not a timeout).
+- **Timed-out send is indeterminate.** A deadline that elapses during the final
+  `DATA`/`250` exchange abandons a connection whose message the server may
+  already have accepted, so `ERR_TIMEOUT` (`meta.sent == false`) can be reported
+  for a *delivered* message. This is inherent to any send timeout. Callers —
+  including agents — must treat a timed-out send as **indeterminate**, not
+  definitively failed, and must not blind-retry (a retry may double-send). The
+  ADR records the same caveat; no idempotency key is introduced by this change.
 
 ## Testing
 

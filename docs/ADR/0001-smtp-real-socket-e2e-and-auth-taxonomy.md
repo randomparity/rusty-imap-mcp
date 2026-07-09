@@ -106,9 +106,21 @@ succeeds on the happy path.
   codes). No structured-error `data` shape changes.
 - **Behavior change (bounded send):** `send_email`/`forward` now fail with
   `ERR_TIMEOUT` after `command_timeout_seconds` instead of hanging on a stalled
-  server. A server slower than the deadline that previously (in the connect
-  phase) would have completed is unaffected; only post-connect stalls are newly
-  bounded.
+  server. The deadline bounds the **whole operation**, so it fires for *any*
+  dialog exceeding it — not only a dead stall but also a live-but-slow transfer
+  (e.g. a large attachment on a slow uplink). `command_timeout_seconds`
+  (default 30s, per-command by name) is knowingly repurposed as this operation
+  budget; a distinct `operation_timeout_seconds` field was rejected as
+  disproportionate.
+- **Timed-out send is indeterminate (idempotency):** a deadline that elapses
+  during the final `DATA`/`250` exchange abandons a connection the server may
+  already have accepted, so `ERR_TIMEOUT` can be reported for a delivered
+  message. This is inherent to any send timeout (it was a hang before, which is
+  strictly worse). Callers — especially agents — must treat a timed-out send as
+  indeterminate and must not blind-retry, or they risk double-sending. No
+  idempotency key is introduced. lettre's connection `pool` feature is not
+  enabled, so no corrupted-pooled-connection reuse arises from the abandoned
+  future.
 - Error-taxonomy coverage runs on every PR (no Docker); only the real-delivery
   assertions are gated.
 - `SmtpError` gains a variant. It is `#[non_exhaustive]`, so downstream matches
@@ -139,6 +151,11 @@ succeeds on the happy path.
   that answers with ICMP unreachable fast-fails as a connection error, not a
   timeout, making the test flaky. It also leaves the real post-connect hang gap
   unfixed.
+- **A distinct `smtp.operation_timeout_seconds` config field.** Cleaner
+  semantics than repurposing the per-command field, but adds config-model,
+  validation, and documentation surface disproportionate to this test-focused
+  change; 30s covers ordinary messages and the field is already operator-tunable.
+  Revisit if large-attachment sends over slow links become a real complaint.
 - **454-to-STARTTLS or connection-drop for the TLS scenario.** A cert-free way
   to fail STARTTLS, but `454` collides with the recognized transient auth codes
   (routes to `Auth`) and a drop yields a client/network error — neither sets
