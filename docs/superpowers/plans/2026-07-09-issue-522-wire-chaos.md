@@ -417,10 +417,26 @@ mod tests {
         assert_eq!((s0, s1), (3, 4));
         assert_eq!(count_auth_failures_between(&recs, s0, s1), 0);
     }
+
+    // Exercises the filesystem read path AND gives `read_records` a caller in
+    // this task — otherwise it is an unused `pub fn` and `dead_code` fails
+    // `just lint` under -D warnings (pub does not exempt items in a test binary).
+    #[test]
+    fn read_records_round_trips_from_a_file() {
+        let jsonl = [
+            line(json!({"seq":0,"kind":"tool_start"})),
+            line(json!({"seq":1,"kind":"tool_end","start_seq":0,"error_code":null})),
+        ].join("\n");
+        let f = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(f.path(), &jsonl).expect("write jsonl");
+        assert_eq!(read_records(f.path()), parse_lines(&jsonl));
+    }
 }
 ```
 
-(Use a `parse_lines(&str)` helper in tests to avoid touching the filesystem; `read_records(path)` wraps it with a file read.)
+(The synthetic-string tests use `parse_lines(&str)` to avoid the filesystem;
+the round-trip test above covers `read_records(path)` and keeps it a live caller
+within Task 3. `tempfile` is already a dev-dep.)
 
 - [ ] **Step 2: Run to verify it fails**
 
