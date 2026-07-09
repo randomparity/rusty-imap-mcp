@@ -631,6 +631,99 @@ async fn case_16_move_message_between_folders() {
     );
 }
 
+/// `move_messages` with `expected_source_uidvalidity`: a matching value passes
+/// the guard and the move proceeds; a stale value (the source folder is deleted
+/// and recreated, rotating UIDVALIDITY) aborts with
+/// `ImapError::UidValidityChanged` and moves nothing. Without the matching-value
+/// case, the guard predicate could be forced always-true and go unnoticed.
+#[tokio::test]
+async fn case_25_move_message_uidvalidity_guard() {
+    let Some(h) = boot(PinChoice::Correct) else {
+        return;
+    };
+    let folder = "MoveGuardTest";
+    h.connection.create_folder(folder).await.unwrap();
+    let _ = h.connection.create_folder("Archive").await;
+
+    let msg = support::fixtures::minimal_rfc5322("move-guard-test");
+    let subject_query = || {
+        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
+            subject: Some("move-guard-test".to_string()),
+            ..Default::default()
+        })
+    };
+    h.connection
+        .append_message(folder, &msg, &[], &[])
+        .await
+        .unwrap();
+    let (uids, uid_validity) = Box::pin(h.connection.search(folder, subject_query()))
+        .await
+        .unwrap();
+    assert!(!uids.is_empty(), "seeded message not found");
+    let uid = uids[0];
+    let good_validity = uid_validity.expect("dovecot reports UIDVALIDITY");
+
+    // Matching UIDVALIDITY: the guard passes and the move proceeds.
+    let outcome = h
+        .connection
+        .move_messages(folder, "Archive", &[uid], Some(good_validity))
+        .await
+        .unwrap();
+    assert_eq!(outcome.results.len(), 1);
+    assert_eq!(outcome.source_uid_validity, Some(good_validity));
+    let (after, _) = Box::pin(h.connection.search(folder, subject_query()))
+        .await
+        .unwrap();
+    assert!(
+        after.is_empty(),
+        "message should have left the source folder"
+    );
+
+    // Rotate UIDVALIDITY: deselect the source first (Dovecot drops the
+    // connection if a client DELETEs its own selected mailbox), then delete
+    // and recreate the folder.
+    let _ = Box::pin(h.connection.search(
+        "INBOX",
+        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery::default()),
+    ))
+    .await
+    .unwrap();
+    h.connection.delete_folder(folder).await.unwrap();
+    h.connection.create_folder(folder).await.unwrap();
+    h.connection
+        .append_message(folder, &msg, &[], &[])
+        .await
+        .unwrap();
+    let (uids, fresh_validity) = Box::pin(h.connection.search(folder, subject_query()))
+        .await
+        .unwrap();
+    assert!(!uids.is_empty(), "seeded message not found after recreate");
+    let fresh_uid = uids[0];
+    assert_ne!(
+        fresh_validity,
+        Some(good_validity),
+        "recreating the folder should rotate UIDVALIDITY"
+    );
+
+    // Stale UIDVALIDITY: the guard aborts before any MOVE is issued.
+    let err = h
+        .connection
+        .move_messages(folder, "Archive", &[fresh_uid], Some(good_validity))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ImapError::UidValidityChanged { .. }),
+        "expected UidValidityChanged, got {err:?}"
+    );
+    let (still, _) = Box::pin(h.connection.search(folder, subject_query()))
+        .await
+        .unwrap();
+    assert!(
+        !still.is_empty(),
+        "message must remain after an aborted move"
+    );
+}
+
 /// `delete_message`: flag + move to Trash, verify UID gone from INBOX.
 #[tokio::test]
 async fn case_17_delete_message() {
