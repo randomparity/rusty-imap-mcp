@@ -111,6 +111,24 @@ audit-log pairing + namespace attribution.
   non-empty diff under `tests/fixtures/rimap-tool-schemas/`.
 - Specs: see `docs/superpowers/specs/2026-05-12-mcp-behavioral-conformance-design.md`.
 
+### Network chaos e2e (nightly, #522)
+
+`crates/rimap-server/tests/e2e_wire_chaos.rs` interposes a Toxiproxy container
+between the server binary and the same Dovecot fixture to exercise
+degraded-but-alive networks: delayed greeting, mid-FETCH stall, RST during
+STARTTLS, and byte-trickle. Each scenario asserts the typed `ERR_*` wire code,
+the audit record, and post-fault recovery.
+
+- **Nightly-only.** Gated behind `RIMAP_CHAOS=1` (checked before the runtime
+  probe), so the suite silent-skips on PR CI even under `RIMAP_REQUIRE_DOCKER=1`.
+- **Run locally:**
+  `RIMAP_CHAOS=1 RIMAP_REQUIRE_DOCKER=1 cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-capture`
+- **Multi-arch, no arch gate.** Toxiproxy `ghcr.io/shopify/toxiproxy:2.12.0` and
+  Dovecot `2.4.4-root` both ship `linux/amd64` + `linux/arm64`.
+- Runs serially (nextest `chaos-backed` group) — two containers per test with
+  tight timeout budgets. CI: `.github/workflows/nightly-chaos.yml`. Spec:
+  `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`.
+
 ## Toolchain and MSRV
 
 - **Dev toolchain:** Rust 1.94.0, pinned in `rust-toolchain.toml`. Rustup

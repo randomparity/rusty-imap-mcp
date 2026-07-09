@@ -1,0 +1,504 @@
+# Network chaos e2e layer — latency, resets, byte-trickle — design
+
+**Status:** Draft 2026-07-09 · issue #522
+**Scope:** Add a nightly-only e2e suite that interposes Toxiproxy between the
+`rusty-imap-mcp` binary and the Dovecot fixture to exercise *degraded-but-alive*
+network conditions (slow greeting, mid-FETCH stall, RST during STARTTLS,
+byte-trickle of a large body) through the real MCP tool-dispatch wire. Asserts
+the typed `ERR_*` code on the wire, the audit record, and that a subsequent call
+recovers with no wedged session or circuit breaker.
+
+## Problem
+
+Fault injection today is binary. `e2e_wire_fault_injection.rs` proves three
+*protocol/dead-server* faults — oversize fetch (`ERR_ATTACHMENT_TOO_LARGE`),
+stale UIDVALIDITY (`ERR_UID_VALIDITY_CHANGED`), and a fully stopped container
+(`ERR_CONNECTION_LOST`). Nothing exercises a network that is *alive but
+degraded*: a server that accepts the TCP connection but stalls the greeting,
+latency that spikes mid-FETCH, a reset landing during the STARTTLS handshake, or
+a large body delivered a byte at a time.
+
+These are exactly the conditions that determine whether the timeout taxonomy
+(`connect_timeout` vs `command_timeout` → `ERR_TIMEOUT`), the idle-reconnect
+retry (`211f629f`, #450), the session-invalidation-then-lazy-reconnect contract,
+and the circuit-breaker accounting behave correctly or wedge — and none are
+covered. The gap is a test-harness dimension, not a production-code gap: the
+grounding survey (below) confirms the machinery each scenario asserts already
+exists.
+
+## Acceptance criteria (from the issue)
+
+- [ ] Greeting delayed past `connect_timeout` → typed timeout (`ERR_TIMEOUT`).
+- [ ] Mid-FETCH latency spike → operation timeout (`ERR_TIMEOUT`), session
+  invalidated, next call recovers.
+- [ ] Connection reset during STARTTLS → typed TLS/connection error, exactly one
+  `AuthEvent`.
+- [ ] Byte-trickle a large body → time bound honored, no unbounded buffering.
+- [ ] Each scenario asserts the typed error code **on the wire**, the **audit
+  record**, and that a **subsequent call succeeds** (no wedged session/breaker).
+- [ ] Nightly job, not PR CI (wall-time).
+
+## Implementation note (2026-07-09) — connect is eager at boot, not lazy
+
+TDD against the real stack corrected a load-bearing assumption below. The server
+does **not** connect lazily on the first tool call: it establishes the IMAP
+session **eagerly at boot** for special-use folder discovery (Drafts/Sent/Trash),
+and that connect is **fatal-on-failure** — the server exits if it cannot list
+folders. Consequences for the as-built scenarios:
+
+- The server requires a **healthy** connect at boot, so a connect-phase fault
+  (delayed greeting, RST during STARTTLS) cannot be injected at boot — the server
+  would fail to start. These faults are instead exercised on a **reconnect after a
+  healthy boot**: degrade the network, drive an op that fails and invalidates the
+  session, then the next op's reconnect hits the connect-phase fault.
+- The eager boot connect is the natural "warm-up" for operation-targeting
+  scenarios (2, 4): the session is already established when the toxic is added.
+- The `auth`-Failure assertion still isolates the connect phase: a command timeout
+  on the live session emits no `auth` record, so an `auth` Failure evidences a
+  reconnect specifically.
+
+The scenario table and error-code mapping below hold as written (the wire codes
+and audit shapes are unchanged); only the *trigger* moved from "first tool call"
+to "reconnect after healthy boot."
+
+## Grounding survey — reality the assertions bind to
+
+Established by reading the current tree; every assertion below cites live
+behavior, not wished behavior.
+
+- **Timeout taxonomy.** `connect_timeout` (default 10s) bounds TCP+TLS+greeting+
+  login as one *decrementing* budget applied **per step** — each step is
+  `timeout(remaining, step).await.map_err(timeout_err(op))?`
+  (`connection/handshake.rs`), returning `Err(ImapError::Timeout{op})` *up to*
+  `connect_inner`; it is **not** an outer wrapper around the whole connect.
+  `command_timeout` (default 30s) wraps every op (`connection/dispatch.rs`,
+  `time.rs`). Elapsing either → `ImapError::Timeout { op }` → `ErrorCode::Timeout`
+  → **`ERR_TIMEOUT`**. The suite lowers budgets per scenario (§Component 4) to
+  keep wall-time bounded.
+- **Connect-timeout still emits exactly one `auth` record (established, not
+  assumed).** Because the per-step `timeout` returns an `Err` rather than
+  cancelling `connect_inner`, control returns to `connect_inner`'s
+  `match &outcome { Err(err) => emit_auth(auth_failure(&ctx, err.code())) }`
+  (`connection/mod.rs`), which runs **outside** the timed step — so a greeting/
+  handshake timeout writes exactly one `auth` Failure with
+  `error_code = Timeout` before the error propagates. The one way to lose this
+  record is an *outer* `command_timeout` cancelling `session()`→`connect_inner`
+  before the emit; scenario 1 avoids that by keeping `command_timeout` (default
+  30s) ≫ `connect_timeout` (2s), so the inner per-step timeout always fires
+  first. This is why scenario 1's audit half is satisfiable without a production
+  change (the "no production-code changes" non-goal holds).
+- **Session invalidation + recovery.** A mid-op timeout is a *transport failure*
+  (`is_transport_failure` includes `Timeout`) → `invalidate()` drops the cached
+  session (`connection/mod.rs`). The session is a lazy `Mutex<Option<..>>`; the
+  *next* call reconnects via `connect_inner()`. A `Timeout` is **not** in-call
+  retried (`should_reconnect` excludes it) — recovery is on the subsequent call,
+  exactly what the issue asks to assert.
+- **STARTTLS reset is a code *set*, not a single code.** A RST during the
+  plaintext greeting → `ERR_CONNECTION_LOST`; a RST once TLS bytes flow →
+  `ERR_TLS`. Toxiproxy operates at TCP and cannot pin the plaintext→TLS boundary,
+  so the scenario asserts `code ∈ {ERR_TLS, ERR_CONNECTION_LOST}` plus
+  **exactly one `AuthEvent`** (`connect_inner` emits exactly one auth event per
+  attempt, success or failure). This matches the issue's own wording, "typed
+  TLS/connection error."
+- **Byte-trickle: two distinct bounds, two falsifiable sub-cases.** The AC pairs
+  *"no unbounded buffering"* (a **size/memory** bound) with *"time bound
+  honored"* — different properties needing different observables. `fetch_body`
+  pre-checks `RFC822.SIZE` and rejects over-cap bodies *before* reading a body
+  byte (honest Dovecot reports true size), which is the actual no-unbounded-
+  buffering guard. Scenario 4 therefore has two sub-cases (see §Component 4):
+  - **4a — buffering bound.** Seed a body **over** `max_fetch_body_bytes`, apply
+    a slow `bandwidth` toxic, fetch → assert **`ERR_ATTACHMENT_TOO_LARGE`**
+    returns *promptly* (well inside `command_timeout`). This is falsifiable
+    against a buffering regression: if `fetch_body` regressed to read the body
+    before checking size, the bandwidth toxic would make it stall to
+    `command_timeout` and surface `ERR_TIMEOUT` instead — the sub-case would
+    fail. The prompt `ERR_ATTACHMENT_TOO_LARGE` *under an active trickle* is
+    exactly the evidence that no body bytes were buffered.
+  - **4b — time bound.** Raise `max_fetch_body_bytes` above the body, seed a body
+    the `bandwidth` toxic cannot deliver inside `command_timeout`, fetch →
+    assert **`ERR_TIMEOUT`**, session invalidated, next call (toxic removed)
+    recovers. This is falsifiable against an unbounded-wait regression.
+- **Breaker neutrality.** `ERR_ATTACHMENT_TOO_LARGE` is breaker-neutral; a single
+  `Timeout` counts toward the breaker but the trip threshold is 5 within 30s, so
+  one timeout per scenario never trips it. The "subsequent call succeeds"
+  assertion therefore is not masked by `ERR_CIRCUIT_OPEN`. Each test uses a fresh
+  server process (fresh breaker) so cross-test accumulation is impossible.
+
+## Non-goals
+
+- No production-code changes. This is test coverage. If a scenario surfaces a
+  genuine defect (a wedge the survey says should not happen), the fix is scoped
+  to a follow-up issue per the `AGENTS.md` deferral convention — unless the fix
+  is a one-liner clearly within this branch's blast radius, in which case it
+  lands here with its own commit and a regression test.
+- No new runtime or dev dependency. The control plane reuses `ureq` (already a
+  workspace dev-dep, used by `e2e_smtp_real.rs`).
+- No change to the PR-blocking compose fixture (`docker-compose.yml`) or the
+  existing `DovecotHarness`. The chaos layer is additive.
+- No Toxiproxy on the PR path. Wall-time is the reason the issue mandates nightly.
+- Not a general chaos framework. Four scenarios (§Component 4), one binary; the
+  corpus grows by adding scenarios, not by building a DSL. Note the four scenarios
+  map to **five test functions** because scenario 4 splits into 4a/4b (two
+  processes, two caps — §Component 4).
+
+## Design
+
+### Component 1 — chaos compose fixture
+
+A new `crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml`
+defines **two** services on one compose network:
+
+- `dovecot` — identical to the existing service (same image pin, same
+  `dovecot.conf` / `entrypoint.sh` / `users` / `fixtures` mounts, same `shared`
+  volume for the fingerprint hand-off). Its 993/143 are **not** host-published;
+  Toxiproxy reaches it in-network as `dovecot:993` / `dovecot:143`.
+- `toxiproxy` — pinned `ghcr.io/shopify/toxiproxy:2.12.0` (latest stable, tag
+  pin matching the repo's existing compose-image convention — the 40-char SHA
+  pin rule is for `.github/workflows/` `uses:`, not compose images). This image
+  is **multi-arch** (`linux/amd64` + `linux/arm64`, verified via
+  `docker manifest inspect`), so it matches the Dovecot fixture's deliberate
+  no-arch-gate contract: Apple Silicon, Ubuntu CI, and Fedora all run it
+  natively, no `ARCH` guard. Starts with a seed config mounting two proxies on
+  *fixed container-internal* ports so Docker can publish them:
+  - `imaps`   : listen `0.0.0.0:21993` → upstream `dovecot:993`
+  - `starttls`: listen `0.0.0.0:21143` → upstream `dovecot:143`
+  - control API: `0.0.0.0:8474`
+  Published to three harness-reserved host ports
+  (`RIMAP_TOXI_IMAPS_PORT`, `RIMAP_TOXI_STARTTLS_PORT`, `RIMAP_TOXI_CTRL_PORT`).
+
+Toxiproxy is pure TCP passthrough, so the TLS session is end-to-end
+server↔Dovecot and the **pinned Dovecot fingerprint still matches** — the suite
+exercises pinning, it does not disable it.
+
+Keeping this in a separate compose file (not a second service in the shared
+`docker-compose.yml`, not a compose `profile`) means the PR-blocking e2e path
+never starts Toxiproxy and its startup/teardown code never runs on PR CI.
+
+### Component 2 — `ChaosHarness` (rimap-server test support)
+
+New `crates/rimap-server/tests/support/chaos/mod.rs` + `harness.rs`, sibling to
+`support/dovecot/`. Reuses the existing patterns (raw `docker/podman compose`
+CLI, `ReservedPort`, `uuid_like` project name, fingerprint read from
+`/shared/fingerprint.hex`, `RIMAP_CONTAINER_TOOL` autodetect, Drop → `compose
+down -v`). Additions over `DovecotHarness`:
+
+- Reserves **three** host ports and injects them into compose env.
+- Brings up with `-f docker-compose.chaos.yml`; readiness = Dovecot fingerprint
+  present **and** `GET /version` on the Toxiproxy control API returns 200 **and**
+  `GET /proxies` shows both `imaps` and `starttls` present, `enabled`, and
+  pointing at the expected `dovecot:993` / `dovecot:143` upstreams. Checking the
+  proxies (not just `/version`) closes a vacuous-pass hole: a proxy that exists
+  but is mis-upstreamed would let `add_toxic` succeed while the server's
+  connection fails for the wrong reason (scenario 3 accepts `ERR_CONNECTION_LOST`,
+  so a bare connect failure would pass without a real reset injected). A
+  completely-missing proxy is already caught downstream (a toxic POST to a missing
+  proxy → 404 → control-plane panic), but the mis-upstreamed case needs the
+  readiness check.
+- `imaps_port()` / `starttls_port()` → host ports the server config points at.
+- A small `ToxiproxyControl` client over `ureq`: `add_toxic(proxy, spec)`,
+  `remove_toxic(proxy, name)`, `reset()` (clears all toxics). Toxic specs are
+  built with `serde_json::json!` and POSTed to
+  `/proxies/<name>/toxics`; removal is `DELETE /proxies/<name>/toxics/<toxic>`.
+  **Every call checks the HTTP status and panics on non-2xx with a diagnostic
+  that names the *control plane* as the cause** (e.g. `"toxiproxy control:
+  add_toxic latency on 'imaps' failed: HTTP 500 …"`). This keeps a control-plane
+  flake from masquerading as a product recovery-wedge: a failed `remove_toxic`/
+  `reset()` aborts the test *before* the recovery assertion runs, attributed to
+  the harness, not to `rusty-imap-mcp`.
+
+### Component 3 — two-tier gate `RIMAP_CHAOS`
+
+`ChaosHarness::try_start` gate order:
+
+1. `RIMAP_CHAOS` unset → `Err(ChaosSkip::Disabled)` → test `return`s. **This is
+   checked first**, so the suite skips even when Docker is present and even under
+   `RIMAP_REQUIRE_DOCKER=1`. That is what keeps it off PR CI: the existing
+   `binary(/e2e/)` nextest filter selects `e2e_wire_chaos`, but every test
+   early-returns because PR CI never sets `RIMAP_CHAOS`.
+2. `RIMAP_CHAOS=1` and no container runtime:
+   - `RIMAP_REQUIRE_DOCKER=1` → panic (loud, nightly).
+   - else → `Err(ChaosSkip::DockerUnavailable)` → `return` (local dev without
+     Docker).
+3. `RIMAP_CHAOS=1` and runtime present → bring the stack up.
+
+The nightly workflow sets `RIMAP_CHAOS=1` **and** `RIMAP_REQUIRE_DOCKER=1`.
+
+**Nightly vacuous-green guard.** Gate (1) is a double-edged sword: it correctly
+keeps the suite off PR CI (which sets `RIMAP_REQUIRE_DOCKER=1` but not
+`RIMAP_CHAOS`), but it means an *early-return counts as a nextest PASS*. If a
+future workflow edit drops or typos `RIMAP_CHAOS`, every scenario would return
+`Disabled`, the job would be **all-green while testing nothing**, and
+`--no-tests=fail` would not catch it (that flag only fires on a zero-*match*
+filter, not on tests that exist and return early). The gate itself cannot promote
+this to a panic — PR CI deliberately hits the `RIMAP_REQUIRE_DOCKER=1` +
+`RIMAP_CHAOS` unset combination and must stay green. The guard therefore lives in
+the nightly job, not the gate: each of the **five test functions** (scenario 1,
+2, 3, 4a, 4b), **after passing the gate**, emits a *distinct* stderr marker
+(`eprintln!` is allowed in tests): `RIMAP_CHAOS_RAN scenario1` … `scenario4b`.
+The nightly runs nextest with `--no-capture`, tees output to a log, and a
+following step asserts **each of the five distinct tokens is present** — a
+per-scenario presence check, not a total `grep -c == N`. Per-token presence is
+required because a raw total count is both numerically ambiguous (four scenarios
+but five tests) and foolable: one scenario silently early-returning (0 markers)
+while another double-emits (e.g. under a configured nextest retry, which
+re-prints the marker per attempt) leaves the total unchanged while a scenario
+tested nothing. Per-token presence closes both holes. This makes "each scenario
+actually exercised the code" an explicit, observable job invariant.
+
+### Component 4 — `e2e_wire_chaos.rs` scenarios
+
+One binary, `#[tokio::test(flavor = "multi_thread")]` per scenario. All start the
+chaos stack, **seed while no toxic is active**, and spawn the server with a chaos
+config whose timeout budgets are **tuned per scenario to the stage under test**
+(see "Toxic parameters" below — a uniform tight budget would gate the
+must-succeed warm-up/recovery calls too, inviting flakiness). Then the ordering
+depends on *what stage the fault must hit* — the server's IMAP session is lazy and
+its connect runs **inside** the command-timeout guard on the first tool call, so
+*when* the toxic is added decides whether it hits connect or an operation:
+
+- **Connect-targeting scenarios (1, 3).** The fault *is* a connect-handshake
+  fault. Add the toxic **before** the first server tool call, so the lazy connect
+  traverses it. Assert the `ERR_*` and the failing `auth` record.
+- **Operation-targeting scenarios (2, 4).** The fault must hit an operation on an
+  *already-established* session. Drive **one successful tool call first with no
+  toxic** (`use_account` + a `search`/`list_folders`) to force the lazy connect
+  and cache the session; assert that warm-up's `tool_end` is success. **Only then**
+  add the toxic and drive the operation that must stall. This is load-bearing: if
+  the toxic were added before the session exists, the connect would time out, the
+  subsequent `invalidate()` would be a no-op on an already-`None` session, and
+  "recovery" would be a first-ever connect — AC#2's *established-session
+  invalidation → lazy reconnect* contract would pass vacuously. The audit
+  assertion for scenario 2/4 therefore requires **a preceding successful
+  `tool_end` then a failing `tool_end`**, so a connect-time timeout cannot
+  masquerade as the mid-operation case.
+
+Assumption to confirm in the first nightly run: Toxiproxy applies a
+newly-added `latency`/`timeout`/`bandwidth` toxic to the *already-open*
+warm-up connection's live stream (not only to connections opened after the
+toxic). If a toxic proves to apply only to new connections, scenario 2/4 add the
+toxic and then force a reconnect (e.g. via an intervening invalidating op) before
+the stalling call; this contingency is noted so a green-but-wrong result is
+impossible.
+
+After the assertions, remove the toxic and prove recovery. Shared wire-assert
+helper mirrors `e2e_wire_fault_injection.rs::assert_error_code`.
+
+**Toxic parameters and per-scenario budgets.** Magnitudes and budgets are
+load-bearing. Because each scenario spawns its own server process with its own
+config, `connect_timeout` and `command_timeout` are decoupled and set to the
+stage under test — **only** the knob that gates the fault stage is lowered; the
+knob that gates a must-succeed call (warm-up connect, recovery connect) stays at
+the roomy default so a cold/loaded runner does not flake an assertion the design
+treats as guaranteed:
+
+- **Scenario 1** (fault *is* the connect): `connect_timeout = 2s` (low, the
+  greeting stall must trip fast); `command_timeout` = default.
+- **Scenarios 2, 4** (fault is a command-stage stall on an established session):
+  `connect_timeout` = default (10s) so the warm-up and recovery *connects* are
+  not gated; `command_timeout = 2s` so the stalled operation trips fast.
+- **Scenario 3** (fault *is* the connect, via a prompt RST): budgets = default;
+  `reset_peer` returns a prompt io error, so no low budget is needed and a
+  generous connect budget keeps the recovery connect flake-free.
+
+Concrete toxic values (starting points, tuned in the first run): scenario 1 uses
+a `timeout`/`latency` toxic that blocks data after TCP connect (greeting never
+arrives within 2s); scenario 2 uses a `timeout` toxic (stops all data,
+guaranteeing the in-flight FETCH exceeds `command_timeout`); scenario 4 uses a
+`bandwidth` toxic at ~64 KB/s with a ~2 MiB seed body for 4b (≈32s to deliver ≫
+2s) and a >`max_fetch_body_bytes` seed body for 4a. The invariant for scenarios
+2/4: the toxic is added *after* the warm-up, so **connect + login** already
+completed and the *connect* is never the casualty — the target operation and
+**its own `RFC822.SIZE` preflight run under the active toxic**. This is
+deliberate and load-bearing for 4a: the small `RFC822.SIZE` response returns
+quickly even through the ~64 KB/s `bandwidth` toxic, so the size-check rejects
+*promptly* with `ERR_ATTACHMENT_TOO_LARGE` — that prompt rejection *under an
+active trickle* is the evidence that no body bytes were buffered (a regression
+that read the body first would instead stall to `command_timeout` and surface
+`ERR_TIMEOUT`). For 4b the preflight passes (cap raised above the body) and the
+subsequent BODY read is what starves → `ERR_TIMEOUT`. The warm-up must **not**
+pre-fetch the target message's `RFC822.SIZE`, or 4a would reject in the clear and
+prove nothing about buffering.
+
+**Seed path (single supported route).** The test is a host process; Dovecot's
+993/143 are **not** host-published, so the *only* reachable path is through a
+published Toxiproxy proxy port. Seeding therefore opens a pinned IMAP connection
+**through the relevant proxy while no toxic is active**, `APPEND`s the fixture,
+then the scenario adds its toxic. There is no direct-to-Dovecot path. Scenario 4
+seeds a body under the account's `max_append_bytes`; the chaos config raises
+`max_append_bytes` to `26_214_400` (25 MiB) so a >10 MiB seed body fits the
+`APPEND` even though it exceeds the `fetch` cap in sub-case 4a.
+
+**Audit-drain assertion helper.** Every audit line is a JSON record with a
+top-level `seq` and a `kind` discriminator (`auth`, `tool_start`, `tool_end`,
+`process_start`, `process_end`); `tool_end` carries `start_seq` back to its
+`tool_start`. The helper reads the JSONL, then:
+- for the failing tool call, locates its `tool_start` (seq `S₀`) and matching
+  `tool_end` (whose `start_seq == S₀`, seq `S₁`), and asserts the `tool_end`
+  `error_code`;
+- for scenario 3's "exactly one AuthEvent", counts `kind == "auth"` records with
+  `S₀ < seq < S₁` and asserts the count is 1.
+This rests on a **load-bearing invariant stated here so a future change breaks
+loudly**: IMAP connect is *lazy* — no `auth` record is emitted at `initialize`,
+so the first tool call's connect is the first-ever `auth` record. If connect ever
+becomes eager (a preflight that emits auth, an eager pool warm-up), the
+scenario-3 count must be re-derived; the Seq-bracketing above already scopes the
+count to the single call window, which contains the mis-count if it happens.
+
+| # | Scenario | Proxy | Toxic | Wire assertion | Audit assertion | Recovery |
+|---|----------|-------|-------|----------------|-----------------|----------|
+| 1 | Delayed **greeting** | `starttls` (143) | `timeout` (block data after TCP connect, > connect budget) — plaintext greeting is read before TLS on the STARTTLS path, so this stalls the greeting specifically | `ERR_TIMEOUT` | `auth` result=Failure, error_code=Timeout | remove toxic → next `list_folders` ok |
+| 2 | Mid-FETCH stall | `imaps` (993) | **warm-up call succeeds**, then `timeout` toxic added, then FETCH | `ERR_TIMEOUT` | preceding `tool_end` success **then** failing `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next `search`/`fetch` ok (session was invalidated → reconnect) |
+| 3 | RST during STARTTLS | `starttls` (143) | `reset_peer` (`timeout: 0`) | `ERR_TLS` **or** `ERR_CONNECTION_LOST` | **exactly one** `auth` result=Failure in the call window | remove toxic → next call over STARTTLS ok |
+| 4a | Over-cap body under trickle (buffering bound) | `imaps` (993) | warm-up ok, then `bandwidth` (slow); body **>** `max_fetch_body_bytes` | `ERR_ATTACHMENT_TOO_LARGE` **promptly** (≪ command budget) | success `tool_end` then `tool_end` error_code=`ERR_ATTACHMENT_TOO_LARGE` | remove toxic → next **small metadata call** (`search`/`list_folders`) ok — re-fetching the over-cap body would still be `ERR_ATTACHMENT_TOO_LARGE`, so recovery uses a different call to prove session liveness |
+| 4b | Under-cap body trickled (time bound) | `imaps` (993) | warm-up ok, then `bandwidth` so body can't arrive in command budget; `max_fetch_body_bytes` raised above body | `ERR_TIMEOUT` | success `tool_end` then `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next fetch ok |
+
+Scenario 1 and 3 use the `starttls` proxy (`encryption = "starttls"`, port 143) —
+the first e2e_wire coverage of the STARTTLS path; scenario 1 there genuinely
+delays the *plaintext greeting* (on the `imaps`/993 path a data-blocking toxic
+stalls the TLS handshake first, never reaching the greeting). Scenarios 2/4 use
+the `imaps` proxy (`encryption = "tls"`, port 993). **Scenarios 4a and 4b are two
+separate `#[tokio::test]`s (two server processes).** They cannot share one process
+because `max_fetch_body_bytes` is fixed at process spawn (4a needs the body *over*
+the cap; 4b needs it *under* a raised cap), and a single process cannot present
+two caps. Both do the operation-targeting warm-up before adding the `bandwidth`
+toxic.
+
+### Component 5 — nightly workflow
+
+New `.github/workflows/nightly-chaos.yml`, modeled on `mcp-fuzz-nightly.yml`:
+`schedule` cron + `workflow_dispatch`; single job on `ubuntu-latest`; installs
+`cargo-nextest`; runs
+`cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-tests=fail
+--no-capture 2>&1 | tee chaos.log`
+with `RIMAP_CHAOS: "1"` and `RIMAP_REQUIRE_DOCKER: "1"`. A following step asserts
+the vacuous-green guard: for **each** of the five distinct tokens
+(`RIMAP_CHAOS_RAN scenario1`…`scenario4b`), `grep -q` succeeds in `chaos.log`,
+failing the job if **any one** is absent (a per-scenario presence check, not a
+total count — §Component 3).
+All `uses:` pinned to 40-char SHA + version comment (zizmor/actionlint gates
+apply). Non-blocking (not in branch-protection required set). The job sets
+`timeout-minutes: 15` so a runaway suite (a container that never comes ready, a
+proxy that wedges) fails loudly instead of silently drifting past the wall-time
+rationale for nightly-only.
+
+Because a `timeout-minutes` expiry SIGKILLs the job and Rust `Drop` does **not**
+run on SIGKILL, an `if: always()` post-step reaps the chaos stack independently of
+`Drop`. Per-test compose projects carry unique names (the harness uses a
+`rimap-chaos-<uuid>` prefix, mirroring `DovecotHarness`'s `rimap-e2e-` scheme), so
+the reaper targets the **prefix**, not one project: force-remove containers named
+`rimap-chaos*` and prune the dangling compose networks
+(`<runtime> ps -aq --filter name=rimap-chaos | xargs -r <runtime> rm -f;
+<runtime> network prune -f`), all `|| true`. This leaks nothing — containers, the
+compose network, or reserved host ports — on a timed-out run. `Drop` remains the
+primary path for the normal case; this step is the SIGKILL backstop and becomes
+mandatory if the job ever moves off ephemeral `ubuntu-latest` runners.
+
+## Failure modes & edge cases
+
+- **Toxic outlives the test.** Each test calls `ToxiproxyControl::reset()` before
+  the recovery assertion; the container is discarded per-test via Drop, so a
+  leaked toxic cannot cross tests. Recovery uses a *removed*-toxic state, not a
+  hope that the toxic expired.
+- **Breaker accidentally trips.** Only if a scenario provokes ≥5 timeouts in 30s.
+  Each scenario provokes exactly one fault before removing the toxic; the
+  survey confirms `ERR_ATTACHMENT_TOO_LARGE` is breaker-neutral. Fresh process
+  per test ⇒ fresh breaker.
+- **Idle-reconnect double AuthEvent.** A recovering *ReadOnly* call after a
+  `ConnectionLost` does two connects → two `AuthEvent`s. Scenario 3 asserts
+  exactly one AuthEvent, but scenario 3's fault is a handshake reset (single
+  `connect_inner`, no in-call ReadOnly retry — retry needs an already-established
+  session that then drops), so one AuthEvent holds. The assertion counts events
+  in the audit JSONL for that single tool call window, not the whole session.
+- **STARTTLS reset races to a timeout.** `reset_peer` sends a real RST promptly,
+  so the outcome is a prompt io error, not a stall to the connect budget — the
+  `{ERR_TLS, ERR_CONNECTION_LOST}` set holds and `ERR_TIMEOUT` is not expected
+  here. With `timeout: 0` the RST lands at/near connection open (on the first
+  downstream bytes, i.e. the plaintext greeting) *before* the TLS handshake, so
+  in practice the code is deterministically `ERR_CONNECTION_LOST`; the `ERR_TLS`
+  branch of the set is a superset allowance, not a promise. If flake appears, the
+  fallback is to widen the asserted set with a logged rationale rather than to
+  silently accept any code.
+- **Connect-timeout emits one `auth` record (confirm in first run; fallback
+  ready).** Scenario 1's audit half (`auth` Failure, `error_code=Timeout`) is
+  established against current code above (per-step timeout returns `Err` to
+  `connect_inner`'s emit, and `command_timeout` ≫ `connect_timeout` prevents outer
+  cancellation). The first nightly run confirms it, symmetric with the RST hedge
+  below. Explicit fallback if a future refactor makes a greeting timeout emit zero
+  `auth` records (e.g. an outer connect wrapper): relax scenario 1's audit half to
+  the dispatch-emitted failing `tool_end` (`error_code=ERR_TIMEOUT`, caller-side
+  and cancellation-safe, exactly as scenarios 2/4 assert) plus the wire
+  `ERR_TIMEOUT`, and record that fallback inline — never silently accept a missing
+  record.
+- **Pre-login RST still emits exactly one `auth` record (confirm in first run).**
+  Scenario 3's "exactly one `auth` result=Failure" assertion depends on
+  `connect_inner` emitting its auth record even when the reset lands during the
+  greeting phase, *before* any LOGIN. The grounding survey verified `connect_inner`
+  emits exactly one auth event on every termination path including a pre-greeting
+  RST (`connection/mod.rs`), so this holds against today's code — but because it is
+  the sole basis for the audit half of scenario 3, the first nightly run confirms
+  it explicitly (mirroring the toxic-applies-to-open-connections confirmation). If
+  a future change moved auth emission to the post-login path, a pre-login RST would
+  emit zero and the assertion would fail `0 != 1` — caught, not masked.
+- **Toxiproxy image unavailable / control API slow to bind.** Readiness gate
+  polls `GET /version` with the same 60s budget as Dovecot readiness; under
+  `RIMAP_REQUIRE_DOCKER=1` a timeout panics with diagnostic context (compose
+  logs), matching `DovecotHarness`.
+- **Port publish vs runtime proxy config.** Proxies listen on *fixed* internal
+  ports (21993/21143) seeded at container start, so Docker's publish mapping is
+  stable; toxics are added at runtime but the listen ports never change.
+- **Control-plane failure mid-test.** A non-2xx from any Toxiproxy control call
+  panics with a control-plane-attributed diagnostic (§Component 2), so a
+  `remove_toxic`/`reset()` hiccup aborts before the recovery assertion and never
+  reads as a product wedge.
+- **Wall-time.** Low timeout budgets (2s) bound each timeout scenario; container
+  bring-up dominates and is bounded by the 60s readiness gate per fixture plus
+  the workflow's `timeout-minutes: 15` job cap — the "~90s on a warm runner"
+  figure is informational, the 15-minute cap is the enforced bound.
+
+## Testing
+
+- The suite **is** the test. Its own correctness is checked by: (a) running it
+  locally with `RIMAP_CHAOS=1 RIMAP_REQUIRE_DOCKER=1` and observing each scenario
+  fail-then-pass when the toxic is toggled; (b) confirming it silent-skips with
+  `RIMAP_CHAOS` unset even under `RIMAP_REQUIRE_DOCKER=1` (the PR-CI invariant);
+  (c) `just ci` staying green (the new binary must not run on the PR path).
+- No unit tests for the harness plumbing beyond what the scenarios exercise;
+  the `ToxiproxyControl` client is validated end-to-end by every scenario adding
+  and removing a toxic.
+
+## Considered & rejected
+
+- **Toxiproxy as a second service in the shared `docker-compose.yml` (behind a
+  compose `profile`).** Rejected: even with a profile, it couples the chaos
+  fixture's lifecycle and env to the PR-blocking harness, and a mis-set profile
+  would start Toxiproxy on every e2e_wire run. A separate compose file is
+  strictly additive and cannot regress the PR path.
+- **Excluding the chaos binary from PR CI via a nextest `-E` filter
+  (`binary(/e2e/) - binary(e2e_wire_chaos)`).** Rejected as the *primary* gate:
+  it is fragile (a second chaos binary silently re-enters), and the workspace
+  `cargo nextest run --workspace` step would still run it when Docker is present.
+  The `RIMAP_CHAOS` env gate is robust at the source level; the nextest filter is
+  not needed.
+- **Terminating TLS at Toxiproxy to inject at the TLS layer.** Rejected: breaks
+  fingerprint pinning, forcing the test to disable the very control it exercises.
+  TCP passthrough keeps pinning honest.
+- **`iptables`/`tc netem` for latency/loss instead of Toxiproxy.** Rejected:
+  requires host privileges/capabilities that CI runners and dev laptops don't
+  uniformly grant; Toxiproxy's HTTP control API is portable and deterministic.
+- **A dedicated `toxiproxy` Rust client crate.** Rejected: a new dependency for
+  ~4 HTTP calls. `ureq` + `serde_json` (both present) cover it.
+- **Reusing `DovecotHarness::stop()` / `restart()` (container-level faults).**
+  Rejected: those model dead/recreated servers (already covered). The issue is
+  specifically about *alive-but-degraded*, which only an in-path proxy provides.
+- **Making scenario 3 assert a single code.** Rejected: the plaintext→TLS
+  boundary is invisible at TCP; asserting a set + one-AuthEvent is faithful to
+  the issue's "TLS/connection" wording and avoids a timing-dependent flake.
+
+## Rollout / rollback
+
+- Additive: new compose file, new support module, new test binary, new nightly
+  workflow. No existing file changes except adding the workflow and (if needed) a
+  one-line note in `AGENTS.md` "Container runtime for integration tests".
+- Rollback: delete the four new artifacts; nothing else depends on them.
+- Follow-up: if scenario 3 proves flaky in the first nightly cycles, widen the
+  asserted code set with a rationale comment (tracked inline, not deferred).

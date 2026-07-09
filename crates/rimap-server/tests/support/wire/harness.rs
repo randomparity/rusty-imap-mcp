@@ -339,15 +339,21 @@ allowed_base_dir = "{}"
         self._tempdir.path().join("audit.jsonl")
     }
 
-    /// Read exactly one parsed envelope from stdout. Skips
-    /// notifications (which have a `method` and absent/null `id`) but
-    /// does NOT skip responses; returns the first response observed.
-    /// Panics on timeout, EOF, or parse failure with stderr included
-    /// in the diagnostic. Shared by `request` and `recv_until_id`.
+    /// Read exactly one parsed envelope from stdout under the default 2s
+    /// `REQUEST_TIMEOUT`. Shared by `request` and `recv_until_id`.
     async fn read_one_envelope(&mut self, caller: &str) -> Value {
+        self.read_one_envelope_within(caller, REQUEST_TIMEOUT).await
+    }
+
+    /// Read exactly one parsed envelope from stdout, bounding the read by
+    /// `read_timeout`. Skips notifications (which have a `method` and
+    /// absent/null `id`) but does NOT skip responses; returns the first
+    /// response observed. Panics on timeout, EOF, or parse failure with stderr
+    /// included in the diagnostic.
+    async fn read_one_envelope_within(&mut self, caller: &str, read_timeout: Duration) -> Value {
         loop {
             let mut buf = String::new();
-            let read_result = timeout(REQUEST_TIMEOUT, self.stdout.read_line(&mut buf)).await;
+            let read_result = timeout(read_timeout, self.stdout.read_line(&mut buf)).await;
             let read = match read_result {
                 Ok(io_result) => io_result.unwrap_or_else(|e| {
                     panic!(
@@ -357,7 +363,7 @@ allowed_base_dir = "{}"
                     )
                 }),
                 Err(elapsed) => panic!(
-                    "response to {caller} did not arrive within {REQUEST_TIMEOUT:?} ({elapsed})\n\
+                    "response to {caller} did not arrive within {read_timeout:?} ({elapsed})\n\
                      --- captured child stderr ---\n{}",
                     self.captured_stderr(),
                 ),
@@ -390,9 +396,23 @@ allowed_base_dir = "{}"
         }
     }
 
-    /// Send a JSON-RPC request and return the parsed response value.
-    /// Panics on timeout, EOF before a response arrives, or non-JSON output.
+    /// Send a JSON-RPC request and return the parsed response value, bounding the
+    /// response read by the shared 2s `REQUEST_TIMEOUT`. Panics on timeout, EOF
+    /// before a response arrives, or non-JSON output.
     pub async fn request(&mut self, method: &str, params: Value) -> Value {
+        self.request_within(method, params, REQUEST_TIMEOUT).await
+    }
+
+    /// Like `request`, but bounds the response read by `deadline` instead of the
+    /// shared 2s `REQUEST_TIMEOUT`. For chaos scenarios whose server-side timeout
+    /// budget (connect/command) is >= 2s and would otherwise trip the fast-fail
+    /// cap — used for both the fault call and reconnect-bearing recovery calls.
+    pub async fn request_within(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Value {
         self.next_id += 1;
         let id = self.next_id;
         let envelope = json!({
@@ -408,7 +428,7 @@ allowed_base_dir = "{}"
             .expect("write request");
         self.stdin.flush().await.expect("flush request");
 
-        let envelope = self.read_one_envelope(method).await;
+        let envelope = self.read_one_envelope_within(method, deadline).await;
         assert_eq!(envelope["id"], json!(id), "response id must match request");
         super::schema::assert_envelope_valid(&envelope);
         envelope

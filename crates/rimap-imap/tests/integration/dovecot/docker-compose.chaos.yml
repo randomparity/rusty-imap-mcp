@@ -1,0 +1,41 @@
+services:
+  dovecot:
+    # Same image + config as docker-compose.yml, but with NO published ports:
+    # Toxiproxy reaches dovecot:993 / dovecot:143 over the compose network, so
+    # all client traffic must traverse the proxy (the point of the chaos layer).
+    image: docker.io/dovecot/dovecot:2.4.4-root
+    container_name: ${COMPOSE_PROJECT_NAME:-rimap-chaos}-dovecot
+    volumes:
+      # `,z` asks podman to SELinux-relabel these host paths; Docker treats the
+      # suffix as a no-op. Mirrors docker-compose.yml.
+      - ./dovecot.conf:/etc/dovecot/dovecot.conf:ro,z
+      - ./users:/etc/dovecot/users:ro,z
+      - ./fixtures:/fixtures:ro,z
+      - ./entrypoint.sh:/entrypoint.sh:ro,z
+      - shared:/shared
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/shared/ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  toxiproxy:
+    # Multi-arch (linux/amd64 + linux/arm64): no arch gate — matches the
+    # Dovecot fixture's no-arch-gate contract.
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    container_name: ${COMPOSE_PROJECT_NAME:-rimap-chaos}-toxiproxy
+    depends_on:
+      - dovecot
+    command: ["-host=0.0.0.0", "-config=/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy.json:/toxiproxy.json:ro,z
+    ports:
+      # Fixed container-internal proxy ports (21993/21143) + control API (8474),
+      # published to harness-reserved host ports on loopback only.
+      - "127.0.0.1:${RIMAP_TOXI_IMAPS_PORT}:21993"
+      - "127.0.0.1:${RIMAP_TOXI_STARTTLS_PORT}:21143"
+      - "127.0.0.1:${RIMAP_TOXI_CTRL_PORT}:8474"
+
+volumes:
+  shared:

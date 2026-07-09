@@ -1,0 +1,14 @@
+[
+  {
+    "name": "imaps",
+    "listen": "0.0.0.0:21993",
+    "upstream": "dovecot:993",
+    "enabled": true
+  },
+  {
+    "name": "starttls",
+    "listen": "0.0.0.0:21143",
+    "upstream": "dovecot:143",
+    "enabled": true
+  }
+]
