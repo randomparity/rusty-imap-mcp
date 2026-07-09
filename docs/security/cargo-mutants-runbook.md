@@ -55,6 +55,44 @@ Trade-offs:
 On macOS, do not use this path until cargo-mutants 27.0.1+ ships
 containing [PR #613](https://github.com/sourcefrog/cargo-mutants/pull/613).
 
+### Docker-capable hosts: exclude the slow container binaries
+
+The bare invocations above assume **no** container runtime is installed —
+the dovecot/e2e integration harnesses then silent-skip. On a host where
+`docker` or `podman` is running (as the 2026-07-09 issue #515 refresh box
+was), those harnesses execute during the unmutated baseline and blow the
+`--timeout 60` deadline (`TIMEOUT Unmutated baseline`), so the survey never
+starts. Two options, both used by the #515 refresh:
+
+- **Include the fast wire-driven dovecot harness, exclude only the slow
+  redundant binaries** (recommended — matches CI coverage and catches the
+  network-facing `Connection::*` / `ops::*` mutants that otherwise survive):
+
+  ```bash
+  # rimap-server: keep e2e_wire (shares one container, ~40s), drop the
+  # in-process e2e + SMTP binaries; raise the per-mutant timeout headroom.
+  cargo mutants --package rimap-server --no-shuffle --jobs 10 --timeout 120 \
+    --test-tool nextest -- -E 'not (binary(=e2e) | binary(=e2e_smtp))' --test-threads 4
+  # rimap-imap: keep dovecot, drop only proton (needs a live Proton Bridge).
+  cargo mutants --package rimap-imap --no-shuffle --jobs 10 --timeout 200 \
+    --test-tool nextest -- -E 'not binary(/proton/)' --test-threads 4
+  ```
+
+- **Skip every container harness** (reproduces the 2026-05-18 no-Docker
+  conditions, but leaves ~100 network-only `rimap-imap` mutants surviving
+  that must then be documented as harness-covered gaps):
+
+  ```bash
+  # rimap-server: append   --test-tool nextest -- -E 'not binary(/e2e/)'
+  # rimap-imap:   append   --test-tool nextest -- -E 'not (binary(/dovecot/) | binary(/proton/))'
+  ```
+
+`mcp_wire_conformance`/`mcp_wire_negative`/`mcp_wire_proptest` drive the
+stdio wire harness (no container) — always keep them. The `mold` linker
+(`mold -run cargo mutants …`) and `--jobserver-tasks <ncpu>` keep per-mutant
+build cost and total compile parallelism in check on a shared box; note the
+per-`--jobs` cold-build hump before steady-state throughput.
+
 ## What `--in-place` costs you
 
 - **Locked to `--jobs 1`.** cargo-mutants refuses parallel jobs in

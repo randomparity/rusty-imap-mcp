@@ -292,6 +292,75 @@ mod tests {
         TlsFingerprint::from_hex(&"00".repeat(32)).expect("valid 32-byte hex literal")
     }
 
+    #[derive(Debug)]
+    struct NoopSink;
+
+    impl rimap_core::auth_sink::AuthEventSink for NoopSink {
+        fn emit_auth(
+            &self,
+            _event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnusedResolver;
+
+    impl rimap_core::credential::CredentialResolver for UnusedResolver {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "accessor test builds a Connection but never opens a session"
+        )]
+        fn resolve(
+            &self,
+            _account: &rimap_core::account::AccountId,
+            _username: &str,
+            _host: &str,
+        ) -> Result<
+            (
+                secrecy::SecretString,
+                rimap_core::credential::CredentialSource,
+            ),
+            rimap_core::credential::CredentialResolverError,
+        > {
+            panic!("credential resolver must not be invoked by an accessor test");
+        }
+    }
+
+    fn connection_with(host: &str, username: &str, max_fetch_body_bytes: u64) -> super::Connection {
+        let cfg = super::ConnectionConfig {
+            account: None,
+            account_id: rimap_core::account::AccountId::default_account(),
+            host: host.to_string(),
+            port: 993,
+            encryption: super::ImapEncryption::Starttls,
+            username: username.to_string(),
+            pinned_fingerprint: None,
+            connect_timeout: std::time::Duration::from_secs(5),
+            command_timeout: std::time::Duration::from_secs(5),
+            max_fetch_body_bytes,
+            max_append_bytes: 1024,
+        };
+        super::Connection::new(
+            cfg,
+            std::sync::Arc::new(NoopSink),
+            std::sync::Arc::new(UnusedResolver),
+        )
+    }
+
+    #[test]
+    fn config_accessors_return_the_configured_values() {
+        // Pins the `host`/`username`/`max_fetch_body_bytes` getters to the
+        // config they read. `username()` in particular feeds the compose
+        // `From:` address, so a getter that dropped the value (e.g. returned
+        // `""`) would silently forge sender identity.
+        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
+        assert_eq!(conn.host(), "mail.example.com");
+        assert_eq!(conn.username(), "alice@example.com");
+        assert_eq!(conn.max_fetch_body_bytes(), 4096);
+    }
+
     #[test]
     fn error_code_for_covers_every_variant() {
         use crate::error::StarttlsFailure;

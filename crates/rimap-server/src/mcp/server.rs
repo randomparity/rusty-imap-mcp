@@ -326,6 +326,24 @@ fn extract_json_from_call_tool_result(result: CallToolResult) -> serde_json::Val
         .unwrap_or(serde_json::Value::Null)
 }
 
+#[cfg(test)]
+mod extract_json_tests {
+    use rmcp::model::CallToolResult;
+    use serde_json::json;
+
+    use super::extract_json_from_call_tool_result;
+
+    #[test]
+    fn prefers_structured_content_body() {
+        // The test helpers this backs assert on the extracted body, so a
+        // stub that dropped it to `Null` would silently blind every
+        // `execute_tool_for_test` content assertion.
+        let value = json!({ "folders": ["INBOX", "Sent"] });
+        let result = CallToolResult::structured(value.clone());
+        assert_eq!(extract_json_from_call_tool_result(result), value);
+    }
+}
+
 /// Bridge an MCP `ErrorData` back to a `RimapError` for the test
 /// helper's uniform `Result<_, RimapError>` surface. The original
 /// message is preserved; the JSON-RPC / MCP code is surfaced as a
@@ -538,17 +556,6 @@ impl ServerHandler for ImapMcpServer {
         })
     }
 
-    // cargo-mutants: known-equivalent (test-infrastructure gap) — the
-    // `replace ... with Ok(Default::default())` stub on `list_resources`
-    // returns an empty `ListResourcesResult`, observably different
-    // from the per-account-populated list the real implementation
-    // returns. Unit-testing the mutation requires constructing an
-    // `rmcp::service::RequestContext<RoleServer>` for which rmcp
-    // exposes no public test constructor in this version. The
-    // mutation is covered end-to-end by the dovecot harness in
-    // `tests/e2e.rs`, which is environment-gated and skipped by
-    // cargo-mutants. Documented in `mutation-baseline.md` as a known
-    // coverage gap.
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
