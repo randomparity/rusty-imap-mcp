@@ -152,13 +152,29 @@ pub(crate) async fn fetch(
         .await
         .map_err(super::folders::map_err)?;
 
+    // Policy: warn-and-continue on a per-item missing/zero UID, rather than
+    // fail-closed. This is deliberately different from the fail-closed
+    // UIDVALIDITY handling in `require_uidvalidity` (used by the body/size
+    // paths): a missing UIDVALIDITY breaks the anti-reuse guard for the whole
+    // response, so it must fail closed, whereas a single item with an absent or
+    // zero UID only costs that one message and is recoverable by skipping it.
+    // The aggregated `warn!` below is the operator-facing signal; the tool
+    // result the agent sees is intentionally unchanged (issue #518 specifies
+    // "skip-with-warning", and the fetch tool contract is a non-goal here).
+    // Consequence: a hostile server can make a folder appear to hold fewer
+    // messages by omitting/zeroing UIDs, visible only in the operator log — an
+    // accepted, documented risk; surfacing the drop in-band to the agent is a
+    // possible follow-up, not part of this change.
     let mut out = Vec::with_capacity(uids.len());
+    let mut skipped_uids: u64 = 0;
     while let Some(msg) = stream.next().await {
         let msg = msg.map_err(super::folders::map_err)?;
         let Some(uid_raw) = msg.uid else {
+            skipped_uids += 1;
             continue;
         };
         let Some(uid) = Uid::new(uid_raw) else {
+            skipped_uids += 1;
             continue;
         };
 
@@ -186,6 +202,14 @@ pub(crate) async fn fetch(
             flags,
             size,
         });
+    }
+    if skipped_uids > 0 {
+        tracing::warn!(
+            folder = %folder,
+            skipped_uids,
+            "FETCH response omitted or zeroed the UID on one or more items; \
+             skipping them (possible malformed or hostile server)",
+        );
     }
     Ok((out, uid_validity))
 }

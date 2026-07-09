@@ -2529,6 +2529,7 @@ dependencies = [
  "async-imap",
  "futures-util",
  "proptest",
+ "rcgen",
  "rimap-audit",
  "rimap-config",
  "rimap-core",
@@ -2541,6 +2542,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-subscriber",
  "webpki-roots",
 ]
 
