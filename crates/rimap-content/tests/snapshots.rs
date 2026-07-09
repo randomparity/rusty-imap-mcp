@@ -174,3 +174,28 @@ fn snapshot_html_anchor_unparsable_href() {
 fn snapshot_lookalike_reply_to_mismatch() {
     snapshot_one("lookalike-reply-to-mismatch");
 }
+
+#[test]
+fn snapshot_calendar_invite_injection() {
+    snapshot_one("calendar-invite-injection");
+}
+
+#[test]
+fn snapshot_eai_raw_utf8_headers() {
+    snapshot_one("eai-raw-utf8-headers");
+}
+
+#[test]
+fn snapshot_pgp_signed_unsigned_sibling() {
+    snapshot_one("pgp-signed-unsigned-sibling");
+}
+
+#[test]
+fn snapshot_message_partial_fragment() {
+    snapshot_one("message-partial-fragment");
+}
+
+#[test]
+fn snapshot_attachment_filename_rfc2231() {
+    snapshot_one("attachment-filename-rfc2231");
+}

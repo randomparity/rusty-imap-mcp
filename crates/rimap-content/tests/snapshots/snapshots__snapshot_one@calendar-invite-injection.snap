@@ -1,0 +1,35 @@
+---
+source: crates/rimap-content/tests/snapshots.rs
+expression: value
+---
+{
+  "meta": {
+    "attachments": [
+      {
+        "content_id": null,
+        "content_type": "text/calendar",
+        "filename": null,
+        "is_inline": false,
+        "size_bytes": 239
+      }
+    ],
+    "body_truncated": false,
+    "cc": [],
+    "date": null,
+    "from": "events@example.com",
+    "in_reply_to": null,
+    "mailing_list": null,
+    "message_id": null,
+    "original_size_bytes": 458,
+    "references": [],
+    "reply_to": null,
+    "subject": "Meeting invite",
+    "to": []
+  },
+  "security_warnings": [],
+  "untrusted": {
+    "alternate_parts": [],
+    "body_html": null,
+    "body_text": "You are invited. See the attached invite."
+  }
+}

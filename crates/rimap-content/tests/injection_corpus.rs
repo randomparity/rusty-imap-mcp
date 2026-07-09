@@ -39,6 +39,10 @@ struct Expected {
     #[serde(default)]
     body_html_must_not_contain: Vec<String>,
     #[serde(default)]
+    alternate_parts_must_contain: Vec<String>,
+    #[serde(default)]
+    alternate_parts_must_not_contain: Vec<String>,
+    #[serde(default)]
     warning_codes: Vec<String>,
     #[serde(default)]
     forbidden_warning_codes: Vec<String>,
@@ -68,6 +72,8 @@ struct ExpectedMeta {
     attachment_count: Option<usize>,
     #[serde(default)]
     body_truncated: Option<bool>,
+    #[serde(default)]
+    attachment_filename_must_not_contain: Vec<String>,
 }
 
 fn corpus_root() -> PathBuf {
@@ -125,8 +131,44 @@ fn assert_fixture(name: &str, dir: &Path, expected: &Expected) -> Result<(), Str
 fn assert_ok_body(name: &str, content: &Content, expected: &Expected) -> Result<(), String> {
     assert_body_substrings(name, &content.untrusted.body_text, expected)?;
     assert_body_html_substrings(name, content.untrusted.body_html.as_deref(), expected)?;
+    assert_alternate_parts_substrings(name, &content.untrusted.alternate_parts, expected)?;
     assert_warning_codes(name, &content.security_warnings, expected)?;
     assert_meta_fields(name, &content.meta, expected)
+}
+
+/// Assert `alternate_parts_must_contain` / `alternate_parts_must_not_contain`
+/// against `content.untrusted.alternate_parts`.
+///
+/// The positive form lets a fixture prove that content which is surfaced
+/// but *segregated* out of the primary body — e.g. an unsigned sibling
+/// under `multipart/signed` — still lands in the untrusted namespace
+/// rather than being dropped or promoted into `meta`. The negative form
+/// lets a quarantine fixture prove a payload is absent from
+/// `alternate_parts` too, so "never surfaced as readable content" is
+/// checked across the whole untrusted namespace (`body_text` +
+/// `alternate_parts`), not `body_text` alone.
+fn assert_alternate_parts_substrings(
+    name: &str,
+    alternate_parts: &[String],
+    expected: &Expected,
+) -> Result<(), String> {
+    for needle in &expected.alternate_parts_must_contain {
+        if !alternate_parts.iter().any(|part| part.contains(needle)) {
+            return Err(format!(
+                "{name}: no alternate part contains required substring {needle:?} \
+                 (alternate_parts={alternate_parts:?})"
+            ));
+        }
+    }
+    for needle in &expected.alternate_parts_must_not_contain {
+        if alternate_parts.iter().any(|part| part.contains(needle)) {
+            return Err(format!(
+                "{name}: an alternate part contains forbidden substring {needle:?} \
+                 (alternate_parts={alternate_parts:?})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Assert `body_html_must_contain` / `body_html_must_not_contain`
@@ -248,6 +290,39 @@ fn assert_meta_fields(
             meta.body_truncated
         ));
     }
+    let filenames: Vec<Option<&str>> = meta
+        .attachments
+        .iter()
+        .map(|att| att.filename.as_deref())
+        .collect();
+    assert_filenames_free_of(
+        name,
+        &filenames,
+        &want_meta.attachment_filename_must_not_contain,
+    )
+}
+
+/// Assert no attachment filename contains any forbidden `needles`
+/// substring. `None` filenames are skipped. Split out of
+/// [`assert_meta_fields`] so the guard's Err path is unit-testable
+/// without constructing the `#[non_exhaustive]` `AttachmentMeta`.
+fn assert_filenames_free_of(
+    name: &str,
+    filenames: &[Option<&str>],
+    needles: &[String],
+) -> Result<(), String> {
+    for needle in needles {
+        for (idx, filename) in filenames.iter().enumerate() {
+            if let Some(fname) = filename
+                && fname.contains(needle)
+            {
+                return Err(format!(
+                    "{name}: attachment[{idx}] filename {fname:?} \
+                     contains forbidden substring {needle:?}"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -263,6 +338,68 @@ fn assert_err_kind(name: &str, err: &ContentError, expected: &Expected) -> Resul
     } else {
         Err(format!("{name}: error_kind want={want:?} got={got:?}"))
     }
+}
+
+#[test]
+fn alternate_parts_must_contain_detects_presence_and_absence() {
+    let json = r#"{"description":"t","alternate_parts_must_contain":["payload"]}"#;
+    let expected: Expected = serde_json::from_str(json).unwrap();
+
+    let present = vec![
+        "harmless".to_string(),
+        "carries the payload here".to_string(),
+    ];
+    assert!(assert_alternate_parts_substrings("t", &present, &expected).is_ok());
+
+    let absent = vec!["harmless".to_string()];
+    let err = assert_alternate_parts_substrings("t", &absent, &expected)
+        .expect_err("missing needle must fail");
+    assert!(err.contains("payload"), "err={err}");
+
+    let empty: Vec<String> = Vec::new();
+    assert!(assert_alternate_parts_substrings("t", &empty, &expected).is_err());
+}
+
+#[test]
+fn alternate_parts_must_not_contain_detects_leak() {
+    let json = r#"{"description":"t","alternate_parts_must_not_contain":["payload"]}"#;
+    let expected: Expected = serde_json::from_str(json).unwrap();
+
+    let clean = vec!["harmless".to_string()];
+    assert!(assert_alternate_parts_substrings("t", &clean, &expected).is_ok());
+
+    let empty: Vec<String> = Vec::new();
+    assert!(assert_alternate_parts_substrings("t", &empty, &expected).is_ok());
+
+    let leaked = vec!["harmless".to_string(), "leaked payload".to_string()];
+    let err = assert_alternate_parts_substrings("t", &leaked, &expected)
+        .expect_err("forbidden needle present must fail");
+    assert!(err.contains("payload"), "err={err}");
+}
+
+#[test]
+fn attachment_filename_must_not_contain_detects_traversal() {
+    let needles = vec!["../".to_string(), "etc/passwd".to_string()];
+
+    // Clean sanitized filename passes.
+    let clean = [Some("____etc_passwd")];
+    assert!(assert_filenames_free_of("t", &clean, &needles).is_ok());
+
+    // A None filename is skipped, not a false positive.
+    let none = [None, Some("report.pdf")];
+    assert!(assert_filenames_free_of("t", &none, &needles).is_ok());
+
+    // Empty needles is vacuously Ok.
+    let empty: Vec<String> = Vec::new();
+    assert!(assert_filenames_free_of("t", &clean, &empty).is_ok());
+
+    // An un-rewritten traversal filename on the second attachment fails,
+    // and the error names its index.
+    let leaked = [Some("safe.txt"), Some("../../etc/passwd")];
+    let err = assert_filenames_free_of("t", &leaked, &needles)
+        .expect_err("un-rewritten traversal must fail");
+    assert!(err.contains("attachment[1]"), "err={err}");
+    assert!(err.contains("etc/passwd"), "err={err}");
 }
 
 #[test]
