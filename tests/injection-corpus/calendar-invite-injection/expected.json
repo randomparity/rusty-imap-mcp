@@ -1,0 +1,14 @@
+{
+  "description": "A text/calendar invite whose VEVENT DESCRIPTION carries prompt-injection instructions. mail-parser sorts text/calendar into meta.attachments (not text_body), so the instruction text never reaches untrusted.body_text — the quarantine is by content-type and holds even with no Content-Disposition. Agents that summarize invites verbatim never see the payload as body content.",
+  "expect": "ok",
+  "must_contain": [
+    "You are invited"
+  ],
+  "must_not_contain": [
+    "IGNORE ALL PREVIOUS INSTRUCTIONS",
+    "attacker@evil.example"
+  ],
+  "meta": {
+    "attachment_count": 1
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "description": "RFC 2231 parameter-continuation + percent-encoding smuggling: the attachment filename is split across filename*0*/filename*1* and percent-encodes '../../etc/passwd'. mail-parser decodes the continuation before the sanitizer runs, so the traversal is caught and rewritten to a safe form — parse_attachment_filename_rewritten fires. Exercises the 2231 decode path that the plain-quoted attachment-path-traversal fixture does not.",
+  "expect": "ok",
+  "must_contain": [
+    "see attached"
+  ],
+  "must_not_contain": [
+    "../",
+    "/etc/passwd"
+  ],
+  "warning_codes": [
+    "parse_attachment_filename_rewritten"
+  ],
+  "meta": {
+    "attachment_count": 1
+  }
+}

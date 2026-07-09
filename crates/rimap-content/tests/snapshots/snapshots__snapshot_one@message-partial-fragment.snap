@@ -1,0 +1,35 @@
+---
+source: crates/rimap-content/tests/snapshots.rs
+expression: value
+---
+{
+  "meta": {
+    "attachments": [
+      {
+        "content_id": null,
+        "content_type": "message/partial",
+        "filename": null,
+        "is_inline": false,
+        "size_bytes": 232
+      }
+    ],
+    "body_truncated": false,
+    "cc": [],
+    "date": null,
+    "from": "sender@example.com",
+    "in_reply_to": null,
+    "mailing_list": null,
+    "message_id": null,
+    "original_size_bytes": 232,
+    "references": [],
+    "reply_to": null,
+    "subject": "split payload (1/2)",
+    "to": []
+  },
+  "security_warnings": [],
+  "untrusted": {
+    "alternate_parts": [],
+    "body_html": null,
+    "body_text": ""
+  }
+}

@@ -1,0 +1,40 @@
+---
+source: crates/rimap-content/tests/snapshots.rs
+expression: value
+---
+{
+  "meta": {
+    "attachments": [],
+    "body_truncated": false,
+    "cc": [],
+    "date": null,
+    "from": "Ålicé <alice@example.com>",
+    "in_reply_to": null,
+    "mailing_list": null,
+    "message_id": null,
+    "original_size_bytes": 164,
+    "references": [],
+    "reply_to": null,
+    "subject": "Hallo — meeting notes",
+    "to": [
+      "Bøb <bob@example.com>"
+    ]
+  },
+  "security_warnings": [
+    {
+      "code": "unicode_zero_width_stripped",
+      "detail": "count=1",
+      "location": "header:subject"
+    },
+    {
+      "code": "unicode_bidi_override_stripped",
+      "detail": "count=2",
+      "location": "header:subject"
+    }
+  ],
+  "untrusted": {
+    "alternate_parts": [],
+    "body_html": null,
+    "body_text": "Møte kl. 10.\n"
+  }
+}

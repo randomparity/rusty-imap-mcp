@@ -1,0 +1,14 @@
+{
+  "description": "RFC 6532 / EAI message: raw 8-bit UTF-8 in the From/To display names and a raw-UTF-8 Subject (no RFC 2047 encoded-words) carrying a zero-width space (U+200B) and a bidi override pair (U+202E/U+202C). Proves EAI headers reach Unicode sanitization directly, not only through the RFC 2047 decode path: the zero-width and bidi codepoints are stripped and both warnings fire.",
+  "expect": "ok",
+  "must_contain": [
+    "Møte"
+  ],
+  "warning_codes": [
+    "unicode_zero_width_stripped",
+    "unicode_bidi_override_stripped"
+  ],
+  "meta": {
+    "attachment_count": 0
+  }
+}
