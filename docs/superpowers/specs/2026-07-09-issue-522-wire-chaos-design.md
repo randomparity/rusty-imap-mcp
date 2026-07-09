@@ -61,14 +61,24 @@ behavior, not wished behavior.
   **exactly one `AuthEvent`** (`connect_inner` emits exactly one auth event per
   attempt, success or failure). This matches the issue's own wording, "typed
   TLS/connection error."
-- **Byte-trickle / no unbounded buffering.** `fetch_body` pre-checks
-  `RFC822.SIZE` and rejects over-cap bodies *before* reading (honest Dovecot
-  reports true size), so a 10 MiB body under a 5 MiB cap → `ERR_ATTACHMENT_TOO_
-  LARGE` **instantly**, trickle irrelevant — that path is already covered. To
-  exercise the *time* bound and prove no unbounded wait, the scenario raises
-  `max_fetch_body_bytes` above the body size, seeds a body large enough that a
-  bandwidth toxic cannot deliver it inside `command_timeout`, and asserts
-  **`ERR_TIMEOUT`** with the session invalidated and the next call recovering.
+- **Byte-trickle: two distinct bounds, two falsifiable sub-cases.** The AC pairs
+  *"no unbounded buffering"* (a **size/memory** bound) with *"time bound
+  honored"* — different properties needing different observables. `fetch_body`
+  pre-checks `RFC822.SIZE` and rejects over-cap bodies *before* reading a body
+  byte (honest Dovecot reports true size), which is the actual no-unbounded-
+  buffering guard. Scenario 4 therefore has two sub-cases (see §Component 4):
+  - **4a — buffering bound.** Seed a body **over** `max_fetch_body_bytes`, apply
+    a slow `bandwidth` toxic, fetch → assert **`ERR_ATTACHMENT_TOO_LARGE`**
+    returns *promptly* (well inside `command_timeout`). This is falsifiable
+    against a buffering regression: if `fetch_body` regressed to read the body
+    before checking size, the bandwidth toxic would make it stall to
+    `command_timeout` and surface `ERR_TIMEOUT` instead — the sub-case would
+    fail. The prompt `ERR_ATTACHMENT_TOO_LARGE` *under an active trickle* is
+    exactly the evidence that no body bytes were buffered.
+  - **4b — time bound.** Raise `max_fetch_body_bytes` above the body, seed a body
+    the `bandwidth` toxic cannot deliver inside `command_timeout`, fetch →
+    assert **`ERR_TIMEOUT`**, session invalidated, next call (toxic removed)
+    recovers. This is falsifiable against an unbounded-wait regression.
 - **Breaker neutrality.** `ERR_ATTACHMENT_TOO_LARGE` is breaker-neutral; a single
   `Timeout` counts toward the breaker but the trip threshold is 5 within 30s, so
   one timeout per scenario never trips it. The "subsequent call succeeds"
@@ -134,6 +144,12 @@ down -v`). Additions over `DovecotHarness`:
   `remove_toxic(proxy, name)`, `reset()` (clears all toxics). Toxic specs are
   built with `serde_json::json!` and POSTed to
   `/proxies/<name>/toxics`; removal is `DELETE /proxies/<name>/toxics/<toxic>`.
+  **Every call checks the HTTP status and panics on non-2xx with a diagnostic
+  that names the *control plane* as the cause** (e.g. `"toxiproxy control:
+  add_toxic latency on 'imaps' failed: HTTP 500 …"`). This keeps a control-plane
+  flake from masquerading as a product recovery-wedge: a failed `remove_toxic`/
+  `reset()` aborts the test *before* the recovery assertion runs, attributed to
+  the harness, not to `rusty-imap-mcp`.
 
 ### Component 3 — two-tier gate `RIMAP_CHAOS`
 
@@ -155,23 +171,51 @@ The nightly workflow sets `RIMAP_CHAOS=1` **and** `RIMAP_REQUIRE_DOCKER=1`.
 ### Component 4 — `e2e_wire_chaos.rs` scenarios
 
 One binary, `#[tokio::test(flavor = "multi_thread")]` per scenario. Each: start
-the chaos stack, seed via a direct pinned IMAP connection through Toxiproxy (or
-directly to Dovecot's in-network port via a seed helper), spawn the server with a
-chaos config (low `connect_timeout`/`command_timeout`, e.g. 2s each), drive tools
-over the wire, assert the `ERR_*` code, drain and assert the audit JSONL, then
-prove recovery. Shared assert helper mirrors
+the chaos stack, **seed while no toxic is active**, spawn the server with a chaos
+config (low `connect_timeout`/`command_timeout`, e.g. 2s each), add the toxic,
+drive tools over the wire, assert the `ERR_*` code, drain and assert the audit
+JSONL, then remove the toxic and prove recovery. Shared wire-assert helper mirrors
 `e2e_wire_fault_injection.rs::assert_error_code`.
 
-| # | Scenario | Toxic | Wire assertion | Audit assertion | Recovery |
-|---|----------|-------|----------------|-----------------|----------|
-| 1 | Delayed greeting | `timeout` on `imaps` downstream (stall > connect budget) | `ERR_TIMEOUT` | `AuthEvent` result=Failure, code=Timeout | remove toxic → next `list_folders` ok |
-| 2 | Mid-FETCH stall | success first, then `latency`/`timeout` on `imaps` > command budget | `ERR_TIMEOUT` | tool_end `ERR_TIMEOUT` | remove toxic → next `search`/`fetch` ok (session was invalidated → reconnect) |
-| 3 | RST during STARTTLS | `reset_peer` (`timeout: 0`) on `starttls` | `ERR_TLS` **or** `ERR_CONNECTION_LOST` | **exactly one** `AuthEvent` result=Failure | remove toxic → next call over STARTTLS ok |
-| 4 | Byte-trickle large body | `max_fetch_body_bytes` raised above body; `bandwidth` toxic so body can't arrive in command budget | `ERR_TIMEOUT` (time bound, not size) | tool_end `ERR_TIMEOUT` | remove toxic → next fetch ok |
+**Seed path (single supported route).** The test is a host process; Dovecot's
+993/143 are **not** host-published, so the *only* reachable path is through a
+published Toxiproxy proxy port. Seeding therefore opens a pinned IMAP connection
+**through the relevant proxy while no toxic is active**, `APPEND`s the fixture,
+then the scenario adds its toxic. There is no direct-to-Dovecot path. Scenario 4
+seeds a body under the account's `max_append_bytes`; the chaos config raises
+`max_append_bytes` to `26_214_400` (25 MiB) so a >10 MiB seed body fits the
+`APPEND` even though it exceeds the `fetch` cap in sub-case 4a.
 
-Scenarios 1/2/4 use the `imaps` proxy (`encryption = "tls"`, port 993);
-scenario 3 uses the `starttls` proxy (`encryption = "starttls"`, port 143),
-which also adds the first e2e_wire coverage of the STARTTLS path.
+**Audit-drain assertion helper.** Every audit line is a JSON record with a
+top-level `seq` and a `kind` discriminator (`auth`, `tool_start`, `tool_end`,
+`process_start`, `process_end`); `tool_end` carries `start_seq` back to its
+`tool_start`. The helper reads the JSONL, then:
+- for the failing tool call, locates its `tool_start` (seq `S₀`) and matching
+  `tool_end` (whose `start_seq == S₀`, seq `S₁`), and asserts the `tool_end`
+  `error_code`;
+- for scenario 3's "exactly one AuthEvent", counts `kind == "auth"` records with
+  `S₀ < seq < S₁` and asserts the count is 1.
+This rests on a **load-bearing invariant stated here so a future change breaks
+loudly**: IMAP connect is *lazy* — no `auth` record is emitted at `initialize`,
+so the first tool call's connect is the first-ever `auth` record. If connect ever
+becomes eager (a preflight that emits auth, an eager pool warm-up), the
+scenario-3 count must be re-derived; the Seq-bracketing above already scopes the
+count to the single call window, which contains the mis-count if it happens.
+
+| # | Scenario | Proxy | Toxic | Wire assertion | Audit assertion | Recovery |
+|---|----------|-------|-------|----------------|-----------------|----------|
+| 1 | Delayed **greeting** | `starttls` (143) | `timeout` (block data after TCP connect, > connect budget) — plaintext greeting is read before TLS on the STARTTLS path, so this stalls the greeting specifically | `ERR_TIMEOUT` | `auth` result=Failure, error_code=Timeout | remove toxic → next `list_folders` ok |
+| 2 | Mid-FETCH stall | `imaps` (993) | success first, then `latency`/`timeout` > command budget | `ERR_TIMEOUT` | `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next `search`/`fetch` ok (session was invalidated → reconnect) |
+| 3 | RST during STARTTLS | `starttls` (143) | `reset_peer` (`timeout: 0`) | `ERR_TLS` **or** `ERR_CONNECTION_LOST` | **exactly one** `auth` result=Failure in the call window | remove toxic → next call over STARTTLS ok |
+| 4a | Over-cap body under trickle (buffering bound) | `imaps` (993) | `bandwidth` (slow); body **>** `max_fetch_body_bytes` | `ERR_ATTACHMENT_TOO_LARGE` **promptly** (≪ command budget) | `tool_end` error_code=`ERR_ATTACHMENT_TOO_LARGE` | remove toxic → next fetch ok |
+| 4b | Under-cap body trickled (time bound) | `imaps` (993) | `bandwidth` so body can't arrive in command budget; `max_fetch_body_bytes` raised above body | `ERR_TIMEOUT` | `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next fetch ok |
+
+Scenario 1 and 3 use the `starttls` proxy (`encryption = "starttls"`, port 143) —
+the first e2e_wire coverage of the STARTTLS path; scenario 1 there genuinely
+delays the *plaintext greeting* (on the `imaps`/993 path a data-blocking toxic
+stalls the TLS handshake first, never reaching the greeting). Scenarios 2/4 use
+the `imaps` proxy (`encryption = "tls"`, port 993). Scenarios 4a and 4b may be
+one `#[tokio::test]` with two phases or two tests; either satisfies the AC.
 
 ### Component 5 — nightly workflow
 
@@ -181,7 +225,9 @@ New `.github/workflows/nightly-chaos.yml`, modeled on `mcp-fuzz-nightly.yml`:
 `cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-tests=fail`
 with `RIMAP_CHAOS: "1"` and `RIMAP_REQUIRE_DOCKER: "1"`. All `uses:` pinned to
 40-char SHA + version comment (zizmor/actionlint gates apply). Non-blocking (not
-in branch-protection required set).
+in branch-protection required set). The job sets `timeout-minutes: 15` so a
+runaway suite (a container that never comes ready, a proxy that wedges) fails
+loudly instead of silently drifting past the wall-time rationale for nightly-only.
 
 ## Failure modes & edge cases
 
@@ -211,8 +257,14 @@ in branch-protection required set).
 - **Port publish vs runtime proxy config.** Proxies listen on *fixed* internal
   ports (21993/21143) seeded at container start, so Docker's publish mapping is
   stable; toxics are added at runtime but the listen ports never change.
-- **Wall-time.** Low timeout budgets (2s) bound each timeout scenario; total
-  suite target < ~90s on a warm runner (Dovecot + Toxiproxy bring-up dominates).
+- **Control-plane failure mid-test.** A non-2xx from any Toxiproxy control call
+  panics with a control-plane-attributed diagnostic (§Component 2), so a
+  `remove_toxic`/`reset()` hiccup aborts before the recovery assertion and never
+  reads as a product wedge.
+- **Wall-time.** Low timeout budgets (2s) bound each timeout scenario; container
+  bring-up dominates and is bounded by the 60s readiness gate per fixture plus
+  the workflow's `timeout-minutes: 15` job cap — the "~90s on a warm runner"
+  figure is informational, the 15-minute cap is the enforced bound.
 
 ## Testing
 
