@@ -32,7 +32,7 @@
 - **Create** `crates/rimap-server/tests/support/chaos/harness.rs` — `ChaosHarness`, `ChaosSkip`, `ToxiproxyControl`, gate logic.
 - **Create** `crates/rimap-server/tests/support/chaos/audit.rs` — audit-drain/Seq-bracket assertion helper (pure, unit-tested).
 - **Create** `crates/rimap-server/tests/e2e_wire_chaos.rs` — the five scenario tests.
-- **Modify** `crates/rimap-server/tests/support/wire/harness.rs` — add a slow-tolerant `request_within(method, params, deadline)` (Task 3B); the existing `request()` caps reads at a shared 2s `REQUEST_TIMEOUT`, which the ≥2s chaos faults would trip.
+- **Modify** `crates/rimap-server/tests/support/wire/harness.rs` — add a slow-tolerant `request_within(method, params, deadline)` (Task 3B); the existing `request()` caps reads at a shared 2s `REQUEST_TIMEOUT`, which both the ≥2s chaos **faults** and the reconnect-bearing **recovery** calls (scenarios 1/2/3/4b) would trip.
 - **Create** `.github/workflows/nightly-chaos.yml` — scheduled nightly job + vacuous-green guard + SIGKILL cleanup.
 - **Modify** `AGENTS.md` — add a "Network chaos e2e (nightly, #522)" note under the container-runtime section.
 
@@ -519,7 +519,7 @@ the shared const — it is deliberately tight so ordinary wire tests fail fast o
 hangs. Add an **additive** per-call slow path instead.
 
 **Interfaces:**
-- Produces (consumed by Tasks 4–7): `Harness::request_within(&mut self, method: &str, params: Value, deadline: Duration) -> Value` — identical to `request()` (assign id, write line, read + parse + schema-validate the response envelope, assert id match) but bounds the stdout read by `deadline` instead of `REQUEST_TIMEOUT`.
+- Produces (consumed by Tasks 4–7): `Harness::request_within(&mut self, method: &str, params: Value, deadline: Duration) -> Value` — identical to `request()` (assign id, write line, read + parse + schema-validate the response envelope, assert id match) but bounds the stdout read by `deadline` instead of `REQUEST_TIMEOUT`. Used for BOTH the ≥2s fault calls AND the reconnect-bearing recovery calls (scenarios 1/2/3/4b) — a recovery reconnect (TCP+TLS+LOGIN through docker-networked Toxiproxy, +command) routinely exceeds 2s under the roomy connect budget, so it must not use the 2s-capped `request()`. Only scenario 4a's live-session recovery stays on `request()`.
 
 - [ ] **Step 1: Read `request()` and `read_one_envelope()` and factor a per-call timeout**
 
@@ -663,7 +663,9 @@ max_append_bytes = {max_append_bytes}
 
 > Confirm `[accounts.imap]` accepts `connect_timeout_seconds` / `command_timeout_seconds` and `[accounts.limits]` accepts `max_append_bytes` (fields exist in `rimap-config/src/model.rs`; `deny_unknown_fields` is on, so names must be exact).
 
-Add `assert_error_code` copied from `e2e_wire_fault_injection.rs`. Add a marker helper. (Do **not** author `seed_through_proxy`/`search_seed_uid` here — scenario 1 does not seed, so an unused private fn would fail `dead_code` under `-D warnings`; they land in Task 5.)
+Add `assert_error_code` copied from `e2e_wire_fault_injection.rs` (it reads
+`resp["result"]["structuredContent"]["error_code"]` and also `assert_valid`s the
+`CallToolResult`). Add a marker helper. (Do **not** author `seed_through_proxy`/`search_seed_uid` here — scenario 1 does not seed, so an unused private fn would fail `dead_code` under `-D warnings`; they land in Task 5. The set-aware `assert_error_code_in` used by scenario 3 lands in Task 6, its first caller, for the same dead-code reason.)
 
 ```rust
 fn mark_ran(scenario: &str) {
@@ -688,8 +690,10 @@ async fn chaos_delayed_greeting_times_out() {
     // so the *same* budget also gates the post-reset RECOVERY connect roomily
     // (spec principle: a must-succeed recovery connect should not run under a
     // tight fault budget). First-run tuning: if the recovery connect flakes on a
-    // cold runner, RAISE connect_timeout — the block-forever toxic keeps the
-    // fault case deterministic at any budget; only wall-time grows.
+    // cold runner, raise BOTH connect_timeout AND the recovery request_within
+    // deadline — raising connect_timeout alone is useless if the wire deadline is
+    // the tighter bound. The block-forever toxic keeps the fault deterministic at
+    // any budget; only wall-time grows.
     let mut h = spawn_ready(
         &chaos, chaos.starttls_port(), "starttls",
         /*connect*/ 4, /*command*/ 30, ROOMY_FETCH, ROOMY_APPEND,
@@ -717,10 +721,13 @@ async fn chaos_delayed_greeting_times_out() {
     // Drain after shutdown for a flushed file.
     chaos.toxics().reset();
 
-    // Recovery: next call succeeds through the now-clean proxy.
-    let ok = h.request("tools/call", serde_json::json!({
+    // Recovery forces a FULL reconnect (fault destroyed the session) under the
+    // roomy connect budget — but that budget (4s) exceeds the wire 2s cap, so
+    // recovery must ALSO use request_within, else request() panics at 2s before
+    // the reconnect+response completes.
+    let ok = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.list_folders", "arguments": {}
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     assert!(ok["error"].is_null() && ok["result"]["isError"] == serde_json::json!(false),
         "recovery call must succeed: {ok}");
 
@@ -825,12 +832,13 @@ async fn chaos_mid_fetch_stall_times_out_then_recovers() {
     }), std::time::Duration::from_secs(15)).await;
     assert_error_code(&resp, "ERR_TIMEOUT");
 
-    // Recovery: remove toxic → session was invalidated → next call reconnects.
+    // Recovery: session was invalidated → this call forces a reconnect under the
+    // roomy 10s connect budget → request_within (not the 2s-capped request()).
     chaos.toxics().reset();
-    let ok = h.request("tools/call", serde_json::json!({
+    let ok = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.search",
         "arguments": { "folder": "INBOX", "subject": "e2e-wire-test-smoke" }
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     assert!(ok["error"].is_null() && ok["result"]["isError"] == serde_json::json!(false),
         "recovery search must succeed: {ok}");
 
@@ -875,7 +883,23 @@ git commit -m "test(chaos): scenario 2 — mid-FETCH stall → ERR_TIMEOUT + rec
 **Files:**
 - Modify: `crates/rimap-server/tests/e2e_wire_chaos.rs` (add one test).
 
-- [ ] **Step 1: Write the test**
+- [ ] **Step 1: Author `assert_error_code_in`, then write the test**
+
+First add the set-aware assert helper (same accessor/validation as
+`assert_error_code`, so scenario 3 never diverges onto a hand-rolled JSON path):
+
+```rust
+/// Like `assert_error_code`, but the wire code must be one of `expected`.
+fn assert_error_code_in(resp: &serde_json::Value, expected: &[&str]) {
+    assert!(resp["error"].is_null(), "unexpected JSON-RPC error: {resp}");
+    assert_valid(&resp["result"], "CallToolResult");
+    assert_eq!(resp["result"]["isError"], serde_json::json!(true), "{resp}");
+    let code = resp["result"]["structuredContent"]["error_code"].as_str().unwrap_or("");
+    assert!(expected.contains(&code), "expected one of {expected:?}; got {code:?} in {resp}");
+}
+```
+
+Then the test:
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -903,18 +927,15 @@ async fn chaos_starttls_reset_typed_error_one_auth() {
     }), std::time::Duration::from_secs(15)).await;
     // Typed TLS/connection error — assert on the set (see spec: TCP-layer reset
     // is not deterministic between plaintext-greeting and TLS-handshake phases).
-    let code = resp["result"]["structuredContent"]["error_code"].as_str().unwrap_or("");
-    assert!(
-        code == "ERR_TLS" || code == "ERR_CONNECTION_LOST",
-        "expected ERR_TLS or ERR_CONNECTION_LOST; got {code} in {resp}"
-    );
-    assert_valid(&resp["result"], "CallToolResult");
-    assert_eq!(resp["result"]["isError"], serde_json::json!(true));
+    // Use the set-aware helper (same accessor as assert_error_code — no hand-rolled path).
+    assert_error_code_in(&resp, &["ERR_TLS", "ERR_CONNECTION_LOST"]);
 
+    // Recovery forces a fresh STARTTLS connect (RST left no session) → the
+    // reconnect can exceed 2s → request_within, not the 2s-capped request().
     chaos.toxics().reset();
-    let ok = h.request("tools/call", serde_json::json!({
+    let ok = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.list_folders", "arguments": {}
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     assert!(ok["error"].is_null() && ok["result"]["isError"] == serde_json::json!(false),
         "recovery over STARTTLS must succeed: {ok}");
 
@@ -991,10 +1012,15 @@ async fn chaos_trickle_over_cap_rejects_promptly() {
     assert!(t0.elapsed() < std::time::Duration::from_secs(20),
         "rejection must be prompt (preflight, not a body-read stall); took {:?}", t0.elapsed());
 
+    // 4a is the ONE scenario whose recovery stays on plain request(): ERR_ATTACHMENT_TOO_LARGE
+    // is transport-neutral, the session stays LIVE (no invalidate), so this
+    // metadata call reuses the open session with no reconnect and returns < 2s.
+    // (Re-fetching the over-cap body would still be ERR_ATTACHMENT_TOO_LARGE, so
+    // recovery uses a different call to prove session liveness.)
     chaos.toxics().reset();
     let ok = h.request("tools/call", serde_json::json!({
         "name": "chaos.list_folders", "arguments": {}
-    })).await; // small metadata call — re-fetching the over-cap body would still be ERR_ATTACHMENT_TOO_LARGE
+    })).await;
     assert!(ok["error"].is_null() && ok["result"]["isError"] == serde_json::json!(false),
         "recovery metadata call must succeed: {ok}");
 
@@ -1034,11 +1060,14 @@ async fn chaos_trickle_under_cap_times_out_then_recovers() {
     }), std::time::Duration::from_secs(15)).await;
     assert_error_code(&resp, "ERR_TIMEOUT");
 
+    // Recovery reconnects AND fetches a 2 MiB body — both must fit the wire
+    // deadline, so request_within with generous headroom (the 2s request() cap
+    // would trip here even on a fast runner).
     chaos.toxics().reset();
-    let ok = h.request("tools/call", serde_json::json!({
+    let ok = h.request_within("tools/call", serde_json::json!({
         "name": "chaos.fetch_message",
         "arguments": { "folder": "INBOX", "uid": uid }
-    })).await;
+    }), std::time::Duration::from_secs(15)).await;
     assert!(ok["error"].is_null() && ok["result"]["isError"] == serde_json::json!(false),
         "recovery fetch must succeed after toxic removed: {ok}");
 
