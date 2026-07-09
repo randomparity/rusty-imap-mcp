@@ -1,0 +1,205 @@
+# ADR-0001: Real-socket SMTP e2e, `SmtpError::Auth`, and negative-reply classification
+
+- **Status:** Accepted
+- **Date:** 2026-07-09
+- **Issue:** [#517](https://github.com/randomparity/rusty-imap-mcp/issues/517)
+- **Spec:** [docs/superpowers/specs/2026-07-09-issue-517-smtp-real-e2e-design.md](../superpowers/specs/2026-07-09-issue-517-smtp-real-e2e-design.md)
+- **Supersedes:** none
+
+## Context
+
+`send_email`/`forward` have never opened a real SMTP socket in any test. The
+production dialog in `crates/rimap-smtp/src/client.rs` (EHLO, STARTTLS, AUTH,
+MAIL/RCPT/DATA, timeout handling) had zero functional coverage: the existing
+`crates/rimap-server/tests/e2e_smtp.rs` injects `FakeSmtpSender`, an in-memory
+spy that returns a preconfigured `SmtpError` **without** exercising
+`classify_smtp_error`.
+
+Driving the real client surfaced a latent classification bug and a taxonomy
+gap:
+
+1. **Every server negative reply is misclassified.** In lettre 0.11 a `4xx`
+   reply is `Kind::Transient(code)` and a `5xx` reply is `Kind::Permanent(code)`.
+   `classify_smtp_error` checks `is_response()` — which matches only
+   `Kind::Response`, a *response-parse* failure — and never `is_permanent()` /
+   `is_transient()`. So a `550` RCPT rejection or a `535` auth failure falls
+   through every arm to `SmtpErrorShape::Other` → `SmtpError::Transport` →
+   `ErrorCode::Internal`. The tool surfaces `ERR_INTERNAL` instead of
+   `ERR_SMTP_PROTOCOL`. The fake-based test never caught this because it bypasses
+   the classifier.
+
+2. **No auth-specific error.** The issue's acceptance criteria name
+   `SmtpError::Auth`, which does not exist. `rimap_core::ErrorCode::Auth`
+   (`ERR_AUTH`) already exists, so the gap is only in `rimap-smtp`.
+
+Constraints:
+
+- The Dovecot fixture has **no arch gate** — every supported developer host
+  (linux/amd64, macOS arm64) runs the suite. Any SMTP container must be
+  multi-arch.
+- Container-gated tests silent-skip without a runtime and honor
+  `RIMAP_REQUIRE_DOCKER=1`; they must stay out of the fast PR-blocking set.
+- lettre's `smtp::Error` has crate-private constructors — its variants cannot
+  be fabricated in a unit test.
+
+## Decision
+
+### 1. Add `SmtpError::Auth`, classify by reply code
+
+Add a `SmtpError::Auth { reason: String }` variant mapping to the existing
+`ErrorCode::Auth` (`ERR_AUTH`). Classification reads `err.status() ->
+Option<Code>`: recognized authentication reply codes map to `Auth`, all other
+negative replies map to `Rejected`, and everything else keeps its current
+mapping. Recognized auth codes — the unambiguous credential-failure codes only:
+
+- Permanent: `534` (mechanism too weak), `535` (credentials invalid), `538`
+  (encryption required for the mechanism)
+- Transient: `432` (password transition needed)
+
+`530` ("must issue STARTTLS first" / relay-denied) and `454` ("TLS not
+available" / temporary auth) are **excluded** — they carry transport-security
+meanings, so classifying them as `Auth` would mis-signal a STARTTLS/TLS
+condition as a credentials problem. They map to `Rejected` (`ERR_SMTP_PROTOCOL`).
+(Narrowed from an initial `530/534/535/538 + 432/454` set after review — see
+Consequences.)
+
+`535` (credentials invalid) is the dominant case a wrong password produces and
+is unambiguous. The classifier is refactored into a pure
+`classify_reply_code(Code) -> …` function that is unit-testable because
+`lettre::transport::smtp::response::Code` has public fields, even though the
+enclosing `Error` does not.
+
+**TLS-failure detection (discovered during build).** lettre's async rustls
+transport wraps *every* TLS handshake failure — including certificate
+rejection — as `Kind::Connection` (`async_net.rs` routes the `TlsConnector`
+error through `error::connection`), so `Error::is_tls()` never fires for this
+transport and a cert failure would otherwise classify as
+`Transport`/`ERR_INTERNAL`. The classifier therefore detects TLS failures by
+walking the error source chain for a `rustls::Error` (type-safe
+`io::Error::get_ref` + `downcast_ref::<rustls::Error>`, no string matching) and
+maps them to `SmtpError::Tls`/`ERR_TLS`. This adds `rustls` as a direct
+(runtime) dependency of `rimap-smtp`; it is already in-tree via lettre's
+`tokio1-rustls-tls` feature.
+
+Additionally, bound the whole SMTP operation: lettre's async transport applies
+its `.timeout()` only to the TCP *connect* future, leaving greeting/command
+reads unbounded, so a stalled (or hostile) server hangs `send_email`/`forward`
+forever. `SmtpClient::send_raw` wraps the transport call in
+`tokio::time::timeout(command_timeout_seconds, ..)`; an elapsed deadline maps to
+`SmtpError::Timeout`. This is a shipped-code robustness fix, not test-only, and
+it is what makes the timeout scenario deterministically testable with an
+in-process responder that accepts then withholds the banner (a blackhole-address
+connect timeout was rejected as environment-sensitive).
+
+### 2. Two test homes, split by dependency
+
+- **In-process scripted SMTP responder → `rimap-smtp` crate tests, no Docker,
+  runs in the fast PR set.** A tokio TCP listener speaking just enough SMTP,
+  with per-scenario scripted replies, drives the real `SmtpClient::send_raw` to
+  prove the classifier end-to-end: wrong password → `Auth`/`ERR_AUTH`; `RCPT`
+  `550` → `Rejected`/`ERR_SMTP_PROTOCOL`; self-signed STARTTLS cert →
+  `Tls`/`ERR_TLS`; silent socket + low timeout → `Timeout`/`ERR_TIMEOUT`.
+- **Mailpit + Dovecot through dispatch → `rimap-server`, container-gated.** A
+  `MailpitHarness` (mirrors `DovecotHarness`) brings up a re-pinned multi-arch
+  Mailpit; a real `SmtpClient` is injected into `AccountState.smtp` in place of
+  the fake, and the Dovecot fixture backs the IMAP Sent-copy read-back. Asserts
+  successful submission, delivered-bytes for a multipart-with-attachment
+  message (fetched from Mailpit's HTTP API), Bcc-excluded-from-DATA (#432)
+  against real delivery, and Sent-copy fail-open.
+
+### 3. Re-pin Mailpit to a multi-arch manifest list
+
+The scaffold's pinned digest
+(`sha256:0d7b9c8e…`) is a **single-arch** manifest and would fail to pull on
+arm64. Re-pin to the v1.29.5 **index** digest
+`sha256:c5a6d0ba4d08187f70f305471da5fd9ad424fdfc2f25a2308226a786335dfa9f`,
+verified to cover `linux/amd64` + `linux/arm64` via
+`docker manifest inspect docker.io/axllent/mailpit@<digest>`; every future
+digest bump (including Dependabot's) must re-run that check and confirm both
+platforms. Add `MP_SMTP_AUTH_ALLOW_INSECURE` so lettre's plaintext AUTH
+succeeds on the happy path.
+
+## Consequences
+
+- **Behavior change (correct):** callers that received `ERR_INTERNAL` for a
+  4xx/5xx SMTP reply now receive `ERR_SMTP_PROTOCOL` (or `ERR_AUTH` for auth
+  codes). No structured-error `data` shape changes.
+- **Behavior change (bounded send):** `send_email`/`forward` now fail with
+  `ERR_TIMEOUT` after `command_timeout_seconds` instead of hanging on a stalled
+  server. The deadline bounds the **whole operation**, so it fires for *any*
+  dialog exceeding it — not only a dead stall but also a live-but-slow transfer
+  (e.g. a large attachment on a slow uplink). `command_timeout_seconds`
+  (default 30s, per-command by name) is knowingly repurposed as this operation
+  budget; a distinct `operation_timeout_seconds` field was rejected as
+  disproportionate.
+- **Timed-out send is indeterminate (idempotency):** a deadline that elapses
+  during the final `DATA`/`250` exchange abandons a connection the server may
+  already have accepted, so `ERR_TIMEOUT` can be reported for a delivered
+  message. This is inherent to any send timeout (it was a hang before, which is
+  strictly worse). Callers — especially agents — must treat a timed-out send as
+  indeterminate and must not blind-retry, or they risk double-sending. No
+  idempotency key is introduced. lettre's connection `pool` feature is not
+  enabled, so no corrupted-pooled-connection reuse arises from the abandoned
+  future.
+- Error-taxonomy coverage runs on every PR (no Docker); only the real-delivery
+  assertions are gated.
+- `SmtpError` gains a variant. It is `#[non_exhaustive]`, so downstream matches
+  need no change, but the crate's own exhaustive matches must add the arm.
+- **Breaker neutrality (review fix):** giving SMTP failures their correct codes
+  (`ERR_AUTH`/`ERR_SMTP_PROTOCOL`) newly fed them into the per-account circuit
+  breaker (`ERR_AUTH` trips it instantly), which would let a wrong SMTP password
+  or a rejected recipient open the breaker and deny unrelated read-only IMAP
+  tools. On `main` these surfaced as `ERR_INTERNAL` (breaker-neutral).
+  `rimap_error_to_breaker_reason` now returns `None` for any `RimapError::Smtp`,
+  restoring that neutrality: the breaker guards the long-lived IMAP connection,
+  while `send_email`/`forward` open a fresh SMTP connection per call and share
+  no state with it. Guarded by a `smtp_errors_are_breaker_neutral` unit test.
+- **Reply-text sanitization (review fix):** the `Auth`/`Rejected` `reason` is
+  server-supplied and reaches the agent context and logs; it is now
+  control-char-stripped and length-capped at the `rimap-smtp` boundary
+  (`sanitize_reason`), closing a CRLF-log / prompt-injection surface a hostile
+  or MITM relay could otherwise exploit. The `RimapError::Smtp.message` doc was
+  updated to describe this actual guarantee (the prior "redacted — no server
+  banners" claim was already violated on `main`).
+- **New runtime dependency:** `rustls` becomes a direct dependency of
+  `rimap-smtp` (already in the tree via lettre) so the classifier can
+  `downcast_ref::<rustls::Error>`. The TLS-detection walk peeks through lettre's
+  error wrapping and could need revisiting if a future lettre version changes
+  how it wraps async rustls handshake errors — the `starttls_bad_cert` e2e is
+  the regression net for that.
+- A new, small SMTP-protocol responder lives in test code only; it is not a
+  general SMTP server and covers only the scripted scenarios.
+
+## Considered & rejected
+
+- **Fold auth rejection into `Rejected` (no `Auth` variant).** Simpler and the
+  `535` reason string is still observable, but an agent caller cannot
+  distinguish "fix your credentials" (config) from "fix the recipient"
+  (per-message). The distinct `ERR_AUTH` already exists in core; not using it
+  would leave the taxonomy poorer for no saving. Rejected by maintainer
+  decision on #517.
+- **Mailpit-only harness.** Mailpit delivers everything and cannot selectively
+  reject a `RCPT`, and forcing STARTTLS/timeout failures against a happy sink is
+  awkward; some acceptance criteria become unachievable, and all coverage would
+  be Docker-gated.
+- **In-process responder only (no container).** Full control and fast, but
+  never exercises a real third-party SMTP implementation and diverges from the
+  issue's "reuse the container harness / fetch via retrieval API" direction; the
+  delivered-bytes assertion would read the responder's own capture rather than a
+  real store.
+- **Blackhole-address connect timeout (no `send_raw` deadline).** Testing the
+  timeout purely at lettre's connect phase by pointing at an unrouted TEST-NET
+  address avoids a shipped-code change, but is environment-sensitive: a network
+  that answers with ICMP unreachable fast-fails as a connection error, not a
+  timeout, making the test flaky. It also leaves the real post-connect hang gap
+  unfixed.
+- **A distinct `smtp.operation_timeout_seconds` config field.** Cleaner
+  semantics than repurposing the per-command field, but adds config-model,
+  validation, and documentation surface disproportionate to this test-focused
+  change; 30s covers ordinary messages and the field is already operator-tunable.
+  Revisit if large-attachment sends over slow links become a real complaint.
+- **454-to-STARTTLS or connection-drop for the TLS scenario.** A cert-free way
+  to fail STARTTLS, but `454` collides with the recognized transient auth codes
+  (routes to `Auth`) and a drop yields a client/network error — neither sets
+  `is_tls()`. Only a real handshake against an untrusted self-signed cert
+  produces `Kind::Tls`.

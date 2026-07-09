@@ -172,7 +172,10 @@ pub enum RimapError {
     Smtp {
         /// Stable error code.
         code: ErrorCode,
-        /// Human-readable message (redacted — no server banners).
+        /// Human-readable message. Any server-supplied reply text embedded here
+        /// is control-char-stripped and length-capped at the `rimap-smtp`
+        /// boundary (never a raw passthrough), so a hostile relay cannot inject
+        /// CRLF/log or prompt-injection sequences into logs or the agent context.
         message: String,
         /// Underlying source error, if any.
         #[source]

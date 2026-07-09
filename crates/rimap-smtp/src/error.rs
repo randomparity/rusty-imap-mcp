@@ -19,6 +19,12 @@ pub enum SmtpError {
         /// Server response reason.
         reason: String,
     },
+    /// Server rejected authentication (e.g. 535 5.7.8).
+    #[error("SMTP authentication failed: {reason}")]
+    Auth {
+        /// Server response reason.
+        reason: String,
+    },
     /// SMTP command timed out.
     #[error("SMTP operation timed out")]
     Timeout,
@@ -37,6 +43,7 @@ impl From<SmtpError> for RimapError {
             SmtpError::Connection(_) => ErrorCode::ConnectionLost,
             SmtpError::Tls(_) => ErrorCode::Tls,
             SmtpError::Rejected { .. } => ErrorCode::SmtpProtocol,
+            SmtpError::Auth { .. } => ErrorCode::Auth,
             SmtpError::Timeout => ErrorCode::Timeout,
             SmtpError::Transport(_) => ErrorCode::Internal,
         };
@@ -66,6 +73,29 @@ mod tests {
             }
             other => panic!("expected Smtp variant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn auth_maps_to_auth_code() {
+        let err = SmtpError::Auth {
+            reason: "535 5.7.8 bad creds".into(),
+        };
+        let mapped: RimapError = err.into();
+        match mapped {
+            RimapError::Smtp { code, message, .. } => {
+                assert_eq!(code, ErrorCode::Auth);
+                assert!(message.contains("535 5.7.8 bad creds"));
+            }
+            other => panic!("expected Smtp variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_display_includes_reason() {
+        let err = SmtpError::Auth {
+            reason: "credentials rejected".into(),
+        };
+        assert!(err.to_string().contains("credentials rejected"));
     }
 
     #[test]

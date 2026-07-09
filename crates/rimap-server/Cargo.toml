@@ -115,3 +115,5 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", 
 tempfile = { workspace = true }
 base64 = { workspace = true }
 proptest = { workspace = true }
+# Blocking HTTP client for the Mailpit retrieval API (e2e_smtp_real.rs).
+ureq = { workspace = true }

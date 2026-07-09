@@ -27,9 +27,23 @@ rimap-config = { path = "../rimap-config", version = "0.1.0" }
 
 lettre = { workspace = true }
 thiserror = { workspace = true }
+# `send_raw` bounds the whole SMTP operation with `tokio::time::timeout`
+# (lettre only times out TCP connect). The workspace feature set includes
+# `time`.
+tokio = { workspace = true }
+# lettre's async rustls transport wraps TLS handshake failures (incl. cert
+# rejection) as Kind::Connection, so is_tls() misses them; the classifier
+# walks the error source chain for a rustls::Error to map them to
+# SmtpError::Tls. Already in-tree via lettre's tokio1-rustls-tls feature.
+rustls = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio = { workspace = true, features = ["test-util", "macros", "net", "io-util", "rt"] }
+# The scripted SMTP responder (tests/support) serves a TLS handshake with a
+# self-signed cert for the STARTTLS-failure scenario. (`rustls` itself is a
+# normal dependency, used by the classifier's TLS detection.)
+tokio-rustls = { workspace = true }
+rcgen = { workspace = true }
 # Self dev-dep enables `test-support` for this crate's own tests so the
 # fake and its tests compile under a plain `cargo test -p rimap-smtp`.
 rimap-smtp = { path = ".", version = "0.1.0", features = ["test-support"] }
