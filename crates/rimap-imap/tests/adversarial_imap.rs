@@ -178,3 +178,63 @@ async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
         skip_warns[0],
     );
 }
+
+/// Scenario 4: a FETCH `BODY[]` literal announcing more bytes than are sent,
+/// followed by a mid-literal disconnect, must surface a typed error (not a
+/// hang, not a bare `Timeout`). The accept-loop re-serves the script if the
+/// read-only path reconnects on `ConnectionLost`.
+#[tokio::test]
+async fn truncated_literal_yields_typed_error_not_timeout() {
+    let server = FakeImapServer::start(vec![
+        Step::Send(b"* OK fake ready\r\n".to_vec()),
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+        Step::Expect { verb: "LOGIN" },
+        Step::Reply {
+            text: "OK LOGIN completed",
+        },
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+        Step::Expect { verb: "EXAMINE" },
+        Step::Send(b"* 1 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
+        Step::Reply {
+            text: "OK [READ-ONLY] EXAMINE completed",
+        },
+        // UID FETCH: announce a 100-byte BODY[] literal, send 5 bytes, drop.
+        Step::Expect { verb: "UID FETCH" },
+        Step::Send(b"* 1 FETCH (UID 5 BODY[] {100}\r\nHELLO".to_vec()),
+        Step::Disconnect,
+    ])
+    .await;
+
+    // LOGIN succeeds here, so use the static-resolver constructor with a
+    // generous 5s backstop so the near-instant loopback EOF wins the race.
+    let conn = server.connection_timeout("user@example.com", Duration::from_secs(5));
+    let spec = FetchSpec {
+        envelope: false,
+        bodystructure: false,
+        uid: true,
+        flags: false,
+        size: false,
+    };
+    let result = conn
+        .fetch(
+            "INBOX",
+            &[Uid::from(NonZeroU32::new(5).unwrap())],
+            spec,
+            None,
+        )
+        .await;
+
+    let err = result.expect_err("truncated literal must fail, not return Ok");
+    assert!(
+        !matches!(err, ImapError::Timeout { .. }),
+        "must be a truncation-class error, not a mere timeout; got {err:?}",
+    );
+}
