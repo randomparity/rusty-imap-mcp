@@ -10,16 +10,29 @@
 //! `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`.
 
 #![expect(clippy::expect_used, reason = "integration tests")]
+#![expect(clippy::panic, reason = "test diagnostics")]
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use rimap_config::credential::PASSWORD_ENV_VAR;
+use rimap_audit::{AuditOptions, AuditWriter, Seq};
+use rimap_config::credential::{
+    CredentialStore, KeyringCredentialResolver, PASSWORD_ENV_VAR, Protocol,
+};
+use rimap_config::model::FallbackMode;
+use rimap_imap::{Connection, ConnectionConfig, ImapEncryption};
+use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[path = "support/chaos/mod.rs"]
 mod chaos;
+// Only the fixtures are needed here (not the DovecotHarness) — include the
+// self-contained fixtures module directly so the harness's items don't appear
+// dead in this binary.
+#[path = "support/dovecot/fixtures.rs"]
+mod fixtures;
 #[path = "support/wire/mod.rs"]
 mod wire;
 
@@ -194,12 +207,115 @@ fn assert_error_code(resp: &Value, expected_code: &str) {
     );
 }
 
-/// Assert a `tools/call` response succeeded (recovery calls).
+/// Assert a `tools/call` response succeeded (recovery/warm-up calls).
 fn assert_ok(resp: &Value, context: &str) {
     assert!(
         resp["error"].is_null() && resp["result"]["isError"] == json!(false),
         "{context} must succeed; got {resp}",
     );
+}
+
+/// In-process credential store for seed connections; returns `DOVECOT_PASSWORD`.
+struct StaticCreds;
+
+impl CredentialStore for StaticCreds {
+    fn get_password(
+        &self,
+        _account: &str,
+    ) -> Result<Option<SecretString>, rimap_config::ConfigError> {
+        Ok(Some(SecretString::from(DOVECOT_PASSWORD.to_string())))
+    }
+
+    #[expect(clippy::panic_in_result_fn, reason = "seed never writes")]
+    fn set_password(
+        &self,
+        _account: &str,
+        _password: &str,
+    ) -> Result<(), rimap_config::ConfigError> {
+        panic!("seed never writes credentials")
+    }
+}
+
+fn parse_encryption(encryption: &str) -> ImapEncryption {
+    match encryption {
+        "tls" => ImapEncryption::Tls,
+        "starttls" => ImapEncryption::Starttls,
+        other => panic!("unknown encryption {other:?}"),
+    }
+}
+
+/// Append `raw` to INBOX through the given proxy `port` while no toxic is active.
+/// The seed uses its OWN `ConnectionConfig` whose `max_append_bytes` (25 MiB) is
+/// independent of the server's TOML cap, so an over-fetch-cap body still seeds.
+async fn seed_body_through_proxy(chaos: &ChaosHarness, port: u16, encryption: &str, raw: &[u8]) {
+    let audit_dir = TempDir::new().expect("seed-audit tempdir");
+    let audit = AuditWriter::open(&AuditOptions {
+        path: audit_dir.path().join("seed.jsonl"),
+        rotate_bytes: 0,
+        rotate_keep: 0,
+        retention_seconds: None,
+        fail_open: false,
+        initial_seq: Seq::FIRST,
+    })
+    .expect("seed audit open");
+
+    let cfg = ConnectionConfig {
+        account: None,
+        account_id: rimap_core::account::AccountId::default_account(),
+        host: "127.0.0.1".into(),
+        port,
+        encryption: parse_encryption(encryption),
+        username: "rimap-test".into(),
+        pinned_fingerprint: Some(*chaos.fingerprint()),
+        connect_timeout: Duration::from_secs(10),
+        command_timeout: Duration::from_secs(30),
+        max_fetch_body_bytes: ROOMY_FETCH,
+        max_append_bytes: ROOMY_APPEND,
+    };
+    let store: Arc<dyn CredentialStore> = Arc::new(StaticCreds);
+    let creds: Arc<dyn rimap_core::CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
+        store,
+        FallbackMode::KeyringThenEnv,
+        Protocol::Imap,
+    ));
+    let sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
+    let conn = Connection::new(cfg, sink, creds);
+    conn.append_message("INBOX", raw, &[], &[])
+        .await
+        .expect("APPEND seed");
+}
+
+/// Seed the shared multipart-with-attachment fixture (subject
+/// `e2e-wire-test-smoke`) through the proxy.
+async fn seed_through_proxy(chaos: &ChaosHarness, port: u16, encryption: &str) {
+    seed_body_through_proxy(
+        chaos,
+        port,
+        encryption,
+        &fixtures::multipart_with_attachment(),
+    )
+    .await;
+}
+
+/// Drive `chaos.search` for the seeded smoke subject; return its max UID.
+async fn search_seed_uid(h: &mut Harness) -> u64 {
+    let resp = h
+        .request(
+            "tools/call",
+            json!({
+                "name": "chaos.search",
+                "arguments": { "folder": "INBOX", "subject": "e2e-wire-test-smoke" },
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "search failed: {resp}");
+    resp["result"]["structuredContent"]["untrusted"]["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .filter_map(|m| m["uid"].as_u64())
+        .max()
+        .expect("seeded message must be found by subject")
 }
 
 /// Scenario 1 — a greeting delayed past `connect_timeout` surfaces `ERR_TIMEOUT`
@@ -287,5 +403,77 @@ async fn chaos_delayed_greeting_times_out() {
             && r["result"] == "failure"
             && r["error_code"] == "ERR_TIMEOUT"),
         "expected an auth Failure with ERR_TIMEOUT from the reconnect; got {recs:?}",
+    );
+}
+
+/// Scenario 2 — a mid-FETCH latency spike times out the operation (`ERR_TIMEOUT`),
+/// invalidates the session, and the next call recovers. The boot connect plus a
+/// warm-up search establish a live session; a `timeout` toxic then stalls the
+/// FETCH on that session (a command-stage stall, not a connect stall). A
+/// preceding successful `tool_end` before the failing one proves a connect-time
+/// timeout cannot masquerade as the mid-operation case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chaos_mid_fetch_stall_times_out_then_recovers() {
+    let Ok(chaos) = ChaosHarness::try_start() else {
+        return;
+    };
+    mark_ran("scenario2");
+    seed_through_proxy(&chaos, chaos.imaps_port(), "tls").await;
+
+    // imaps (993): connect_timeout generous (recovery reconnect not gated);
+    // command_timeout low (1s) so the stalled FETCH trips fast.
+    let mut h = spawn_ready(
+        &chaos,
+        chaos.imaps_port(),
+        "tls",
+        10,
+        1,
+        ROOMY_FETCH,
+        ROOMY_APPEND,
+    )
+    .await;
+    let audit_path = h.audit_path();
+
+    // Warm-up on the live session (success is load-bearing for the audit assertion).
+    let uid = search_seed_uid(&mut h).await;
+
+    // Degrade: stall all data → the in-flight FETCH exceeds command_timeout.
+    chaos.toxics().add_toxic(
+        "imaps",
+        &json!({ "type": "timeout", "stream": "downstream", "attributes": { "timeout": 0 } }),
+    );
+    let resp = h
+        .request_within(
+            "tools/call",
+            json!({ "name": "chaos.fetch_message", "arguments": { "folder": "INBOX", "uid": uid } }),
+            Duration::from_secs(15),
+        )
+        .await;
+    assert_error_code(&resp, "ERR_TIMEOUT");
+
+    // Recovery: session invalidated → reconnect succeeds.
+    chaos.toxics().reset();
+    let ok = h
+        .request_within(
+            "tools/call",
+            json!({ "name": "chaos.search", "arguments": { "folder": "INBOX", "subject": "e2e-wire-test-smoke" } }),
+            Duration::from_secs(15),
+        )
+        .await;
+    assert_ok(&ok, "recovery search after mid-FETCH stall");
+
+    let (status, _tempdir) = h.shutdown_and_wait().await;
+    assert!(status.success(), "binary exited non-zero: {status:?}");
+
+    // Audit: a preceding successful tool_end (warm-up search) then the failing
+    // FETCH tool_end (ERR_TIMEOUT).
+    let recs = audit::read_records(&audit_path);
+    let (s0, _s1) = audit::last_tool_call_matching_error(&recs, &["ERR_TIMEOUT"])
+        .expect("a failing tool_end with ERR_TIMEOUT");
+    assert!(
+        recs.iter().any(|r| r["kind"] == "tool_end"
+            && r["error_code"].is_null()
+            && r["seq"].as_u64().is_some_and(|s| s < s0)),
+        "a successful warm-up tool_end must precede the failing FETCH; got {recs:?}",
     );
 }

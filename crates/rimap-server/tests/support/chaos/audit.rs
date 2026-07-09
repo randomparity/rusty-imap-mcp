@@ -64,6 +64,29 @@ pub fn tool_end_error_code(records: &[Value], start_seq: u64) -> Option<String> 
     None
 }
 
+/// `(start_seq, end_seq)` of the last `tool_end` whose `error_code` is one of
+/// `codes`. Lets a scenario locate its failing call's window when other
+/// (successful) calls also appear in the log.
+pub fn last_tool_call_matching_error(records: &[Value], codes: &[&str]) -> Option<(u64, u64)> {
+    let mut best: Option<(u64, u64)> = None;
+    for r in records {
+        if r["kind"] != "tool_end" {
+            continue;
+        }
+        let matches = r["error_code"].as_str().is_some_and(|c| codes.contains(&c));
+        if !matches {
+            continue;
+        }
+        let (Some(end), Some(start)) = (seq(r), r["start_seq"].as_u64()) else {
+            continue;
+        };
+        if best.is_none_or(|(_, e)| end > e) {
+            best = Some((start, end));
+        }
+    }
+    best
+}
+
 /// Count `auth` records with `result == "failure"` whose seq lies strictly
 /// between `start_seq` and `end_seq` (the failing call's window).
 pub fn count_auth_failures_between(records: &[Value], start_seq: u64, end_seq: u64) -> usize {
@@ -125,6 +148,25 @@ mod tests {
         let (s0, s1) = last_tool_call(&recs).expect("a tool call");
         assert_eq!((s0, s1), (3, 4));
         assert_eq!(count_auth_failures_between(&recs, s0, s1), 0);
+    }
+
+    #[test]
+    fn last_tool_call_matching_error_picks_the_matching_window() {
+        let jsonl = [
+            line(json!({"seq":0,"kind":"tool_start"})),
+            line(json!({"seq":1,"kind":"tool_end","start_seq":0,"error_code":null})),
+            line(json!({"seq":2,"kind":"tool_start"})),
+            line(json!({"seq":3,"kind":"tool_end","start_seq":2,"error_code":"ERR_TIMEOUT"})),
+            line(json!({"seq":4,"kind":"tool_start"})),
+            line(json!({"seq":5,"kind":"tool_end","start_seq":4,"error_code":null})),
+        ]
+        .join("\n");
+        let recs = parse_lines(&jsonl);
+        assert_eq!(
+            last_tool_call_matching_error(&recs, &["ERR_TIMEOUT", "ERR_CONNECTION_LOST"]),
+            Some((2, 3))
+        );
+        assert_eq!(last_tool_call_matching_error(&recs, &["ERR_TLS"]), None);
     }
 
     #[test]
