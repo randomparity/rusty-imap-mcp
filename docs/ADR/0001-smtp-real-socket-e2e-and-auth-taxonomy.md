@@ -61,6 +61,18 @@ is unambiguous. The classifier is refactored into a pure
 `lettre::transport::smtp::response::Code` has public fields, even though the
 enclosing `Error` does not.
 
+**TLS-failure detection (discovered during build).** lettre's async rustls
+transport wraps *every* TLS handshake failure — including certificate
+rejection — as `Kind::Connection` (`async_net.rs` routes the `TlsConnector`
+error through `error::connection`), so `Error::is_tls()` never fires for this
+transport and a cert failure would otherwise classify as
+`Transport`/`ERR_INTERNAL`. The classifier therefore detects TLS failures by
+walking the error source chain for a `rustls::Error` (type-safe
+`io::Error::get_ref` + `downcast_ref::<rustls::Error>`, no string matching) and
+maps them to `SmtpError::Tls`/`ERR_TLS`. This adds `rustls` as a direct
+(runtime) dependency of `rimap-smtp`; it is already in-tree via lettre's
+`tokio1-rustls-tls` feature.
+
 Additionally, bound the whole SMTP operation: lettre's async transport applies
 its `.timeout()` only to the TCP *connect* future, leaving greeting/command
 reads unbounded, so a stalled (or hostile) server hangs `send_email`/`forward`
@@ -125,6 +137,12 @@ succeeds on the happy path.
   assertions are gated.
 - `SmtpError` gains a variant. It is `#[non_exhaustive]`, so downstream matches
   need no change, but the crate's own exhaustive matches must add the arm.
+- **New runtime dependency:** `rustls` becomes a direct dependency of
+  `rimap-smtp` (already in the tree via lettre) so the classifier can
+  `downcast_ref::<rustls::Error>`. The TLS-detection walk peeks through lettre's
+  error wrapping and could need revisiting if a future lettre version changes
+  how it wraps async rustls handshake errors — the `starttls_bad_cert` e2e is
+  the regression net for that.
 - A new, small SMTP-protocol responder lives in test code only; it is not a
   general SMTP server and covers only the scripted scenarios.
 

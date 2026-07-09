@@ -72,8 +72,14 @@ fn classify_reply_code(code: Code) -> ReplyClass { Auth | Rejected }
 
 Recognized auth codes (RFC 4954 / RFC 5321): permanent `530`, `534`, `535`,
 `538`; transient `432`, `454`. All other negative replies → `Rejected`.
-`is_timeout`/`is_tls`/`is_client` keep their current precedence and mappings;
-only the previously-unhandled `Transient`/`Permanent` path changes. This is
+`is_timeout`/`is_client` keep their current precedence and mappings. TLS
+detection is *not* `is_tls()`: lettre's async rustls transport wraps handshake
+failures (incl. cert rejection) as `Kind::Connection`, so `is_tls()` is dead
+for this transport. The classifier walks the error source chain for a
+`rustls::Error` (via `io::Error::get_ref` + `downcast_ref`, no string matching)
+and maps a hit to `SmtpError::Tls` (`ERR_TLS`); this adds `rustls` as a direct
+dependency of `rimap-smtp` (already in-tree via lettre). Only the
+previously-unhandled `Transient`/`Permanent` and TLS paths change. This is
 unit-testable without fabricating a lettre `Error` because
 `lettre::transport::smtp::response::Code` has public fields.
 
