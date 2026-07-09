@@ -320,7 +320,7 @@ host-runnable and PR-blocking; Dovecot is container-gated and silent-skips.
   post-login `Session::capabilities()` issues a second `CAPABILITY`; the exact
   command sequence (and whether `LOGIN` uses quoted strings vs literals) is
   fixed by async-imap 0.11 and pinned in `Cargo.lock`. The scripts are written
-  against the observed sequence (captured during TDD via `join()`), and an
+  against the observed sequence (captured during TDD via `recorded()`), and an
   async-imap bump that changes the dialog will fail these tests loudly — which
   is the intended tripwire, not a flake.
 - **Server response tag mismatch would hang.** async-imap correlates the tagged
