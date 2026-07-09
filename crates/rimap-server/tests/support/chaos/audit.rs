@@ -4,9 +4,12 @@
 //! discriminator (`auth`, `tool_start`, `tool_end`, `process_start`,
 //! `process_end`); `tool_end` carries `start_seq` back to its `tool_start` and an
 //! `error_code`. These helpers scope assertions (e.g. "exactly one `auth`
-//! Failure") to a single tool-call's Seq window, encoding the spec's lazy-connect
-//! invariant: connect is lazy, so the first tool call's connect is the first-ever
-//! `auth` record.
+//! Failure") to a single tool-call's Seq window.
+//!
+//! Note: the server connects EAGERLY at boot (special-use folder discovery,
+//! fatal-on-failure), so the first-ever `auth` record is the boot connect, not a
+//! tool call. Per-call assertions therefore bracket by the failing call's
+//! `tool_start`/`tool_end` Seq window rather than assuming "first auth record".
 
 use std::path::Path;
 

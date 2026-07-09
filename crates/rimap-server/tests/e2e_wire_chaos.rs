@@ -433,15 +433,20 @@ async fn chaos_delayed_greeting_times_out() {
     let (status, _tempdir) = h.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
 
-    // Audit: a reconnect attempt emitted an `auth` Failure with ERR_TIMEOUT — the
-    // connect-phase greeting stall. (A command timeout on the live session emits
-    // no auth record, so this specifically evidences the greeting-on-connect stall.)
+    // Audit: op #2's reconnect emitted exactly one `auth` Failure — the
+    // connect-phase greeting stall. Scope strictly to op #2's Seq window (the
+    // LAST ERR_TIMEOUT tool_end — op #1 precedes it) so a stray auth record
+    // elsewhere cannot satisfy this vacuously. op #1 is a command timeout on the
+    // established session (no reconnect, no `auth` record: `auth` is emitted only
+    // by `connect_inner`), so the single auth Failure in op #2's window
+    // specifically evidences the greeting-on-connect stall.
     let recs = audit::read_records(&audit_path);
-    assert!(
-        recs.iter().any(|r| r["kind"] == "auth"
-            && r["result"] == "failure"
-            && r["error_code"] == "ERR_TIMEOUT"),
-        "expected an auth Failure with ERR_TIMEOUT from the reconnect; got {recs:?}",
+    let (s0, s1) = audit::last_tool_call_matching_error(&recs, &["ERR_TIMEOUT"])
+        .expect("op #2's failing tool_end with ERR_TIMEOUT");
+    assert_eq!(
+        audit::count_auth_failures_between(&recs, s0, s1),
+        1,
+        "op #2's reconnect must emit exactly one auth Failure (the greeting stall); got {recs:?}",
     );
 }
 
@@ -590,8 +595,16 @@ async fn chaos_starttls_reset_typed_error_one_auth() {
 /// with `ERR_ATTACHMENT_TOO_LARGE` by the `RFC822.SIZE` pre-check, before any body
 /// bytes are read. Falsifiable against a buffering regression: if `fetch_body`
 /// regressed to read the body before checking size, the bandwidth toxic would
-/// stall it to `command_timeout` and surface `ERR_TIMEOUT` instead. The prompt
-/// rejection under an active trickle is the evidence that no body was buffered.
+/// stall it to `command_timeout` and surface `ERR_TIMEOUT` instead — the prompt
+/// rejection is then evidence that no body was buffered.
+///
+/// Scope caveat: `ERR_ATTACHMENT_TOO_LARGE` and the `< 20s` bound both hold even
+/// if the bandwidth toxic were inert (an unthrottled over-cap fetch also rejects
+/// promptly), so 4a alone does not *prove* the trickle throttled. That the
+/// bandwidth toxic on the imaps proxy genuinely throttles the body stream is
+/// proven non-vacuously by **scenario 4b** (same toxic type, same proxy): without
+/// the toxic 4b's 2 MiB fetch succeeds; with it, it times out. 4a's role is the
+/// prompt size-rejection (no buffering) under that established throttle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chaos_trickle_over_cap_rejects_promptly() {
     let Ok(chaos) = ChaosHarness::try_start() else {
