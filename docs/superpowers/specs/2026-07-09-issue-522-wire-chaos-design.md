@@ -38,6 +38,29 @@ exists.
   record**, and that a **subsequent call succeeds** (no wedged session/breaker).
 - [ ] Nightly job, not PR CI (wall-time).
 
+## Implementation note (2026-07-09) — connect is eager at boot, not lazy
+
+TDD against the real stack corrected a load-bearing assumption below. The server
+does **not** connect lazily on the first tool call: it establishes the IMAP
+session **eagerly at boot** for special-use folder discovery (Drafts/Sent/Trash),
+and that connect is **fatal-on-failure** — the server exits if it cannot list
+folders. Consequences for the as-built scenarios:
+
+- The server requires a **healthy** connect at boot, so a connect-phase fault
+  (delayed greeting, RST during STARTTLS) cannot be injected at boot — the server
+  would fail to start. These faults are instead exercised on a **reconnect after a
+  healthy boot**: degrade the network, drive an op that fails and invalidates the
+  session, then the next op's reconnect hits the connect-phase fault.
+- The eager boot connect is the natural "warm-up" for operation-targeting
+  scenarios (2, 4): the session is already established when the toxic is added.
+- The `auth`-Failure assertion still isolates the connect phase: a command timeout
+  on the live session emits no `auth` record, so an `auth` Failure evidences a
+  reconnect specifically.
+
+The scenario table and error-code mapping below hold as written (the wire codes
+and audit shapes are unchanged); only the *trigger* moved from "first tool call"
+to "reconnect after healthy boot."
+
 ## Grounding survey — reality the assertions bind to
 
 Established by reading the current tree; every assertion below cites live
