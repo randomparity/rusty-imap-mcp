@@ -43,11 +43,27 @@ exists.
 Established by reading the current tree; every assertion below cites live
 behavior, not wished behavior.
 
-- **Timeout taxonomy.** `connect_timeout` (default 10s) spans TCP+TLS+greeting+
-  login as one budget (`connection/handshake.rs`); `command_timeout` (default
-  30s) wraps every op (`connection/dispatch.rs`, `time.rs`). Elapsing either →
-  `ImapError::Timeout { op }` → `ErrorCode::Timeout` → **`ERR_TIMEOUT`**. The
-  suite lowers both budgets in config to keep wall-time bounded.
+- **Timeout taxonomy.** `connect_timeout` (default 10s) bounds TCP+TLS+greeting+
+  login as one *decrementing* budget applied **per step** — each step is
+  `timeout(remaining, step).await.map_err(timeout_err(op))?`
+  (`connection/handshake.rs`), returning `Err(ImapError::Timeout{op})` *up to*
+  `connect_inner`; it is **not** an outer wrapper around the whole connect.
+  `command_timeout` (default 30s) wraps every op (`connection/dispatch.rs`,
+  `time.rs`). Elapsing either → `ImapError::Timeout { op }` → `ErrorCode::Timeout`
+  → **`ERR_TIMEOUT`**. The suite lowers budgets per scenario (§Component 4) to
+  keep wall-time bounded.
+- **Connect-timeout still emits exactly one `auth` record (established, not
+  assumed).** Because the per-step `timeout` returns an `Err` rather than
+  cancelling `connect_inner`, control returns to `connect_inner`'s
+  `match &outcome { Err(err) => emit_auth(auth_failure(&ctx, err.code())) }`
+  (`connection/mod.rs`), which runs **outside** the timed step — so a greeting/
+  handshake timeout writes exactly one `auth` Failure with
+  `error_code = Timeout` before the error propagates. The one way to lose this
+  record is an *outer* `command_timeout` cancelling `session()`→`connect_inner`
+  before the emit; scenario 1 avoids that by keeping `command_timeout` (default
+  30s) ≫ `connect_timeout` (2s), so the inner per-step timeout always fires
+  first. This is why scenario 1's audit half is satisfiable without a production
+  change (the "no production-code changes" non-goal holds).
 - **Session invalidation + recovery.** A mid-op timeout is a *transport failure*
   (`is_transport_failure` includes `Timeout`) → `invalidate()` drops the cached
   session (`connection/mod.rs`). The session is a lazy `Mutex<Option<..>>`; the
@@ -305,7 +321,7 @@ count to the single call window, which contains the mis-count if it happens.
 | 1 | Delayed **greeting** | `starttls` (143) | `timeout` (block data after TCP connect, > connect budget) — plaintext greeting is read before TLS on the STARTTLS path, so this stalls the greeting specifically | `ERR_TIMEOUT` | `auth` result=Failure, error_code=Timeout | remove toxic → next `list_folders` ok |
 | 2 | Mid-FETCH stall | `imaps` (993) | **warm-up call succeeds**, then `timeout` toxic added, then FETCH | `ERR_TIMEOUT` | preceding `tool_end` success **then** failing `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next `search`/`fetch` ok (session was invalidated → reconnect) |
 | 3 | RST during STARTTLS | `starttls` (143) | `reset_peer` (`timeout: 0`) | `ERR_TLS` **or** `ERR_CONNECTION_LOST` | **exactly one** `auth` result=Failure in the call window | remove toxic → next call over STARTTLS ok |
-| 4a | Over-cap body under trickle (buffering bound) | `imaps` (993) | warm-up ok, then `bandwidth` (slow); body **>** `max_fetch_body_bytes` | `ERR_ATTACHMENT_TOO_LARGE` **promptly** (≪ command budget) | success `tool_end` then `tool_end` error_code=`ERR_ATTACHMENT_TOO_LARGE` | remove toxic → next fetch ok |
+| 4a | Over-cap body under trickle (buffering bound) | `imaps` (993) | warm-up ok, then `bandwidth` (slow); body **>** `max_fetch_body_bytes` | `ERR_ATTACHMENT_TOO_LARGE` **promptly** (≪ command budget) | success `tool_end` then `tool_end` error_code=`ERR_ATTACHMENT_TOO_LARGE` | remove toxic → next **small metadata call** (`search`/`list_folders`) ok — re-fetching the over-cap body would still be `ERR_ATTACHMENT_TOO_LARGE`, so recovery uses a different call to prove session liveness |
 | 4b | Under-cap body trickled (time bound) | `imaps` (993) | warm-up ok, then `bandwidth` so body can't arrive in command budget; `max_fetch_body_bytes` raised above body | `ERR_TIMEOUT` | success `tool_end` then `tool_end` error_code=`ERR_TIMEOUT` | remove toxic → next fetch ok |
 
 Scenario 1 and 3 use the `starttls` proxy (`encryption = "starttls"`, port 143) —
@@ -374,6 +390,17 @@ mandatory if the job ever moves off ephemeral `ubuntu-latest` runners.
   branch of the set is a superset allowance, not a promise. If flake appears, the
   fallback is to widen the asserted set with a logged rationale rather than to
   silently accept any code.
+- **Connect-timeout emits one `auth` record (confirm in first run; fallback
+  ready).** Scenario 1's audit half (`auth` Failure, `error_code=Timeout`) is
+  established against current code above (per-step timeout returns `Err` to
+  `connect_inner`'s emit, and `command_timeout` ≫ `connect_timeout` prevents outer
+  cancellation). The first nightly run confirms it, symmetric with the RST hedge
+  below. Explicit fallback if a future refactor makes a greeting timeout emit zero
+  `auth` records (e.g. an outer connect wrapper): relax scenario 1's audit half to
+  the dispatch-emitted failing `tool_end` (`error_code=ERR_TIMEOUT`, caller-side
+  and cancellation-safe, exactly as scenarios 2/4 assert) plus the wire
+  `ERR_TIMEOUT`, and record that fallback inline — never silently accept a missing
+  record.
 - **Pre-login RST still emits exactly one `auth` record (confirm in first run).**
   Scenario 3's "exactly one `auth` result=Failure" assertion depends on
   `connect_inner` emitting its auth record even when the reset lands during the
