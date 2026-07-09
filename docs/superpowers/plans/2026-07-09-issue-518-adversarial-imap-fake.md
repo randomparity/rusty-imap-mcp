@@ -23,72 +23,150 @@ two-line shipped change adds an aggregated `warn!` to `ops::fetch`.
 ## Global Constraints
 
 - **MSRV 1.88.0**; dev toolchain 1.94.0. No syntax/deps that break MSRV.
-- **Zero warnings.** CI runs all builds under `RUSTFLAGS="-D warnings"`.
+- **Zero warnings, per commit.** CI builds under `RUSTFLAGS="-D warnings"`, and
   `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
-  must be clean.
+  must be clean **after every commit** (bisect-clean). Two consequences that
+  bite this plan specifically:
+  - `[lints] workspace = true` applies the workspace clippy config
+    (`unwrap_used = "deny"`, `expect_used = "warn"`, `panic = "deny"`, …) to the
+    package's **integration test crates** too. Test files must suppress the
+    lints they trigger.
+  - **`#![expect(...)]` must list exactly the lints the file body triggers.** An
+    unfulfilled member fires `unfulfilled_lint_expectations`, which `-D warnings`
+    turns into a hard error. So `#![expect(clippy::unwrap_used, clippy::expect_used)]`
+    on a file with no `.expect()` call FAILS. When a task adds a construct
+    (`.unwrap()`, `.expect()`, `panic!`) that a scenario file did not previously
+    contain, that same task must update the file's `#![expect(...)]` list.
+- **No new shipped dependency.** `rcgen`/`tokio-rustls`/`rustls`/`tracing-subscriber`
+  are added only to `rimap-imap` **dev-dependencies** (all already
+  `[workspace.dependencies]`).
 - **No `#[allow(...)]`** except the module-level `#![allow(dead_code)]` on the
   shared test-support module (mirrors `tests/integration/support/container.rs:7`).
-  Use `#![expect(clippy::unwrap_used, reason = "tests")]` etc. inside test files.
-- **No new shipped dependency.** `rcgen`/`tokio-rustls`/`rustls` are added only
-  to `rimap-imap` **dev-dependencies**.
+  Elsewhere use `#[expect(..., reason = "...")]`.
+- **`#[cfg(test)]` IS set in integration-test crates** (they compile under
+  rustc `--test`), so a `#[cfg(test)] mod tests` inside a `tests/support/*.rs`
+  file DOES compile and run — but only once some top-level `tests/*.rs` binary
+  does `mod support;`. Until then the support module is never compiled.
 - **Absolute imports only** (no relative `..`). 100-char lines. Google-style
-  docstrings on public items (`missing_docs = "warn"` is on for test targets too).
-- **Guardrail suite:** `just ci` (runs `fmt-check`, `lint`, `test`, `deny`,
-  hooks). Fast inner loop: `cargo nextest run -p rimap-imap --locked`.
+  docstrings on public items (`missing_docs = "warn"` applies to test targets).
+- **Guardrail suite:** `just ci` (`fmt-check`, `lint`, `test`, `deny`, hooks).
+  Fast inner loop: `cargo nextest run -p rimap-imap --locked`.
 - **TDD:** failing test first, watch it fail, minimal implementation, watch it
   pass, commit. One logical change per commit; conventional-commit subjects
-  ≤72 chars; end each commit message with the trailer
+  ≤72 chars; end each commit body with the trailer
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+
+## Public API reference (verified against the repo — use these exact forms)
+
+- `rimap_imap::{Connection, ConnectionConfig, ImapEncryption}` (re-exported at
+  crate root).
+- `rimap_imap::error::{AuthFailure, ImapError}`.
+- `rimap_imap::types::{FetchSpec, Uid, Folder}`.
+- **UID construction from a test crate:** `Uid::new` is `pub(crate)` and
+  **unreachable** from `tests/*.rs`. Use the public
+  `rimap_imap::types::Uid::from(core::num::NonZeroU32::new(N).unwrap())`
+  (exactly as `tests/integration/dovecot.rs:494` does).
+- `Connection::move_messages(&self, source_folder, dest_folder, uids: &[Uid], expected_source_uidvalidity: Option<u32>) -> Result<MoveOutcome, ImapError>`
+  where `MoveOutcome { used_fallback: bool, folder_wide_expunge: bool, .. }`.
+- `Connection::fetch(&self, folder, uids: &[Uid], spec: FetchSpec, expected_uidvalidity: Option<u32>) -> Result<(Vec<FetchedMessage>, Option<u32>), ImapError>`
+  where `FetchedMessage { uid: Uid, .. }`.
+- `Connection::list_folders(&self, pattern) -> Result<Vec<Folder>, ImapError>`
+  where `Folder { name: String, .. }`.
+- `rimap_core::TlsFingerprint::from_cert_der(der: &[u8]) -> TlsFingerprint`.
+- `secrecy::SecretString::from(String)`, `rimap_core::credential::CredentialSource::Keyring`.
 
 ---
 
 ## File Structure
 
-- `crates/rimap-imap/Cargo.toml` — add `rcgen` (+ confirm `tokio-rustls`,
-  `rustls`) to `[dev-dependencies]`; add a self dev-dep only if a feature gate
-  is needed (it is not — the harness lives in `tests/`, not `src/`).
-- `crates/rimap-imap/tests/support/mod.rs` — `#![allow(dead_code)]`,
-  `pub mod certs; pub mod fake_imap;`.
-- `crates/rimap-imap/tests/support/certs.rs` — self-signed cert + pin.
-- `crates/rimap-imap/tests/support/fake_imap.rs` — `Step`, `FakeImapServer`.
-- `crates/rimap-imap/tests/adversarial_imap.rs` — smoke test + scenarios 2, 3, 4.
+- `crates/rimap-imap/Cargo.toml` — `[dev-dependencies]` add `rcgen`,
+  `tokio-rustls`, `rustls` (Task 1), then `tracing`, `tracing-subscriber` (Task 5).
+- `crates/rimap-imap/tests/support/mod.rs` — `#![allow(dead_code)]`, module decls.
+- `crates/rimap-imap/tests/support/certs.rs` — self-signed cert + pin (Task 2).
+- `crates/rimap-imap/tests/support/fake_imap.rs` — `Step`, `FakeImapServer` (Task 2).
+- `crates/rimap-imap/tests/support/tracing_capture.rs` — scoped warn capture (Task 5).
+- `crates/rimap-imap/tests/adversarial_imap.rs` — smoke (Task 2) + scenarios 2, 3, 4.
 - `crates/rimap-imap/tests/expunge_folder_wide_gap.rs` — **rewritten** from the
-  `#[ignore]` placeholder into scenario 1.
-- `crates/rimap-imap/src/ops/fetch.rs` — aggregated skip `warn!` (scenario 3).
-- `AGENTS.md` — CONTRIBUTING note (fake vs Dovecot).
+  `#[ignore]` placeholder into scenario 1 (Task 3).
+- `crates/rimap-imap/src/ops/fetch.rs` — aggregated skip `warn!` (Task 5).
+- `AGENTS.md` — CONTRIBUTING note (Task 7).
 
-**Cargo test discovery note:** every top-level `tests/*.rs` file is its own test
-binary; the `tests/support/` subdirectory is **not** compiled as a binary, so it
-is included per-scenario-binary via `mod support;`. Both scenario binaries
-include it; the module-level `#![allow(dead_code)]` absorbs the per-binary
-unused-helper warnings.
+**Cargo discovery:** every top-level `tests/*.rs` file is its own test binary;
+`tests/support/` is not compiled as a binary — it is included per-scenario-binary
+via `mod support;`. Both scenario binaries include it; the module-level
+`#![allow(dead_code)]` absorbs per-binary unused-helper warnings.
 
 ---
 
-### Task 1: Dev-deps + support skeleton + self-signed cert
+### Task 1: Add dev-dependencies for the fake harness
 
 **Files:**
 - Modify: `crates/rimap-imap/Cargo.toml` (`[dev-dependencies]`)
-- Create: `crates/rimap-imap/tests/support/mod.rs`
-- Create: `crates/rimap-imap/tests/support/certs.rs`
 
-**Interfaces:**
-- Produces: `support::certs::self_signed() -> SelfSigned` where
-  `struct SelfSigned { chain: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>, pin: TlsFingerprint }`.
+**Rationale:** Kept as its own commit because it is independently verifiable
+(the crate still builds, no new modules yet). The support module is NOT created
+here — a `tests/support/*.rs` file is not compiled until a binary includes it
+(Task 2), so creating it now would land unverified code.
 
-- [ ] **Step 1: Add dev-dependencies.** In `crates/rimap-imap/Cargo.toml`, under
-  `[dev-dependencies]`, add (`tokio-rustls` and `rustls` are already normal deps,
-  but dev code needs them too — inheriting `workspace = true` is fine to repeat):
+- [ ] **Step 1: Add the dev-deps.** In `crates/rimap-imap/Cargo.toml`, under
+  `[dev-dependencies]`, add:
 
 ```toml
 # In-process fake IMAP server (tests/support): terminates TLS with a
-# self-signed rcgen cert the client pins by fingerprint. Test-only.
+# self-signed rcgen cert the client pins by fingerprint. Test-only; no
+# shipped-dependency change (all three are already normal deps of this crate,
+# repeated here so dev/test code may use them directly).
 rcgen = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 ```
 
-- [ ] **Step 2: Create the support module root.**
+- [ ] **Step 2: Verify the crate still builds.**
+
+```bash
+cargo check -p rimap-imap --tests --locked
+```
+
+Expected: PASS (no code change, only manifest). This genuinely compiles the
+existing test binaries; the new harness arrives in Task 2.
+
+- [ ] **Step 3: Commit.**
+
+```bash
+git add crates/rimap-imap/Cargo.toml
+git commit -m "test(imap): add dev-deps for in-process fake IMAP server"
+```
+
+---
+
+### Task 2: Support module + self-signed cert + `FakeImapServer` + smoke test
+
+**This task is the calibration point.** The exact async-imap 0.11 command
+sequence (does `Session::capabilities()` re-issue `CAPABILITY` post-login? are
+`LOGIN` args quoted?) is implementation-defined. Task 2's smoke test drives a
+real login through the fake and prints `recorded()`; **read that output and
+adjust the scenario scripts in Tasks 3–6 to match the observed sequence.** This
+is also the **first real compile** of the support module (the smoke binary
+`mod support;`s it).
+
+**Files:**
+- Create: `crates/rimap-imap/tests/support/mod.rs`
+- Create: `crates/rimap-imap/tests/support/certs.rs`
+- Create: `crates/rimap-imap/tests/support/fake_imap.rs`
+- Create: `crates/rimap-imap/tests/adversarial_imap.rs`
+
+**Interfaces produced:**
+- `support::certs::self_signed() -> SelfSigned { chain: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>, pin: TlsFingerprint }`
+- `enum support::fake_imap::Step { Expect { verb: &'static str }, Send(Vec<u8>), Reply { text: &'static str }, Delay(Duration), Disconnect }`
+- `struct support::fake_imap::FakeImapServer` with `async fn start(Vec<Step>) -> Self`,
+  `fn port(&self) -> u16`, `fn pin(&self) -> TlsFingerprint`,
+  `fn connection(&self, &str) -> Connection`,
+  `fn connection_timeout(&self, &str, Duration) -> Connection`,
+  `fn connection_with(&self, &str, Arc<dyn CredentialResolver>, Duration) -> Connection`,
+  `fn recorded(&self) -> Vec<String>`.
+- `struct support::fake_imap::PanicResolver`.
+
+- [ ] **Step 1: Create the support module root.**
   `crates/rimap-imap/tests/support/mod.rs`:
 
 ```rust
@@ -104,8 +182,8 @@ pub mod certs;
 pub mod fake_imap;
 ```
 
-- [ ] **Step 3: Write the failing cert test.** Create
-  `crates/rimap-imap/tests/support/certs.rs` with the test only:
+- [ ] **Step 2: Create the cert helper.**
+  `crates/rimap-imap/tests/support/certs.rs`:
 
 ```rust
 //! Self-signed leaf for the in-process fake. The client pins its
@@ -147,84 +225,26 @@ mod tests {
     use super::self_signed;
 
     #[test]
-    fn pin_matches_leaf_der_fingerprint() {
+    fn pin_matches_leaf_der_and_is_fresh_each_call() {
         let a = self_signed();
-        // The pin is exactly the fingerprint of the leaf we serve.
         assert_eq!(
             a.pin,
             rimap_core::TlsFingerprint::from_cert_der(a.chain[0].as_ref()),
         );
-        // Two independent generations differ (fresh key each time).
         let b = self_signed();
         assert_ne!(a.pin, b.pin);
     }
 }
 ```
 
-  **Note:** a `tests/support/*.rs` file is not compiled as its own test binary,
-  so the `#[cfg(test)] mod tests` here does not run standalone; it compiles and
-  runs only when a scenario binary includes `mod support;`. That is acceptable —
-  the real proof is Task 2's smoke test. If you prefer, fold this assertion into
-  Task 2 instead. Keep it here for a focused first commit.
-
-- [ ] **Step 4: Verify it compiles (harness not yet used).** Because no scenario
-  binary includes `support` yet, add a temporary throwaway to confirm it builds,
-  OR proceed to Task 2 which exercises it. Run:
-
-```bash
-cargo check -p rimap-imap --tests --locked
-```
-
-Expected: compiles. (`fake_imap` does not exist yet, so temporarily comment out
-`pub mod fake_imap;` in `mod.rs` for this check, or land Steps together with
-Task 2. Simplest: commit Task 1 with `pub mod fake_imap;` commented, uncomment in
-Task 2.)
-
-- [ ] **Step 5: Commit.**
-
-```bash
-git add crates/rimap-imap/Cargo.toml crates/rimap-imap/tests/support/mod.rs \
-        crates/rimap-imap/tests/support/certs.rs
-git commit -m "test(imap): add support skeleton and self-signed cert for fake"
-```
-
----
-
-### Task 2: The `FakeImapServer` harness + smoke test (CALIBRATION)
-
-**This task is the calibration point.** The exact async-imap 0.11 command
-sequence (does `Session::capabilities()` re-issue `CAPABILITY` post-login? are
-`LOGIN` args quoted?) is implementation-defined. Task 2's smoke test drives a
-real login through the fake and prints `recorded()`; **read that output and
-adjust the scenario scripts in Tasks 3–6 to match the observed sequence.**
-
-**Files:**
-- Create: `crates/rimap-imap/tests/support/fake_imap.rs`
-- Create: `crates/rimap-imap/tests/adversarial_imap.rs`
-- Modify: `crates/rimap-imap/tests/support/mod.rs` (uncomment `pub mod fake_imap;`)
-
-**Interfaces:**
-- Consumes: `support::certs::self_signed`.
-- Produces:
-  - `enum Step { Expect { verb: &'static str }, Send(Vec<u8>), Reply { text: &'static str }, Delay(Duration), Disconnect }`
-  - `struct FakeImapServer` with:
-    - `async fn start(script: Vec<Step>) -> FakeImapServer`
-    - `fn port(&self) -> u16`
-    - `fn pin(&self) -> TlsFingerprint`
-    - `fn connection(&self, username: &str) -> Connection`
-    - `fn connection_timeout(&self, username: &str, command_timeout: Duration) -> Connection`
-    - `fn connection_with(&self, username: &str, resolver: Arc<dyn CredentialResolver>, command_timeout: Duration) -> Connection`
-    - `fn recorded(&self) -> Vec<String>`
-  - `struct PanicResolver` (impl `CredentialResolver`, panics in `resolve`).
-
-- [ ] **Step 1: Write the harness.** Create
+- [ ] **Step 3: Create the fake server.**
   `crates/rimap-imap/tests/support/fake_imap.rs`:
 
 ```rust
 //! In-process TLS-terminating scriptable IMAP fake. Replays an ordered
 //! `Vec<Step>` per accepted connection (accept-loop) so a client's transparent
 //! ReadOnly reconnect re-observes the same dialog. Drives the real `Connection`.
-#![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#![expect(clippy::unwrap_used, reason = "tests")]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -243,8 +263,8 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::support::certs::{self, SelfSigned};
 
-/// Bounded number of connections the accept-loop serves before stopping — a
-/// ReadOnly retry needs at most 2; the cap prevents a storming client.
+/// Bounded number of connections the accept-loop serves — a ReadOnly retry
+/// needs at most 2; the cap prevents a storming client.
 const MAX_ACCEPTS: usize = 4;
 
 /// Fixed password the static resolver returns.
@@ -331,14 +351,9 @@ impl FakeImapServer {
         self.recorded.lock().unwrap().clone()
     }
 
-    /// Fully-wired `Connection` pointed at this fake (~1s command timeout,
-    /// static-password resolver, no-op audit sink).
+    /// Fully-wired `Connection` (static-password resolver, ~1s timeout).
     pub fn connection(&self, username: &str) -> Connection {
-        self.connection_with(
-            username,
-            Arc::new(StaticResolver),
-            Duration::from_secs(1),
-        )
+        self.connection_timeout(username, Duration::from_secs(1))
     }
 
     /// Static-resolver connection with a caller-chosen command timeout
@@ -347,7 +362,8 @@ impl FakeImapServer {
         self.connection_with(username, Arc::new(StaticResolver), command_timeout)
     }
 
-    /// Same, but inject an arbitrary resolver and command timeout.
+    /// Inject an arbitrary resolver and command timeout (scenario 2 uses a
+    /// `PanicResolver` to prove resolve() is never consulted).
     pub fn connection_with(
         &self,
         username: &str,
@@ -437,6 +453,7 @@ pub struct PanicResolver;
 
 impl CredentialResolver for PanicResolver {
     #[expect(
+        clippy::panic,
         clippy::panic_in_result_fn,
         reason = "deliberate: proves the resolver is never called"
     )]
@@ -461,10 +478,7 @@ impl AuthEventSink for NoopAudit {
 }
 ```
 
-- [ ] **Step 2: Uncomment `pub mod fake_imap;`** in
-  `crates/rimap-imap/tests/support/mod.rs` (if you commented it in Task 1).
-
-- [ ] **Step 3: Write the smoke test.** Create
+- [ ] **Step 4: Create the smoke test.**
   `crates/rimap-imap/tests/adversarial_imap.rs`:
 
 ```rust
@@ -473,7 +487,11 @@ impl AuthEventSink for NoopAudit {
 //! `expunge_folder_wide_gap.rs`; scenarios 2–4 live here.
 //!
 //! Fake, no container runtime — runs on every PR.
-#![expect(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
+//!
+//! The `#![expect(...)]` list below must match exactly the clippy lints this
+//! file's body triggers; later tasks extend it as they add `.unwrap()` /
+//! `panic!` constructs (see the plan's Global Constraints).
+#![expect(clippy::expect_used, reason = "tests")]
 
 mod support;
 
@@ -482,7 +500,7 @@ use support::fake_imap::{FakeImapServer, Step};
 /// Smoke/calibration: a real login + LIST through the fake proves the TLS
 /// handshake, pin, greeting, CAPABILITY drain, LOGIN, and post-login
 /// CAPABILITY all work end-to-end. Print `recorded()` and use the observed
-/// command order to write the scenario scripts.
+/// command order to write the scenario scripts in Tasks 3–6.
 #[tokio::test]
 async fn login_and_list_succeed_through_fake() {
     let server = FakeImapServer::start(vec![
@@ -499,7 +517,6 @@ async fn login_and_list_succeed_through_fake() {
         Step::Expect { verb: "CAPABILITY" },
         Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
         Step::Reply { text: "OK CAPABILITY completed" },
-        // LIST "" "*"
         Step::Expect { verb: "LIST" },
         Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
         Step::Reply { text: "OK LIST completed" },
@@ -515,23 +532,31 @@ async fn login_and_list_succeed_through_fake() {
 }
 ```
 
-- [ ] **Step 4: Run the smoke test and read the dialog.**
+- [ ] **Step 5: Run the smoke test and read the dialog.**
 
 ```bash
 cargo nextest run -p rimap-imap --locked adversarial_imap --no-capture
 ```
 
-Expected: PASS. **Read the `recorded dialog:` output.** Confirm the exact command
-order (pre-login CAPABILITY, LOGIN, post-login CAPABILITY?, LIST). If the test
-fails on an `Expect` verb-mismatch panic (visible in the fake's assert message),
-the observed order differs from the script above — adjust the script to match and
-re-run until PASS. **The confirmed order is the template for Tasks 3–6.**
+Expected: PASS. **Read the `recorded dialog:` output** and confirm the command
+order (pre-login CAPABILITY, LOGIN, post-login CAPABILITY?, LIST). If it fails on
+a `fake: expected command` panic, the observed order differs — adjust the script
+until PASS. **The confirmed order is the template for Tasks 3–6.**
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 6: Confirm clippy is clean (per-commit gate).**
 
 ```bash
-git add crates/rimap-imap/tests/support/fake_imap.rs \
-        crates/rimap-imap/tests/support/mod.rs \
+cargo clippy -p rimap-imap --tests --all-features --locked -- -D warnings
+```
+
+Expected: clean. (Confirms the `#![expect(...)]` lists match the triggered lints.)
+
+- [ ] **Step 7: Commit.**
+
+```bash
+git add crates/rimap-imap/tests/support/mod.rs \
+        crates/rimap-imap/tests/support/certs.rs \
+        crates/rimap-imap/tests/support/fake_imap.rs \
         crates/rimap-imap/tests/adversarial_imap.rs
 git commit -m "test(imap): add scriptable TLS fake and login smoke test"
 ```
@@ -543,11 +568,10 @@ git commit -m "test(imap): add scriptable TLS fake and login smoke test"
 **Files:**
 - Modify (rewrite): `crates/rimap-imap/tests/expunge_folder_wide_gap.rs`
 
-**Interfaces:**
-- Consumes: `support::fake_imap::{FakeImapServer, Step}`; `Connection::move_messages`.
-
 - [ ] **Step 1: Replace the placeholder with the real test.** Overwrite
-  `crates/rimap-imap/tests/expunge_folder_wide_gap.rs` entirely:
+  `crates/rimap-imap/tests/expunge_folder_wide_gap.rs` entirely. **Adjust the
+  CAPABILITY placement and untagged-response shapes to the sequence Task 2
+  confirmed.**
 
 ```rust
 //! Scenario 1: a server advertising neither MOVE nor UIDPLUS forces the
@@ -558,18 +582,17 @@ git commit -m "test(imap): add scriptable TLS fake and login smoke test"
 //!
 //! Fake, no container runtime — runs on every PR. Replaces the former
 //! `#[ignore]`d placeholder that marked this gap.
-#![expect(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
+#![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
 mod support;
+
+use core::num::NonZeroU32;
 
 use rimap_imap::types::Uid;
 use support::fake_imap::{FakeImapServer, Step};
 
 #[tokio::test]
 async fn no_move_no_uidplus_uses_folder_wide_expunge() {
-    // Post-login CAPABILITY advertises NEITHER MOVE NOR UIDPLUS, so the client
-    // takes copy_delete_fallback -> run_expunge(FolderWide) -> plain EXPUNGE.
-    // Adjust the CAPABILITY placement per Task 2's calibration.
     let server = FakeImapServer::start(vec![
         Step::Send(b"* OK fake ready\r\n".to_vec()),
         Step::Expect { verb: "CAPABILITY" },
@@ -603,8 +626,9 @@ async fn no_move_no_uidplus_uses_folder_wide_expunge() {
     .await;
 
     let conn = server.connection("user@example.com");
+    let uid = Uid::from(NonZeroU32::new(5).unwrap());
     let outcome = conn
-        .move_messages("INBOX", "Archive", &[Uid::new(5).unwrap()], None)
+        .move_messages("INBOX", "Archive", &[uid], None)
         .await
         .expect("move should succeed via fallback");
 
@@ -624,17 +648,16 @@ async fn no_move_no_uidplus_uses_folder_wide_expunge() {
 }
 ```
 
-- [ ] **Step 2: Run it, expect the calibration-dependent first failure.**
+- [ ] **Step 2: Run it, adjust the script to the real dialog.**
 
 ```bash
 cargo nextest run -p rimap-imap --locked expunge_folder_wide_gap --no-capture
 ```
 
-Expected initially: may FAIL on a `fake: expected command` assert if the SELECT/
-STATUS/COPY/STORE/EXPUNGE order or the untagged-response shape differs from real
-async-imap. Adjust the untagged responses / step order to the real dialog (use
-`--no-capture` output and `recorded()`), then re-run until PASS. Verify the
-assertions on `used_fallback` / `folder_wide_expunge` hold.
+Expected initially: may FAIL on a `fake: expected command` assert if the
+SELECT/COPY/STATUS/STORE/EXPUNGE order or untagged-response shapes differ from
+real async-imap. Adjust to the real dialog (use `--no-capture` and `recorded()`),
+re-run until PASS. Confirm `used_fallback` / `folder_wide_expunge` hold.
 
 - [ ] **Step 3: Confirm the placeholder is gone.**
 
@@ -644,9 +667,10 @@ grep -c "#\[ignore" crates/rimap-imap/tests/expunge_folder_wide_gap.rs
 
 Expected: `0`.
 
-- [ ] **Step 4: Commit.**
+- [ ] **Step 4: Clippy + commit.**
 
 ```bash
+cargo clippy -p rimap-imap --tests --all-features --locked -- -D warnings
 git add crates/rimap-imap/tests/expunge_folder_wide_gap.rs
 git commit -m "test(imap): verify folder-wide EXPUNGE data-loss path via fake"
 ```
@@ -656,14 +680,18 @@ git commit -m "test(imap): verify folder-wide EXPUNGE data-loss path via fake"
 ### Task 4: Scenario 2 — LOGINDISABLED auth provenance
 
 **Files:**
-- Modify: `crates/rimap-imap/tests/adversarial_imap.rs` (add a test)
+- Modify: `crates/rimap-imap/tests/adversarial_imap.rs`
 
-**Interfaces:**
-- Consumes: `support::fake_imap::{FakeImapServer, Step, PanicResolver}`;
-  `ImapError`, `AuthFailure`.
+- [ ] **Step 1: Widen the module `#![expect(...)]`.** Scenario 2 adds
+  `.unwrap_err()` (`unwrap_used`) and `panic!` (`clippy::panic`), so change the
+  top of `adversarial_imap.rs` from
+  `#![expect(clippy::expect_used, reason = "tests")]` to:
 
-- [ ] **Step 1: Add the test** to `crates/rimap-imap/tests/adversarial_imap.rs`
-  (append; add imports at the top):
+```rust
+#![expect(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
+```
+
+- [ ] **Step 2: Add imports** near the top of `adversarial_imap.rs`:
 
 ```rust
 use std::sync::Arc;
@@ -672,6 +700,8 @@ use std::time::Duration;
 use rimap_imap::error::{AuthFailure, ImapError};
 use support::fake_imap::PanicResolver;
 ```
+
+- [ ] **Step 3: Add the test** (append to `adversarial_imap.rs`):
 
 ```rust
 /// Scenario 2: LOGINDISABLED in CAPABILITY yields CapabilityMissing { needed:
@@ -703,91 +733,159 @@ async fn logindisabled_maps_to_capability_missing_before_resolve() {
 }
 ```
 
-- [ ] **Step 2: Run it.**
+- [ ] **Step 4: Run + clippy + commit.**
 
 ```bash
 cargo nextest run -p rimap-imap --locked logindisabled --no-capture
-```
-
-Expected: PASS. The `PanicResolver` never fires (no panic), confirming the
-pre-resolve error path. If the fake asserts a verb mismatch, align the CAPABILITY
-step count with Task 2's calibration.
-
-- [ ] **Step 3: Commit.**
-
-```bash
+cargo clippy -p rimap-imap --tests --all-features --locked -- -D warnings
 git add crates/rimap-imap/tests/adversarial_imap.rs
 git commit -m "test(imap): verify LOGINDISABLED auth provenance via fake"
 ```
+
+Expected: PASS; `PanicResolver` never fires (no panic), confirming the
+pre-resolve path.
 
 ---
 
 ### Task 5: Scenario 3 — missing/zero-UID FETCH skip + aggregated warn
 
 **Files:**
-- Modify: `crates/rimap-imap/src/ops/fetch.rs` (add skip counter + `warn!`)
+- Modify: `crates/rimap-imap/Cargo.toml` (`tracing`, `tracing-subscriber` dev-deps)
+- Create: `crates/rimap-imap/tests/support/tracing_capture.rs`
+- Modify: `crates/rimap-imap/tests/support/mod.rs` (`pub mod tracing_capture;`)
+- Modify: `crates/rimap-imap/src/ops/fetch.rs` (skip counter + `warn!`)
 - Modify: `crates/rimap-imap/tests/adversarial_imap.rs` (add a test)
 
-**Interfaces:**
-- Consumes: `Connection::fetch`, `FetchSpec`, `Uid`; `tracing` capture.
+**Interfaces produced:**
+- `support::tracing_capture::WarnCapture` with `fn install() -> WarnCapture`
+  (holds a `DefaultGuard`) and `fn records(&self) -> Vec<String>`.
 
-- [ ] **Step 1: Write the failing scenario test first (asserts the warn).**
-  Append to `crates/rimap-imap/tests/adversarial_imap.rs`. Add imports:
+- [ ] **Step 1: Add capture dev-deps.** In `crates/rimap-imap/Cargo.toml`
+  `[dev-dependencies]` add:
 
-```rust
-use rimap_imap::types::{FetchSpec, Uid};
-use tracing::Level;
-use tracing_subscriber::layer::SubscriberExt;
+```toml
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 ```
 
-  (Add `tracing` and `tracing-subscriber` to `rimap-imap` dev-deps in this task —
-  see Step 4. If a lighter capture already exists in the repo's test utilities,
-  prefer it.) The test:
+- [ ] **Step 2: Create the scoped tracing capture.** Mirrors the established
+  pattern at `crates/rimap-content/src/parse/safe_parser.rs:145-187`, but uses
+  the guard API (`set_default`) so it can span an `.await`, and installs a
+  permissive global once so the thread-local WARN is not filtered out by the
+  static max-level hint (the footgun that motivated this repo's tracing-test
+  convention). `crates/rimap-imap/tests/support/tracing_capture.rs`:
+
+```rust
+//! Thread-local capture of emitted `tracing` events for async tests.
+//!
+//! Async-safe: uses `dispatcher::set_default` (a `DefaultGuard` held across the
+//! awaited call), not the sync `with_default` closure. A permissive global
+//! default is installed once so the `warn!` is not short-circuited by the
+//! runtime max-level hint before the scoped dispatcher runs.
+#![expect(clippy::unwrap_used, reason = "tests")]
+
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex, Once};
+
+use tracing::Subscriber;
+use tracing::dispatcher::DefaultGuard;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::registry::Registry;
+
+static PERMISSIVE_GLOBAL: Once = Once::new();
+
+fn ensure_permissive_global() {
+    PERMISSIVE_GLOBAL.call_once(|| {
+        // A no-op global whose max_level_hint is unbounded, so WARN events are
+        // not filtered before the scoped dispatcher sees them. Ignore the error
+        // if some other component already set a global default.
+        let _ = tracing::subscriber::set_global_default(Registry::default());
+    });
+}
+
+struct CaptureLayer {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+struct FieldWriter<'a>(&'a mut String);
+impl Visit for FieldWriter<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        write!(self.0, " {}={value:?}", field.name()).ok();
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        write!(self.0, " {}={value}", field.name()).ok();
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        write!(self.0, " {}={value}", field.name()).ok();
+    }
+}
+
+impl<S: Subscriber> Layer<S> for CaptureLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut record = format!("target={}", event.metadata().target());
+        event.record(&mut FieldWriter(&mut record));
+        self.events.lock().unwrap().push(record);
+    }
+}
+
+/// A scoped capture. Hold it across the awaited call under test; read
+/// `records()` afterward. Dropping it removes the thread-local dispatcher.
+pub struct WarnCapture {
+    _guard: DefaultGuard,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl WarnCapture {
+    /// Install a thread-local capturing dispatcher on the current thread.
+    pub fn install() -> WarnCapture {
+        ensure_permissive_global();
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureLayer {
+            events: Arc::clone(&events),
+        };
+        let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        WarnCapture {
+            _guard: guard,
+            events,
+        }
+    }
+
+    /// Snapshot of captured `"target=... field=value ..."` records.
+    pub fn records(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+}
+```
+
+- [ ] **Step 3: Declare the module.** In
+  `crates/rimap-imap/tests/support/mod.rs` add:
+
+```rust
+pub mod tracing_capture;
+```
+
+- [ ] **Step 4: Write the failing scenario test first.** Append to
+  `crates/rimap-imap/tests/adversarial_imap.rs`. Add imports at the top:
+
+```rust
+use core::num::NonZeroU32;
+
+use rimap_imap::types::{FetchSpec, Uid};
+use support::tracing_capture::WarnCapture;
+```
+
+  Then the test:
 
 ```rust
 /// Scenario 3: a UID FETCH whose items omit or zero the UID are skipped, and a
 /// single aggregated `warn!` carrying `skipped_uids` fires. Pinned to a
-/// current-thread runtime so the thread-local dispatcher covers the warn.
+/// current-thread runtime so the thread-local capture covers the warn.
 #[tokio::test(flavor = "current_thread")]
 async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
-    use std::sync::{Arc, Mutex};
-    use tracing::field::{Field, Visit};
-
-    // Minimal capture layer: record (target, message-or-skipped_uids) for warns.
-    #[derive(Clone, Default)]
-    struct Captured {
-        skip_warns: Arc<Mutex<Vec<u64>>>,
-    }
-    struct SkipVisitor(Option<u64>);
-    impl Visit for SkipVisitor {
-        fn record_u64(&mut self, field: &Field, value: u64) {
-            if field.name() == "skipped_uids" {
-                self.0 = Some(value);
-            }
-        }
-        fn record_debug(&mut self, _f: &Field, _v: &dyn std::fmt::Debug) {}
-    }
-    struct CaptureLayer(Captured);
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == Level::WARN {
-                let mut v = SkipVisitor(None);
-                event.record(&mut v);
-                if let Some(n) = v.0 {
-                    self.0.skip_warns.lock().unwrap().push(n);
-                }
-            }
-        }
-    }
-
-    let captured = Captured::default();
-    let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
-    let dispatch = tracing::Dispatch::new(subscriber);
-    let _guard = tracing::dispatcher::set_default(&dispatch);
+    let capture = WarnCapture::install();
 
     let server = FakeImapServer::start(vec![
         Step::Send(b"* OK fake ready\r\n".to_vec()),
@@ -799,11 +897,11 @@ async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
         Step::Expect { verb: "CAPABILITY" },
         Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
         Step::Reply { text: "OK CAPABILITY completed" },
-        // fetch: EXAMINE (read-only open).
+        // fetch: EXAMINE (read-only open — ops::fetch calls select(...,true)).
         Step::Expect { verb: "EXAMINE" },
         Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
         Step::Reply { text: "OK [READ-ONLY] EXAMINE completed" },
-        // UID FETCH: one item with no UID, one with UID 0, one valid (UID 5).
+        // UID FETCH: item with no UID, item with UID 0, valid item (UID 5).
         Step::Expect { verb: "UID FETCH" },
         Step::Send(b"* 1 FETCH (FLAGS (\\Seen))\r\n".to_vec()),
         Step::Send(b"* 2 FETCH (UID 0 FLAGS (\\Seen))\r\n".to_vec()),
@@ -821,46 +919,46 @@ async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
         size: false,
     };
     let (messages, _uidv) = conn
-        .fetch(
-            "INBOX",
-            &[Uid::new(5).unwrap()],
-            spec,
-            None,
-        )
+        .fetch("INBOX", &[Uid::from(NonZeroU32::new(5).unwrap())], spec, None)
         .await
         .expect("fetch should succeed, skipping malformed items");
 
     // Only the well-formed UID 5 survives.
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].uid, Uid::new(5).unwrap());
+    assert_eq!(messages[0].uid, Uid::from(NonZeroU32::new(5).unwrap()));
 
-    // Exactly one aggregated skip warn fired; its count is the TDD-observed
-    // total (see contingency below). Assert on the filtered skip warns only.
-    let warns = captured.skip_warns.lock().unwrap().clone();
-    assert_eq!(warns.len(), 1, "exactly one aggregated skip warn expected");
-    assert!(warns[0] >= 1, "skipped_uids must count the malformed items");
-    // If Task-5 calibration confirms async-imap surfaces the UID-less item as
-    // msg.uid == None, tighten this to `assert_eq!(warns[0], 2);`.
+    // Exactly one aggregated skip warn fired (filter by the distinctive field).
+    let skip_warns: Vec<String> = capture
+        .records()
+        .into_iter()
+        .filter(|r| r.contains("skipped_uids="))
+        .collect();
+    assert_eq!(skip_warns.len(), 1, "one aggregated skip warn expected: {skip_warns:?}");
+    // TDD contingency (see below): tighten to the observed count once known.
+    assert!(
+        skip_warns[0].contains("skipped_uids=2") || skip_warns[0].contains("skipped_uids=1"),
+        "warn must carry the skipped count: {}",
+        skip_warns[0],
+    );
 }
 ```
 
-  **Contingency (per spec):** confirm during this task how async-imap 0.11
-  surfaces the UID-less `* 1 FETCH (FLAGS …)` item. If it yields `msg.uid ==
-  None` (the `fetch.rs:158` arm), the count is 2; if async-imap drops it during
-  parsing, the count is 1 (only the UID-0 item). Tighten the final assertion to
-  the observed exact count.
+  **Contingency (per spec):** the `UID 0` skip is certain; whether async-imap
+  0.11 surfaces the UID-less `* 1 FETCH (FLAGS …)` item as `msg.uid == None`
+  (count 2) or drops it in parsing (count 1) is confirmed in Step 7. Tighten the
+  final assertion to the observed exact count.
 
-- [ ] **Step 2: Run it — expect FAIL (no warn yet).**
+- [ ] **Step 5: Run it — expect FAIL (no warn yet).**
 
 ```bash
 cargo nextest run -p rimap-imap --locked missing_and_zero_uid --no-capture
 ```
 
-Expected: FAIL at `exactly one aggregated skip warn expected` (the skip is
-currently silent). This proves the test drives the skip path.
+Expected: FAIL at `one aggregated skip warn expected` — the skip is currently
+silent. This proves the test drives the skip path.
 
-- [ ] **Step 3: Add the aggregated warn to `ops::fetch::fetch`.** In
-  `crates/rimap-imap/src/ops/fetch.rs`, at line 155 replace:
+- [ ] **Step 6: Add the aggregated warn to `ops::fetch::fetch`.** In
+  `crates/rimap-imap/src/ops/fetch.rs`, the loop at line 155 currently reads:
 
 ```rust
     let mut out = Vec::with_capacity(uids.len());
@@ -874,7 +972,7 @@ currently silent). This proves the test drives the skip path.
         };
 ```
 
-  with:
+  Replace it with (add a counter and increment on each skip arm):
 
 ```rust
     let mut out = Vec::with_capacity(uids.len());
@@ -891,43 +989,34 @@ currently silent). This proves the test drives the skip path.
         };
 ```
 
-  Then, immediately **after** the `while` loop and **before** the final
-  `Ok((out, uid_validity))` return, add:
+  Then, **after** the `while` loop closes and **before** the function's final
+  `Ok((out, uid_validity))`, insert:
 
 ```rust
     if skipped_uids > 0 {
         tracing::warn!(
             folder = %folder,
             skipped_uids,
-            "FETCH response omitted or zeroed the UID on {skipped_uids} item(s); \
+            "FETCH response omitted or zeroed the UID on one or more items; \
              skipping them (possible malformed or hostile server)",
         );
     }
 ```
 
-- [ ] **Step 4: Add dev-deps for capture (if not already present).** In
-  `crates/rimap-imap/Cargo.toml` `[dev-dependencies]`, add:
+  (`folder: &str` is the `fetch` fn parameter — in scope here. `Uid::new` stays
+  as-is; it is `pub(crate)` and this is in-crate `src/`.)
 
-```toml
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-```
-
-  (Confirm both are `[workspace.dependencies]`; `tracing` already is. If
-  `tracing-subscriber` is not, use the workspace's existing test-capture
-  utility instead of adding a dep — check `rimap-content` tests for the
-  established pattern before adding.)
-
-- [ ] **Step 5: Run again — expect PASS.**
+- [ ] **Step 7: Run again — expect PASS; pin the count.**
 
 ```bash
 cargo nextest run -p rimap-imap --locked missing_and_zero_uid --no-capture
 ```
 
-Expected: PASS. Read `--no-capture` output to confirm the observed `skipped_uids`
-count and tighten the assertion (Step 1 contingency).
+Expected: PASS. Read `--no-capture` to see the emitted `skipped_uids=` value and
+tighten the Step-4 assertion to `assert!(skip_warns[0].contains("skipped_uids=2"))`
+(or `=1`) per the observed behavior.
 
-- [ ] **Step 6: Verify no other fetch tests regressed.**
+- [ ] **Step 8: Verify existing fetch tests still pass.**
 
 ```bash
 cargo nextest run -p rimap-imap --locked fetch
@@ -935,10 +1024,14 @@ cargo nextest run -p rimap-imap --locked fetch
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit.**
+- [ ] **Step 9: Clippy + commit.**
 
 ```bash
-git add crates/rimap-imap/src/ops/fetch.rs crates/rimap-imap/tests/adversarial_imap.rs \
+cargo clippy -p rimap-imap --all-targets --all-features --locked -- -D warnings
+git add crates/rimap-imap/src/ops/fetch.rs \
+        crates/rimap-imap/tests/adversarial_imap.rs \
+        crates/rimap-imap/tests/support/tracing_capture.rs \
+        crates/rimap-imap/tests/support/mod.rs \
         crates/rimap-imap/Cargo.toml
 git commit -m "feat(imap): warn on skipped missing/zero-UID FETCH items"
 ```
@@ -948,14 +1041,11 @@ git commit -m "feat(imap): warn on skipped missing/zero-UID FETCH items"
 ### Task 6: Scenario 4 — truncated response mid-literal, typed error no hang
 
 **Files:**
-- Modify: `crates/rimap-imap/tests/adversarial_imap.rs` (add a test)
+- Modify: `crates/rimap-imap/tests/adversarial_imap.rs`
 
-**Interfaces:**
-- Consumes: `Connection::fetch` (or `fetch_body`), `Step::Send`/`Disconnect`,
-  `ImapError`, `connection_with` (5s timeout).
-
-- [ ] **Step 1: Add the test.** Append to
-  `crates/rimap-imap/tests/adversarial_imap.rs`:
+- [ ] **Step 1: Add the test.** Append to `crates/rimap-imap/tests/adversarial_imap.rs`
+  (all needed imports — `NonZeroU32`, `Uid`, `FetchSpec`, `ImapError`, `Duration`
+  — are already imported by Tasks 4–5):
 
 ```rust
 /// Scenario 4: a FETCH BODY[] literal announcing more bytes than are sent,
@@ -986,8 +1076,8 @@ async fn truncated_literal_yields_typed_error_not_timeout() {
 
     // LOGIN succeeds here, so use the static-resolver constructor with a
     // generous 5s backstop so the near-instant loopback EOF wins the race.
-    let conn = server.connection_timeout("user@example.com", std::time::Duration::from_secs(5));
-    let spec = rimap_imap::types::FetchSpec {
+    let conn = server.connection_timeout("user@example.com", Duration::from_secs(5));
+    let spec = FetchSpec {
         envelope: false,
         bodystructure: false,
         uid: true,
@@ -995,7 +1085,7 @@ async fn truncated_literal_yields_typed_error_not_timeout() {
         size: false,
     };
     let result = conn
-        .fetch("INBOX", &[Uid::new(5).unwrap()], spec, None)
+        .fetch("INBOX", &[Uid::from(NonZeroU32::new(5).unwrap())], spec, None)
         .await;
 
     let err = result.expect_err("truncated literal must fail, not return Ok");
@@ -1014,17 +1104,16 @@ cargo nextest run -p rimap-imap --locked truncated_literal --no-capture
 
 Expected: PASS (err is `Protocol` or `ConnectionLost`, not `Timeout`).
 **Contingency (per spec):** if async-imap instead returns `Ok` (graceful stream
-end) — the `expect_err` fails — switch the truncation trigger: replace the last
-two steps with a truncated **tagged completion** (send the untagged FETCH fully,
-then `Disconnect` before the tagged `OK`), so the command never completes and
-async-imap surfaces an error. Re-run until a real `Err` is observed. Record
-whether a reconnect occurred (a second connection in `recorded()`); the
-accept-loop handles it.
+end), `expect_err` fails — switch the trigger: send the untagged FETCH fully,
+then `Step::Disconnect` **before** a tagged `OK` (the command never completes),
+so async-imap surfaces an error. Re-run until a real `Err` is observed. The
+accept-loop already covers a ReadOnly reconnect if the error is `ConnectionLost`.
 
-- [ ] **Step 3: Commit.**
+- [ ] **Step 3: Clippy + commit.**
 
 ```bash
-git add crates/rimap-imap/tests/adversarial_imap.rs crates/rimap-imap/tests/support/fake_imap.rs
+cargo clippy -p rimap-imap --tests --all-features --locked -- -D warnings
+git add crates/rimap-imap/tests/adversarial_imap.rs
 git commit -m "test(imap): verify truncated-literal surfaces typed error"
 ```
 
@@ -1049,7 +1138,7 @@ git commit -m "test(imap): verify truncated-literal surfaces typed error"
   container-gated and silent-skips without a runtime.
 ```
 
-- [ ] **Step 2: Run doc hooks / markdown lint if any.**
+- [ ] **Step 2: Run hooks / markdown lint.**
 
 ```bash
 just hooks
@@ -1076,16 +1165,15 @@ git commit -m "docs: note when to use the IMAP fake vs Dovecot"
 just ci
 ```
 
-Expected: green — `fmt-check`, `lint` (clippy `-D warnings`), `test` (full
-nextest), `deny`, and hooks all pass. `deny` must show no delta (no new
-dependency was shipped; dev-deps are not audited differently, but confirm
-`cargo deny check` stays clean).
+Expected: green — `fmt-check`, `lint` (clippy `-D warnings`, all targets),
+`test` (full nextest), `deny`, and hooks all pass. `cargo deny check` must stay
+clean (no shipped dependency was added; dev-deps were already in-tree).
 
-- [ ] **Step 2: Confirm the four scenarios are green and the placeholder is gone.**
+- [ ] **Step 2: Confirm the four scenarios pass and the placeholder is gone.**
 
 ```bash
 cargo nextest run -p rimap-imap --locked adversarial_imap expunge_folder_wide_gap
-grep -rc "#\[ignore" crates/rimap-imap/tests/expunge_folder_wide_gap.rs
+grep -c "#\[ignore" crates/rimap-imap/tests/expunge_folder_wide_gap.rs
 ```
 
 Expected: all scenario tests pass; ignore count `0`.
@@ -1098,26 +1186,35 @@ Expected: all scenario tests pass; ignore count `0`.
 ## Self-Review
 
 **Spec coverage:**
-- Harness under `tests/support/` → Tasks 1, 2. ✔
+- Harness under `tests/support/` → Tasks 1, 2 (+ `tracing_capture` in Task 5). ✔
 - Four scripts green → Tasks 3 (s1), 4 (s2), 5 (s3), 6 (s4). ✔
-- `expunge_folder_wide_gap.rs` un-`#[ignore]`d → Task 3 (rewrite) + Task 8 check. ✔
+- `expunge_folder_wide_gap.rs` un-`#[ignore]`d → Task 3 rewrite + Task 8 check. ✔
 - CONTRIBUTING note → Task 7. ✔
 - Aggregated `warn!` (spec's only shipped change) → Task 5. ✔
-- `#![allow(dead_code)]` support module, no new shipped dep, accept-loop for
-  ReadOnly retry, `set_default` guard capture, EXAMINE (not SELECT) for fetch
-  scenarios, ASCII creds, generous scenario-4 timeout → embodied across Tasks
-  1–6. ✔
+- `#![allow(dead_code)]` support module, no new shipped dep, accept-loop for the
+  ReadOnly retry, `set_default` guard capture + permissive global, EXAMINE (not
+  SELECT) for fetch scenarios, ASCII creds, generous scenario-4 timeout →
+  embodied across Tasks 1–6. ✔
+
+**Type consistency (verified against the repo):**
+- **`Uid`** is constructed only via the public
+  `rimap_imap::types::Uid::from(core::num::NonZeroU32::new(N).unwrap())` in every
+  test file (the `pub(crate) Uid::new` is used ONLY in the in-crate `fetch.rs`
+  edit). Matches `dovecot.rs:494`.
+- `FakeImapServer`/`Step`/`connection`/`connection_timeout`/`connection_with`/
+  `recorded`/`PanicResolver`/`SelfSigned { chain, key, pin }`/`WarnCapture`,
+  `Connection::move_messages`/`fetch`/`list_folders`, `FetchSpec { envelope,
+  bodystructure, uid, flags, size }`, `ImapError::{Auth, Timeout}`,
+  `AuthFailure::CapabilityMissing { needed }`, `MoveOutcome::{used_fallback,
+  folder_wide_expunge}` — all match the source signatures.
+
+**Per-commit clippy hygiene:** each scenario file's `#![expect(...)]` lists
+exactly the lints its body triggers, and tasks that introduce a new construct
+(`.unwrap()`/`.expect()`/`panic!`) update the list in the same commit; every task
+runs `cargo clippy ... -- -D warnings` before committing so no commit fails the
+`unfulfilled_lint_expectations`/`-D warnings` gate.
 
 **Calibration dependency (called out, not a placeholder):** the exact async-imap
-0.11 dialog (post-login CAPABILITY presence, response shapes) is confirmed
-empirically in Task 2 and the scenario scripts are adjusted to it — this is the
-spec's "captured during TDD" contract, not an unfilled TODO. Concrete best-guess
+0.11 dialog is confirmed empirically in Task 2 and the scenario scripts are
+adjusted to it — the spec's "captured during TDD" contract. Concrete best-guess
 scripts are provided for every scenario.
-
-**Type consistency:** `FakeImapServer`, `Step` (`Expect`/`Send`/`Reply`/`Delay`/
-`Disconnect`), `connection`/`connection_with`/`connection_timeout`, `recorded`,
-`PanicResolver`, `SelfSigned { chain, key, pin }`, `Connection::move_messages`/
-`fetch`, `FetchSpec { envelope, bodystructure, uid, flags, size }`, `Uid::new`,
-`ImapError::{Auth, Timeout}`, `AuthFailure::CapabilityMissing { needed }` — all
-match the source crate signatures verified against `dispatch.rs`, `error.rs`,
-`types.rs`, and `credential.rs`.
