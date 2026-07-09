@@ -207,6 +207,26 @@ fn assert_error_code(resp: &Value, expected_code: &str) {
     );
 }
 
+/// Like `assert_error_code`, but the wire code must be one of `expected` (for
+/// faults whose typed code is a set — e.g. a TCP reset that lands in either the
+/// plaintext-greeting or TLS-handshake phase). Same accessor as
+/// `assert_error_code`, so scenario 3 cannot diverge onto a hand-rolled path.
+fn assert_error_code_in(resp: &Value, expected: &[&str]) {
+    assert!(
+        resp["error"].is_null(),
+        "tool-execution failure must not be a JSON-RPC error envelope; got {resp}",
+    );
+    assert_valid(&resp["result"], "CallToolResult");
+    assert_eq!(resp["result"]["isError"], json!(true), "{resp}");
+    let code = resp["result"]["structuredContent"]["error_code"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        expected.contains(&code),
+        "expected one of {expected:?}; got {code:?} in {resp}",
+    );
+}
+
 /// Assert a `tools/call` response succeeded (recovery/warm-up calls).
 fn assert_ok(resp: &Value, context: &str) {
     assert!(
@@ -475,5 +495,74 @@ async fn chaos_mid_fetch_stall_times_out_then_recovers() {
             && r["error_code"].is_null()
             && r["seq"].as_u64().is_some_and(|s| s < s0)),
         "a successful warm-up tool_end must precede the failing FETCH; got {recs:?}",
+    );
+}
+
+/// Scenario 3 — a connection reset during STARTTLS surfaces a typed
+/// TLS/connection error (`ERR_TLS` or `ERR_CONNECTION_LOST` — a TCP-layer RST is
+/// not deterministic between the plaintext-greeting and TLS-handshake phases),
+/// and the failing call's window carries exactly one `auth` Failure. The server
+/// boots healthy on the STARTTLS path; a `reset_peer` toxic then RSTs traffic
+/// through the proxy, so the session's next op fails and its reconnect's STARTTLS
+/// handshake is reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chaos_starttls_reset_typed_error_one_auth() {
+    let Ok(chaos) = ChaosHarness::try_start() else {
+        return;
+    };
+    mark_ran("scenario3");
+
+    // STARTTLS path; generous budgets (a prompt RST needs no low budget, and a
+    // generous connect budget keeps the recovery reconnect flake-free).
+    let mut h = spawn_ready(
+        &chaos,
+        chaos.starttls_port(),
+        "starttls",
+        10,
+        10,
+        ROOMY_FETCH,
+        ROOMY_APPEND,
+    )
+    .await;
+    let audit_path = h.audit_path();
+
+    // reset_peer: RST at/near connection open on the starttls proxy.
+    chaos.toxics().add_toxic(
+        "starttls",
+        &json!({ "type": "reset_peer", "stream": "downstream", "attributes": { "timeout": 0 } }),
+    );
+    let resp = h
+        .request_within(
+            "tools/call",
+            json!({ "name": "chaos.list_folders", "arguments": {} }),
+            Duration::from_secs(15),
+        )
+        .await;
+    assert_error_code_in(&resp, &["ERR_TLS", "ERR_CONNECTION_LOST"]);
+
+    // Recovery: remove toxic → fresh STARTTLS connect succeeds.
+    chaos.toxics().reset();
+    let ok = h
+        .request_within(
+            "tools/call",
+            json!({ "name": "chaos.list_folders", "arguments": {} }),
+            Duration::from_secs(15),
+        )
+        .await;
+    assert_ok(&ok, "recovery over STARTTLS after reset");
+
+    let (status, _tempdir) = h.shutdown_and_wait().await;
+    assert!(status.success(), "binary exited non-zero: {status:?}");
+
+    // Audit: exactly one `auth` Failure within the failing call's Seq window.
+    // (Confirm in first runs: a pre-login RST still emits exactly one auth
+    // record; if a future refactor moves auth emission post-login, re-derive.)
+    let recs = audit::read_records(&audit_path);
+    let (s0, s1) = audit::last_tool_call_matching_error(&recs, &["ERR_TLS", "ERR_CONNECTION_LOST"])
+        .expect("a failing tool_end with ERR_TLS/ERR_CONNECTION_LOST");
+    assert_eq!(
+        audit::count_auth_failures_between(&recs, s0, s1),
+        1,
+        "exactly one auth Failure in the failing call window; got {recs:?}",
     );
 }
