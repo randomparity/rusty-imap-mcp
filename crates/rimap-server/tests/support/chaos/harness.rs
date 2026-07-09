@@ -241,6 +241,12 @@ impl ChaosHarness {
             }
 
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // A failed `up` frequently leaves the network and the first
+            // container created before the failing port publish. `Drop` does not
+            // run (the struct is never constructed), so reap here before every
+            // early return/panic — otherwise a partial stack leaks (loud_or_skip
+            // panics under RIMAP_REQUIRE_DOCKER=1, skipping any later cleanup).
+            compose_down(&project, &compose_dir);
             if !is_port_collision(&stderr) {
                 return Err(loud_or_skip(&format!("chaos compose up failed: {stderr}")));
             }
