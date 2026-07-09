@@ -232,9 +232,16 @@ async fn truncated_literal_yields_typed_error_not_timeout() {
         )
         .await;
 
+    // The mid-literal EOF surfaces as the truncation-class `ConnectionLost`
+    // (async-imap 0.11), the client's typed signal for a torn-down stream —
+    // NOT a `Timeout` (which would mean the client hung waiting rather than
+    // detecting the truncation). `fetch` is read-only, so this also exercises
+    // the one reconnect-and-retry against the accept-loop fake, which re-serves
+    // the same truncation. Pin the exact variant so a regression to a
+    // different (non-`Timeout`) error still fails loudly.
     let err = result.expect_err("truncated literal must fail, not return Ok");
     assert!(
-        !matches!(err, ImapError::Timeout { .. }),
-        "must be a truncation-class error, not a mere timeout; got {err:?}",
+        matches!(err, ImapError::ConnectionLost),
+        "expected truncation-class ConnectionLost, got {err:?}",
     );
 }

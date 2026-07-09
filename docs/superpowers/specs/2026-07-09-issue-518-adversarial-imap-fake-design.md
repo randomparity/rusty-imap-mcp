@@ -246,6 +246,17 @@ a log-flood lever. One aggregated warn per fetch call is inert for conformant
 servers and bounded for hostile ones. This is the spec's only shipped-code
 change; it is additive.
 
+**Accepted risk (deliberate, documented at the skip site).** The warn is
+operator-facing; the tool result the agent sees is intentionally unchanged (a
+shorter message list), so a hostile server can make a folder appear to hold
+fewer messages by omitting/zeroing UIDs, visible only in the operator log. This
+is the issue-prescribed "skip-with-warning" behavior and preserves the fetch
+tool contract (a non-goal to change here). It is deliberately *fail-open*, in
+contrast to the *fail-closed* `require_uidvalidity` path (a missing UIDVALIDITY
+breaks the whole-response anti-reuse guard, whereas a single absent per-item UID
+costs only that message). Surfacing the drop in-band to the agent is a possible
+follow-up, out of scope for this change.
+
 Assert the warning fires using the repo's parallel-safe, thread-local capture
 wiring. The async form must use the **guard** API, not the closure API:
 `tracing::dispatcher::with_default(&d, f)` takes a *synchronous* `f: FnOnce()`

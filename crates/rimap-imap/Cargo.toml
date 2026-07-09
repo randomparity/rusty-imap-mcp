@@ -60,9 +60,10 @@ tempfile = { workspace = true }
 serde_json = { workspace = true }
 proptest = { workspace = true }
 # In-process fake IMAP server (tests/support): terminates TLS with a
-# self-signed rcgen cert the client pins by fingerprint. Test-only; no
-# shipped-dependency change (all three are already normal deps of this crate,
-# repeated here so dev/test code may use them directly).
+# self-signed rcgen cert the client pins by fingerprint. `tokio-rustls` and
+# `rustls` are already normal deps of this crate (repeated here so dev/test
+# code may use them directly); `rcgen` is test-only. No shipped-dependency
+# change — `rcgen` is confined to `[dev-dependencies]`.
 rcgen = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
