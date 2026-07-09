@@ -28,7 +28,7 @@
 - `crates/rimap-smtp/src/error.rs` — add `SmtpError::Auth`; map to `ErrorCode::Auth`.
 - `crates/rimap-smtp/src/client.rs` — reply-code classification + `send_raw` operation timeout; `SmtpClient` gains a `deadline` field.
 - `crates/rimap-smtp/tests/support/smtp_responder.rs` (new) — scripted in-process SMTP responder.
-- `crates/rimap-smtp/tests/real_socket.rs` (new) — the four taxonomy scenarios driving `SmtpClient`.
+- `crates/rimap-smtp/tests/real_socket.rs` (new) — the three taxonomy scenarios (auth / RCPT / STARTTLS) driving `SmtpClient` (timeout is the Task 2 lib test).
 - `crates/rimap-smtp/tests/support/certs.rs` (new) — rcgen self-signed cert for the STARTTLS scenario.
 - `crates/rimap-smtp/Cargo.toml` — add `tokio` to `[dependencies]` (Task 2); dev-deps: `tokio-rustls`, `rustls`, `rcgen` (+ extend `tokio` features).
 - `Cargo.toml` (workspace) — add `rcgen` and `ureq` to `[workspace.dependencies]`.
@@ -680,7 +680,7 @@ In `crates/rimap-server/Cargo.toml` `[dev-dependencies]`: `ureq = { workspace = 
 Run: `cargo fetch && just deny`
 Expected: clean. If a transitive dep trips bans/licenses, stop and report before adding any exception.
 
-- [ ] **Step 2: Write `harness.rs`.** Reuse the structure of `crates/rimap-server/tests/support/dovecot/harness.rs` (copy the `HarnessError` enum, `runtime()`, `binary_present`, `runtime_available`, `uuid_like`, `ReservedPort`, `compose_down`, retry loop). Differences:
+- [ ] **Step 2: Write `harness.rs`.** Reuse the structure of `crates/rimap-server/tests/support/dovecot/harness.rs` (copy `runtime()`, `binary_present`, `runtime_available`, `uuid_like`, `ReservedPort`, `compose_down`, retry loop). **Adapt `HarnessError`, do not copy it verbatim:** drop the dovecot-only `FingerprintReadFailed` variant (the Mailpit harness has no TLS fingerprint) and replace it with a health-check failure variant the HTTP wait loop actually returns (e.g. `HealthCheckFailed(String)`). A copied-but-never-constructed variant trips `dead_code` under `-D warnings` and breaks `just lint`/`just ci` (the same failure mode as the removed `TimeoutNoBanner`). Differences from Dovecot:
   - `compose_dir` = `<manifest>/../rimap-imap/tests/integration/smtp`.
   - Reserve TWO ports; pass `RIMAP_SMTP_HOST_PORT` and `RIMAP_SMTP_API_PORT` env into `compose up` (matching the compose file's variables).
   - `wait_for_ready` polls `GET {api_base}/api/v1/info` for HTTP 200 instead of reading a fingerprint file.
