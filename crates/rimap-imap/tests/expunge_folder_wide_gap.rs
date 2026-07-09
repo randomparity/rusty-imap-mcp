@@ -13,26 +13,14 @@ mod support;
 use core::num::NonZeroU32;
 
 use rimap_imap::types::Uid;
-use support::fake_imap::{FakeImapServer, Step};
+use support::fake_imap::{FakeImapServer, Step, login_preamble};
 
 #[tokio::test]
 async fn no_move_no_uidplus_uses_folder_wide_expunge() {
-    let server = FakeImapServer::start(vec![
-        Step::Send(b"* OK fake ready\r\n".to_vec()),
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
-        Step::Expect { verb: "LOGIN" },
-        Step::Reply {
-            text: "OK LOGIN completed",
-        },
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
+    // No UIDPLUS and no MOVE advertised → the copy/store/folder-wide-EXPUNGE
+    // fallback runs.
+    let mut steps = login_preamble("IMAP4rev1");
+    steps.extend([
         // move_messages: SELECT source (read-write; select(...,false)).
         Step::Expect { verb: "SELECT" },
         Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
@@ -62,8 +50,8 @@ async fn no_move_no_uidplus_uses_folder_wide_expunge() {
         Step::Reply {
             text: "OK EXPUNGE completed",
         },
-    ])
-    .await;
+    ]);
+    let server = FakeImapServer::start(steps).await;
 
     let conn = server.connection("user@example.com");
     let uid = Uid::from(NonZeroU32::new(5).unwrap());

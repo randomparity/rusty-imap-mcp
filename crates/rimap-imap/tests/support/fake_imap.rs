@@ -43,10 +43,35 @@ pub enum Step {
         /// Status + text after the echoed tag (e.g. `"OK LOGIN completed"`).
         text: &'static str,
     },
-    /// Sleep without closing (exercise the command timeout).
-    Delay(Duration),
     /// Drop the connection immediately (prompt FIN, no `close_notify`).
     Disconnect,
+}
+
+/// The shared greeting → `CAPABILITY` → `LOGIN` → post-login `CAPABILITY`
+/// preamble that every full-login scenario opens with. `caps` is the
+/// capability atom list advertised both pre- and post-login (e.g.
+/// `"IMAP4rev1 UIDPLUS"`, or `"IMAP4rev1"` for a no-`UIDPLUS`/no-`MOVE`
+/// server). Append the scenario-specific steps to the returned vec.
+#[must_use]
+pub fn login_preamble(caps: &str) -> Vec<Step> {
+    let cap_line = format!("* CAPABILITY {caps}\r\n").into_bytes();
+    vec![
+        Step::Send(b"* OK fake ready\r\n".to_vec()),
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(cap_line.clone()),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+        Step::Expect { verb: "LOGIN" },
+        Step::Reply {
+            text: "OK LOGIN completed",
+        },
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(cap_line),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+    ]
 }
 
 /// A running fake. Drop aborts the accept-loop and closes the listener.
@@ -193,7 +218,6 @@ async fn serve(
                 write.write_all(line.as_bytes()).await?;
                 write.flush().await?;
             }
-            Step::Delay(d) => tokio::time::sleep(*d).await,
             Step::Disconnect => return Ok(()), // drop halves → FIN
         }
     }

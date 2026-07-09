@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use rimap_imap::error::{AuthFailure, ImapError};
 use rimap_imap::types::{FetchSpec, Uid};
-use support::fake_imap::{FakeImapServer, PanicResolver, Step};
+use support::fake_imap::{FakeImapServer, PanicResolver, Step, login_preamble};
 use support::tracing_capture::WarnCapture;
 
 /// Smoke/calibration: a real login + LIST through the fake proves the TLS
@@ -31,30 +31,15 @@ use support::tracing_capture::WarnCapture;
 /// command order can be read off and used to write the other scenarios.
 #[tokio::test]
 async fn login_and_list_succeed_through_fake() {
-    let server = FakeImapServer::start(vec![
-        Step::Send(b"* OK fake ready\r\n".to_vec()),
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
-        Step::Expect { verb: "LOGIN" },
-        Step::Reply {
-            text: "OK LOGIN completed",
-        },
-        // Post-login CAPABILITY probe (login.rs calls session.capabilities()).
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
+    let mut steps = login_preamble("IMAP4rev1 UIDPLUS");
+    steps.extend([
         Step::Expect { verb: "LIST" },
         Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
         Step::Reply {
             text: "OK LIST completed",
         },
-    ])
-    .await;
+    ]);
+    let server = FakeImapServer::start(steps).await;
 
     let conn = server.connection("user@example.com");
     let folders = conn.list_folders("*").await.expect("list should succeed");
@@ -106,22 +91,8 @@ async fn logindisabled_maps_to_capability_missing_before_resolve() {
 async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
     let capture = WarnCapture::install();
 
-    let server = FakeImapServer::start(vec![
-        Step::Send(b"* OK fake ready\r\n".to_vec()),
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
-        Step::Expect { verb: "LOGIN" },
-        Step::Reply {
-            text: "OK LOGIN completed",
-        },
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
+    let mut steps = login_preamble("IMAP4rev1 UIDPLUS");
+    steps.extend([
         // fetch: EXAMINE (read-only open — ops::fetch calls select(...,true)).
         Step::Expect { verb: "EXAMINE" },
         Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
@@ -136,8 +107,8 @@ async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
         Step::Reply {
             text: "OK FETCH completed",
         },
-    ])
-    .await;
+    ]);
+    let server = FakeImapServer::start(steps).await;
 
     let conn = server.connection("user@example.com");
     let spec = FetchSpec {
@@ -185,22 +156,8 @@ async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
 /// read-only path reconnects on `ConnectionLost`.
 #[tokio::test]
 async fn truncated_literal_yields_typed_error_not_timeout() {
-    let server = FakeImapServer::start(vec![
-        Step::Send(b"* OK fake ready\r\n".to_vec()),
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
-        Step::Expect { verb: "LOGIN" },
-        Step::Reply {
-            text: "OK LOGIN completed",
-        },
-        Step::Expect { verb: "CAPABILITY" },
-        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
-        Step::Reply {
-            text: "OK CAPABILITY completed",
-        },
+    let mut steps = login_preamble("IMAP4rev1 UIDPLUS");
+    steps.extend([
         Step::Expect { verb: "EXAMINE" },
         Step::Send(b"* 1 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
         Step::Reply {
@@ -210,8 +167,8 @@ async fn truncated_literal_yields_typed_error_not_timeout() {
         Step::Expect { verb: "UID FETCH" },
         Step::Send(b"* 1 FETCH (UID 5 BODY[] {100}\r\nHELLO".to_vec()),
         Step::Disconnect,
-    ])
-    .await;
+    ]);
+    let server = FakeImapServer::start(steps).await;
 
     // LOGIN succeeds here, so use the static-resolver constructor with a
     // generous 5s backstop so the near-instant loopback EOF wins the race.
