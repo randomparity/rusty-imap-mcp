@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **MSRV 1.88.0, edition 2024.** No syntax/deps that break the MSRV build.
-- **No new runtime or dev dependency.** The control plane reuses `ureq` (already a workspace dev-dep, used by `e2e_smtp_real.rs`) and `serde_json`. Do not add a toxiproxy client crate or `reqwest`.
+- **No new runtime or dev dependency.** The control plane reuses `ureq` (v3, already a workspace dev-dep, used in `crates/rimap-server/tests/support/mailpit/harness.rs`) and `serde_json`. Do not add a toxiproxy client crate or `reqwest`. Note: the in-repo `ureq` example shows only `GET`/`.call()`/`.body_mut().read_json()`; the `POST .send_json()` (add_toxic) and `POST /reset` shapes must be confirmed against ureq 3.x docs (use context7) before writing — no in-repo POST example exists.
 - **No production-code changes.** This is test coverage. If a scenario surfaces a genuine defect, open a follow-up issue per `AGENTS.md` (do not expand scope) unless the fix is a clearly-scoped one-liner with its own regression test.
 - **Workspace lints are law.** `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` must be clean. No `#[allow]` (use `#[expect(..., reason = "...")]`). Integration-test binaries may `#![expect(clippy::expect_used, reason = "integration tests")]` and `#![expect(clippy::panic, reason = "test diagnostics")]` at the top, mirroring `e2e_wire_fault_injection.rs`. `eprintln!`/`println!` are allowed **in tests only**.
 - **Multi-arch, no arch gate.** Toxiproxy image `ghcr.io/shopify/toxiproxy:2.12.0` is multi-arch (`linux/amd64` + `linux/arm64`); Dovecot is `docker.io/dovecot/dovecot:2.4.4-root` (multi-arch). Do **not** add any `std::env::consts::ARCH` guard — every supported dev host (Apple Silicon macOS, Ubuntu CI, Fedora) runs the suite natively.
@@ -158,22 +158,48 @@ git commit -m "test(chaos): add Toxiproxy+Dovecot compose fixture for #522"
   - `ChaosHarness::fingerprint(&self) -> &TlsFingerprint` (type `rimap_core::TlsFingerprint`; confirm the exact path used by `DovecotHarness`).
   - `ChaosHarness::project(&self) -> &str` — the `rimap-chaos-<uuid>` project name (for diagnostics).
   - `ChaosHarness::toxics(&self) -> &ToxiproxyControl`.
-  - `ToxiproxyControl::add_toxic(&self, proxy: &str, spec: serde_json::Value)`, `remove_toxic(&self, proxy: &str, name: &str)`, `reset(&self)` — each panics on non-2xx with a control-plane-attributed message.
+  - `ToxiproxyControl::add_toxic(&self, proxy: &str, spec: serde_json::Value)`, `reset(&self)` — each panics on non-2xx with a control-plane-attributed message. (No `remove_toxic`: every scenario clears via `reset()`; adding an uncalled `pub fn` would trip `dead_code` under `-D warnings` — `pub` does not exempt items in a test binary. If a future scenario needs per-toxic removal, add it *with* its caller, or link it via a `force_use_for_dead_code_link` helper mirroring `e2e_wire_fault_injection.rs:60`.)
   - Drop → `compose down -v --remove-orphans`.
 
-- [ ] **Step 1: Write the module file**
+> **Ordering is critical.** `tests/support/*` files compile **only** when a test
+> binary pulls them in via `#[path = "..."] mod ...;` — there is no lib/support
+> target. So the chaos modules do not compile (and `just lint` / `--no-run` give a
+> **false green**) until an `e2e_wire_chaos.rs` binary includes them. Therefore
+> **create the binary shell in Step 1**, before the harness code, so every
+> subsequent `just lint` actually compiles `support/chaos/*` and Task 3's audit
+> unit tests can run. **No chaos-module commit is valid until
+> `cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-run`
+> compiles cleanly.**
+
+- [ ] **Step 1: Write the module file AND a compiling binary shell**
 
 `crates/rimap-server/tests/support/chaos/mod.rs`:
 
 ```rust
 //! Network-chaos e2e support: a Toxiproxy-in-path Dovecot harness (#522).
-pub mod audit;
 pub mod harness;
 
 pub use harness::{ChaosHarness, ChaosSkip, ToxiproxyControl};
 ```
 
-(`audit` is created in Task 3; declare it now so the module compiles once Task 3 lands. If you implement Task 2 before Task 3, temporarily omit the `pub mod audit;` line and add it in Task 3.)
+(`pub mod audit;` + its re-export are added in Task 3 when `audit.rs` lands.)
+
+`crates/rimap-server/tests/e2e_wire_chaos.rs` — minimal shell so the module
+compiles under `just lint` from now on (Task 4 fleshes it out):
+
+```rust
+#![expect(clippy::expect_used, reason = "integration tests")]
+#![expect(clippy::panic, reason = "test diagnostics")]
+
+#[path = "support/chaos/mod.rs"]
+mod chaos;
+
+// Reference the public surface so it is not dead code before scenarios land.
+#[expect(dead_code, reason = "shell; scenarios in Task 4+ exercise this")]
+fn _force_use() {
+    let _ = chaos::ChaosHarness::try_start;
+}
+```
 
 - [ ] **Step 2: Write the gate + `ToxiproxyControl` (the genuinely new code)**
 
@@ -218,15 +244,6 @@ impl ToxiproxyControl {
         }
     }
 
-    /// DELETE a named toxic. Panics (control-plane-attributed) on non-2xx.
-    pub fn remove_toxic(&self, proxy: &str, name: &str) {
-        let url = format!("{}/proxies/{proxy}/toxics/{name}", self.base);
-        match ureq::delete(&url).call() {
-            Ok(_) => {}
-            Err(e) => panic!("toxiproxy control: remove_toxic '{name}' on '{proxy}' failed: {e}"),
-        }
-    }
-
     /// Clear all toxics on all proxies. Panics (control-plane-attributed) on error.
     pub fn reset(&self) {
         let url = format!("{}/reset", self.base);
@@ -258,7 +275,7 @@ impl ToxiproxyControl {
 }
 ```
 
-> Note: confirm the exact `ureq` 3.x response API (`resp.body_mut().read_json`, `send_json`) against `e2e_smtp_real.rs`, which already uses `ureq` in this workspace — mirror its call style precisely.
+> Note: mirror the `ureq` 3.x call style from `crates/rimap-server/tests/support/mailpit/harness.rs` (`ureq::get(url).call()?.body_mut().read_json()`). That file demonstrates **GET only** — `version_ok`/`proxies_ok` above match it. The `POST .send_json()` (add_toxic) and `POST /reset` shapes have **no in-repo example**; confirm them against ureq 3.x docs via context7 before writing, and check whether a non-2xx status returns `Err` in ureq 3.x (it does by default) so the panic arms fire correctly.
 
 - [ ] **Step 3: Write `try_start` (reserve 3 ports, compose up, wait for readiness)**
 
@@ -308,23 +325,31 @@ mod harness_selftest {
 }
 ```
 
-- [ ] **Step 6: Run the self-test under the gate**
+- [ ] **Step 6: Compile the modules, then run the self-test under the gate**
 
-Run:
+First prove the modules compile (this is the check `just lint` alone would have
+missed before the Step-1 shell existed):
+```bash
+cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-run
+```
+Expected: compiles cleanly (the shell binary pulls in `support/chaos/*`).
+
+Then run the harness self-test:
 ```bash
 RIMAP_CHAOS=1 RIMAP_REQUIRE_DOCKER=1 \
-  cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-tests=pass 2>&1 | tail -20
+  cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-capture 2>&1 | tail -20
 ```
-(At this point the scenario binary doesn't exist yet; instead run the module self-test via a scratch integration binary, or defer running until Task 4 provides `e2e_wire_chaos.rs`. If deferring, verify compilation only: `cargo test -p rimap-server --no-run`.)
-
-Expected without gate env: the self-test returns early (skip). With `RIMAP_CHAOS=1` and Docker: the stack comes up, the toxic add/reset succeeds, teardown runs clean.
+Expected with `RIMAP_CHAOS=1` and Docker: the stack comes up, the toxic add/reset
+succeeds, teardown runs clean. Without the gate env: the self-test returns early
+(skip).
 
 - [ ] **Step 7: Guardrails + commit**
 
 ```bash
 just fmt && just lint
 git add crates/rimap-server/tests/support/chaos/mod.rs \
-        crates/rimap-server/tests/support/chaos/harness.rs
+        crates/rimap-server/tests/support/chaos/harness.rs \
+        crates/rimap-server/tests/e2e_wire_chaos.rs
 git commit -m "test(chaos): add ChaosHarness and Toxiproxy control client"
 ```
 
@@ -334,7 +359,13 @@ git commit -m "test(chaos): add ChaosHarness and Toxiproxy control client"
 
 **Files:**
 - Create: `crates/rimap-server/tests/support/chaos/audit.rs`
-- Test: inline `#[cfg(test)]` in the same file (pure — no Docker).
+- Modify: `crates/rimap-server/tests/support/chaos/mod.rs` (add `pub mod audit;`)
+- Test: inline `#[cfg(test)]` in `audit.rs` (pure — no Docker).
+
+> Because the Task-2 shell binary already `#[path]`-includes `support/chaos/mod.rs`,
+> adding `pub mod audit;` makes these `#[cfg(test)]` tests compile and run under
+> `cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)'` — the red→green
+> loop below is genuinely runnable in this task (no Docker needed; the helper is pure).
 
 **Interfaces:**
 - Consumes: audit JSONL lines (each a flat object with top-level `seq`, `kind`, and kind-specific fields; `tool_end` carries `start_seq` and `error_code`; `auth` carries `result` and `error_code`). Confirm field names against `crates/rimap-audit/src/record/mod.rs`.
@@ -392,7 +423,7 @@ mod tests {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p rimap-server --test e2e_wire_chaos audit -- --nocapture` (once the binary exists) or move these helpers to a location a unit test can reach. Expected: FAIL (functions not defined).
+Run: `cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' -E 'test(/audit/)'` (the Task-2 shell binary includes the module). Expected: FAIL to compile / test not found (functions not defined).
 
 - [ ] **Step 3: Implement the helper**
 
@@ -458,7 +489,7 @@ pub fn count_auth_failures_between(records: &[Value], start_seq: u64, end_seq: u
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cargo test -p rimap-server audit_helper` (adjust to how the helper is reachable — simplest is to keep these `#[cfg(test)]` tests inside `audit.rs` and reference the binary that includes the module). Expected: PASS.
+Run: `cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' -E 'test(/audit/)'`. Expected: PASS (both helper tests). No Docker needed — these are pure.
 
 - [ ] **Step 5: Guardrails + commit**
 
@@ -474,22 +505,19 @@ git commit -m "test(chaos): add audit-drain Seq-bracket assertion helper"
 ## Task 4: Scenario 1 — delayed greeting (STARTTLS) → `ERR_TIMEOUT`
 
 **Files:**
-- Create: `crates/rimap-server/tests/e2e_wire_chaos.rs`
+- Modify: `crates/rimap-server/tests/e2e_wire_chaos.rs` (the Task-2 shell — flesh it out; delete the `_force_use` shim once a real scenario references `ChaosHarness`).
 - Consumes: `support/chaos` (Tasks 2–3), `support/wire` (`Harness`, `assert_valid`), `support/dovecot::fixtures`.
 
 **Interfaces:**
 - Produces: the binary all later scenarios extend. Establishes `build_chaos_config(..)`, `spawn_ready(..)`, `seed_through_proxy(..)`, `assert_error_code(..)`, and the per-scenario `RIMAP_CHAOS_RAN <name>` marker.
 
-- [ ] **Step 1: Write the binary preamble + config builder + seed helper**
+- [ ] **Step 1: Expand the shell — add module imports, config builder, seed + assert helpers**
 
-Top of `e2e_wire_chaos.rs` (mirror `e2e_wire_fault_injection.rs` preamble, module `#[path]` includes, `StaticCreds`, `DOVECOT_PASSWORD`). Add a chaos config builder that takes the proxy host port, encryption mode, and per-scenario timeout budgets:
+The Task-2 shell already has the `#![expect]` preamble and `#[path] mod chaos;`.
+Add the remaining `#[path]` includes and helpers (mirror `e2e_wire_fault_injection.rs`
+for `StaticCreds`, `DOVECOT_PASSWORD`, `assert_error_code`, `seed`-style helpers):
 
 ```rust
-#![expect(clippy::expect_used, reason = "integration tests")]
-#![expect(clippy::panic, reason = "test diagnostics")]
-
-#[path = "support/chaos/mod.rs"]
-mod chaos;
 #[path = "support/dovecot/mod.rs"]
 mod dovecot;
 #[path = "support/wire/mod.rs"]
@@ -502,21 +530,33 @@ use wire::{Harness, assert_valid};
 
 const DOVECOT_PASSWORD: &str = "testpass";
 
-/// Chaos account TOML. `encryption` is "tls" (993 proxy) or "starttls" (143
-/// proxy); the two timeout budgets are per-scenario (see the spec's
-/// "Toxic parameters and per-scenario budgets").
-fn build_chaos_config(
-    fingerprint_hex: &str,
+/// Chaos account TOML params. A struct (not 10 positional args) — clippy's
+/// `too_many_arguments` default threshold is 7 and `clippy.toml` does not raise
+/// it, so a 10-arg fn would fail the `-D warnings` gate; the repo also caps
+/// positional params at 5.
+struct ChaosConfigParams<'a> {
+    fingerprint_hex: &'a str,
     port: u16,
-    encryption: &str,
+    /// "tls" (993 proxy) or "starttls" (143 proxy).
+    encryption: &'a str,
+    /// Per-scenario budgets — see the spec's "Toxic parameters and per-scenario
+    /// budgets".
     connect_timeout_seconds: u32,
     command_timeout_seconds: u32,
     max_fetch_body_bytes: u64,
     max_append_bytes: u64,
-    audit_path: &std::path::Path,
-    allowed_base: &std::path::Path,
-    download_dir: &std::path::Path,
-) -> String {
+    audit_path: &'a std::path::Path,
+    allowed_base: &'a std::path::Path,
+    download_dir: &'a std::path::Path,
+}
+
+fn build_chaos_config(p: &ChaosConfigParams<'_>) -> String {
+    let ChaosConfigParams {
+        fingerprint_hex, port, encryption,
+        connect_timeout_seconds, command_timeout_seconds,
+        max_fetch_body_bytes, max_append_bytes,
+        audit_path, allowed_base, download_dir,
+    } = *p;
     format!(
         r#"
 [audit]
@@ -576,11 +616,17 @@ async fn chaos_delayed_greeting_times_out() {
     };
     mark_ran("scenario1");
 
-    // STARTTLS path (143 proxy): connect_timeout low (2s) — the greeting stall
-    // must trip fast; command_timeout default-ish (30s).
+    // STARTTLS path (143 proxy). The `timeout` toxic below blocks the greeting
+    // FOREVER, so the fault trips at whatever connect_timeout is — the toxic, not
+    // a tight budget, makes it deterministic. Keep connect_timeout moderate (4s)
+    // so the *same* budget also gates the post-reset RECOVERY connect roomily
+    // (spec principle: a must-succeed recovery connect should not run under a
+    // tight fault budget). First-run tuning: if the recovery connect flakes on a
+    // cold runner, RAISE connect_timeout — the block-forever toxic keeps the
+    // fault case deterministic at any budget; only wall-time grows.
     let mut h = spawn_ready(
         &chaos, chaos.starttls_port(), "starttls",
-        /*connect*/ 2, /*command*/ 30, ROOMY_FETCH, ROOMY_APPEND,
+        /*connect*/ 4, /*command*/ 30, ROOMY_FETCH, ROOMY_APPEND,
     ).await;
 
     // Block all data after TCP connect: the plaintext greeting never arrives
@@ -622,7 +668,7 @@ async fn chaos_delayed_greeting_times_out() {
 }
 ```
 
-> `spawn_ready` mirrors `e2e_wire_fault_injection.rs::spawn_ready` but takes the proxy port + encryption + budgets, writes the config via `build_chaos_config`, and returns a `Harness` plus a way to reach the audit path (add an `audit_path()` accessor or return the path alongside). Define `ROOMY_FETCH = 26_214_400`, `ROOMY_APPEND = 26_214_400`.
+> `spawn_ready(&chaos, port, encryption, connect_s, command_s, fetch_cap, append_cap)` (7 params — at the clippy threshold, not over) mirrors `e2e_wire_fault_injection.rs::spawn_ready`: it assembles a `ChaosConfigParams` from its args + the tempdir paths, calls `build_chaos_config`, spawns via `Harness::spawn_with_config`, completes the MCP handshake, and returns a `Harness`. Expose the audit path via `Harness::audit_path()` (confirm it exists on the wire `Harness`; if not, return `(Harness, PathBuf)`). Define `ROOMY_FETCH = 26_214_400`, `ROOMY_APPEND = 26_214_400`.
 
 - [ ] **Step 3: Run under the gate**
 
@@ -1043,5 +1089,5 @@ Expected: all five PASS; five distinct markers present.
 ## Self-Review notes (author)
 
 - **Spec coverage:** AC#1 → Task 4; AC#2 → Task 5; AC#3 → Task 6; AC#4 (buffering + time) → Task 7 (4a/4b); "typed code on wire + audit + recovery, every scenario" → each scenario task asserts all three; "nightly not PR CI" → Task 8 + the `RIMAP_CHAOS` gate (Task 2) + Task 10 invariant checks. Readiness gate (proxies+upstreams) → Task 2 Step 2. SIGKILL cleanup → Task 8 Step 1. Vacuous-green guard → Task 8 Step 1 + markers seeded in Tasks 4–7.
-- **Open items the implementer MUST confirm at the source (flagged inline):** exact `ureq` 3.x response API (mirror `e2e_smtp_real.rs`); `[accounts.imap]` timeout field names + `[accounts.limits] max_append_bytes` (`rimap-config/src/model.rs`, `deny_unknown_fields`); audit record field names (`rimap-audit/src/record/mod.rs`); the correct draft-safe body-fetch tool name (`chaos.fetch_message` / `chaos.download_attachment` — check the tool catalog); Toxiproxy `bandwidth` `rate` units and `timeout`/`reset_peer` attribute names (Toxiproxy README); whether a mid-connection toxic applies to the already-open scenario-2/4 connection (first-run confirmation).
+- **Open items the implementer MUST confirm at the source (flagged inline):** exact `ureq` 3.x response API (mirror GET from `support/mailpit/harness.rs`; verify POST `send_json`/`/reset` via context7 — no in-repo POST example); `[accounts.imap]` timeout field names + `[accounts.limits] max_append_bytes` (`rimap-config/src/model.rs`, `deny_unknown_fields`); audit record field names (`rimap-audit/src/record/mod.rs`); the correct draft-safe body-fetch tool name (`chaos.fetch_message` / `chaos.download_attachment` — check the tool catalog); Toxiproxy `bandwidth` `rate` units and `timeout`/`reset_peer` attribute names (Toxiproxy README); whether a mid-connection toxic applies to the already-open scenario-2/4 connection (first-run confirmation).
 - **Fallbacks are pre-authorized by the spec** for: scenario-1 connect auth-emission (relax to `tool_end`), scenario-2/4 toxic-on-open-connection, scenario-3 pre-login auth count — each recorded inline if triggered.
