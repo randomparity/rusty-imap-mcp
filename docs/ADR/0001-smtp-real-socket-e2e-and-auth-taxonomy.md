@@ -50,10 +50,18 @@ Add a `SmtpError::Auth { reason: String }` variant mapping to the existing
 `ErrorCode::Auth` (`ERR_AUTH`). Classification reads `err.status() ->
 Option<Code>`: recognized authentication reply codes map to `Auth`, all other
 negative replies map to `Rejected`, and everything else keeps its current
-mapping. Recognized auth codes (RFC 4954 / RFC 5321):
+mapping. Recognized auth codes — the unambiguous credential-failure codes only:
 
-- Permanent: `530`, `534`, `535`, `538`
-- Transient: `432`, `454`
+- Permanent: `534` (mechanism too weak), `535` (credentials invalid), `538`
+  (encryption required for the mechanism)
+- Transient: `432` (password transition needed)
+
+`530` ("must issue STARTTLS first" / relay-denied) and `454` ("TLS not
+available" / temporary auth) are **excluded** — they carry transport-security
+meanings, so classifying them as `Auth` would mis-signal a STARTTLS/TLS
+condition as a credentials problem. They map to `Rejected` (`ERR_SMTP_PROTOCOL`).
+(Narrowed from an initial `530/534/535/538 + 432/454` set after review — see
+Consequences.)
 
 `535` (credentials invalid) is the dominant case a wrong password produces and
 is unambiguous. The classifier is refactored into a pure
@@ -137,6 +145,22 @@ succeeds on the happy path.
   assertions are gated.
 - `SmtpError` gains a variant. It is `#[non_exhaustive]`, so downstream matches
   need no change, but the crate's own exhaustive matches must add the arm.
+- **Breaker neutrality (review fix):** giving SMTP failures their correct codes
+  (`ERR_AUTH`/`ERR_SMTP_PROTOCOL`) newly fed them into the per-account circuit
+  breaker (`ERR_AUTH` trips it instantly), which would let a wrong SMTP password
+  or a rejected recipient open the breaker and deny unrelated read-only IMAP
+  tools. On `main` these surfaced as `ERR_INTERNAL` (breaker-neutral).
+  `rimap_error_to_breaker_reason` now returns `None` for any `RimapError::Smtp`,
+  restoring that neutrality: the breaker guards the long-lived IMAP connection,
+  while `send_email`/`forward` open a fresh SMTP connection per call and share
+  no state with it. Guarded by a `smtp_errors_are_breaker_neutral` unit test.
+- **Reply-text sanitization (review fix):** the `Auth`/`Rejected` `reason` is
+  server-supplied and reaches the agent context and logs; it is now
+  control-char-stripped and length-capped at the `rimap-smtp` boundary
+  (`sanitize_reason`), closing a CRLF-log / prompt-injection surface a hostile
+  or MITM relay could otherwise exploit. The `RimapError::Smtp.message` doc was
+  updated to describe this actual guarantee (the prior "redacted — no server
+  banners" claim was already violated on `main`).
 - **New runtime dependency:** `rustls` becomes a direct dependency of
   `rimap-smtp` (already in the tree via lettre) so the classifier can
   `downcast_ref::<rustls::Error>`. The TLS-detection walk peeks through lettre's

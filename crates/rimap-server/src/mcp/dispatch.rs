@@ -85,6 +85,16 @@ pub(super) fn rimap_error_to_breaker_reason(
 ) -> Option<rimap_authz::breaker::FailureReason> {
     use rimap_authz::breaker::FailureReason;
     use rimap_core::ErrorCode;
+    // SMTP send failures are breaker-neutral. The per-account breaker guards the
+    // long-lived IMAP connection; `send_email`/`forward` open a fresh SMTP
+    // connection per call and share no state with it, so a wrong SMTP password
+    // (`ERR_AUTH`) or a rejected recipient (`ERR_SMTP_PROTOCOL`) must not open
+    // the breaker and deny unrelated read-only IMAP tools. Before #517 these
+    // surfaced as `ERR_INTERNAL` (neutral); this preserves that while keeping
+    // the now-correct SMTP error codes.
+    if let rimap_core::RimapError::Smtp { .. } = err {
+        return None;
+    }
     match err.code() {
         ErrorCode::ConnectionLost => Some(FailureReason::ConnectionLost),
         ErrorCode::Auth => Some(FailureReason::Auth),
@@ -361,6 +371,33 @@ mod tests {
             20,
             "list must enumerate all variants (6 service + 14 user)"
         );
+    }
+
+    #[test]
+    fn smtp_errors_are_breaker_neutral() {
+        use rimap_core::{ErrorCode, RimapError};
+
+        // SMTP send failures must never trip the per-account (IMAP) breaker,
+        // even for codes that trip it from an IMAP error — a wrong SMTP
+        // password or a rejected recipient must not deny read-only IMAP tools.
+        for code in [
+            ErrorCode::Auth,
+            ErrorCode::SmtpProtocol,
+            ErrorCode::Tls,
+            ErrorCode::Timeout,
+            ErrorCode::ConnectionLost,
+        ] {
+            let err = RimapError::Smtp {
+                code,
+                message: "x".into(),
+                source: None,
+            };
+            assert_eq!(
+                rimap_error_to_breaker_reason(&err),
+                None,
+                "SMTP {code:?} must be breaker-neutral",
+            );
+        }
     }
 
     #[test]

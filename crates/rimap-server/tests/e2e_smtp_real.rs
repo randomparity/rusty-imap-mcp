@@ -370,8 +370,13 @@ async fn send_email_real_socket_delivers_multipart_and_copies() {
 
     assert_eq!(result["meta"]["sent"], true);
 
-    // Delivered bytes fetched from Mailpit: multipart survived real delivery
-    // and Bcc is absent from the DATA (#432).
+    // Delivered bytes fetched from Mailpit: assert the multipart structure
+    // survived real delivery and the blind recipient is not disclosed in the
+    // visible To/Cc headers. NOTE: this does NOT verify DATA-level Bcc-header
+    // stripping (#432) — Mailpit synthesizes a `Bcc` header from envelope-only
+    // recipients, so the delivered raw cannot distinguish a stripped-DATA
+    // client from a leaking one. The byte-level #432 regression net is the
+    // fake-based `e2e_smtp.rs`; here we verify non-disclosure in To/Cc only.
     let raw = mailpit
         .fetch_raw_by_subject(subject)
         .expect("delivered message not found in Mailpit");

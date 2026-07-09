@@ -127,16 +127,42 @@ enum ReplyClass {
     Rejected,
 }
 
-/// Recognized SMTP authentication reply codes (RFC 4954 / RFC 5321):
-/// permanent 530/534/535/538, transient 432/454. All other negative
-/// replies are ordinary rejections.
+/// Recognized SMTP authentication reply codes: the unambiguous
+/// credential-failure codes only — permanent `534` (mechanism too weak),
+/// `535` (credentials invalid), `538` (encryption required for the mechanism);
+/// transient `432` (password transition needed). `530` ("must issue STARTTLS
+/// first" / "authentication required" / relay-denied) and `454` ("TLS not
+/// available" / temporary auth failure) are deliberately excluded: they carry
+/// transport-security meanings, so classifying them as `Auth` would mis-signal
+/// a STARTTLS/TLS condition as a credentials problem. They fall through to
+/// `Rejected` (`ERR_SMTP_PROTOCOL`).
 fn classify_reply_code(code: u16) -> ReplyClass {
-    const AUTH_CODES: [u16; 6] = [530, 534, 535, 538, 432, 454];
+    const AUTH_CODES: [u16; 4] = [534, 535, 538, 432];
     if AUTH_CODES.contains(&code) {
         ReplyClass::Auth
     } else {
         ReplyClass::Rejected
     }
+}
+
+/// Sanitize server-supplied reply text before it enters an error message that
+/// reaches the agent context and the logs. A hostile or MITM relay controls
+/// this text: strip control characters (defeats CRLF log injection and keeps
+/// smuggled prompt-injection control sequences out of the model's context),
+/// collapse whitespace, and cap the length so a pathological reply cannot
+/// flood either sink.
+fn sanitize_reason(raw: &str) -> String {
+    const MAX_LEN: usize = 200;
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX_LEN {
+        return collapsed;
+    }
+    let capped: String = collapsed.chars().take(MAX_LEN).collect();
+    format!("{capped}…")
 }
 
 /// Whether a lettre SMTP error is a TLS failure.
@@ -218,10 +244,10 @@ impl SmtpErrorShape {
 fn classify_smtp_error(err: lettre::transport::smtp::Error) -> SmtpError {
     match SmtpErrorShape::of(&err) {
         SmtpErrorShape::Rejected => SmtpError::Rejected {
-            reason: err.to_string(),
+            reason: sanitize_reason(&err.to_string()),
         },
         SmtpErrorShape::Auth => SmtpError::Auth {
-            reason: err.to_string(),
+            reason: sanitize_reason(&err.to_string()),
         },
         SmtpErrorShape::Timeout => SmtpError::Timeout,
         SmtpErrorShape::Tls => SmtpError::Tls(err),
@@ -383,13 +409,39 @@ mod tests {
     }
 
     #[test]
-    fn reply_code_454_classifies_as_auth() {
-        assert_eq!(super::classify_reply_code(454), super::ReplyClass::Auth);
+    fn reply_code_454_classifies_as_rejected() {
+        // 454 ("TLS not available" / temporary auth) is transport-ambiguous and
+        // deliberately not an auth code.
+        assert_eq!(super::classify_reply_code(454), super::ReplyClass::Rejected);
+    }
+
+    #[test]
+    fn reply_code_530_classifies_as_rejected() {
+        // 530 ("must issue STARTTLS first" / relay-denied) is not a credential
+        // failure.
+        assert_eq!(super::classify_reply_code(530), super::ReplyClass::Rejected);
     }
 
     #[test]
     fn reply_code_550_classifies_as_rejected() {
         assert_eq!(super::classify_reply_code(550), super::ReplyClass::Rejected);
+    }
+
+    #[test]
+    fn sanitize_reason_strips_control_chars_and_caps_length() {
+        // CRLF and other control chars are collapsed to spaces (log/prompt
+        // injection defense).
+        let dirty = "535 bad\r\ncreds\u{7}now";
+        let clean = super::sanitize_reason(dirty);
+        assert!(!clean.contains('\r') && !clean.contains('\n'));
+        assert!(!clean.chars().any(char::is_control));
+        assert_eq!(clean, "535 bad creds now");
+
+        // Length is capped with an ellipsis marker.
+        let long = "x".repeat(500);
+        let capped = super::sanitize_reason(&long);
+        assert!(capped.chars().count() <= 201, "capped: {}", capped.len());
+        assert!(capped.ends_with('…'));
     }
 
     #[test]
