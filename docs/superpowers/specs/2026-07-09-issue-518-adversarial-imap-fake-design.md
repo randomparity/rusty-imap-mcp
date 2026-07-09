@@ -55,8 +55,9 @@ hostile responses to the real client state machine.
 - **No container runtime.** The fake is a pure in-process tokio listener; it
   runs on every PR, including hosts where Docker is absent.
 - **No change to any MCP tool contract or response shape.** The one shipped-code
-  change (Component 2, scenario 3) is a `warn!` on an already-existing silent
-  skip — behavior for well-behaved servers is unchanged.
+  change (Component 2, scenario 3) is a single aggregated `warn!` after an
+  already-existing silent skip loop — the returned message set is unchanged, and
+  behavior for well-behaved servers (zero skips → no warn) is unchanged.
 
 ## Design
 
@@ -98,27 +99,37 @@ canned-response pairs, plus adversarial knobs:
 
 ```rust
 pub enum Step {
-    /// Send these bytes verbatim over the TLS stream (untagged data,
-    /// tagged replies, greetings, or deliberately malformed bytes).
-    Send(Vec<u8>),
     /// Read one CRLF-terminated client command line; assert the verb
-    /// (after the client tag) case-insensitively starts with `verb`.
-    /// The parsed tag is captured so `SendTagged` can echo it.
+    /// (after the client tag) case-insensitively starts with `verb`, and
+    /// capture the client tag for the next `Reply`. Does not write.
     Expect { verb: &'static str },
-    /// Read one client command line (asserting `verb`) and reply with the
-    /// client's own tag + this suffix, e.g. `SendTagged { verb: "LOGIN",
-    /// reply: "OK LOGIN completed" }` emits `<tag> OK LOGIN completed\r\n`.
-    SendTagged { verb: &'static str, reply: &'static str },
+    /// Send these bytes verbatim over the TLS stream: untagged data
+    /// (`* CAPABILITY …`, `* n FETCH (…)`), greetings, literals, or
+    /// deliberately malformed/truncated bytes. Does not read.
+    Send(Vec<u8>),
+    /// Emit a tagged completion using the tag captured by the most recent
+    /// `Expect`: writes `<captured-tag> <text>\r\n`. Does not read. E.g.
+    /// `Reply { text: "OK LOGIN completed" }`.
+    Reply { text: &'static str },
     /// Sleep, to exercise the client command timeout without closing.
     Delay(Duration),
-    /// Drop the TLS session (and TCP) immediately — mid-command disconnect.
+    /// Drop the TLS session and TCP socket immediately (bare drop → prompt
+    /// FIN, no `close_notify` wait) — a mid-command disconnect / truncation.
     Disconnect,
 }
 ```
 
-Tag echoing (`Expect`/`SendTagged` capture the client's tag and reply with it)
-makes the fake robust to async-imap's tag format, unlike the existing plaintext
-`MockImap` in `handshake.rs`, which hardcodes `A0001`.
+A real command reply is therefore three steps —
+`Expect { verb }`, then zero-or-more `Send(untagged…)`, then
+`Reply { text }` — so the untagged-data-then-tagged-completion shape every
+scenario needs (post-login `* CAPABILITY …` + OK; `SELECT` response; each
+`* n FETCH (…)` + OK) is expressible. Because `Reply` echoes the tag captured
+by the preceding `Expect` **without reading another line**, the fake never
+deadlocks waiting for a command the client already completed, and it is robust
+to async-imap's tag format — unlike the existing plaintext `MockImap` in
+`handshake.rs`, which hardcodes `A0001` and would desync if the tag scheme
+changed. (`Expect` reads exactly one CRLF line and asserts the verb; a `+`
+literal-continuation dialog is not modeled — see *Failure modes*.)
 
 **Capability sets** are expressed as plain `Send` steps of the untagged
 `* CAPABILITY …` line the scenario wants (e.g. `IMAP4rev1` with neither `MOVE`
@@ -135,9 +146,17 @@ the TLS stream, and exposes:
   `pinned_fingerprint`),
 - `connection(username) -> Connection` — a fully-wired `Connection` pointed at
   the fake with `encryption: Tls`, the pin set, a no-op `AuthEventSink`, and a
-  static-password `CredentialResolver` (returns a fixed `SecretString` +
+  static-password `CredentialResolver` (returns a fixed ASCII `SecretString` +
   `CredentialSource::Keyring`), with a short `command_timeout` (~1s) so a hang
   bug fails fast rather than stalling the suite,
+- `connection_with(username, resolver, command_timeout) -> Connection` — same,
+  but injects an arbitrary `Arc<dyn CredentialResolver>` and timeout;
+  `connection()` delegates to it. Scenario 2 passes a `PanicResolver` (mirroring
+  `handshake.rs`) to prove the resolver is never consulted; scenario 4 passes a
+  longer timeout (see below). The injected username/password are constrained to
+  ASCII with no quotes, backslashes, or 8-bit bytes, so async-imap 0.11 encodes
+  `LOGIN` as quoted strings and never as an IMAP literal (which the `Step`
+  vocabulary cannot answer — see *Failure modes*),
 - `join() -> Result<Vec<String>, io::Error>` — await the server task; returns
   the client command lines it recorded (for ordering assertions).
 
@@ -188,20 +207,39 @@ one lacking the `UID` data item, one with `UID 0`, and one well-formed
 
 The skip is currently **silent**. To satisfy the AC's "skip-**with-warning**"
 and give operators a signal that a server withheld/zeroed a UID (a hostile-input
-indicator per the threat model), add a `tracing::warn!` on each of the two skip
-arms. Assert the warnings fire using the repo's parallel-safe capture wiring
-(`tracing::dispatcher::with_default`, per the existing tracing-test convention).
-This is the spec's only shipped-code change; it is additive and inert for
-conformant servers.
+indicator per the threat model), the fetch loop **counts** skipped items
+(missing UID + zero UID) and emits a **single aggregated** `tracing::warn!`
+after the loop when the count is non-zero, carrying the skipped count and the
+folder. A per-item `warn!` is rejected: the skip is attacker-controlled, so
+one-warn-per-item lets a hostile server amplify log volume 1:1 with its
+response stream — the exact threat the warn is meant to surface must not become
+a log-flood lever. One aggregated warn per fetch call is inert for conformant
+servers and bounded for hostile ones. This is the spec's only shipped-code
+change; it is additive.
+
+Assert the warning fires using the repo's parallel-safe capture wiring
+(`tracing::dispatcher::with_default`, per the existing tracing-test
+convention). The dispatcher is thread-local, so scenario 3 pins
+`#[tokio::test(flavor = "current_thread")]` and `.await`s the `fetch` call
+**inside** the `with_default` guard scope — a current-thread runtime polls the
+future on the test thread, so the `warn!` fires on the thread the dispatcher
+covers. Assert exactly one captured warn event whose fields report
+`skipped == 2`.
 
 **Scenario 4 — truncated response mid-literal, typed error no hang.** Log in,
 `SELECT`, then answer a `UID FETCH` with a `BODY[]` literal announcing `{100}`
-but `Send` fewer than 100 bytes followed by `Disconnect`. async-imap sees EOF
-mid-literal and surfaces a typed `ImapError` (`Protocol` or `ConnectionLost`)
-promptly. Assert the call returns `Err(_)` within the ~1s command timeout and
-that it is **not** an `ImapError::Timeout` — proving the client detects the
-truncation rather than merely timing out. (The command timeout is the belt-and-
-suspenders backstop; the EOF is the primary signal.)
+but `Send` fewer than 100 bytes followed by `Disconnect`. `Disconnect` bare-drops
+the TLS/TCP stream (prompt FIN, no `close_notify`), so async-imap's read sees
+EOF mid-literal on the loopback socket essentially immediately (sub-millisecond)
+and surfaces a truncation-class `ImapError` (`Protocol` or `ConnectionLost`).
+Scenario 4 uses `connection_with(..)` with a **generous ~5s** `command_timeout`
+so the near-instant loopback EOF unambiguously wins the race against the
+backstop timeout on any plausibly-loaded CI runner. Assert the call returns
+`Err(_)` and that it is **not** an `ImapError::Timeout` — proving the client
+detects the truncation itself rather than merely timing out. The timeout remains
+only as a no-hang backstop; making it large removes the flake surface the strict
+variant-exclusion would otherwise create, while keeping the AC-required "typed
+error, no hang" assertion meaningful.
 
 ### Component 3 — CONTRIBUTING note
 
@@ -235,10 +273,22 @@ host-runnable and PR-blocking; Dovecot is container-gated and silent-skips.
   rcgen's default ECDSA-P256 leaf is in the supported set. If a future rcgen
   default changed to an unsupported scheme, the handshake would fail with a
   `TlsHandshake` error — caught immediately by scenario 1's login.
-- **Scenario 4 races truncation vs timeout.** Closing the connection (EOF)
-  after a short partial literal makes the truncation the first observable event;
-  the assertion explicitly excludes `Timeout` so a regression to "only the
-  timeout saved us" is caught.
+- **Scenario 4 races truncation vs timeout.** Resolved by construction:
+  `Disconnect` bare-drops the socket (prompt FIN, no `close_notify`), so the
+  loopback EOF is observed sub-millisecond, while scenario 4's `command_timeout`
+  is set to ~5s — a ~1000× margin. The assertion excludes `Timeout` so a
+  regression to "only the timeout saved us" is caught, but the large margin
+  keeps that exclusion from flaking on a loaded CI runner.
+- **LOGIN literal encoding is a known cliff, not a silent hang.** The `Step`
+  vocabulary models one CRLF line per client command and cannot answer an IMAP
+  literal continuation (`{n}\r\n` → server `+ …\r\n` → remaining bytes). async-
+  imap 0.11 (pinned in `Cargo.lock`) encodes `LOGIN` as quoted strings for the
+  constrained ASCII credentials the harness injects, so no literal is emitted
+  today. If a future async-imap bump switched `LOGIN` (or any argument) to
+  literal encoding, the script would desync and the call would fail via the
+  command-timeout backstop — a loud, bounded failure that flags the cliff, not
+  a silent hang. Adding a `+` continuation step is deferred until a scenario
+  needs it.
 - **`folder_wide_expunge` vs `used_fallback`.** Scenario 1 asserts **both**:
   `used_fallback` (`!has_move`) is also true on the *safe* scoped-UID path, so
   only the conjunction with `folder_wide_expunge` (`!has_move && !has_uidplus`)
@@ -251,7 +301,8 @@ host-runnable and PR-blocking; Dovecot is container-gated and silent-skips.
 - `just ci` green locally (`fmt-check`, `lint`, `test`, `deny`, hooks). No
   `.github/workflows` change, so no `actionlint`/`zizmor` delta. No new
   dependency, so no `cargo-deny` delta.
-- The added `warn!`s (scenario 3) are asserted via `tracing::dispatcher::with_default`.
+- The added aggregated `warn!` (scenario 3) is asserted via
+  `tracing::dispatcher::with_default` under a pinned `current_thread` runtime.
 
 ## Considered & rejected
 
@@ -280,12 +331,17 @@ host-runnable and PR-blocking; Dovecot is container-gated and silent-skips.
 - **Leave the FETCH skip silent (test-only, no `warn!`).** Rejected: the AC
   says "skip-with-warning", and a compromised server silently dropping messages
   by omitting/zeroing UIDs is exactly the kind of event the audit/observability
-  story should surface. The `warn!` is two lines and inert for good servers.
+  story should surface.
+- **Per-item FETCH `warn!`.** Rejected in favor of a single aggregated warn
+  carrying the skipped count: a per-item warn is driven 1:1 by attacker-
+  controlled response items, turning the observability signal into a log-flood
+  amplifier under the very threat it targets.
 
 ## Rollout / rollback
 
 Additive: a new `tests/support/` harness, a rewritten (previously-ignored) test
-file, a new test binary, two `warn!` lines in `ops/fetch.rs`, and an `AGENTS.md`
-note. No migration, no shipped-dependency change, no public-contract change.
-Rollback is a straight revert; the `ops/fetch.rs` `warn!` add is independently
-revertible from the test scaffolding.
+file, a new test binary, one aggregated `warn!` (plus a skipped-count
+accumulator) in `ops/fetch.rs`, and an `AGENTS.md` note. No migration, no
+shipped-dependency change, no public-contract change. Rollback is a straight
+revert; the `ops/fetch.rs` `warn!` add is independently revertible from the test
+scaffolding.
