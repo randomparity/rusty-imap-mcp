@@ -302,13 +302,15 @@ fn wait_for_ready(p: &WaitParams<'_>) -> Result<ChaosHarness, ChaosSkip> {
                 "chaos stack not ready within {timeout:?}\n{logs}"
             )));
         }
-        let ready = read_fingerprint(p.project).ok().filter(|_| {
-            toxics.version_ok()
-                && toxics.proxies_ok()
-                && std::net::TcpStream::connect_timeout(&imaps_addr, Duration::from_millis(500))
-                    .is_ok()
-        });
-        if let Some(fp) = ready {
+        // Cheap localhost probes first; the `docker exec` fingerprint read (a
+        // full process spawn) runs only once these pass, so early startup
+        // iterations don't pay it. The imaps proxy accepting a TCP connection
+        // implies Dovecot is up, so by then the fingerprint file exists.
+        let cheap_ok = toxics.version_ok()
+            && toxics.proxies_ok()
+            && std::net::TcpStream::connect_timeout(&imaps_addr, Duration::from_millis(500))
+                .is_ok();
+        if cheap_ok && let Ok(fp) = read_fingerprint(p.project) {
             return Ok(ChaosHarness {
                 project: p.project.to_string(),
                 compose_dir: p.compose_dir.to_path_buf(),

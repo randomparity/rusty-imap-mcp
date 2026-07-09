@@ -149,7 +149,6 @@ async fn spawn_ready(
     connect_timeout_seconds: u32,
     command_timeout_seconds: u32,
     max_fetch_body_bytes: u64,
-    max_append_bytes: u64,
 ) -> Harness {
     let tempdir = TempDir::new().expect("tempdir");
     let audit_path = tempdir.path().join("audit.jsonl");
@@ -166,7 +165,7 @@ async fn spawn_ready(
         connect_timeout_seconds,
         command_timeout_seconds,
         max_fetch_body_bytes,
-        max_append_bytes,
+        max_append_bytes: ROOMY_APPEND,
         audit_path: &audit_path,
         allowed_base: &allowed_base,
         download_dir: &download_dir,
@@ -181,24 +180,10 @@ async fn spawn_ready(
 }
 
 /// Assert a `tools/call` response is a tool-execution error whose
-/// `structuredContent.error_code` equals `expected_code`. Mirrors
-/// `e2e_wire_fault_injection.rs::assert_error_code`.
+/// `structuredContent.error_code` equals `expected_code` and that carries a
+/// non-empty message. Mirrors `e2e_wire_fault_injection.rs::assert_error_code`.
 fn assert_error_code(resp: &Value, expected_code: &str) {
-    assert!(
-        resp["error"].is_null(),
-        "tool-execution failure must not be a JSON-RPC error envelope; got {resp}",
-    );
-    assert_valid(&resp["result"], "CallToolResult");
-    assert_eq!(
-        resp["result"]["isError"],
-        json!(true),
-        "fault must surface as a tool result with isError=true; got {resp}",
-    );
-    assert_eq!(
-        resp["result"]["structuredContent"]["error_code"],
-        json!(expected_code),
-        "fault must carry {expected_code} through dispatch; got {resp}",
-    );
+    assert_error_code_in(resp, &[expected_code]);
     assert!(
         resp["result"]["content"][0]["text"]
             .as_str()
@@ -381,16 +366,7 @@ async fn chaos_delayed_greeting_times_out() {
     // greeting is blocked (connect_timeout → ERR_TIMEOUT + an `auth` Failure —
     // the delayed-greeting-on-connect fault). connect==command==1s so both trip
     // fast; the wire deadline (15s) comfortably exceeds them.
-    let mut h = spawn_ready(
-        &chaos,
-        chaos.starttls_port(),
-        "starttls",
-        1,
-        1,
-        ROOMY_FETCH,
-        ROOMY_APPEND,
-    )
-    .await;
+    let mut h = spawn_ready(&chaos, chaos.starttls_port(), "starttls", 1, 1, ROOMY_FETCH).await;
     let audit_path = h.audit_path();
 
     chaos.toxics().add_toxic(
@@ -466,16 +442,7 @@ async fn chaos_mid_fetch_stall_times_out_then_recovers() {
 
     // imaps (993): connect_timeout generous (recovery reconnect not gated);
     // command_timeout low (1s) so the stalled FETCH trips fast.
-    let mut h = spawn_ready(
-        &chaos,
-        chaos.imaps_port(),
-        "tls",
-        10,
-        1,
-        ROOMY_FETCH,
-        ROOMY_APPEND,
-    )
-    .await;
+    let mut h = spawn_ready(&chaos, chaos.imaps_port(), "tls", 10, 1, ROOMY_FETCH).await;
     let audit_path = h.audit_path();
 
     // Warm-up on the live session (success is load-bearing for the audit assertion).
@@ -545,7 +512,6 @@ async fn chaos_starttls_reset_typed_error_one_auth() {
         10,
         10,
         ROOMY_FETCH,
-        ROOMY_APPEND,
     )
     .await;
     let audit_path = h.audit_path();
@@ -622,16 +588,7 @@ async fn chaos_trickle_over_cap_rejects_promptly() {
     .await;
 
     // command_timeout generous so the size rejection is unambiguously "prompt".
-    let mut h = spawn_ready(
-        &chaos,
-        chaos.imaps_port(),
-        "tls",
-        10,
-        30,
-        1_048_576,
-        ROOMY_APPEND,
-    )
-    .await;
+    let mut h = spawn_ready(&chaos, chaos.imaps_port(), "tls", 10, 30, 1_048_576).await;
     let uid = search_seed_uid(&mut h).await;
 
     // Slow trickle: the tiny RFC822.SIZE preflight returns fast even at ~64 KB/s;
@@ -692,16 +649,7 @@ async fn chaos_trickle_under_cap_times_out_then_recovers() {
     .await;
 
     // command_timeout low (2s) so the trickled body times out; connect generous.
-    let mut h = spawn_ready(
-        &chaos,
-        chaos.imaps_port(),
-        "tls",
-        10,
-        2,
-        ROOMY_FETCH,
-        ROOMY_APPEND,
-    )
-    .await;
+    let mut h = spawn_ready(&chaos, chaos.imaps_port(), "tls", 10, 2, ROOMY_FETCH).await;
     let uid = search_seed_uid(&mut h).await;
 
     chaos.toxics().add_toxic(

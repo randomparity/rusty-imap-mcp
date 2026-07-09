@@ -156,9 +156,6 @@ fn force_use_for_dead_code_link() {
     // No current callers in any binary — suppressed here for the same
     // per-binary dead-code reason.
     let _ = Harness::recv_line_within;
-    // Called only by e2e_wire_chaos.rs (#522, slow-response chaos scenarios);
-    // dead in every other wire-including binary.
-    let _ = Harness::request_within;
     // Method used by mcp_wire_conformance and e2e_wire_cancellation,
     // not by other binaries.
     let _ = Harness::assert_no_response_within;
@@ -399,28 +396,11 @@ allowed_base_dir = "{}"
         }
     }
 
-    /// Send a JSON-RPC request and return the parsed response value.
-    /// Panics on timeout, EOF before a response arrives, or non-JSON output.
+    /// Send a JSON-RPC request and return the parsed response value, bounding the
+    /// response read by the shared 2s `REQUEST_TIMEOUT`. Panics on timeout, EOF
+    /// before a response arrives, or non-JSON output.
     pub async fn request(&mut self, method: &str, params: Value) -> Value {
-        self.next_id += 1;
-        let id = self.next_id;
-        let envelope = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        let line = format!("{envelope}\n");
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .expect("write request");
-        self.stdin.flush().await.expect("flush request");
-
-        let envelope = self.read_one_envelope(method).await;
-        assert_eq!(envelope["id"], json!(id), "response id must match request");
-        super::schema::assert_envelope_valid(&envelope);
-        envelope
+        self.request_within(method, params, REQUEST_TIMEOUT).await
     }
 
     /// Like `request`, but bounds the response read by `deadline` instead of the
