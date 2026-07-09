@@ -157,8 +157,8 @@ git commit -m "test(chaos): add Toxiproxy+Dovecot compose fixture for #522"
   - `ChaosHarness::try_start() -> Result<ChaosHarness, ChaosSkip>` — applies the three-tier gate, brings up the stack, waits for readiness.
   - `ChaosHarness::imaps_port(&self) -> u16`, `starttls_port(&self) -> u16` — host ports for the two proxies.
   - `ChaosHarness::fingerprint(&self) -> &TlsFingerprint` (type `rimap_core::TlsFingerprint`; confirm the exact path used by `DovecotHarness`).
-  - `ChaosHarness::project(&self) -> &str` — the `rimap-chaos-<uuid>` project name (for diagnostics).
   - `ChaosHarness::toxics(&self) -> &ToxiproxyControl`.
+  - (No `project()` accessor — the `rimap-chaos-<uuid>` project name is an internal field used by `Drop`/log dumps, not exposed; a public accessor no scenario calls would be permanently dead code.)
   - `ToxiproxyControl::add_toxic(&self, proxy: &str, spec: serde_json::Value)`, `reset(&self)` — each panics on non-2xx with a control-plane-attributed message. (No `remove_toxic`: every scenario clears via `reset()`; adding an uncalled `pub fn` would trip `dead_code` under `-D warnings` — `pub` does not exempt items in a test binary. If a future scenario needs per-toxic removal, add it *with* its caller, or link it via a `force_use_for_dead_code_link` helper mirroring `e2e_wire_fault_injection.rs:60`.)
   - Drop → `compose down -v --remove-orphans`.
 
@@ -195,12 +195,28 @@ compiles under `just lint` from now on (Task 4 fleshes it out):
 #[path = "support/chaos/mod.rs"]
 mod chaos;
 
-// Reference the public surface so it is not dead code before scenarios land.
-#[expect(dead_code, reason = "shell; scenarios in Task 4+ exercise this")]
-fn _force_use() {
+// PERMANENT dead-code link. Each e2e binary compiles support/chaos
+// independently, so every public ChaosHarness/ToxiproxyControl accessor a given
+// commit boundary does not yet call appears dead under -D warnings. Referencing
+// them here counts as "use". Mirrors e2e_wire_fault_injection.rs::
+// force_use_for_dead_code_link. Keep this permanently — do NOT delete it when
+// scenarios land; some accessors (e.g. fingerprint) are first called only in
+// Task 5, so removing the link earlier would re-break Task 4's lint.
+#[expect(dead_code, reason = "cross-boundary dead-code link for support/chaos items")]
+fn force_use_for_dead_code_link() {
     let _ = chaos::ChaosHarness::try_start;
+    let _ = chaos::ChaosHarness::imaps_port;
+    let _ = chaos::ChaosHarness::starttls_port;
+    let _ = chaos::ChaosHarness::fingerprint;
+    let _ = chaos::ChaosHarness::toxics;
+    let _ = chaos::ToxiproxyControl::add_toxic;
+    let _ = chaos::ToxiproxyControl::reset;
 }
 ```
+
+> This shim keeps Task 2 Step 7's `just lint` green even though the accessors'
+> first real callers land in Tasks 4–5. Every public item committed in Task 2
+> must appear in this list; if you add a public accessor later, add it here too.
 
 - [ ] **Step 2: Write the gate + `ToxiproxyControl` (the genuinely new code)**
 
@@ -561,33 +577,51 @@ pub async fn request_within(&mut self, method: &str, params: Value, deadline: Du
 }
 ```
 
-- [ ] **Step 3: Compile the whole test crate (no behavior change to existing tests)**
+- [ ] **Step 3: Link `request_within` into every wire-including binary's dead-code shim (REQUIRED, not conditional)**
 
-Run: `cargo nextest run -p rimap-server --no-run` and then a fast existing wire test:
-`cargo nextest run -p rimap-server -E 'binary(e2e_wire) & test(/full_session/)' 2>&1 | tail` (or, if Docker-gated, at least `--no-run`).
-Expected: compiles; existing wire tests unchanged (they still use the 2s default).
+`request_within` is a new `pub fn` on the shared wire `Harness`. Because each e2e
+binary compiles `support/wire` as its own crate, `request_within` is dead code in
+**every** binary that includes `support/wire` but does not call it — which is all
+**seven** existing wire binaries (the chaos binary calls it, so it is live there).
+Each already carries a `force_use_for_dead_code_link` helper; add
+`let _ = Harness::request_within;` to **all seven**:
 
-- [ ] **Step 4: Guardrails + commit**
-
-```bash
-just fmt && just lint
-git add crates/rimap-server/tests/support/wire/harness.rs
-git commit -m "test(wire): add request_within for slow-response chaos scenarios"
+```
+crates/rimap-server/tests/e2e_wire.rs
+crates/rimap-server/tests/e2e_wire_fault_injection.rs
+crates/rimap-server/tests/e2e_wire_cancellation.rs
+crates/rimap-server/tests/e2e_wire_destructive.rs
+crates/rimap-server/tests/e2e_wire_tool_advertisement.rs
+crates/rimap-server/tests/e2e_wire_multi_account_advertisement.rs
+crates/rimap-server/tests/e2e_wire_folder_management.rs
 ```
 
-> Dead-code note: `request_within` is `pub` on the shared wire `Harness`, which
-> other e2e binaries also compile. If a binary that does not call it emits
-> `dead_code`, that mirrors how the repo already handles cross-binary support
-> items — reference it from the existing `force_use_for_dead_code_link` helpers
-> (`e2e_wire_fault_injection.rs:60`, `e2e_wire_destructive.rs`) as those files do
-> for other shared `Harness` methods. Add the reference if lint flags it.
+A reference in one crate does NOT silence the lint in the others — miss one and
+`just lint` fails on that binary. (Re-confirm the exact set with
+`grep -l 'path = "support/wire/mod.rs"' crates/rimap-server/tests/*.rs`.)
+
+- [ ] **Step 4: Compile + guardrails + commit**
+
+Run: `cargo nextest run -p rimap-server --no-run` (compiles all e2e binaries), then:
+```bash
+just fmt && just lint   # must be green across ALL seven wire binaries + chaos
+git add crates/rimap-server/tests/support/wire/harness.rs \
+        crates/rimap-server/tests/e2e_wire.rs \
+        crates/rimap-server/tests/e2e_wire_fault_injection.rs \
+        crates/rimap-server/tests/e2e_wire_cancellation.rs \
+        crates/rimap-server/tests/e2e_wire_destructive.rs \
+        crates/rimap-server/tests/e2e_wire_tool_advertisement.rs \
+        crates/rimap-server/tests/e2e_wire_multi_account_advertisement.rs \
+        crates/rimap-server/tests/e2e_wire_folder_management.rs
+git commit -m "test(wire): add request_within for slow-response chaos scenarios"
+```
 
 ---
 
 ## Task 4: Scenario 1 — delayed greeting (STARTTLS) → `ERR_TIMEOUT`
 
 **Files:**
-- Modify: `crates/rimap-server/tests/e2e_wire_chaos.rs` (the Task-2 shell — flesh it out; delete the `_force_use` shim once a real scenario references `ChaosHarness`).
+- Modify: `crates/rimap-server/tests/e2e_wire_chaos.rs` (the Task-2 shell — flesh it out; **keep** the permanent `force_use_for_dead_code_link` shim — `fingerprint()` isn't called until Task 5, so removing it now would re-break lint).
 - Consumes: `support/chaos` (Tasks 2–3), `support/wire` (`Harness`, `assert_valid`), `support/dovecot::fixtures`.
 
 **Interfaces:**
