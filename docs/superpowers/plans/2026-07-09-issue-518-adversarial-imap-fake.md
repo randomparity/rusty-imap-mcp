@@ -37,6 +37,21 @@ two-line shipped change adds an aggregated `warn!` to `ops::fetch`.
     on a file with no `.expect()` call FAILS. When a task adds a construct
     (`.unwrap()`, `.expect()`, `panic!`) that a scenario file did not previously
     contain, that same task must update the file's `#![expect(...)]` list.
+  - **Reconcile against the FULL workspace lint set, not just unwrap/expect/panic.**
+    Beyond those, the workspace denies (Cargo.toml:265-289) `panic_in_result_fn`,
+    `todo`, `unimplemented`, `unreachable`, `print_stdout`, `print_stderr`,
+    `await_holding_lock`, and sets `pedantic = warn` (so `must_use_candidate`,
+    `doc_markdown`, etc. become `-D` errors — except the relaxed
+    `module_name_repetitions`/`similar_names`). Concretely for this plan:
+    `assert!` inside a `-> Result` fn trips `panic_in_result_fn`; `eprintln!`
+    trips `print_stderr`; every value-returning pure `pub fn` accessor wants
+    `#[must_use]` (mirroring `tests/integration/support/container.rs`); and doc
+    comments may trip `doc_markdown` on bare identifiers (`ReadOnly`,
+    `close_notify`). The snippets below handle the first three at the call/def
+    site. **The per-task `cargo clippy … -- -D warnings` step is authoritative:**
+    resolve any residual pedantic lint the snippets did not anticipate (typically
+    `doc_markdown`) by backticking the doc term or adding a targeted
+    `#[expect(<lint>, reason = "…")]` — this is expected polish, not a plan defect.
 - **No new shipped dependency.** `rcgen`/`tokio-rustls`/`rustls`/`tracing-subscriber`
   are added only to `rimap-imap` **dev-dependencies** (all already
   `[workspace.dependencies]`).
@@ -206,6 +221,7 @@ pub struct SelfSigned {
 }
 
 /// Generate a fresh self-signed cert/key for `127.0.0.1` and its pin.
+#[must_use]
 pub fn self_signed() -> SelfSigned {
     let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
     let cert_der = generated.cert.der().clone();
@@ -338,32 +354,38 @@ impl FakeImapServer {
         }
     }
 
+    #[must_use]
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    #[must_use]
     pub fn pin(&self) -> TlsFingerprint {
         self.pin
     }
 
     /// Snapshot of client command lines read so far (for ordering assertions).
+    #[must_use]
     pub fn recorded(&self) -> Vec<String> {
         self.recorded.lock().unwrap().clone()
     }
 
     /// Fully-wired `Connection` (static-password resolver, ~1s timeout).
+    #[must_use]
     pub fn connection(&self, username: &str) -> Connection {
         self.connection_timeout(username, Duration::from_secs(1))
     }
 
     /// Static-resolver connection with a caller-chosen command timeout
     /// (scenario 4 uses a generous 5s backstop).
+    #[must_use]
     pub fn connection_timeout(&self, username: &str, command_timeout: Duration) -> Connection {
         self.connection_with(username, Arc::new(StaticResolver), command_timeout)
     }
 
     /// Inject an arbitrary resolver and command timeout (scenario 2 uses a
     /// `PanicResolver` to prove resolve() is never consulted).
+    #[must_use]
     pub fn connection_with(
         &self,
         username: &str,
@@ -387,6 +409,10 @@ impl FakeImapServer {
     }
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the fake asserts on a scripted protocol mismatch; the panic surfaces as a test failure"
+)]
 async fn serve(
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     script: &[Step],
@@ -527,8 +553,13 @@ async fn login_and_list_succeed_through_fake() {
     let folders = conn.list_folders("*").await.expect("list should succeed");
     assert!(folders.iter().any(|f| f.name == "INBOX"));
 
-    // Calibration aid: dump the exact client command order.
-    eprintln!("recorded dialog: {:#?}", server.recorded());
+    // Calibration aid: dump the exact client command order. `print_stderr` is
+    // denied workspace-wide (stdout is the MCP transport); stderr is fine in a
+    // test, so suppress it at the call site rather than in the module header.
+    #[expect(clippy::print_stderr, reason = "calibration output for TDD")]
+    {
+        eprintln!("recorded dialog: {:#?}", server.recorded());
+    }
 }
 ```
 
@@ -839,6 +870,8 @@ pub struct WarnCapture {
 
 impl WarnCapture {
     /// Install a thread-local capturing dispatcher on the current thread.
+    /// Hold the returned guard across the awaited call under test.
+    #[must_use]
     pub fn install() -> WarnCapture {
         ensure_permissive_global();
         let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -854,6 +887,7 @@ impl WarnCapture {
     }
 
     /// Snapshot of captured `"target=... field=value ..."` records.
+    #[must_use]
     pub fn records(&self) -> Vec<String> {
         self.events.lock().unwrap().clone()
     }
@@ -1208,11 +1242,16 @@ Expected: all scenario tests pass; ignore count `0`.
   `AuthFailure::CapabilityMissing { needed }`, `MoveOutcome::{used_fallback,
   folder_wide_expunge}` — all match the source signatures.
 
-**Per-commit clippy hygiene:** each scenario file's `#![expect(...)]` lists
-exactly the lints its body triggers, and tasks that introduce a new construct
-(`.unwrap()`/`.expect()`/`panic!`) update the list in the same commit; every task
-runs `cargo clippy ... -- -D warnings` before committing so no commit fails the
-`unfulfilled_lint_expectations`/`-D warnings` gate.
+**Per-commit clippy hygiene:** the snippets suppress the workspace-denied lints
+their bodies trigger — `unwrap_used`/`expect_used`/`panic` via each file's
+`#![expect(...)]`, `panic_in_result_fn` on `serve()`, `print_stderr` on the
+smoke `eprintln!`, and `#[must_use]` on value-returning accessors — and tasks
+that introduce a new construct update the file's `#![expect(...)]` in the same
+commit. The provided lists are best-effort against clippy 1.94.0's pedantic set;
+because the plan cannot compile itself, the **authoritative gate is the per-task
+`cargo clippy … -- -D warnings` step**, which surfaces any residual pedantic lint
+(e.g. `doc_markdown`) for a one-line fix (backtick or targeted `#[expect]`)
+before the commit. No commit is made until that step is clean.
 
 **Calibration dependency (called out, not a placeholder):** the exact async-imap
 0.11 dialog is confirmed empirically in Task 2 and the scenario scripts are
