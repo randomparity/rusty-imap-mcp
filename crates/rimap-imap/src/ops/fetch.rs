@@ -153,12 +153,15 @@ pub(crate) async fn fetch(
         .map_err(super::folders::map_err)?;
 
     let mut out = Vec::with_capacity(uids.len());
+    let mut skipped_uids: u64 = 0;
     while let Some(msg) = stream.next().await {
         let msg = msg.map_err(super::folders::map_err)?;
         let Some(uid_raw) = msg.uid else {
+            skipped_uids += 1;
             continue;
         };
         let Some(uid) = Uid::new(uid_raw) else {
+            skipped_uids += 1;
             continue;
         };
 
@@ -186,6 +189,14 @@ pub(crate) async fn fetch(
             flags,
             size,
         });
+    }
+    if skipped_uids > 0 {
+        tracing::warn!(
+            folder = %folder,
+            skipped_uids,
+            "FETCH response omitted or zeroed the UID on one or more items; \
+             skipping them (possible malformed or hostile server)",
+        );
     }
     Ok((out, uid_validity))
 }

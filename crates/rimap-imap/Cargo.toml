@@ -66,6 +66,9 @@ proptest = { workspace = true }
 rcgen = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
+# Scoped tracing capture for the missing/zero-UID FETCH skip-warn assertion.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [[test]]
 name = "dovecot"

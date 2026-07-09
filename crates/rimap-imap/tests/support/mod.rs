@@ -8,3 +8,4 @@
 
 pub mod certs;
 pub mod fake_imap;
+pub mod tracing_capture;

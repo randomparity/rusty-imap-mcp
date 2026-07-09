@@ -16,11 +16,14 @@
 
 mod support;
 
+use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rimap_imap::error::{AuthFailure, ImapError};
+use rimap_imap::types::{FetchSpec, Uid};
 use support::fake_imap::{FakeImapServer, PanicResolver, Step};
+use support::tracing_capture::WarnCapture;
 
 /// Smoke/calibration: a real login + LIST through the fake proves the TLS
 /// handshake, pin, greeting, CAPABILITY drain, LOGIN, and post-login
@@ -94,4 +97,84 @@ async fn logindisabled_maps_to_capability_missing_before_resolve() {
         } => assert_eq!(needed, "LOGIN"),
         other => panic!("expected CapabilityMissing {{ needed: LOGIN }}, got {other:?}"),
     }
+}
+
+/// Scenario 3: a UID FETCH whose items omit or zero the UID are skipped, and a
+/// single aggregated `warn!` carrying `skipped_uids` fires. Pinned to a
+/// current-thread runtime so the thread-local capture covers the warn.
+#[tokio::test(flavor = "current_thread")]
+async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
+    let capture = WarnCapture::install();
+
+    let server = FakeImapServer::start(vec![
+        Step::Send(b"* OK fake ready\r\n".to_vec()),
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+        Step::Expect { verb: "LOGIN" },
+        Step::Reply {
+            text: "OK LOGIN completed",
+        },
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(b"* CAPABILITY IMAP4rev1 UIDPLUS\r\n".to_vec()),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+        // fetch: EXAMINE (read-only open — ops::fetch calls select(...,true)).
+        Step::Expect { verb: "EXAMINE" },
+        Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
+        Step::Reply {
+            text: "OK [READ-ONLY] EXAMINE completed",
+        },
+        // UID FETCH: item with no UID, item with UID 0, valid item (UID 5).
+        Step::Expect { verb: "UID FETCH" },
+        Step::Send(b"* 1 FETCH (FLAGS (\\Seen))\r\n".to_vec()),
+        Step::Send(b"* 2 FETCH (UID 0 FLAGS (\\Seen))\r\n".to_vec()),
+        Step::Send(b"* 3 FETCH (UID 5 FLAGS (\\Seen))\r\n".to_vec()),
+        Step::Reply {
+            text: "OK FETCH completed",
+        },
+    ])
+    .await;
+
+    let conn = server.connection("user@example.com");
+    let spec = FetchSpec {
+        envelope: false,
+        bodystructure: false,
+        uid: true,
+        flags: true,
+        size: false,
+    };
+    let (messages, _uidv) = conn
+        .fetch(
+            "INBOX",
+            &[Uid::from(NonZeroU32::new(5).unwrap())],
+            spec,
+            None,
+        )
+        .await
+        .expect("fetch should succeed, skipping malformed items");
+
+    // Only the well-formed UID 5 survives.
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].uid, Uid::from(NonZeroU32::new(5).unwrap()));
+
+    // Exactly one aggregated skip warn fired (filter by the distinctive field).
+    let skip_warns: Vec<String> = capture
+        .records()
+        .into_iter()
+        .filter(|r| r.contains("skipped_uids="))
+        .collect();
+    assert_eq!(
+        skip_warns.len(),
+        1,
+        "one aggregated skip warn expected: {skip_warns:?}"
+    );
+    assert!(
+        skip_warns[0].contains("skipped_uids=2"),
+        "expected skipped_uids=2, got: {}",
+        skip_warns[0],
+    );
 }
