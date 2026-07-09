@@ -326,6 +326,24 @@ fn extract_json_from_call_tool_result(result: CallToolResult) -> serde_json::Val
         .unwrap_or(serde_json::Value::Null)
 }
 
+#[cfg(test)]
+mod extract_json_tests {
+    use rmcp::model::CallToolResult;
+    use serde_json::json;
+
+    use super::extract_json_from_call_tool_result;
+
+    #[test]
+    fn prefers_structured_content_body() {
+        // The test helpers this backs assert on the extracted body, so a
+        // stub that dropped it to `Null` would silently blind every
+        // `execute_tool_for_test` content assertion.
+        let value = json!({ "folders": ["INBOX", "Sent"] });
+        let result = CallToolResult::structured(value.clone());
+        assert_eq!(extract_json_from_call_tool_result(result), value);
+    }
+}
+
 /// Bridge an MCP `ErrorData` back to a `RimapError` for the test
 /// helper's uniform `Result<_, RimapError>` surface. The original
 /// message is preserved; the JSON-RPC / MCP code is surfaced as a
