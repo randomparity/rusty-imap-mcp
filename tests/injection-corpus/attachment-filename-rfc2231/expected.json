@@ -4,14 +4,14 @@
   "must_contain": [
     "see attached"
   ],
-  "must_not_contain": [
-    "../",
-    "/etc/passwd"
-  ],
   "warning_codes": [
     "parse_attachment_filename_rewritten"
   ],
   "meta": {
-    "attachment_count": 1
+    "attachment_count": 1,
+    "attachment_filename_must_not_contain": [
+      "../",
+      "etc/passwd"
+    ]
   }
 }

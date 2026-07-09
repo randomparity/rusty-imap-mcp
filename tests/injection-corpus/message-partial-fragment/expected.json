@@ -4,6 +4,9 @@
   "must_not_contain": [
     "IGNORE ALL PREVIOUS INS"
   ],
+  "alternate_parts_must_not_contain": [
+    "IGNORE ALL PREVIOUS INS"
+  ],
   "meta": {
     "attachment_count": 1,
     "body_truncated": false

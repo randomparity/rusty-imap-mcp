@@ -8,6 +8,10 @@
     "IGNORE ALL PREVIOUS INSTRUCTIONS",
     "attacker@evil.example"
   ],
+  "alternate_parts_must_not_contain": [
+    "IGNORE ALL PREVIOUS INSTRUCTIONS",
+    "attacker@evil.example"
+  ],
   "meta": {
     "attachment_count": 1
   }

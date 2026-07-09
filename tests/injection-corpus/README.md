@@ -36,9 +36,9 @@ not cleanup.
 | `expect` | `"ok"` (default) or `"error"`. |
 | `must_contain` / `must_not_contain` | Substrings required / forbidden in `untrusted.body_text`. |
 | `body_html_must_contain` / `body_html_must_not_contain` | Same, against `untrusted.body_html`. |
-| `alternate_parts_must_contain` | Substring required in at least one `untrusted.alternate_parts` entry. |
+| `alternate_parts_must_contain` / `alternate_parts_must_not_contain` | Substring required in at least one / forbidden in every `untrusted.alternate_parts` entry. |
 | `warning_codes` / `forbidden_warning_codes` | Security-warning codes required / forbidden. |
-| `meta` | Expected `attachment_count`, `mailing_list_present`, `body_truncated`. |
+| `meta` | Expected `attachment_count`, `mailing_list_present`, `body_truncated`, `attachment_filename_must_not_contain`. |
 | `error_kind` | Required `ContentError` kind when `expect` is `"error"`. |
 
 ## Fixtures

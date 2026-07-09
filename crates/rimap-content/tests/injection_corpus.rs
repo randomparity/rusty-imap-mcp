@@ -41,6 +41,8 @@ struct Expected {
     #[serde(default)]
     alternate_parts_must_contain: Vec<String>,
     #[serde(default)]
+    alternate_parts_must_not_contain: Vec<String>,
+    #[serde(default)]
     warning_codes: Vec<String>,
     #[serde(default)]
     forbidden_warning_codes: Vec<String>,
@@ -70,6 +72,8 @@ struct ExpectedMeta {
     attachment_count: Option<usize>,
     #[serde(default)]
     body_truncated: Option<bool>,
+    #[serde(default)]
+    attachment_filename_must_not_contain: Vec<String>,
 }
 
 fn corpus_root() -> PathBuf {
@@ -132,13 +136,17 @@ fn assert_ok_body(name: &str, content: &Content, expected: &Expected) -> Result<
     assert_meta_fields(name, &content.meta, expected)
 }
 
-/// Assert every `alternate_parts_must_contain` needle appears in at
-/// least one entry of `content.untrusted.alternate_parts`. This lets a
-/// fixture prove that content which is surfaced but *segregated* out of
-/// the primary body — e.g. an unsigned sibling under `multipart/signed`
-/// — still lands in the untrusted namespace rather than being dropped or
-/// promoted into `meta`. A fixture declaring needles when no alternate
-/// part carries them is a failure.
+/// Assert `alternate_parts_must_contain` / `alternate_parts_must_not_contain`
+/// against `content.untrusted.alternate_parts`.
+///
+/// The positive form lets a fixture prove that content which is surfaced
+/// but *segregated* out of the primary body — e.g. an unsigned sibling
+/// under `multipart/signed` — still lands in the untrusted namespace
+/// rather than being dropped or promoted into `meta`. The negative form
+/// lets a quarantine fixture prove a payload is absent from
+/// `alternate_parts` too, so "never surfaced as readable content" is
+/// checked across the whole untrusted namespace (`body_text` +
+/// `alternate_parts`), not `body_text` alone.
 fn assert_alternate_parts_substrings(
     name: &str,
     alternate_parts: &[String],
@@ -148,6 +156,14 @@ fn assert_alternate_parts_substrings(
         if !alternate_parts.iter().any(|part| part.contains(needle)) {
             return Err(format!(
                 "{name}: no alternate part contains required substring {needle:?} \
+                 (alternate_parts={alternate_parts:?})"
+            ));
+        }
+    }
+    for needle in &expected.alternate_parts_must_not_contain {
+        if alternate_parts.iter().any(|part| part.contains(needle)) {
+            return Err(format!(
+                "{name}: an alternate part contains forbidden substring {needle:?} \
                  (alternate_parts={alternate_parts:?})"
             ));
         }
@@ -274,6 +290,18 @@ fn assert_meta_fields(
             meta.body_truncated
         ));
     }
+    for needle in &want_meta.attachment_filename_must_not_contain {
+        for (idx, att) in meta.attachments.iter().enumerate() {
+            if let Some(filename) = att.filename.as_deref()
+                && filename.contains(needle)
+            {
+                return Err(format!(
+                    "{name}: attachment[{idx}] filename {filename:?} \
+                     contains forbidden substring {needle:?}"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -309,6 +337,23 @@ fn alternate_parts_must_contain_detects_presence_and_absence() {
 
     let empty: Vec<String> = Vec::new();
     assert!(assert_alternate_parts_substrings("t", &empty, &expected).is_err());
+}
+
+#[test]
+fn alternate_parts_must_not_contain_detects_leak() {
+    let json = r#"{"description":"t","alternate_parts_must_not_contain":["payload"]}"#;
+    let expected: Expected = serde_json::from_str(json).unwrap();
+
+    let clean = vec!["harmless".to_string()];
+    assert!(assert_alternate_parts_substrings("t", &clean, &expected).is_ok());
+
+    let empty: Vec<String> = Vec::new();
+    assert!(assert_alternate_parts_substrings("t", &empty, &expected).is_ok());
+
+    let leaked = vec!["harmless".to_string(), "leaked payload".to_string()];
+    let err = assert_alternate_parts_substrings("t", &leaked, &expected)
+        .expect_err("forbidden needle present must fail");
+    assert!(err.contains("payload"), "err={err}");
 }
 
 #[test]
