@@ -139,6 +139,33 @@ fn classify_reply_code(code: u16) -> ReplyClass {
     }
 }
 
+/// Whether a lettre SMTP error is a TLS failure.
+///
+/// `lettre::transport::smtp::Error::is_tls` only matches `Kind::Tls`, but
+/// lettre's async rustls transport wraps every handshake failure — including
+/// certificate rejection — as `Kind::Connection` (`async_net.rs`
+/// `error::connection`). So `is_tls()` is effectively dead for this transport.
+/// Walk the source chain and detect a `rustls::Error` (type-safe, no string
+/// matching) so a cert/TLS failure classifies as `SmtpError::Tls` (`ERR_TLS`)
+/// rather than collapsing into `Transport`/`ERR_INTERNAL`.
+fn is_tls_error(err: &lettre::transport::smtp::Error) -> bool {
+    if err.is_tls() {
+        return true;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(current) = source {
+        if let Some(io) = current.downcast_ref::<std::io::Error>()
+            && io
+                .get_ref()
+                .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some())
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
+}
+
 /// Coarse classification of an SMTP error derived from the public
 /// predicates on `lettre::transport::smtp::Error`. Separated from the
 /// error-to-variant mapping so the taxonomy can be unit-tested with
@@ -170,7 +197,7 @@ impl SmtpErrorShape {
         // every 4xx/5xx reply collapsed into Transport/Internal.
         if err.is_timeout() {
             Self::Timeout
-        } else if err.is_tls() {
+        } else if is_tls_error(err) {
             Self::Tls
         } else if let Some(code) = err.status() {
             match classify_reply_code(u16::from(code)) {
