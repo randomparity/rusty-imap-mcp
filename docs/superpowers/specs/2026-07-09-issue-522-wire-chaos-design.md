@@ -129,8 +129,13 @@ defines **two** services on one compose network:
   `dovecot.conf` / `entrypoint.sh` / `users` / `fixtures` mounts, same `shared`
   volume for the fingerprint hand-off). Its 993/143 are **not** host-published;
   Toxiproxy reaches it in-network as `dovecot:993` / `dovecot:143`.
-- `toxiproxy` — pinned `ghcr.io/shopify/toxiproxy:<sha>` (exact tag+digest
-  resolved at build time). Starts with a seed config mounting two proxies on
+- `toxiproxy` — pinned `ghcr.io/shopify/toxiproxy:2.12.0` (latest stable, tag
+  pin matching the repo's existing compose-image convention — the 40-char SHA
+  pin rule is for `.github/workflows/` `uses:`, not compose images). This image
+  is **multi-arch** (`linux/amd64` + `linux/arm64`, verified via
+  `docker manifest inspect`), so it matches the Dovecot fixture's deliberate
+  no-arch-gate contract: Apple Silicon, Ubuntu CI, and Fedora all run it
+  natively, no `ARCH` guard. Starts with a seed config mounting two proxies on
   *fixed container-internal* ports so Docker can publish them:
   - `imaps`   : listen `0.0.0.0:21993` → upstream `dovecot:993`
   - `starttls`: listen `0.0.0.0:21143` → upstream `dovecot:143`
