@@ -198,6 +198,14 @@ are the ones that trip people up or aren't obvious from the lint set.
 - **Adversarial corpus** (`tests/injection-corpus/`) for the content pipeline.
   Each fixture is an `.eml` file plus an `.expected.json` declaring required
   security warnings and forbidden content. The corpus only grows.
+- **Fake vs Dovecot.** Use the in-process scriptable fake
+  (`crates/rimap-imap/tests/support/fake_imap.rs`) to test client behavior
+  against a *misbehaving* server — missing capabilities (no MOVE/UIDPLUS,
+  `LOGINDISABLED`), malformed or zero UIDs, truncated literals, mid-command
+  disconnects. It terminates TLS with a pinned self-signed cert, is
+  host-runnable (no container), and is PR-blocking. Use the Dovecot container
+  harness (`tests/integration/`) for *conformant* end-to-end behavior; it is
+  container-gated and silent-skips without a runtime.
 
 ## Git, commits, and PR workflow
 
