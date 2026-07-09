@@ -61,6 +61,16 @@ is unambiguous. The classifier is refactored into a pure
 `lettre::transport::smtp::response::Code` has public fields, even though the
 enclosing `Error` does not.
 
+Additionally, bound the whole SMTP operation: lettre's async transport applies
+its `.timeout()` only to the TCP *connect* future, leaving greeting/command
+reads unbounded, so a stalled (or hostile) server hangs `send_email`/`forward`
+forever. `SmtpClient::send_raw` wraps the transport call in
+`tokio::time::timeout(command_timeout_seconds, ..)`; an elapsed deadline maps to
+`SmtpError::Timeout`. This is a shipped-code robustness fix, not test-only, and
+it is what makes the timeout scenario deterministically testable with an
+in-process responder that accepts then withholds the banner (a blackhole-address
+connect timeout was rejected as environment-sensitive).
+
 ### 2. Two test homes, split by dependency
 
 - **In-process scripted SMTP responder → `rimap-smtp` crate tests, no Docker,
@@ -83,15 +93,22 @@ The scaffold's pinned digest
 (`sha256:0d7b9c8e…`) is a **single-arch** manifest and would fail to pull on
 arm64. Re-pin to the v1.29.5 **index** digest
 `sha256:c5a6d0ba4d08187f70f305471da5fd9ad424fdfc2f25a2308226a786335dfa9f`,
-verified to cover `linux/amd64` + `linux/arm64`. Add
-`MP_SMTP_AUTH_ALLOW_INSECURE` so lettre's plaintext AUTH succeeds on the
-happy path.
+verified to cover `linux/amd64` + `linux/arm64` via
+`docker manifest inspect docker.io/axllent/mailpit@<digest>`; every future
+digest bump (including Dependabot's) must re-run that check and confirm both
+platforms. Add `MP_SMTP_AUTH_ALLOW_INSECURE` so lettre's plaintext AUTH
+succeeds on the happy path.
 
 ## Consequences
 
 - **Behavior change (correct):** callers that received `ERR_INTERNAL` for a
   4xx/5xx SMTP reply now receive `ERR_SMTP_PROTOCOL` (or `ERR_AUTH` for auth
   codes). No structured-error `data` shape changes.
+- **Behavior change (bounded send):** `send_email`/`forward` now fail with
+  `ERR_TIMEOUT` after `command_timeout_seconds` instead of hanging on a stalled
+  server. A server slower than the deadline that previously (in the connect
+  phase) would have completed is unaffected; only post-connect stalls are newly
+  bounded.
 - Error-taxonomy coverage runs on every PR (no Docker); only the real-delivery
   assertions are gated.
 - `SmtpError` gains a variant. It is `#[non_exhaustive]`, so downstream matches
@@ -116,3 +133,14 @@ happy path.
   issue's "reuse the container harness / fetch via retrieval API" direction; the
   delivered-bytes assertion would read the responder's own capture rather than a
   real store.
+- **Blackhole-address connect timeout (no `send_raw` deadline).** Testing the
+  timeout purely at lettre's connect phase by pointing at an unrouted TEST-NET
+  address avoids a shipped-code change, but is environment-sensitive: a network
+  that answers with ICMP unreachable fast-fails as a connection error, not a
+  timeout, making the test flaky. It also leaves the real post-connect hang gap
+  unfixed.
+- **454-to-STARTTLS or connection-drop for the TLS scenario.** A cert-free way
+  to fail STARTTLS, but `454` collides with the recognized transient auth codes
+  (routes to `Auth`) and a drop yields a client/network error — neither sets
+  `is_tls()`. Only a real handshake against an untrusted self-signed cert
+  produces `Kind::Tls`.

@@ -77,6 +77,19 @@ only the previously-unhandled `Transient`/`Permanent` path changes. This is
 unit-testable without fabricating a lettre `Error` because
 `lettre::transport::smtp::response::Code` has public fields.
 
+**Overall-operation deadline (shipped-code robustness fix).** lettre's async
+transport applies the configured `.timeout()` only to the TCP *connect* future
+(`async_net.rs`); the greeting read and every command read have no deadline. A
+server that accepts the connection then stalls — including a hostile one —
+hangs `send_email`/`forward` forever. `SmtpClient::send_raw` therefore wraps the
+whole `transport.send_raw(..)` call in `tokio::time::timeout(deadline, ..)`,
+where `deadline = command_timeout_seconds`; an elapsed deadline maps to
+`SmtpError::Timeout` (`ERR_TIMEOUT`) before classification. This closes the
+hang gap *and* makes the timeout scenario deterministically testable
+in-process (Component 2 scenario 4). It is additive: the happy path completes
+well within the deadline, and the connect-phase timeout lettre already applies
+is left in place.
+
 ### Component 2 — in-process scripted SMTP responder (`rimap-smtp` tests)
 
 A test-only tokio TCP listener under `crates/rimap-smtp/tests/` that:
@@ -90,23 +103,27 @@ A test-only tokio TCP listener under `crates/rimap-smtp/tests/` that:
      expect `SmtpError::Auth`, `ERR_AUTH`.
   2. **RCPT reject** — reply `550 5.1.1 …` to `RCPT` → expect
      `SmtpError::Rejected`, `ERR_SMTP_PROTOCOL`.
-  3. **STARTTLS failure** — advertise `STARTTLS`, then present a self-signed
-     cert the client's default roots reject → expect `SmtpError::Tls`,
-     `ERR_TLS`.
+  3. **STARTTLS failure** — configure the client for STARTTLS; advertise
+     `STARTTLS`, complete the upgrade, and present a self-signed cert the
+     client's default roots reject → expect `SmtpError::Tls`, `ERR_TLS`.
   4. **timeout** — accept the TCP connection and never send the `220` banner;
-     `SmtpConfig.command_timeout_seconds` set low → expect `SmtpError::Timeout`,
-     `ERR_TIMEOUT`.
+     `SmtpConfig.command_timeout_seconds` set low (~1s) → the `send_raw`
+     overall-operation deadline (Component 1) elapses → expect
+     `SmtpError::Timeout`, `ERR_TIMEOUT`.
 
 Each scenario also asserts the `RimapError` code via `From<SmtpError>`.
 Runs on every PR — no container runtime.
 
-The STARTTLS-failure scenario needs a TLS server side. Prefer the smallest
-mechanism: if a self-signed cert is needed, generate it in-test with `rcgen`
-(dev-dep, gated behind the responder's cfg) and serve via `tokio-rustls`. If
-inducing the client's STARTTLS demand to fail *before* TLS (server advertises
-STARTTLS then drops / replies `454` to `STARTTLS`) reproduces `is_tls()`
-reliably, prefer that and avoid the cert entirely. The build phase picks
-whichever cleanly yields `SmtpError::Tls`; the responder owns the choice.
+The STARTTLS-failure scenario is committed to the self-signed-cert mechanism:
+the responder completes the `STARTTLS` upgrade and serves a cert generated
+in-test with `rcgen` via `tokio-rustls`, which the client's default webpki
+roots reject, yielding `Kind::Tls` → `is_tls()` → `SmtpError::Tls`. The
+cert-free alternatives are rejected, not deferred: a `454` reply to `STARTTLS`
+is `Kind::Transient(454)`, which the reworked classifier routes to `Auth` (454
+is a recognized transient auth code), and a mid-STARTTLS connection drop yields
+a client/network error — neither sets `is_tls()`. `rcgen` and `tokio-rustls`
+are added as `rimap-smtp` dev-dependencies (no shipped-crate dependency
+change).
 
 ### Component 3 — Mailpit harness + real-delivery e2e (`rimap-server` tests)
 
@@ -118,7 +135,12 @@ whichever cleanly yields `SmtpError::Tls`; the responder owns the choice.
   the multi-arch v1.29.5 index digest
   `sha256:c5a6d0ba4d08187f70f305471da5fd9ad424fdfc2f25a2308226a786335dfa9f`
   (covers linux/amd64 + linux/arm64) and adding
-  `MP_SMTP_AUTH_ALLOW_INSECURE: "true"` so lettre's plaintext AUTH succeeds;
+  `MP_SMTP_AUTH_ALLOW_INSECURE: "true"` (alongside the existing
+  `MP_SMTP_AUTH_ACCEPT_ANY`) so lettre's plaintext AUTH succeeds. Multi-arch is
+  verified — and re-verified on any future digest bump — with
+  `docker manifest inspect docker.io/axllent/mailpit@<digest>` (or
+  `docker buildx imagetools inspect`), which must list both `linux/amd64` and
+  `linux/arm64`;
 - honors `RIMAP_CONTAINER_TOOL` / `RIMAP_REQUIRE_DOCKER`; silent-skips when no
   runtime; reserves two host ports (SMTP 1025, API 8025) via the same
   `ReservedPort` pattern; waits on `GET /api/v1/info`;
@@ -156,16 +178,26 @@ Container-gated (both Dovecot and Mailpit); nightly, not PR-blocking.
 - **Responder liveness.** The in-process server serves one connection then
   exits; the test must `await` the client call, not the server task, and must
   not leak the listener across scenarios (each scenario gets a fresh port).
-- **Mailpit AUTH over plaintext.** Without `MP_SMTP_AUTH_ALLOW_INSECURE`,
-  Mailpit rejects AUTH on a plaintext connection and the happy path fails with
-  a spurious `535`; the env var is load-bearing and is asserted by the
-  successful-submission test itself.
+- **Mailpit AUTH over plaintext.** lettre sends AUTH over an unencrypted
+  connection whenever credentials are set (no client-side insecure-auth gate),
+  so `MP_SMTP_AUTH_ALLOW_INSECURE` is load-bearing: without it the happy-path
+  submission fails. The exact failure code is not pinned — Mailpit may reject
+  the AUTH (a `5xx` → `ERR_SMTP_PROTOCOL`/`ERR_AUTH`) or simply not advertise a
+  compatible mechanism (a lettre client error → `ERR_CONNECTION_LOST`). The
+  successful-submission test guards the env var by failing loudly if it is
+  missing; it asserts on *send success*, not on a specific failure code.
+  `MP_SMTP_AUTH_ACCEPT_ANY` stays set alongside it.
 - **arm64.** The single-arch scaffold digest would fail to pull on arm64 (silent
-  test failure on Apple Silicon, or a confusing manifest error); the re-pin is
-  verified multi-arch before merge.
-- **Timeout flakiness.** The timeout scenario relies on the client's configured
-  `command_timeout_seconds`, not on wall-clock racing; set it to ~1s and never
-  send the banner so the deadline fires deterministically.
+  test failure on Apple Silicon, or a confusing manifest error). The re-pin is
+  verified multi-arch with a documented command (see Component 3) that every
+  future digest bump — including a Dependabot one — must repeat.
+- **Timeout determinism.** The timeout scenario relies on the `send_raw`
+  overall-operation deadline (Component 1), not on lettre's connect-only
+  timeout and not on wall-clock racing: with `command_timeout_seconds ≈ 1` and a
+  responder that accepts but withholds the banner, the deadline fires
+  deterministically in-process. A blackhole-address connect timeout is *not*
+  used — it is environment-sensitive (an ICMP unreachable fast-fails as a
+  connection error, not a timeout).
 
 ## Testing
 
