@@ -33,7 +33,16 @@ pub fn load(repo_root: &Path) -> Result<Vec<CorpusInput>, CorpusError> {
 /// Load an external tree of `.eml` files (e.g. the EPVME dataset), extracting
 /// each message's text/html parts the *same* way [`load_injection_parts`] does
 /// so the differential stays fair. Absent/unreadable dir is not an error.
-/// `id_prefix` namespaces the ids (content-hash filenames give stable keys).
+///
+/// Ids are `id_prefix/<file-stem>`. This assumes stems are unique across the
+/// tree; EPVME satisfies this because its filenames are content hashes (a shared
+/// stem means identical bytes, so the collision is a benign duplicate). A caller
+/// with non-unique stems across subdirectories would see ids alias.
+///
+/// `limit` bounds the number of source `.eml` *files* processed (files are
+/// sorted first, so the cap is deterministic), not the number of html parts
+/// produced — a capped run may yield more inputs than `limit` when files are
+/// multipart. This matches the `epvme_runner` `--limit` semantics.
 pub fn load_eml_tree(
     dir: &Path,
     id_prefix: &str,

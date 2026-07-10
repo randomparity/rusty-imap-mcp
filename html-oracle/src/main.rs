@@ -95,148 +95,127 @@ fn is_mostly_binary(text: &str) -> bool {
     replacement * 10 > total
 }
 
-fn main() -> ExitCode {
-    let args = parse_args();
+/// Accumulated per-input classification results.
+#[derive(Default)]
+struct Outcome {
+    totals: Totals,
+    hard_inputs: Vec<InputReport>,
+    soft_inputs: Vec<InputReport>,
+    seen_ids: BTreeSet<String>,
+}
 
-    let allowlist_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("allowlist.toml");
-    let mut allow_text = std::fs::read_to_string(&allowlist_path).unwrap_or_default();
-    if args.epvme_dir.is_some() {
-        // Merge the EPVME-specific allowlist only when the EPVME corpus is
-        // loaded, so its `epvme/…` entries never show as stale in the hermetic
-        // --repo-root run. Concatenated `[[allow]]` blocks parse as one array.
-        let epvme_allow = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("epvme-allowlist.toml");
-        if let Ok(extra) = std::fs::read_to_string(&epvme_allow) {
-            allow_text.push('\n');
-            allow_text.push_str(&extra);
-        }
+/// Assemble the allowlist: the base `allowlist.toml` plus, only when the EPVME
+/// corpus is loaded, `epvme-allowlist.toml`. Merging the EPVME file only then
+/// keeps its `epvme/…` entries from showing as stale in the hermetic
+/// `--repo-root` run. Concatenated `[[allow]]` blocks parse as one array.
+fn assemble_allowlist(with_epvme: bool) -> Result<allowlist::Allowlist, String> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut text = std::fs::read_to_string(manifest.join("allowlist.toml")).unwrap_or_default();
+    if with_epvme && let Ok(extra) = std::fs::read_to_string(manifest.join("epvme-allowlist.toml"))
+    {
+        text.push('\n');
+        text.push_str(&extra);
     }
-    let allow = match allowlist::load(&allow_text) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("html-oracle: invalid allowlist: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    allowlist::load(&text).map_err(|e| e.to_string())
+}
 
-    let mut inputs = match corpus::load(&args.repo_root) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("html-oracle: corpus load failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+/// Assemble the corpus: the in-repo sources, plus the external EPVME tree when
+/// `--epvme-dir` is set.
+fn assemble_inputs(args: &Args) -> Result<Vec<corpus::CorpusInput>, String> {
+    let mut inputs = corpus::load(&args.repo_root).map_err(|e| e.to_string())?;
     if let Some(epvme_dir) = &args.epvme_dir {
-        match corpus::load_eml_tree(epvme_dir, "epvme", args.limit) {
-            Ok(mut extra) => {
-                eprintln!(
-                    "html-oracle: EPVME corpus {} html part(s) from {}",
-                    extra.len(),
-                    epvme_dir.display()
-                );
-                inputs.append(&mut extra);
-            }
-            Err(e) => {
-                eprintln!("html-oracle: EPVME load failed: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
+        let mut extra =
+            corpus::load_eml_tree(epvme_dir, "epvme", args.limit).map_err(|e| e.to_string())?;
+        eprintln!(
+            "html-oracle: EPVME corpus {} html part(s) from {}",
+            extra.len(),
+            epvme_dir.display()
+        );
+        inputs.append(&mut extra);
     }
+    Ok(inputs)
+}
 
-    let mut seen_ids: BTreeSet<String> = BTreeSet::new();
-    let mut totals = Totals::default();
-    let mut hard_inputs = Vec::new();
-    let mut soft_inputs = Vec::new();
-
-    for input in &inputs {
-        totals.total += 1;
-        seen_ids.insert(input.id.clone());
-
-        let prod = match rimap_content::test_support::sanitize_html(
-            &input.raw,
-            input.charset.as_deref(),
-        ) {
-            Ok(r) => r,
-            Err(_) => {
-                totals.skipped += 1;
-                continue;
-            }
-        };
-        let decoded = rimap_content::decode(&input.raw, input.charset.as_deref());
-        if is_mostly_binary(&decoded) {
-            // A part that decodes to mostly replacement characters is not HTML
-            // text; two tokenizers shred byte-soup differently, so comparing it
-            // yields noise, not sanitizer signal. Skip it.
-            totals.skipped += 1;
-            continue;
-        }
-        let refx = match reference::extract_reference(&decoded) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("html-oracle: reference error on {}: {e}", input.id);
-                totals.ref_error += 1;
-                continue;
-            }
-        };
-
-        if !refx.text_tokens.is_empty() || !refx.href_ids.is_empty() {
-            totals.compared_nonempty += 1;
-        }
-
-        let allow_tokens = allow.tokens_for(&input.id);
-        let divergence = diff::classify(&prod, &refx, &allow_tokens);
-        let warnings: Vec<String> = prod
-            .warnings
-            .iter()
-            .map(|w| format!("{:?}", w.code))
-            .collect();
-        let production_only: Vec<String> = divergence.production_only.into_iter().collect();
-
-        match divergence.verdict {
-            Verdict::Match => totals.matched += 1,
-            Verdict::Soft { reference_only } => {
-                totals.soft += 1;
-                soft_inputs.push(InputReport {
-                    id: input.id.clone(),
-                    verdict: "soft",
-                    reference_only: reference_only.into_iter().collect(),
-                    production_only,
-                    warnings,
-                });
-            }
-            Verdict::Hard { reference_only } => {
-                totals.hard += 1;
-                hard_inputs.push(InputReport {
-                    id: input.id.clone(),
-                    verdict: "hard",
-                    reference_only: reference_only.into_iter().collect(),
-                    production_only,
-                    warnings,
-                });
-            }
-        }
+fn run_inputs(inputs: &[corpus::CorpusInput], allow: &allowlist::Allowlist) -> Outcome {
+    let mut out = Outcome::default();
+    for input in inputs {
+        out.totals.total += 1;
+        out.seen_ids.insert(input.id.clone());
+        process_one(input, allow, &mut out);
     }
+    out
+}
 
-    let stale: Vec<String> = allow
-        .input_ids()
-        .filter(|id| !seen_ids.contains(*id))
-        .cloned()
-        .collect();
-    totals.stale_allowlist_entries = stale.len();
-
-    let inert = totals.total > 0 && totals.compared_nonempty == 0;
-
-    let report = Report {
-        totals,
-        hard_inputs,
-        soft_inputs,
-        stale_allowlist_inputs: stale,
+fn process_one(input: &corpus::CorpusInput, allow: &allowlist::Allowlist, out: &mut Outcome) {
+    let Ok(prod) = rimap_content::test_support::sanitize_html(&input.raw, input.charset.as_deref())
+    else {
+        out.totals.skipped += 1;
+        return;
     };
-    let json = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
-    if let Err(e) = std::fs::write(&args.report, json) {
-        eprintln!("html-oracle: failed to write report: {e}");
-        return ExitCode::FAILURE;
+    let decoded = rimap_content::decode(&input.raw, input.charset.as_deref());
+    if is_mostly_binary(&decoded) {
+        // A part that decodes to mostly replacement characters is not HTML text;
+        // two tokenizers shred byte-soup differently, so comparing it yields
+        // noise, not sanitizer signal. Skip it.
+        out.totals.skipped += 1;
+        return;
     }
+    let refx = match reference::extract_reference(&decoded) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("html-oracle: reference error on {}: {e}", input.id);
+            out.totals.ref_error += 1;
+            return;
+        }
+    };
+    if !refx.text_tokens.is_empty() || !refx.href_ids.is_empty() {
+        out.totals.compared_nonempty += 1;
+    }
+    let divergence = diff::classify(&prod, &refx, &allow.tokens_for(&input.id));
+    record_verdict(input, &prod, divergence, out);
+}
 
+fn record_verdict(
+    input: &corpus::CorpusInput,
+    prod: &rimap_content::test_support::HtmlResult,
+    divergence: diff::Divergence,
+    out: &mut Outcome,
+) {
+    let warnings: Vec<String> = prod
+        .warnings
+        .iter()
+        .map(|w| format!("{:?}", w.code))
+        .collect();
+    let production_only: Vec<String> = divergence.production_only.into_iter().collect();
+    let (verdict, reference_only) = match divergence.verdict {
+        Verdict::Match => {
+            out.totals.matched += 1;
+            return;
+        }
+        Verdict::Soft { reference_only } => {
+            out.totals.soft += 1;
+            ("soft", reference_only)
+        }
+        Verdict::Hard { reference_only } => {
+            out.totals.hard += 1;
+            ("hard", reference_only)
+        }
+    };
+    let report = InputReport {
+        id: input.id.clone(),
+        verdict,
+        reference_only: reference_only.into_iter().collect(),
+        production_only,
+        warnings,
+    };
+    if verdict == "hard" {
+        out.hard_inputs.push(report);
+    } else {
+        out.soft_inputs.push(report);
+    }
+}
+
+fn print_summary(report: &Report) {
     eprintln!(
         "html-oracle: {} inputs, {} hard, {} soft, {} match, {} skipped, {} ref_error, {} compared",
         report.totals.total,
@@ -253,7 +232,9 @@ fn main() -> ExitCode {
             report.totals.stale_allowlist_entries
         );
     }
+}
 
+fn exit_code(report: &Report, inert: bool) -> ExitCode {
     if report.totals.hard > 0 {
         eprintln!(
             "html-oracle: FAIL — {} silent-drop (HARD) divergence(s)",
@@ -266,6 +247,47 @@ fn main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn main() -> ExitCode {
+    let args = parse_args();
+    let allow = match assemble_allowlist(args.epvme_dir.is_some()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("html-oracle: invalid allowlist: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let inputs = match assemble_inputs(&args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("html-oracle: corpus load failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut outcome = run_inputs(&inputs, &allow);
+    let stale: Vec<String> = allow
+        .input_ids()
+        .filter(|id| !outcome.seen_ids.contains(*id))
+        .cloned()
+        .collect();
+    outcome.totals.stale_allowlist_entries = stale.len();
+    let inert = outcome.totals.total > 0 && outcome.totals.compared_nonempty == 0;
+
+    let report = Report {
+        totals: outcome.totals,
+        hard_inputs: outcome.hard_inputs,
+        soft_inputs: outcome.soft_inputs,
+        stale_allowlist_inputs: stale,
+    };
+    let json = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
+    if let Err(e) = std::fs::write(&args.report, json) {
+        eprintln!("html-oracle: failed to write report: {e}");
+        return ExitCode::FAILURE;
+    }
+    print_summary(&report);
+    exit_code(&report, inert)
 }
 
 #[cfg(test)]
