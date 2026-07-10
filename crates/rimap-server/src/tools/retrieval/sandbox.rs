@@ -170,10 +170,12 @@ pub(crate) fn write_attachment(
             // filesystems CI runs on.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 counter += 1;
-                // cargo-mutants: known-equivalent — `> with ==` on the collision
-                // cap. `counter` increments by one from 0, so `== 1000` and
-                // `> 1000` both terminate the loop at ~1000; distinguishing them
-                // needs 1000 pre-existing colliding filenames.
+                // cargo-mutants: best-effort — `> with ==` on the collision cap.
+                // `counter` increments by one from 0, so `== 1000` fires one
+                // iteration earlier than `> 1000` (tolerating 1000 vs 1001
+                // collisions); both terminate the loop at ~1000. Distinguishing
+                // them requires 1000 pre-existing colliding filenames, so it is
+                // left annotated rather than killed.
                 if counter > 1000 {
                     let _ = dest.dir.remove_file(&tmp_name);
                     return Err(RimapError::Internal("too many filename collisions".into()));

@@ -26,11 +26,6 @@ fn walk_inner<F>(bs: &BodyStructure, prefix: &str, visit: &mut F, depth: u32)
 where
     F: FnMut(&str, &BodyStructure),
 {
-    // cargo-mutants: known-equivalent — `> with >=` on this defensive
-    // recursion cap. `>=` differs from `>` only at exactly `depth ==
-    // MAX_PART_DEPTH` (64); no real IMAP BODYSTRUCTURE nests 64 levels deep,
-    // so for any tree a server actually returns the walk visits an identical
-    // set of parts. Same shape as `rimap-content` `raw_parts.rs:71`.
     if depth > MAX_PART_DEPTH {
         return;
     }
@@ -134,5 +129,28 @@ mod tests {
         let mut ids = Vec::new();
         walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn visits_leaf_at_exactly_max_depth() {
+        // A leaf wrapped in exactly MAX_PART_DEPTH multipart layers is reached
+        // at `depth == MAX_PART_DEPTH`, where the cap check `depth > MAX` is
+        // false and the leaf IS visited. This pins the boundary: `>=` would drop
+        // it. `depth_limit_stops_descent` (70 layers) cannot — both operators
+        // stop above the cap there.
+        let mut bs = single("text", "plain");
+        for _ in 0..MAX_PART_DEPTH {
+            bs = BodyStructure::Multipart {
+                subtype: "mixed".into(),
+                parts: vec![bs],
+            };
+        }
+        let mut ids = Vec::new();
+        walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
+        assert_eq!(
+            ids.len(),
+            1,
+            "leaf at exactly MAX_PART_DEPTH must be visited"
+        );
     }
 }

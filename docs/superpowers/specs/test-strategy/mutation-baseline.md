@@ -140,7 +140,7 @@ a real test gap.
 
 **Last refresh:** 2026-07-09 (issue #530 — cold-path triage over the #515 hot-path refresh).
 **Surviving mutants in hot paths (`mcp/{dispatch,audit_envelope,tool_catalog,tool_name,preinit,server,response,error,result_provenance}.rs`, `mcp/wire_validator/`, `boot/`; `fuzz_oracle.rs` covered separately below):** 13 in this run (all annotated as known-equivalent), plus 7 hot-path mutants caught by timeout (documented in the timeout table below).
-**Surviving mutants in cold paths (`cli/`, `tools/`, `main.rs`, `lib.rs`):** **0 unannotated.** Issue #530 triaged the 54-then-45 cold-path survivors into 16 killed (new unit tests), 5 known-equivalent, and 22 best-effort — every remaining survivor carries an inline `// cargo-mutants:` annotation and a row in the cold-path table below.
+**Surviving mutants in cold paths (`cli/`, `tools/`, `main.rs`, `lib.rs`):** **0 unannotated.** Issue #530 triaged the 54-then-45 cold-path survivors into 17 killed (new unit tests), 3 known-equivalent, and 23 best-effort — every remaining survivor carries an inline `// cargo-mutants:` annotation and a row in the cold-path table below.
 
 Run summary (917 mutants total, 2026-07-09 refresh via `cargo mutants
 --package rimap-server --no-shuffle --jobs 10 --jobserver-tasks 40
@@ -161,7 +161,7 @@ Issue #530 cold-path rerun (2026-07-09), scoped to the cold-path files via
 unviable, 39 min. The missed count is down from the #515 figure of 54 because
 #517 (real SMTP `message_builder` e2e) landed *after* the #515 refresh
 (PR #516 merged 11:07 UTC; #517 closed 15:09 UTC) and kills several compose
-survivors. The 43 missed split 16 kill / 5 known-equivalent / 22 best-effort;
+survivors. The 43 missed split 17 kill / 3 known-equivalent / 23 best-effort;
 the 2 timeouts are new kill-by-timeout survivors (below).
 
 Methodology change vs 2026-05-18: this refresh **runs the container
@@ -199,14 +199,15 @@ File-scope corrections vs the 2026-05-18 section:
   the visitor/CRLF known-equivalent rows below moved with it.
 
 Cold-path triage (issue #530): the cold-path survivors are no longer deferred.
-Sixteen were pure-function gaps and are now killed by unit tests (`escape_wire_name`
+Seventeen were pure-function gaps and are now killed by unit tests (`escape_wire_name`
 DEL escaping, the `sanitize_folder_entry` raw-input cap, `validate_compose_input`
 body_html size, `validate_recipient_set` boundary, `forwarded_subject` multibyte
 truncation, `validate_header_text` injection chars, `line_is_from` all-`>` bound,
 `unique_temp_name`/`export_token` uniqueness, `build_query` control-byte rejection,
-`format_flag` mappings). The remaining 27 carry inline `// cargo-mutants:`
-annotations and the cold-path table rows below: 5 known-equivalent and 22
-best-effort (thin wrappers over `rimap-imap` whose argument shaping needs an
+`format_flag` mappings, and the `part_walker` leaf-at-exactly-`MAX_PART_DEPTH`
+boundary). The remaining 26 carry inline `// cargo-mutants:` annotations and the
+cold-path table rows below: 3 known-equivalent and 23 best-effort (thin wrappers
+over `rimap-imap` whose argument shaping needs an
 integration harness, non-portable filesystem error/TOCTOU paths, and diagnostic
 CLI wiring — spec §6 best-effort tier). The retrieval `ExportSource` and
 `fetch_message` truncation rows are attributed to issue #520 (export/retrieval
@@ -230,15 +231,14 @@ best-effort tier.
 | File:line | Mutation(s) | Reason kept | Annotation site |
 |---|---|---|---|
 | `tools/retrieval/mbox.rs:73` | `< with <=` on the `escape_from_lines_into` trailing push | At `line_start == msg.len()` the mutated guard passes the empty tail slice to `write_mbox_line`, and `line_is_from(b"")` is false, so nothing is appended — identical to the `<` branch skipping the push. Same shape as `rimap-content` `mime_scrub.rs:187`. | `tools/retrieval/mbox.rs:68` |
-| `tools/retrieval/sandbox.rs:177` | `> with ==` on the 1000-collision cap in `write_attachment` | `counter` increments by one from 0, so `== 1000` and `> 1000` both terminate the retry loop at ~1000; distinguishing them needs 1000 pre-existing colliding filenames. | `tools/retrieval/sandbox.rs:172` |
 | `tools/retrieval/sandbox.rs` — `#[cfg(not(unix))]` `read_sandboxed_file` | `-> Ok(vec![0])` / `Ok(vec![1])` (2 mutants) | Platform-gated fail-closed stub, not compiled on Linux CI, so it cannot change behavior in this run; on non-Unix the stub failing closed is the security property. Same shape as `rimap-audit` `self_check.rs:189`. | the `#[cfg(not(unix))]` fn body |
-| `tools/retrieval/part_walker.rs:34` | `> with >=` on `MAX_PART_DEPTH` (64) in `walk_inner` | Off-by-one on a defensive recursion cap; `>=` differs from `>` only at exactly depth 64, and no real IMAP BODYSTRUCTURE nests 64 levels deep, so the walk visits an identical part set for any tree a server returns. Same shape as `raw_parts.rs:71`. | `tools/retrieval/part_walker.rs:29` |
 | `tools/retrieval/export_messages.rs:219,241` | `fetch_sizes` stub-returns (4) + `fetch_one_body -> Ok(vec![1])` | The real IMAP-backed `impl ExportSource for AccountState`. The export logic is unit-tested against a fake `ExportSource` (trait seam); this impl's `self.imap.fetch*` round trip is best-effort, covered by **#520** (export over the wire). | `impl ExportSource for AccountState` |
 | `tools/retrieval/fetch_message.rs:181` | `> with </>=/==` (3) on the `max_body_bytes` truncation | `body_text` comes from an IMAP fetch + content parse inside `handle`; exercising the boundary needs a fetched body straddling `max` (harness; **#520**-adjacent). | `tools/retrieval/fetch_message.rs:177` |
 | `tools/retrieval/search.rs:346` | `delete !` in `handle_thread` (`!related.contains(target)`) | `related` is the result of an IMAP `thread_related` round trip; the branch is only distinguishable through the thread integration harness. | `tools/retrieval/search.rs:342` |
 | `tools/retrieval/search.rs:385,403` | `fetch_thread_headers` stub-returns (2) + `delete "Message-ID"` match arm | The function fetches the target's body over IMAP and parses headers; the token parsing it delegates to is unit-tested, this fetch+dispatch shell is harness-covered. | `tools/retrieval/search.rs:381` |
 | `tools/retrieval/search.rs:485` | delete `envelope` / `size` FetchSpec fields in `fetch_and_format_page` | Changes what the page fetch requests; observable only through a real IMAP fetch. `format_search_result`, the consumer, is unit-tested. | `tools/retrieval/search.rs:481` |
 | `tools/retrieval/download_attachment.rs:140` | delete `bodystructure` field from the cross-validation FetchSpec | The MIME cross-validation warning is only observable through an IMAP fetch returning a BODYSTRUCTURE (harness). | `tools/retrieval/download_attachment.rs:132` |
+| `tools/retrieval/sandbox.rs:179` | `> with ==` on the 1000-collision cap in `write_attachment` | Off-by-one, not strict equivalence: `counter` increments by one from 0, so `== 1000` fires one iteration earlier than `> 1000` (tolerating 1000 vs 1001 collisions); both terminate the loop at ~1000. Distinguishing them needs 1000 pre-existing colliding filenames, so it is annotated rather than killed. | `tools/retrieval/sandbox.rs:172` |
 | `tools/retrieval/sandbox.rs:171` | `match guard e.kind() == AlreadyExists` forced to `true` | Routing a non-`AlreadyExists` `hard_link` error through the retry path only changes the surfaced error after ~1000 iterations, and a persistent non-`AlreadyExists` `hard_link` failure is not portable across CI filesystems. | `tools/retrieval/sandbox.rs:165` |
 | `tools/retrieval/sandbox.rs:352` | `+ with *` on `take(max_bytes + 1)` in `read_sandboxed_file` | Disables only the post-stat file-growth (TOCTOU) tripwire; observing it requires the file to grow between the `metadata()` stat and the read, which the harness cannot induce deterministically. | `tools/retrieval/sandbox.rs:346` |
 | `tools/compose/message_builder.rs:52` | `* with +` on `MAX_FORWARD_ORIGINAL_BYTES` | No unit test pins the byte value; it is only observable through the `forward` handler's size gate, which needs an IMAP+SMTP round trip. | `tools/compose/message_builder.rs:50` |
