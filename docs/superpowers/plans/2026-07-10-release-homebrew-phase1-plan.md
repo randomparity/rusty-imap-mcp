@@ -29,6 +29,7 @@
 ## Task 1: `vendored-keyring` cargo feature (static libdbus for Linux)
 
 **Files:**
+- Modify: `Cargo.toml` (root — add `dbus-secret-service` to `[workspace.dependencies]`)
 - Modify: `crates/rimap-config/Cargo.toml`
 - Modify: `crates/rimap-server/Cargo.toml`
 - Modify: `deny.toml` (only if cargo-deny flags the new dep/`cc`)
@@ -36,19 +37,32 @@
 **Interfaces:**
 - Produces: a workspace feature `vendored-keyring` (enable via `cargo build -p rimap-server --features vendored-keyring`) that static-links libdbus on Linux; a no-op on macOS/Windows.
 
-- [ ] **Step 1: Add the optional Linux dep + weak feature to `rimap-config`**
+**Host prerequisite for the local verification steps (5–7):** the machine needs a C toolchain plus libdbus headers — `sudo apt-get install -y libdbus-1-dev pkg-config build-essential` (this mirrors the release.yml x86_64 job env). Without them the default build (Step 6) fails at pkg-config and the vendored build (Step 5) fails at the `cc` compile.
 
-In `crates/rimap-config/Cargo.toml`, add a Linux-target-gated optional dependency and a feature. Place the dependency near the existing `keyring` line and add a `[features]` table if none exists:
+- [ ] **Step 1: Add `dbus-secret-service` to `[workspace.dependencies]`**
+
+The root `Cargo.toml` documents "No member crate may declare a version directly." Follow the existing target-gated precedent (`libc = "0.2"` in `[workspace.dependencies]`, referenced as `libc = { workspace = true }` in `rimap-audit`). Add to the root `Cargo.toml` `[workspace.dependencies]`:
 
 ```toml
-# Linux-only optional dep declared solely so `vendored-keyring` can turn on its
-# `vendored` feature (static libdbus). keyring already pulls this crate in
-# non-optionally on Linux via `linux-native-sync-persistent`; the weak `?/`
-# reference below applies `vendored` to that same instance. Version pinned (not
-# `*`) to satisfy cargo-deny's wildcard ban; `4.1` unifies with keyring 3.6.3's
-# transitive dbus-secret-service 4.1.0.
+# Declared here so rimap-config's `vendored-keyring` feature can enable its
+# `vendored` (static libdbus) feature. `4.1` unifies with keyring 3.6.3's
+# transitive dbus-secret-service 4.1.0. default-features stay off — keyring's
+# own transitive pull supplies the crypto backend; feature unification is
+# additive.
+dbus-secret-service = { version = "4.1", default-features = false }
+```
+
+- [ ] **Step 2: Reference it (optional, Linux-gated) + add the weak feature in `rimap-config`**
+
+In `crates/rimap-config/Cargo.toml`, add a Linux-target-gated optional dependency (via `workspace = true`) and a `[features]` table:
+
+```toml
 [target.'cfg(target_os = "linux")'.dependencies]
-dbus-secret-service = { version = "4.1", optional = true, default-features = false }
+# Linux-only, declared solely so `vendored-keyring` can turn on its `vendored`
+# feature (static libdbus). keyring already pulls this crate in non-optionally
+# on Linux via `linux-native-sync-persistent`; the weak `?/` reference below
+# applies `vendored` to that same instance.
+dbus-secret-service = { workspace = true, optional = true }
 
 [features]
 # Static-link libdbus so release Linux binaries carry no runtime libdbus-1.so.
@@ -57,7 +71,7 @@ dbus-secret-service = { version = "4.1", optional = true, default-features = fal
 vendored-keyring = ["dbus-secret-service?/vendored"]
 ```
 
-- [ ] **Step 2: Re-export the feature from `rimap-server`**
+- [ ] **Step 3: Re-export the feature from `rimap-server`**
 
 In `crates/rimap-server/Cargo.toml`, add (or extend) a `[features]` table:
 
@@ -66,7 +80,7 @@ In `crates/rimap-server/Cargo.toml`, add (or extend) a `[features]` table:
 vendored-keyring = ["rimap-config/vendored-keyring"]
 ```
 
-- [ ] **Step 3: Verify the feature resolves and reaches libdbus-sys on Linux**
+- [ ] **Step 4: Verify the feature resolves and reaches libdbus-sys on Linux**
 
 Run:
 ```bash
@@ -74,7 +88,7 @@ cargo tree -p rimap-config --features vendored-keyring -i libdbus-sys -e feature
 ```
 Expected: `libdbus-sys` appears with the `vendored` feature active (the chain `dbus-secret-service vendored -> dbus vendored -> libdbus-sys vendored`).
 
-- [ ] **Step 4: Verify non-Linux resolution is a clean no-op**
+- [ ] **Step 5: Verify non-Linux resolution is a clean no-op**
 
 Run (resolution only, no build — catches the target-gated-feature sharp edge):
 ```bash
@@ -83,7 +97,7 @@ cargo metadata --all-features --filter-platform x86_64-pc-windows-msvc --format-
 ```
 Expected: both print OK, no error. (Proves `--all-features` on non-Linux does not error on the weak feature.)
 
-- [ ] **Step 5: Build the release binary with the feature and assert no dynamic libdbus**
+- [ ] **Step 6: Build the release binary with the feature and assert no dynamic libdbus**
 
 Run:
 ```bash
@@ -92,7 +106,7 @@ readelf -d target/release/rusty-imap-mcp | rg -i 'NEEDED' | rg -i 'dbus' || echo
 ```
 Expected: `OK: no libdbus NEEDED entry` (the vendored static libdbus leaves no `libdbus-1.so.3` NEEDED entry).
 
-- [ ] **Step 6: Confirm default build still links libdbus dynamically (feature is off by default)**
+- [ ] **Step 7: Confirm default build still links libdbus dynamically (feature is off by default)**
 
 Run:
 ```bash
@@ -101,7 +115,7 @@ readelf -d target/release/rusty-imap-mcp | rg -i 'NEEDED' | rg -i 'dbus' && echo
 ```
 Expected: a `libdbus-1.so.3` NEEDED entry is present (default/dev builds keep using system libdbus).
 
-- [ ] **Step 7: Run cargo-deny and fmt/lint; adjust `deny.toml` only if needed**
+- [ ] **Step 8: Run cargo-deny and fmt/lint; adjust `deny.toml` only if needed**
 
 Run:
 ```bash
@@ -110,10 +124,10 @@ just fmt-check && just lint
 ```
 Expected: green. If cargo-deny flags a new advisory/license/duplicate for `dbus-secret-service`/`cc`/`libdbus-sys`, add a narrowly-scoped, commented exception to `deny.toml` (do not broaden global rules). Re-run until green.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add crates/rimap-config/Cargo.toml crates/rimap-server/Cargo.toml Cargo.lock
+git add Cargo.toml crates/rimap-config/Cargo.toml crates/rimap-server/Cargo.toml Cargo.lock
 # add deny.toml only if you changed it
 git commit -m "feat(release): add vendored-keyring feature to static-link libdbus
 
@@ -584,7 +598,19 @@ Expected: green. Note (from project memory) that `just ci`'s local-only `typos` 
 
 Confirm `release.yml` still has the `workflow_dispatch` `dry_run` input and that `verify-tag` is the only job that runs when `dry_run: true`. This is exercised via the GitHub UI after merge (out-of-band); note it in the PR description as the guard smoke test.
 
-- [ ] **Step 3: Record the out-of-band manual steps (do NOT run during implementation)**
+- [ ] **Step 3: Pre-tag gate — verify the aarch64 vendored cross-build (spec §Testing strategy)**
+
+The spec requires proving §1b for **both** Linux triples and confirming the `cross` aarch64 image ships the C toolchain the vendored `cc` build needs. The aarch64 binary is cross-built, so this cannot be checked by Task 1's native steps — it must be verified before the production tag push (a failed aarch64 build would otherwise first surface on the tag). Run locally (requires Docker; `cross` is installed on demand):
+
+```bash
+cargo install cross --locked --version 0.2.5   # if not already present
+cross build --release --target aarch64-unknown-linux-gnu -p rimap-server --features vendored-keyring
+readelf -d target/aarch64-unknown-linux-gnu/release/rusty-imap-mcp | rg -i 'NEEDED' | rg -i 'dbus' \
+  || echo "OK: aarch64 vendored build has no libdbus NEEDED entry"
+```
+Expected: the `cross` build succeeds (proving the aarch64 image's C toolchain compiles the bundled libdbus source) and `OK: aarch64 vendored build has no libdbus NEEDED entry`. If `cross` cannot run in this environment, treat the first CI `build-linux-aarch64` run on the tag as the gate and be ready to delete the tag on failure (the `release` job `needs` all 5 builds, so a failed aarch64 build skips publish rather than shipping a broken release).
+
+- [ ] **Step 4: Record the out-of-band manual steps (do NOT run during implementation)**
 
 These happen after the PR merges to `main`, in order:
 1. Create the `HOMEBREW_TAP_TOKEN` fine-grained PAT (`Contents: Write` on `randomparity/homebrew-tap`) and add it as a repo secret on `randomparity/rusty-imap-mcp`.
@@ -594,12 +620,13 @@ These happen after the PR merges to `main`, in order:
 5. Watch the pipeline: `verify-tag → build ×5 → release → homebrew → bottles → bottles-merge`.
 6. Verify `brew install randomparity/tap/rusty-imap-mcp` on a supported platform and, in a clean container without `libdbus-1-3`, that `rusty-imap-mcp --version` runs.
 
-- [ ] **Step 4: No commit** (this task is verification + runbook only).
+- [ ] **Step 5: No commit** (this task is verification + runbook only).
 
 ---
 
 ## Self-Review Notes
 
 - **Spec coverage:** §1b → Task 1; §1 tarballs + §2 publish → Task 2; §3 formula + homebrew job → Task 3; §4 bottles → Task 4; §5 RELEASING + §6 README + tap README → Task 5; §8 testing + rollout → Tasks 1/2/6.
-- **Vendored verification** uses `readelf` (arch-independent) per spec; aarch64 runtime proof + cross C-toolchain confirmation happen on the real release build (Task 6 step 5–6 / the tag push), since the aarch64 binary is cross-built.
+- **Vendored verification** uses `readelf` (arch-independent) per spec: x86_64 native in Task 1 (Steps 6–7), aarch64 cross-build as a pre-tag gate in Task 6 Step 3 (confirms the cross image's aarch64 C toolchain), and clean-container runtime proof in Task 6 Step 4.6.
+- **Dependency governance:** `dbus-secret-service` version lives in `[workspace.dependencies]` (Task 1 Step 1), referenced via `{ workspace = true }` — matches the repo's single-version-source rule and the `libc` target-gated precedent.
 - **Out-of-band** `HOMEBREW_TAP_TOKEN` and tag push are explicitly not workflow-run steps.

@@ -100,15 +100,21 @@ so it carries no runtime `libdbus-1.so` dependency. Mechanism:
   the strong `dep:` form is a cross-platform sharp edge, see below):
 
   ```toml
+  # root Cargo.toml [workspace.dependencies] (single version source):
+  dbus-secret-service = { version = "4.1", default-features = false }
+
+  # crates/rimap-config/Cargo.toml:
   [target.'cfg(target_os = "linux")'.dependencies]
-  dbus-secret-service = { version = "4.1", optional = true, default-features = false }
+  dbus-secret-service = { workspace = true, optional = true }
 
   [features]
   vendored-keyring = ["dbus-secret-service?/vendored"]
   ```
 
-  The `4.1` pin satisfies cargo-deny's wildcard ban and unifies with keyring
-  3.6.3's transitive `dbus-secret-service 4.1.0`. The weak `?/vendored` means
+  The version lives in `[workspace.dependencies]` per the repo's
+  single-version-source rule (mirroring the target-gated `libc` precedent in
+  `rimap-audit`); the `4.1` pin satisfies cargo-deny's wildcard ban and unifies
+  with keyring 3.6.3's transitive `dbus-secret-service 4.1.0`. The weak `?/vendored` means
   "if `dbus-secret-service` is otherwise in the graph, turn on its `vendored`
   feature." On Linux keyring pulls it in (non-optionally, via
   `linux-native-sync-persistent`), so `vendored` applies:
