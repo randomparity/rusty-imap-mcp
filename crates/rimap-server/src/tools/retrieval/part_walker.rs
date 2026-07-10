@@ -83,6 +83,28 @@ mod tests {
         }
     }
 
+    /// Wrap `bs` in `layers` nested single-child `multipart/mixed` bodies.
+    fn wrap_multipart(mut bs: BodyStructure, layers: u32) -> BodyStructure {
+        for _ in 0..layers {
+            bs = BodyStructure::Multipart {
+                subtype: "mixed".into(),
+                parts: vec![bs],
+            };
+        }
+        bs
+    }
+
+    /// Wrap `bs` in `layers` nested `message/rfc822` bodies.
+    fn wrap_message(mut bs: BodyStructure, layers: u32) -> BodyStructure {
+        for _ in 0..layers {
+            bs = BodyStructure::Message {
+                mime_subtype: "rfc822".into(),
+                body: Box::new(bs),
+            };
+        }
+        bs
+    }
+
     #[test]
     fn single_part_yields_one() {
         let bs = single("text", "plain");
@@ -119,13 +141,7 @@ mod tests {
 
     #[test]
     fn depth_limit_stops_descent() {
-        let mut bs = single("text", "plain");
-        for _ in 0..70 {
-            bs = BodyStructure::Multipart {
-                subtype: "mixed".into(),
-                parts: vec![bs],
-            };
-        }
+        let bs = wrap_multipart(single("text", "plain"), 70);
         let mut ids = Vec::new();
         walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
         assert!(ids.is_empty());
@@ -138,13 +154,7 @@ mod tests {
         // false and the leaf IS visited. This pins the boundary: `>=` would drop
         // it. `depth_limit_stops_descent` (70 layers) cannot — both operators
         // stop above the cap there.
-        let mut bs = single("text", "plain");
-        for _ in 0..MAX_PART_DEPTH {
-            bs = BodyStructure::Multipart {
-                subtype: "mixed".into(),
-                parts: vec![bs],
-            };
-        }
+        let bs = wrap_multipart(single("text", "plain"), MAX_PART_DEPTH);
         let mut ids = Vec::new();
         walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
         assert_eq!(
@@ -160,10 +170,7 @@ mod tests {
         // e2e fixtures exercise a `message/rfc822` BODYSTRUCTURE). It visits the
         // wrapper then recurses at `depth + 1`; a `+ with -` there computes
         // `0u32 - 1` at the root and panics, so this pins the descent.
-        let bs = BodyStructure::Message {
-            mime_subtype: "rfc822".into(),
-            body: Box::new(single("text", "plain")),
-        };
+        let bs = wrap_message(single("text", "plain"), 1);
         let mut ids = Vec::new();
         walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
         assert_eq!(ids.len(), 2, "message wrapper and its embedded body");
@@ -176,13 +183,7 @@ mod tests {
         // chain deeper than MAX_PART_DEPTH must stop; the original visits at
         // most MAX_PART_DEPTH+1 wrappers. A mutated increment that fails to grow
         // depth (`* 1`) would never trip the cap and visit every layer.
-        let mut bs = single("text", "plain");
-        for _ in 0..(MAX_PART_DEPTH as usize * 2) {
-            bs = BodyStructure::Message {
-                mime_subtype: "rfc822".into(),
-                body: Box::new(bs),
-            };
-        }
+        let bs = wrap_message(single("text", "plain"), MAX_PART_DEPTH + 2);
         let mut ids = Vec::new();
         walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
         assert!(
