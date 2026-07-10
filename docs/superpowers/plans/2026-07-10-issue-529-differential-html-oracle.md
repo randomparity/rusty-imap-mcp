@@ -931,20 +931,31 @@ mod tests {
     }
 
     #[test]
-    fn windows_1252_charset_is_carried() {
+    fn charset_is_carried_and_contents_are_predecoded() {
+        // mail-parser charset-decodes text parts to UTF-8 BEFORE storage, so
+        // `part.contents()` is already UTF-8 and the declared charset is carried
+        // verbatim. This is faithful to production: `bodies.rs` passes exactly
+        // `cow.as_bytes()` (the decoded UTF-8) + the declared charset to
+        // `html::sanitize`, so the oracle feeds both engines the same bytes
+        // production's real pipeline does. (Re-decoding UTF-8 bytes under the
+        // windows-1252 label is a double-decode — NOT idempotent — but it happens
+        // identically on both sides, so it can never be a false divergence.)
         let dir = tempfile::tempdir().unwrap();
         let corpus = dir.path().join("tests/injection-corpus/w1252");
         std::fs::create_dir_all(&corpus).unwrap();
-        // 0xE9 is 'é' in Windows-1252.
+        // 0xE9 is 'é' in Windows-1252; mail-parser decodes it to UTF-8 'é'.
         let mut eml = b"Content-Type: text/html; charset=windows-1252\r\n\r\n".to_vec();
         eml.extend_from_slice(b"<p>caf\xE9</p>");
         std::fs::write(corpus.join("input.eml"), &eml).unwrap();
         let inputs = load(dir.path()).unwrap();
         let sample = inputs.iter().find(|i| i.id.starts_with("injection/w1252")).unwrap();
         assert_eq!(sample.charset.as_deref(), Some("windows-1252"));
-        // decode via production decode -> 'é'
-        let decoded = rimap_content::decode(&sample.raw, sample.charset.as_deref());
-        assert!(decoded.contains('é'), "decoded: {decoded:?}");
+        // contents() is already decoded to UTF-8 'é' by mail-parser.
+        assert!(
+            String::from_utf8_lossy(&sample.raw).contains('é'),
+            "raw should be pre-decoded UTF-8: {:?}",
+            sample.raw
+        );
     }
 }
 ```
@@ -1067,6 +1078,13 @@ fn load_injection_parts(repo_root: &Path, out: &mut Vec<CorpusInput>) -> Result<
 >   version's docs) and adjust — `rimap-content` already uses `mail-parser`, so
 >   cross-check `crates/rimap-content/src/parse/` for the idiomatic calls.
 > - If a fixture has multiple HTML parts, each gets a distinct `partN` id.
+> - **Faithfulness (do not "fix" this):** `part.contents()` is already
+>   charset-decoded to UTF-8 by mail-parser, yet the loader still carries the
+>   *declared* charset. That mirrors production exactly — `bodies.rs` passes
+>   `cow.as_bytes()` (decoded UTF-8) + the declared charset to `html::sanitize`
+>   (lines 64-69, 157-158). Feeding the same `(bytes, charset)` to both engines
+>   is what makes the differential faithful; do not strip the charset or
+>   re-decode, or the oracle would test a code path production never runs.
 
 - [ ] **Step 4: Run tests, verify pass**
 

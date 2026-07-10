@@ -377,11 +377,15 @@ so the first nightly run establishes the real baseline.
   logs-and-skips that single input (`ref_error` count), never aborting the run.
 - **Malformed `.eml` with no `text/html`:** skipped with an info log, not an
   error.
-- **Charset (both engines):** the runner decodes once via
-  `rimap_content::decode(raw, charset)` and feeds the same string to the
-  reference, while production re-decodes the same `raw`+`charset` internally
-  (idempotent for valid UTF-8). A Windows-1252 unit test guards the path so
-  non-UTF-8 inputs cannot become a corpus-wide divergence source.
+- **Charset (both engines):** `mail-parser` charset-decodes text parts to UTF-8
+  before storage, and production's `bodies.rs` passes those decoded bytes plus the
+  *declared* charset to `html::sanitize`. The oracle carries the identical
+  `(bytes, charset)` pair: the runner decodes once via `rimap_content::decode(raw,
+  charset)` for the reference, and production re-decodes the same `raw`+`charset`
+  internally. Both engines therefore decode identically — even in the pathological
+  UTF-8-bytes-under-a-legacy-label double-decode case — so charset can never be a
+  false divergence source. A Windows-1252 unit test pins that `part.contents()` is
+  pre-decoded and the declared charset is carried faithfully.
 
 ## Testing
 
