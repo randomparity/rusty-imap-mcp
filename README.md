@@ -177,20 +177,43 @@ just setup    # install required tooling and pre-commit hooks
 just ci       # run the full local-CI equivalent
 ```
 
+## Homebrew
+
+On macOS (Apple Silicon) and Linux (x86_64 / aarch64):
+
+```bash
+brew install randomparity/tap/rusty-imap-mcp
+```
+
+or, as two steps:
+
+```bash
+brew tap randomparity/tap
+brew install rusty-imap-mcp
+```
+
+Intel Macs build from source via a build-time `rust` dependency (no prebuilt
+Intel-macOS binary). See [`homebrew/README.md`](homebrew/README.md).
+
 ## Pre-built binaries
 
-Binaries are published for five targets on each
+Tarballs are published for five targets on each
 [release](https://github.com/randomparity/rusty-imap-mcp/releases):
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
 `aarch64-apple-darwin`, `powerpc64le-unknown-linux-gnu`,
 `s390x-unknown-linux-gnu`. Each release also attaches `SHA256SUMS.txt`
 and a [build provenance
 attestation](https://github.com/randomparity/rusty-imap-mcp/attestations)
-for every binary.
+over every tarball.
+
+The `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and
+`aarch64-apple-darwin` tarballs are self-contained. The
+`powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu` tarballs link
+libdbus dynamically and require a system `libdbus-1-3` at runtime.
 
 ### Installing a prebuilt binary
 
-1. Download the binary for your platform and `SHA256SUMS.txt` from the
+1. Download the tarball for your platform and `SHA256SUMS.txt` from the
    [releases page](https://github.com/randomparity/rusty-imap-mcp/releases).
 2. Verify the checksum before running anything you downloaded:
 
@@ -198,11 +221,11 @@ for every binary.
    sha256sum --ignore-missing -c SHA256SUMS.txt
    ```
 
-3. Make the binary executable and put it on your `$PATH`:
+3. Extract it and put the binary on your `$PATH`:
 
    ```bash
-   chmod +x rusty-imap-mcp-<target-triple>
-   mv rusty-imap-mcp-<target-triple> ~/.local/bin/rusty-imap-mcp
+   tar xzf rusty-imap-mcp-vX.Y.Z-<target-triple>.tar.gz
+   mv rusty-imap-mcp-vX.Y.Z-<target-triple>/rusty-imap-mcp ~/.local/bin/rusty-imap-mcp
    ```
 
 4. **macOS only:** Gatekeeper quarantines binaries downloaded via a

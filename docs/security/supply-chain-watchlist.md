@@ -57,6 +57,40 @@ trigger condition for promotion to a full-fledged issue or follow-up.
 - **Reference:** supply-chain-reviewer (Sprint 2 review). Cross-references
   the deferred `release-integrity-reviewer` (#19).
 
+## 5. Bundled libdbus C source (vendored-keyring)
+
+- **Crate:** `libdbus-sys 0.2.7` under the `vendored-keyring` feature.
+- **Concern:** With `vendored-keyring` (release Linux legs; also any
+  `--all-features` build), `libdbus-sys` statically compiles a **bundled
+  libdbus 1.14.4** (2022) C source via `cc`. C-level libdbus CVEs are invisible
+  to `cargo audit`/RUSTSEC, so the release binary could carry a vulnerable
+  libdbus while every Rust gate stays green. 1.14.4 predates the 1.14.8 security
+  series. The build script itself was audited clean (no network; writes only
+  `$OUT_DIR`; safe env reads).
+- **Trigger:** A libdbus CVE in the 1.14.x line, OR `libdbus-sys` bumping its
+  bundled libdbus version.
+- **Action on trigger:** Bump `libdbus-sys`, re-check `DBUS_VERSION` in its
+  `build_vendored.rs`, and record the bundled libdbus version in the release
+  notes/SBOM (advisory tooling will not).
+- **Reference:** supply-chain-reviewer `[SC-BUILD-05/06]` (low, accepted).
+
+## 6. OpenSSL pinned-but-never-built (rustls-only invariant)
+
+- **Crates:** `openssl`, `openssl-sys`, `openssl-src`, `vcpkg` in `Cargo.lock`.
+- **Concern:** `dbus-secret-service`'s `vendored = ["dbus/vendored",
+  "openssl?/vendored"]` makes the OpenSSL stack reachable, so it is pinned in
+  `Cargo.lock`. It is **never compiled** (weak `openssl?` edge; no
+  `crypto-openssl` backend). Risk: a future change silently pulls OpenSSL into
+  the build graph, breaking the rustls-only invariant; and a future OpenSSL
+  RUSTSEC advisory could red `cargo audit` for a crate shipping no OpenSSL.
+- **Trigger:** `just check-no-openssl` fails (openssl-sys enters the build
+  graph), OR an OpenSSL advisory flags the lockfile entry.
+- **Action on trigger:** Find what enabled `crypto-openssl`/`dep:openssl` and
+  disable it; if the advisory is lock-only (never built), document and ignore.
+- **Enforcement:** `just check-no-openssl` (part of `just ci`) asserts
+  `cargo tree -i openssl-sys --all-features --target all` is empty.
+- **Reference:** supply-chain-reviewer `[SC-FEAT-03/SC-DEP-01]` (medium).
+
 ## Review cadence
 
 This file is reviewed as part of every minor-version bump. Add the entry to

@@ -37,6 +37,19 @@ directories = "6"
 
 # Credentials
 keyring = { version = "3.6", features = ["apple-native", "linux-native-sync-persistent"] }
+# Declared here (single version source) so rimap-config's `vendored-keyring`
+# feature can enable its `vendored` (static libdbus) feature. `4.1` unifies with
+# keyring 3.6.3's transitive dbus-secret-service 4.1.0; only referenced under a
+# Linux `cfg` target in rimap-config.
+#
+# NOTE: dbus-secret-service's `vendored = ["dbus/vendored", "openssl?/vendored"]`
+# makes the openssl crate stack reachable, so `openssl`/`openssl-sys`/`openssl-src`
+# are pinned in Cargo.lock. They are NEVER compiled — `openssl?` is a weak edge
+# and no `crypto-openssl` backend is enabled (verified: `cargo tree -i openssl-sys
+# --all-features --target all` is empty). `just check-no-openssl` enforces this
+# so a future change cannot silently pull OpenSSL into the build graph (rustls-only
+# invariant). See docs/security/supply-chain-watchlist.md.
+dbus-secret-service = { version = "4.1", default-features = false }
 rpassword = "7.5"
 secrecy = "0.10"
 

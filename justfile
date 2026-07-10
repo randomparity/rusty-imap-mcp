@@ -260,6 +260,20 @@ test-epvme *args:
 deny:
     cargo deny --all-features check
 
+# Enforce the rustls-only invariant: OpenSSL may be pinned in Cargo.lock (via
+# dbus-secret-service's `vendored` -> `openssl?/vendored` weak edge) but must
+# never enter the *build* graph. Fails if openssl-sys is reachable for any
+# target under any feature. See docs/security/supply-chain-watchlist.md.
+check-no-openssl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if cargo tree -i openssl-sys --all-features --target all 2>/dev/null | grep -q openssl-sys; then
+        echo "::error::openssl-sys entered the build graph — rustls-only invariant broken"
+        cargo tree -i openssl-sys --all-features --target all
+        exit 1
+    fi
+    echo "ok: openssl-sys is not in the build graph"
+
 # Verify declared MSRV is still accurate.
 audit-msrv:
     cargo msrv verify
@@ -309,7 +323,7 @@ check-tools-doc:
     fi
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny mcp-conformance-node check-tools-doc
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc
     typos
 
 # Re-run pre-commit hooks across all files.

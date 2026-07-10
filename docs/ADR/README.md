@@ -16,3 +16,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-smtp-real-socket-e2e-and-auth-taxonomy.md) | Real-socket SMTP e2e, `SmtpError::Auth`, and negative-reply classification | Accepted |
+| [0002](0002-phased-bzr-release-parity-and-direct-publish.md) | Phased bzr-parity release process and direct-publish releases | Accepted |

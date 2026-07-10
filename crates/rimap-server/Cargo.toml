@@ -53,6 +53,12 @@ test-support = [
     "rimap-audit/test-injection",
 ]
 
+# Static-link libdbus into the binary (release Linux legs only) so the shipped
+# tarball / Homebrew bottle carries no runtime libdbus-1.so dependency. Off by
+# default; no-op on macOS/Windows. See
+# docs/superpowers/specs/2026-07-10-release-homebrew-phase1-design.md §1b.
+vendored-keyring = ["rimap-config/vendored-keyring"]
+
 [lib]
 name = "rimap_server"
 path = "src/lib.rs"

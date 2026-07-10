@@ -65,13 +65,25 @@ jobs:
           toolchain: stable
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.4
-      - run: cargo auditable build --release --locked
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-x86_64-unknown-linux-gnu
+      # vendored-keyring static-links libdbus so the tarball/bottle binary
+      # carries no runtime libdbus-1.so dependency (self-contained on hosts
+      # without libdbus-1-3).
+      - run: cargo auditable build --release --locked -p rimap-server --features vendored-keyring
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="x86_64-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-x86_64-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-x86_64-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
 
   build-linux-aarch64:
     name: build (aarch64-unknown-linux-gnu)
@@ -95,13 +107,22 @@ jobs:
       # Cross.toml at the repo root installs cargo-auditable inside the
       # cross container via a pre-build hook, so `cross auditable build`
       # emits an SBOM identical to the native and QEMU targets.
-      - run: cross auditable build --release --locked --target aarch64-unknown-linux-gnu
-      - name: Rename binary
-        run: cp target/aarch64-unknown-linux-gnu/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-aarch64-unknown-linux-gnu
+      - run: cross auditable build --release --locked --target aarch64-unknown-linux-gnu -p rimap-server --features vendored-keyring
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="aarch64-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/aarch64-unknown-linux-gnu/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-aarch64-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-aarch64-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
 
   build-macos-aarch64:
     name: build (aarch64-apple-darwin)
@@ -120,12 +141,21 @@ jobs:
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.4
       - run: cargo auditable build --release --locked
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-aarch64-apple-darwin
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="aarch64-apple-darwin"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-aarch64-apple-darwin
-          path: ${{ env.BINARY_NAME }}-aarch64-apple-darwin
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-apple-darwin
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
 
   build-linux-ppc64le:
     name: build (powerpc64le-unknown-linux-gnu)
@@ -149,12 +179,23 @@ jobs:
             -w /workspace \
             rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 \
             bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked"
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-powerpc64le-unknown-linux-gnu
+      # Not vendored: ppc64le has no Homebrew bottle path; this tarball retains
+      # a dynamic libdbus link (documented in README as needing libdbus-1-3).
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="powerpc64le-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-powerpc64le-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-powerpc64le-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-powerpc64le-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-powerpc64le-unknown-linux-gnu.tar.gz
 
   build-linux-s390x:
     name: build (s390x-unknown-linux-gnu)
@@ -178,12 +219,23 @@ jobs:
             -w /workspace \
             rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 \
             bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked"
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-s390x-unknown-linux-gnu
+      # Not vendored: s390x has no Homebrew bottle path; this tarball retains a
+      # dynamic libdbus link (documented in README as needing libdbus-1-3).
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="s390x-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-s390x-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-s390x-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-s390x-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-s390x-unknown-linux-gnu.tar.gz
 
   release:
     name: Create GitHub Release
@@ -212,12 +264,12 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd artifacts
-          sha256sum ${{ env.BINARY_NAME }}-* > SHA256SUMS.txt
+          sha256sum ${{ env.BINARY_NAME }}-*.tar.gz > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-path: |
-            artifacts/rusty-imap-mcp-*
+            artifacts/rusty-imap-mcp-*.tar.gz
             artifacts/SHA256SUMS.txt
       - name: Extract release notes
         env:
@@ -235,14 +287,211 @@ jobs:
             exit 1
           fi
           head -20 RELEASE_NOTES.md
-      - name: Create draft release
+      # Publishes directly (no --draft): the homebrew/bottles jobs download
+      # assets from the public releases/download CDN, which only serves a
+      # published release. See ADR-0002.
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           gh release create "$TAG_NAME" \
-            --draft \
             --title "$TAG_NAME" \
             --notes-file RELEASE_NOTES.md \
-            artifacts/${{ env.BINARY_NAME }}-* \
+            artifacts/${{ env.BINARY_NAME }}-*.tar.gz \
             artifacts/SHA256SUMS.txt
+
+  # Renders homebrew/rusty-imap-mcp.rb.template into the tap on stable v* tags.
+  # Prerelease tags never reach here (verify-tag rejects any '-'); the guard is
+  # retained as forward-compatible defense for the Phase 2 -dev model.
+  homebrew:
+    name: Bump randomparity/homebrew-tap
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    # Gates the HOMEBREW_TAP_TOKEN behind an environment (matches the
+    # sonarcloud/SONAR_TOKEN pattern). Unconfigured today, so no approval stall.
+    environment: homebrew-tap
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout rusty-imap-mcp (for template)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Checkout tap
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: randomparity/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          persist-credentials: true
+      - name: Render formula
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          BASE="https://github.com/randomparity/rusty-imap-mcp/releases/download/${TAG}"
+          # --retry absorbs releases/download CDN propagation lag: this job runs
+          # seconds after publish and the CDN can briefly 404/5xx a live asset.
+          curl_retry() {
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-all-errors --retry-delay 5 "$1"
+          }
+          # The release job already published SHA256SUMS.txt over the tarballs;
+          # parse it (one small request) instead of re-downloading each tarball.
+          SUMS="$(curl_retry "${BASE}/SHA256SUMS.txt")"
+          sum_for() {
+            local s
+            s=$(printf '%s\n' "$SUMS" | awk -v f="$1" '$2 == f { print $1 }')
+            if [ -z "$s" ]; then
+              echo "::error::no SHA256SUMS.txt entry for $1" >&2
+              exit 1
+            fi
+            printf '%s' "$s"
+          }
+          MAC_ARM_SHA=$(sum_for   "rusty-imap-mcp-${TAG}-aarch64-apple-darwin.tar.gz")
+          LINUX_ARM_SHA=$(sum_for "rusty-imap-mcp-${TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          LINUX_INTEL_SHA=$(sum_for "rusty-imap-mcp-${TAG}-x86_64-unknown-linux-gnu.tar.gz")
+          # The GitHub source archive is not in SHA256SUMS.txt — hash it directly.
+          SRC_SHA=$(curl_retry "https://github.com/randomparity/rusty-imap-mcp/archive/refs/tags/${TAG}.tar.gz" | sha256sum | awk '{print $1}')
+          mkdir -p tap/Formula
+          sed \
+            -e "s|{{VERSION}}|${VERSION}|g" \
+            -e "s|{{MAC_ARM_SHA}}|${MAC_ARM_SHA}|g" \
+            -e "s|{{LINUX_ARM_SHA}}|${LINUX_ARM_SHA}|g" \
+            -e "s|{{LINUX_INTEL_SHA}}|${LINUX_INTEL_SHA}|g" \
+            -e "s|{{SRC_SHA}}|${SRC_SHA}|g" \
+            homebrew/rusty-imap-mcp.rb.template > tap/Formula/rusty-imap-mcp.rb
+      - name: Commit and push
+        working-directory: tap
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/rusty-imap-mcp.rb
+          if git diff --staged --quiet; then
+            echo "Formula already up-to-date for ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git commit -m "rusty-imap-mcp ${TAG#v}"
+          git push
+
+  # Build native Homebrew bottles so `brew install` pours a prebuilt binary
+  # instead of running `install` under Homebrew's build sandbox. Runs after the
+  # (bottle-less) formula is pushed. No libdbus-1-3 install: the poured Linux
+  # binary is vendored (static libdbus), so neither runner nor user needs it.
+  bottles:
+    name: Build bottle (${{ matrix.label }})
+    needs: homebrew
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write   # upload bottle tarballs to the GitHub release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: arm64 macOS
+          - os: ubuntu-latest
+            label: x86_64 Linux
+          - os: ubuntu-24.04-arm
+            label: arm64 Linux
+    steps:
+      # SHA-pinned setup action instead of `curl | bash` of the installer at a
+      # floating HEAD (this job holds contents: write). macOS runners ship brew.
+      - name: Set up Homebrew (Linux)
+        if: runner.os == 'Linux'
+        uses: Homebrew/actions/setup-homebrew@2825979605fed985cccfbd7f3dc3188161aaa15e  # master 2026-06
+        with:
+          stable: true
+      - name: Build, bottle, and upload
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          BASE="https://github.com/randomparity/rusty-imap-mcp/releases/download/${TAG}"
+          brew tap randomparity/tap
+          brew install --build-bottle randomparity/tap/rusty-imap-mcp
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          # --root-url bakes the release download base into the JSON so the later
+          # --merge writes a bottle do block that resolves to these assets.
+          brew bottle --json --no-rebuild --root-url "$BASE" randomparity/tap/rusty-imap-mcp
+          # brew bottle writes a DOUBLE-dash local file; Homebrew downloads the
+          # SINGLE-dash form from root_url. Rename before upload.
+          dd_file="$(ls rusty-imap-mcp--"${VERSION}".*.bottle.tar.gz)"
+          sd_file="${dd_file/--/-}"
+          mv "$dd_file" "$sd_file"
+          gh release upload "$TAG" "$sd_file" --repo randomparity/rusty-imap-mcp --clobber
+          mkdir -p "$GITHUB_WORKSPACE/bottle-json"
+          cp ./*.json "$GITHUB_WORKSPACE/bottle-json/"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bottle-json-${{ matrix.os }}
+          path: bottle-json/*.json
+          if-no-files-found: error
+
+  # Fold the per-platform bottle metadata into the tap formula and push a second
+  # tap commit. If any bottle leg fails, this is skipped and the formula stays
+  # bottle-less (degrades to the binary-download install path).
+  bottles-merge:
+    name: Add bottle block to formula
+    needs: bottles
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: homebrew-tap
+    permissions:
+      contents: read
+    steps:
+      # Credentialed checkout of the tap: pushes use the token persisted by
+      # actions/checkout (git's http.extraheader), so the PAT never lands in a
+      # remote URL or .git/config. Mirrors the `homebrew` job.
+      - name: Checkout tap
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: randomparity/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          persist-credentials: true
+      - name: Set up Homebrew on PATH
+        run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+      - name: Download bottle JSONs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: bottle-json-*
+          path: bottle-json
+          merge-multiple: true
+      - name: Merge bottle block and push to tap
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          brew tap randomparity/tap
+          # Homebrew refuses to load a non-official formula that --merge loads by
+          # tap context unless it is trusted; trust the single formula.
+          brew trust --formula randomparity/tap/rusty-imap-mcp
+          brew bottle --merge --write --no-commit bottle-json/*.json
+          # brew writes the bottle block into its own tap clone; copy the result
+          # into the credentialed checkout and push from there.
+          cp "$(brew --repository randomparity/tap)/Formula/rusty-imap-mcp.rb" \
+            tap/Formula/rusty-imap-mcp.rb
+          cd tap
+          # A bottle block makes Homebrew pour instead of build, with no source
+          # fallback; gate the push on the formula parsing as Ruby.
+          ruby -c Formula/rusty-imap-mcp.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/rusty-imap-mcp.rb
+          if git diff --staged --quiet; then
+            echo "Formula already carries the bottle block for ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git commit -m "rusty-imap-mcp ${TAG#v}: add bottles"
+          git push
