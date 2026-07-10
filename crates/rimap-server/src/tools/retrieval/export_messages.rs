@@ -210,6 +210,11 @@ trait ExportSource {
     ) -> Result<Vec<u8>, rimap_core::RimapError>;
 }
 
+// cargo-mutants: best-effort — the stub-return mutants on `fetch_sizes` and
+// `fetch_one_body` below survive because this is the real IMAP-backed
+// `ExportSource`. The export *logic* is unit-tested against a fake `ExportSource`
+// (the trait seam); this impl's `self.imap.fetch*` round trip is covered by the
+// over-the-wire harness in issue #520 (export_messages e2e), not a unit test.
 impl ExportSource for AccountState {
     async fn fetch_sizes(
         &self,
@@ -587,6 +592,19 @@ fn export_token() -> String {
         .unwrap_or(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{nanos:016x}{seq:04x}")
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::export_token;
+
+    #[test]
+    fn export_token_is_nonempty_and_distinct() {
+        let a = export_token();
+        let b = export_token();
+        assert!(!a.is_empty(), "token must not be empty");
+        assert_ne!(a, b, "consecutive tokens must differ");
+    }
 }
 
 /// Per-UID fetch result fed into [`plan_outcome`].

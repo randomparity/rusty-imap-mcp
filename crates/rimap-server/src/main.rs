@@ -638,6 +638,10 @@ fn run_test_support_subcommands(cli: &Cli) -> Option<anyhow::Result<()>> {
                     .context("dumping tool catalog"),
             )
         }
+        // cargo-mutants: best-effort — deleting this arm drops the
+        // `dump-tool-schemas` subcommand to normal server startup. It is a
+        // `#[cfg(feature = "test-support")]` diagnostic dispatch exercised by
+        // `just regen-tool-schemas` in CI, not by any in-process Rust test.
         Some(Command::DumpToolSchemas) => {
             let mut stdout = std::io::stdout().lock();
             Some(
@@ -666,6 +670,10 @@ fn run_login_command(account: &str, username: &str, host: &str) -> anyhow::Resul
 }
 
 /// Handle the `migrate-keyring` subcommand.
+// cargo-mutants: best-effort — the `-> Ok(())` stub bypasses the whole
+// migration. This is CLI wiring over the OS keyring (`KeyringStore`); the
+// underlying `migrate_keyring::migrate_one` is unit-tested, but exercising this
+// handler needs a live keyring the unit suite has no portable access to.
 fn run_migrate_keyring(account: &str, username: &str, host: &str) -> anyhow::Result<()> {
     let store = KeyringStore;
     let account_id = rimap_core::account::AccountId::new(account)

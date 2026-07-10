@@ -26,6 +26,11 @@ fn walk_inner<F>(bs: &BodyStructure, prefix: &str, visit: &mut F, depth: u32)
 where
     F: FnMut(&str, &BodyStructure),
 {
+    // cargo-mutants: known-equivalent — `> with >=` on this defensive
+    // recursion cap. `>=` differs from `>` only at exactly `depth ==
+    // MAX_PART_DEPTH` (64); no real IMAP BODYSTRUCTURE nests 64 levels deep,
+    // so for any tree a server actually returns the walk visits an identical
+    // set of parts. Same shape as `rimap-content` `raw_parts.rs:71`.
     if depth > MAX_PART_DEPTH {
         return;
     }
