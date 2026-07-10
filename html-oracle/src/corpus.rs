@@ -78,8 +78,7 @@ fn load_injection_parts(repo_root: &Path, out: &mut Vec<CorpusInput>) -> Result<
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut part_no = 0usize;
-        for part in msg.html_bodies() {
+        for (part_no, part) in msg.html_bodies().enumerate() {
             let charset = part
                 .content_type()
                 .and_then(|c| c.attribute("charset"))
@@ -91,7 +90,6 @@ fn load_injection_parts(repo_root: &Path, out: &mut Vec<CorpusInput>) -> Result<
                 format!("injection/{dir_name}/part{part_no}")
             };
             out.push(CorpusInput { id, raw, charset });
-            part_no += 1;
         }
     }
     Ok(())

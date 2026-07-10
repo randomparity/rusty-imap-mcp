@@ -14,8 +14,7 @@ use crate::norm;
 
 /// Tags whose text content is not user-visible body text. Same set as
 /// production's `NON_CONTENT_TAGS` in `rimap-content`.
-const NON_CONTENT_TAGS: &[&str] =
-    &["script", "style", "noscript", "template", "head", "title"];
+const NON_CONTENT_TAGS: &[&str] = &["script", "style", "noscript", "template", "head", "title"];
 
 /// Byte cap handed to the Unicode scrubber; matches `MAX_HTML_BYTES` (1 MiB).
 const SCRUB_LIMIT: usize = 1024 * 1024;
@@ -113,8 +112,12 @@ pub fn extract_reference(decoded_html: &str) -> Result<ReferenceExtract, Referen
     let mut st = state.borrow_mut();
     st.flush_node();
     // Scrub identically to production `extract_text`: NFKC + codepoint filter.
-    let (scrubbed, _warnings) =
-        rimap_content::sanitize(st.buf.as_bytes(), Some("utf-8"), SCRUB_LIMIT, "oracle:reference");
+    let (scrubbed, _warnings) = rimap_content::sanitize(
+        st.buf.as_bytes(),
+        Some("utf-8"),
+        SCRUB_LIMIT,
+        "oracle:reference",
+    );
     Ok(ReferenceExtract {
         text_tokens: norm::tokenize(&scrubbed),
         href_ids: norm::href_identities(st.hrefs.iter()),
@@ -130,7 +133,11 @@ mod tests {
     fn bodyless_fragment_is_not_inert() {
         // No <html>/<body>: implicit-body model must still surface text.
         let r = extract_reference("<p>visible</p>").unwrap();
-        assert!(r.text_tokens.contains("visible"), "tokens: {:?}", r.text_tokens);
+        assert!(
+            r.text_tokens.contains("visible"),
+            "tokens: {:?}",
+            r.text_tokens
+        );
     }
 
     #[test]
@@ -166,10 +173,8 @@ mod tests {
 
     #[test]
     fn safe_scheme_href_ids_only() {
-        let r = extract_reference(
-            r#"<a href="https://e.com/p">x</a><a href="javascript:1">y</a>"#,
-        )
-        .unwrap();
+        let r = extract_reference(r#"<a href="https://e.com/p">x</a><a href="javascript:1">y</a>"#)
+            .unwrap();
         assert!(r.href_ids.contains("https|e.com"));
         assert!(!r.href_ids.iter().any(|h| h.starts_with("javascript")));
     }

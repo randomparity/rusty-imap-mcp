@@ -56,7 +56,6 @@ where
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
