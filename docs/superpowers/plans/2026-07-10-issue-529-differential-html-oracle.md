@@ -180,7 +180,7 @@ git commit -m "feat(oracle): scaffold excluded html-oracle crate (#529)"
     shared scrub).
   - `pub fn href_identity(href: &str) -> Option<String>` — returns
     `"<scheme>|<host-or-domain>"` for `http`/`https`/`mailto` hrefs, lowercased;
-    `None` for any other scheme or unparseable input. Path/query/fragment are
+    `None` for any other scheme or unparsable input. Path/query/fragment are
     discarded.
   - `pub fn href_identities<I: IntoIterator<Item = S>, S: AsRef<str>>(hrefs: I)
     -> std::collections::BTreeSet<String>` — map + filter over `href_identity`.
