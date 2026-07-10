@@ -1,0 +1,33 @@
+[package]
+name = "rusty-imap-mcp-html-oracle"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94.0"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Nightly differential HTML→text sanitizer oracle for rusty-imap-mcp."
+
+[[bin]]
+name = "html-oracle"
+path = "src/main.rs"
+
+[dependencies]
+rimap-content = { path = "../crates/rimap-content", version = "0.1.0", features = ["test-support"] }
+rimap-core = { path = "../crates/rimap-core", version = "0.1.0" }
+lol_html = "3"
+# Same html5ever engine production uses — decodes character references
+# byte-identically (incl. legacy semicolon-less names + longest-prefix).
+# lol_html still does the tokenization; scraper only decodes isolated text.
+scraper = { version = "0.27", default-features = false }
+mail-parser = "0.11"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+unwrap_used = "warn"

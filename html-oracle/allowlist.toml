@@ -1,0 +1,8 @@
+# Known-benign divergences for the differential HTML oracle (#529).
+# Each entry REQUIRES a `reason`. Populate from the first nightly baseline;
+# never allowlist a divergence that is a real sanitizer bug — file an issue.
+#
+# [[allow]]
+# input = "content_html/example-seed"
+# tokens = ["benignword", "https|host.example"]
+# reason = "why this divergence is benign"

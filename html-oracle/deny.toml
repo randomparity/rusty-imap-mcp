@@ -1,0 +1,47 @@
+# cargo-deny policy for the excluded html-oracle crate (#529). The oracle's
+# dependency graph (lol_html + transitives) is invisible to the main workspace
+# gate, so the nightly workflow runs this scoped check. Concerns: advisories,
+# licenses, sources. Version-unification (multiple-versions) is `warn` here, not
+# `deny`: strict unification matters for the shipped binary, not a nightly test
+# tool, and lol_html transitives may legitimately duplicate versions against
+# rimap-content's graph.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+# Trimmed to exactly the licenses present in the oracle's own dependency graph
+# (lol_html + transitives). A dep bump introducing a new license fails the
+# nightly deny step loudly — the intended behavior for a scoped supply-chain gate.
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
