@@ -1,7 +1,7 @@
 # Release v0.1.0 + Homebrew Tap (Phase 1) Design
 
 Date: 2026-07-10
-Status: Draft (pending user review)
+Status: Approved (adversarial spec review passed, 3 iterations)
 ADR: [ADR-0002](../../ADR/0002-phased-bzr-release-parity-and-direct-publish.md) — phased bzr-parity, direct-publish releases
 
 ## Summary
