@@ -366,3 +366,111 @@ jobs:
           fi
           git commit -m "rusty-imap-mcp ${TAG#v}"
           git push
+
+  # Build native Homebrew bottles so `brew install` pours a prebuilt binary
+  # instead of running `install` under Homebrew's build sandbox. Runs after the
+  # (bottle-less) formula is pushed. No libdbus-1-3 install: the poured Linux
+  # binary is vendored (static libdbus), so neither runner nor user needs it.
+  bottles:
+    name: Build bottle (${{ matrix.label }})
+    needs: homebrew
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write   # upload bottle tarballs to the GitHub release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: arm64 macOS
+          - os: ubuntu-latest
+            label: x86_64 Linux
+          - os: ubuntu-24.04-arm
+            label: arm64 Linux
+    steps:
+      - name: Set up Homebrew on PATH (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if [ ! -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+            NONINTERACTIVE=1 /bin/bash -c \
+              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          fi
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+      - name: Build, bottle, and upload
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          BASE="https://github.com/randomparity/rusty-imap-mcp/releases/download/${TAG}"
+          brew tap randomparity/tap
+          brew install --build-bottle randomparity/tap/rusty-imap-mcp
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          # --root-url bakes the release download base into the JSON so the later
+          # --merge writes a bottle do block that resolves to these assets.
+          brew bottle --json --no-rebuild --root-url "$BASE" randomparity/tap/rusty-imap-mcp
+          # brew bottle writes a DOUBLE-dash local file; Homebrew downloads the
+          # SINGLE-dash form from root_url. Rename before upload.
+          dd_file="$(ls rusty-imap-mcp--"${VERSION}".*.bottle.tar.gz)"
+          sd_file="${dd_file/--/-}"
+          mv "$dd_file" "$sd_file"
+          gh release upload "$TAG" "$sd_file" --repo randomparity/rusty-imap-mcp --clobber
+          mkdir -p "$GITHUB_WORKSPACE/bottle-json"
+          cp ./*.json "$GITHUB_WORKSPACE/bottle-json/"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bottle-json-${{ matrix.os }}
+          path: bottle-json/*.json
+          if-no-files-found: error
+
+  # Fold the per-platform bottle metadata into the tap formula and push a second
+  # tap commit. If any bottle leg fails, this is skipped and the formula stays
+  # bottle-less (degrades to the binary-download install path).
+  bottles-merge:
+    name: Add bottle block to formula
+    needs: bottles
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: homebrew-tap
+    permissions:
+      contents: read
+    steps:
+      - name: Set up Homebrew on PATH
+        run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+      - name: Download bottle JSONs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: bottle-json-*
+          path: bottle-json
+          merge-multiple: true
+      - name: Merge bottle block and push to tap
+        env:
+          TAG: ${{ github.ref_name }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          brew tap randomparity/tap
+          # Homebrew refuses to load a non-official formula that --merge loads by
+          # tap context unless it is trusted; trust the single formula.
+          brew trust --formula randomparity/tap/rusty-imap-mcp
+          brew bottle --merge --write --no-commit bottle-json/*.json
+          tap_dir="$(brew --repository randomparity/tap)"
+          cd "$tap_dir"
+          # A bottle block makes Homebrew pour instead of build, with no source
+          # fallback; gate the push on the formula parsing as Ruby.
+          ruby -c Formula/rusty-imap-mcp.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/randomparity/homebrew-tap.git"
+          git add Formula/rusty-imap-mcp.rb
+          if git diff --staged --quiet; then
+            echo "Formula already carries the bottle block for ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git commit -m "rusty-imap-mcp ${TAG#v}: add bottles"
+          git push origin HEAD:main
