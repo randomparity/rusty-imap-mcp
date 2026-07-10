@@ -389,15 +389,13 @@ jobs:
           - os: ubuntu-24.04-arm
             label: arm64 Linux
     steps:
-      - name: Set up Homebrew on PATH (Linux)
+      # SHA-pinned setup action instead of `curl | bash` of the installer at a
+      # floating HEAD (this job holds contents: write). macOS runners ship brew.
+      - name: Set up Homebrew (Linux)
         if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          if [ ! -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
-            NONINTERACTIVE=1 /bin/bash -c \
-              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+        uses: Homebrew/actions/setup-homebrew@2825979605fed985cccfbd7f3dc3188161aaa15e  # master 2026-06
+        with:
+          stable: true
       - name: Build, bottle, and upload
         env:
           TAG: ${{ github.ref_name }}
@@ -439,6 +437,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Credentialed checkout of the tap: pushes use the token persisted by
+      # actions/checkout (git's http.extraheader), so the PAT never lands in a
+      # remote URL or .git/config. Mirrors the `homebrew` job.
+      - name: Checkout tap
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: randomparity/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          persist-credentials: true
       - name: Set up Homebrew on PATH
         run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
       - name: Download bottle JSONs
@@ -450,7 +458,6 @@ jobs:
       - name: Merge bottle block and push to tap
         env:
           TAG: ${{ github.ref_name }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           brew tap randomparity/tap
@@ -458,19 +465,20 @@ jobs:
           # tap context unless it is trusted; trust the single formula.
           brew trust --formula randomparity/tap/rusty-imap-mcp
           brew bottle --merge --write --no-commit bottle-json/*.json
-          tap_dir="$(brew --repository randomparity/tap)"
-          cd "$tap_dir"
+          # brew writes the bottle block into its own tap clone; copy the result
+          # into the credentialed checkout and push from there.
+          cp "$(brew --repository randomparity/tap)/Formula/rusty-imap-mcp.rb" \
+            tap/Formula/rusty-imap-mcp.rb
+          cd tap
           # A bottle block makes Homebrew pour instead of build, with no source
           # fallback; gate the push on the formula parsing as Ruby.
           ruby -c Formula/rusty-imap-mcp.rb
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/randomparity/homebrew-tap.git"
           git add Formula/rusty-imap-mcp.rb
           if git diff --staged --quiet; then
             echo "Formula already carries the bottle block for ${TAG}; nothing to commit."
             exit 0
           fi
           git commit -m "rusty-imap-mcp ${TAG#v}: add bottles"
-          git push origin HEAD:main
+          git push
