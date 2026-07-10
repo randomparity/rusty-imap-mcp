@@ -66,9 +66,11 @@ dbus-secret-service = { workspace = true, optional = true }
 
 [features]
 # Static-link libdbus so release Linux binaries carry no runtime libdbus-1.so.
-# Weak `?/vendored`: on macOS/Windows the dep is absent, so this is a clean
-# no-op (no feature-resolution error under --all-features).
-vendored-keyring = ["dbus-secret-service?/vendored"]
+# STRONG dep: form is required — keyring pulls dbus-secret-service through its
+# own edge, not this optional dep, so the weak `?/vendored` never fires. The
+# optional dep is Linux-cfg-gated, so dep: is a clean no-op on macOS/Windows
+# (verified via cargo metadata --filter-platform).
+vendored-keyring = ["dep:dbus-secret-service", "dbus-secret-service/vendored"]
 ```
 
 - [ ] **Step 3: Re-export the feature from `rimap-server`**

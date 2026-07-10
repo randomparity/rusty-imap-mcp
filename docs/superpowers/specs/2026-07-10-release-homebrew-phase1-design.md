@@ -96,8 +96,7 @@ feed both tarballs and Homebrew bottles — are built with a new
 so it carries no runtime `libdbus-1.so` dependency. Mechanism:
 
 - `crates/rimap-config/Cargo.toml` declares an optional, **Linux-target-gated**
-  direct dependency and a **weak** feature reference (mirroring bzr exactly —
-  the strong `dep:` form is a cross-platform sharp edge, see below):
+  direct dependency and a **strong** (`dep:`) feature reference:
 
   ```toml
   # root Cargo.toml [workspace.dependencies] (single version source):
@@ -108,24 +107,30 @@ so it carries no runtime `libdbus-1.so` dependency. Mechanism:
   dbus-secret-service = { workspace = true, optional = true }
 
   [features]
-  vendored-keyring = ["dbus-secret-service?/vendored"]
+  vendored-keyring = ["dep:dbus-secret-service", "dbus-secret-service/vendored"]
   ```
 
   The version lives in `[workspace.dependencies]` per the repo's
   single-version-source rule (mirroring the target-gated `libc` precedent in
   `rimap-audit`); the `4.1` pin satisfies cargo-deny's wildcard ban and unifies
-  with keyring 3.6.3's transitive `dbus-secret-service 4.1.0`. The weak `?/vendored` means
-  "if `dbus-secret-service` is otherwise in the graph, turn on its `vendored`
-  feature." On Linux keyring pulls it in (non-optionally, via
-  `linux-native-sync-persistent`), so `vendored` applies:
+  with keyring 3.6.3's transitive `dbus-secret-service 4.1.0`.
   `dbus-secret-service/vendored` -> `dbus/vendored` -> `libdbus-sys/vendored`
   compiles libdbus from source via `cc` (`rustc-link-lib=static=dbus`;
-  libdbus-sys gates its pkg-config probe off under `vendored`). On macOS/Windows
-  the dep is absent, so `?/vendored` is a **clean no-op** — no feature-resolution
-  error even under `--all-features`. (The strong
-  `["dep:dbus-secret-service", "dbus-secret-service/vendored"]` form would
-  force-activate a target-gated dep on non-Linux targets and can error during
-  resolution; the weak form is why bzr uses `?/`.)
+  libdbus-sys gates its pkg-config probe off under `vendored`).
+
+  **The strong `dep:` form is required, not the weak `?/vendored`.** bzr's weak
+  form works there only because bzr's own `keyring` feature does
+  `dep:dbus-secret-service-keyring-store`, activating bzr's optional dep. Here
+  the `keyring` *crate* pulls `dbus-secret-service` through its own dependency
+  edge — it never activates rimap-config's optional dep — so a weak
+  `dbus-secret-service?/vendored` never fires and `vendored` stays off (verified
+  empirically: `cargo tree` showed `libdbus-sys default,pkg-config`, not
+  `vendored`). The strong form force-activates rimap-config's optional dep and
+  turns on `vendored` (`cargo tree` then shows
+  `libdbus-sys cc,default,pkg-config,vendored`). Because the optional dep is
+  Linux-`cfg`-gated, the strong `dep:` reference is a **clean no-op on
+  macOS/Windows** — verified: `cargo metadata --all-features --filter-platform
+  x86_64-apple-darwin` and `...windows-msvc` both resolve without error.
 - `crates/rimap-server/Cargo.toml` re-exports it:
   `vendored-keyring = ["rimap-config/vendored-keyring"]`.
 - The feature is **off by default** for local dev and the release build's

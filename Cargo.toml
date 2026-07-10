@@ -37,6 +37,12 @@ directories = "6"
 
 # Credentials
 keyring = { version = "3.6", features = ["apple-native", "linux-native-sync-persistent"] }
+# Declared here (single version source) so rimap-config's `vendored-keyring`
+# feature can enable its `vendored` (static libdbus) feature. `4.1` unifies with
+# keyring 3.6.3's transitive dbus-secret-service 4.1.0; default-features stay off
+# (keyring's own transitive pull supplies the crypto backend — unification is
+# additive). Only referenced under a Linux `cfg` target in rimap-config.
+dbus-secret-service = { version = "4.1", default-features = false }
 rpassword = "7.5"
 secrecy = "0.10"
 

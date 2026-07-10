@@ -15,6 +15,11 @@ workspace = true
 # Exposes test fixtures (in-memory `MockStore`, etc.) so downstream crates
 # can reuse them in their own dev-dependencies without copying.
 test-support = []
+# Static-link libdbus so release Linux binaries carry no runtime libdbus-1.so
+# dependency (needed for self-contained tarballs / Homebrew bottles). Off by
+# default. Weak `?/vendored`: on macOS/Windows the dep is absent, so this is a
+# clean no-op — no feature-resolution error under --all-features.
+vendored-keyring = ["dep:dbus-secret-service", "dbus-secret-service/vendored"]
 
 [dependencies]
 rimap-core = { path = "../rimap-core", version = "0.1.0" }
@@ -28,6 +33,13 @@ rpassword = { workspace = true }
 secrecy = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-only, declared solely so `vendored-keyring` can turn on its `vendored`
+# feature (static libdbus). keyring already pulls this crate in non-optionally
+# on Linux via `linux-native-sync-persistent`; the weak `?/` reference in
+# `[features]` applies `vendored` to that same instance.
+dbus-secret-service = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
