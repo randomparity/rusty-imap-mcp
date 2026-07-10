@@ -339,6 +339,10 @@ async fn handle_thread(
     ))
     .await?;
 
+    // cargo-mutants: best-effort — deleting `!` here flips the "ensure the
+    // target UID is in its own thread" guard. `related` is the result of an
+    // IMAP `thread_related` round trip, so distinguishing the branches needs
+    // the thread integration harness, not a unit test.
     if !related.contains(&target_uid) {
         related.push(target_uid);
         related.sort_unstable();
@@ -373,6 +377,11 @@ async fn handle_thread(
 /// `In-Reply-To` headers (closest ancestors first — see
 /// `cap_ancestor_ids`). Reuses the same header-extraction pipeline as
 /// `fetch_message`'s `include_headers` (#409).
+// cargo-mutants: best-effort — the whole-body stub-returns and the
+// `delete match arm "Message-ID"` mutant survive because this function fetches
+// the target's body over IMAP and parses its headers. The header-token parsing
+// it delegates to is unit-tested; this fetch+dispatch shell is covered by the
+// thread integration harness.
 async fn fetch_thread_headers(
     account: &AccountState,
     folder: &str,
@@ -463,6 +472,10 @@ async fn fetch_and_format_page(
     if page_uids.is_empty() {
         return Ok(Vec::new());
     }
+    // cargo-mutants: best-effort — deleting the `envelope`/`size` FetchSpec
+    // fields changes what this page fetch requests from the server. The effect
+    // is only observable through a real IMAP fetch (the integration harness);
+    // `format_search_result`, which consumes the fields, is unit-tested.
     let fetched = account
         .imap
         .fetch(
@@ -1117,6 +1130,43 @@ mod tests {
         let mut input = input_with_folder();
         input.text = Some("\t ".to_string());
         assert!(build(&input).is_err());
+    }
+
+    #[test]
+    fn build_query_rejects_advanced_query_control_bytes() {
+        for injected in ['\r', '\n', '\0'] {
+            let mut input = input_with_folder();
+            input.advanced_query = Some(format!("FROM a{injected}b"));
+            let err = build(&input).unwrap_err();
+            assert!(
+                err.to_string().to_lowercase().contains("control"),
+                "advanced_query with {injected:?} must be rejected as a control byte, got: {err}",
+            );
+        }
+        // A clean advanced_query must pass through as a raw query — pins the
+        // accept side so the control-byte comparisons cannot be inverted.
+        let mut ok = input_with_folder();
+        ok.advanced_query = Some("FROM alice SUBJECT invoice".to_string());
+        let query = build(&ok).expect("clean advanced_query must be accepted");
+        assert_eq!(
+            query,
+            rimap_imap::types::SearchQuery::Raw("FROM alice SUBJECT invoice".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_flag_maps_each_variant_to_its_wire_atom() {
+        use rimap_imap::types::Flag;
+        assert_eq!(super::format_flag(&Flag::Seen), "\\Seen");
+        assert_eq!(super::format_flag(&Flag::Answered), "\\Answered");
+        assert_eq!(super::format_flag(&Flag::Flagged), "\\Flagged");
+        assert_eq!(super::format_flag(&Flag::Deleted), "\\Deleted");
+        assert_eq!(super::format_flag(&Flag::Draft), "\\Draft");
+        assert_eq!(super::format_flag(&Flag::Recent), "\\Recent");
+        assert_eq!(
+            super::format_flag(&Flag::Keyword("$Important".to_string())),
+            "$Important"
+        );
     }
 
     #[test]

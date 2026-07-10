@@ -46,6 +46,9 @@ pub(crate) const MAX_TOTAL_MESSAGE_BYTES: usize = 25 * 1_048_576;
 /// re-send. The fetched message is base64-wrapped as a `message/rfc822`
 /// part (≈ +33% on the wire), so this raw cap keeps the outgoing message
 /// within common MTA limits while bounding server memory.
+// cargo-mutants: best-effort — `* with +` on this constant. No unit test pins
+// the exact byte value; it is only observable through the `forward` handler's
+// size gate (`forward.rs`), which needs an IMAP+SMTP round trip.
 pub(crate) const MAX_FORWARD_ORIGINAL_BYTES: usize = 25 * 1_048_576;
 
 /// A single attachment sourced from the download sandbox.
@@ -441,6 +444,10 @@ pub(crate) fn cap_references(mut refs: Vec<String>) -> Vec<String> {
 }
 
 /// Fetch referenced message and set In-Reply-To / References headers.
+// cargo-mutants: best-effort — the `-> Ok(Default::default())` stub drops
+// threading. The body fetches the referenced message over IMAP
+// (`account.imap.fetch_body`); killing it needs an integration harness that
+// replies to a real message, not a unit test over a mocked connection.
 pub(crate) async fn apply_threading_headers<'a>(
     account: &AccountState,
     builder: MessageBuilder<'a>,
@@ -652,7 +659,8 @@ mod tests {
     use mail_builder::headers::message_id::MessageId;
 
     use super::{
-        AddressInput, ComposeInput, addresses_to_builder, cap_references, validate_compose_input,
+        AddressInput, ComposeInput, MAX_BODY_BYTES, addresses_to_builder, cap_references,
+        validate_compose_input,
     };
 
     /// Build a minimal draft, parse it, verify headers round-trip.
@@ -1020,6 +1028,27 @@ mod tests {
     }
 
     #[test]
+    fn body_html_too_large_rejected() {
+        let mut input = make_input(vec![AddressInput {
+            name: None,
+            address: "ok@example.com".into(),
+        }]);
+        input.body_html = Some("x".repeat(MAX_BODY_BYTES + 1));
+        let err = validate_compose_input(&input).unwrap_err();
+        assert_eq!(err.code(), rimap_core::error::ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn body_html_at_max_accepted() {
+        let mut input = make_input(vec![AddressInput {
+            name: None,
+            address: "ok@example.com".into(),
+        }]);
+        input.body_html = Some("x".repeat(MAX_BODY_BYTES));
+        validate_compose_input(&input).unwrap();
+    }
+
+    #[test]
     fn in_reply_to_folder_with_crlf_rejected() {
         let mut input = make_input(vec![AddressInput {
             name: None,
@@ -1159,7 +1188,7 @@ mod tests {
 
     use super::{
         MAX_RECIPIENTS, MAX_SUBJECT_LEN, build_forward_message, forwarded_subject,
-        validate_recipient_set,
+        validate_header_text, validate_recipient_set,
     };
 
     fn to_one(a: &str) -> Vec<AddressInput> {
@@ -1185,6 +1214,29 @@ mod tests {
     fn forwarded_subject_capped_at_max_len() {
         let subject = forwarded_subject(Some(&"x".repeat(MAX_SUBJECT_LEN * 2)));
         assert!(subject.len() <= MAX_SUBJECT_LEN);
+    }
+
+    #[test]
+    fn forwarded_subject_caps_multibyte_on_char_boundary() {
+        // A ☃ is 3 bytes, so byte index MAX_SUBJECT_LEN lands mid-character —
+        // this exercises the `is_char_boundary` walk-back loop that an all-ASCII
+        // subject never triggers. The result must stay a valid string capped at
+        // the limit; a mutant that fails to decrement the index hangs instead.
+        let subject = forwarded_subject(Some(&"☃".repeat(MAX_SUBJECT_LEN)));
+        assert!(subject.len() <= MAX_SUBJECT_LEN);
+        assert!(subject.is_char_boundary(subject.len()));
+    }
+
+    #[test]
+    fn validate_header_text_rejects_each_forbidden_char() {
+        for injected in ['\r', '\n', '\0', '<', '>'] {
+            let value = format!("a{injected}b");
+            assert!(
+                validate_header_text("display name", &value).is_err(),
+                "value containing {injected:?} must be rejected",
+            );
+        }
+        validate_header_text("display name", "Ada Lovelace").unwrap();
     }
 
     #[test]
@@ -1356,6 +1408,14 @@ mod tests {
             })
             .collect();
         assert!(validate_recipient_set(&many, None, None).is_err());
+        // exactly at the cap is accepted (boundary: `>` not `>=`)
+        let exactly: Vec<AddressInput> = (0..MAX_RECIPIENTS)
+            .map(|i| AddressInput {
+                name: None,
+                address: format!("u{i}@example.com"),
+            })
+            .collect();
+        assert!(validate_recipient_set(&exactly, None, None).is_ok());
     }
 
     // --- attachments + HTML (#408) ---

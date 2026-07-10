@@ -83,6 +83,28 @@ mod tests {
         }
     }
 
+    /// Wrap `bs` in `layers` nested single-child `multipart/mixed` bodies.
+    fn wrap_multipart(mut bs: BodyStructure, layers: u32) -> BodyStructure {
+        for _ in 0..layers {
+            bs = BodyStructure::Multipart {
+                subtype: "mixed".into(),
+                parts: vec![bs],
+            };
+        }
+        bs
+    }
+
+    /// Wrap `bs` in `layers` nested `message/rfc822` bodies.
+    fn wrap_message(mut bs: BodyStructure, layers: u32) -> BodyStructure {
+        for _ in 0..layers {
+            bs = BodyStructure::Message {
+                mime_subtype: "rfc822".into(),
+                body: Box::new(bs),
+            };
+        }
+        bs
+    }
+
     #[test]
     fn single_part_yields_one() {
         let bs = single("text", "plain");
@@ -119,15 +141,55 @@ mod tests {
 
     #[test]
     fn depth_limit_stops_descent() {
-        let mut bs = single("text", "plain");
-        for _ in 0..70 {
-            bs = BodyStructure::Multipart {
-                subtype: "mixed".into(),
-                parts: vec![bs],
-            };
-        }
+        let bs = wrap_multipart(single("text", "plain"), 70);
         let mut ids = Vec::new();
         walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn visits_leaf_at_exactly_max_depth() {
+        // A leaf wrapped in exactly MAX_PART_DEPTH multipart layers is reached
+        // at `depth == MAX_PART_DEPTH`, where the cap check `depth > MAX` is
+        // false and the leaf IS visited. This pins the boundary: `>=` would drop
+        // it. `depth_limit_stops_descent` (70 layers) cannot — both operators
+        // stop above the cap there.
+        let bs = wrap_multipart(single("text", "plain"), MAX_PART_DEPTH);
+        let mut ids = Vec::new();
+        walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
+        assert_eq!(
+            ids.len(),
+            1,
+            "leaf at exactly MAX_PART_DEPTH must be visited"
+        );
+    }
+
+    #[test]
+    fn message_arm_visits_wrapper_and_descends_into_embedded_body() {
+        // The `Message` arm has no unit coverage otherwise (only incidental
+        // e2e fixtures exercise a `message/rfc822` BODYSTRUCTURE). It visits the
+        // wrapper then recurses at `depth + 1`; a `+ with -` there computes
+        // `0u32 - 1` at the root and panics, so this pins the descent.
+        let bs = wrap_message(single("text", "plain"), 1);
+        let mut ids = Vec::new();
+        walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
+        assert_eq!(ids.len(), 2, "message wrapper and its embedded body");
+    }
+
+    #[test]
+    fn message_arm_recursion_is_capped_by_depth() {
+        // The Message arm's `depth + 1` needs its own cap coverage: the
+        // Multipart test drives line 40, not this recursion. A message/rfc822
+        // chain deeper than MAX_PART_DEPTH must stop; the original visits at
+        // most MAX_PART_DEPTH+1 wrappers. A mutated increment that fails to grow
+        // depth (`* 1`) would never trip the cap and visit every layer.
+        let bs = wrap_message(single("text", "plain"), MAX_PART_DEPTH + 2);
+        let mut ids = Vec::new();
+        walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
+        assert!(
+            ids.len() <= MAX_PART_DEPTH as usize + 1,
+            "message-arm recursion must respect the depth cap, visited {}",
+            ids.len()
+        );
     }
 }

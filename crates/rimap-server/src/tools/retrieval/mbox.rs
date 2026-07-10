@@ -65,6 +65,11 @@ fn escape_from_lines_into(out: &mut Vec<u8>, msg: &[u8]) {
             line_start = i + 1;
         }
     }
+    // cargo-mutants: known-equivalent — `< with <=` here. At
+    // `line_start == msg.len()` (message ended on a `\n`) the mutated guard
+    // calls `write_mbox_line` with the empty tail slice `&msg[len..]`, and
+    // `line_is_from(b"")` is false, so it appends nothing — identical to the
+    // `<` branch skipping the push. Same shape as `mime_scrub.rs:187`.
     if line_start < msg.len() {
         write_mbox_line(out, &msg[line_start..]);
     }
@@ -91,9 +96,21 @@ fn line_is_from(line: &[u8]) -> bool {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod build_mbox_tests {
-    use super::build_mbox;
+    use super::{build_mbox, line_is_from};
 
     const SEP: &[u8] = b"From mboxrd@rusty-imap-mcp Thu Jan  1 00:00:00 1970\n";
+
+    #[test]
+    fn line_is_from_walks_all_gt_runs_without_indexing_past_end() {
+        // A line of only `>` walks the whole slice in the quote-run loop; the
+        // bound must stay strict (`<`), or the trailing check reads one byte
+        // past the end and panics.
+        assert!(!line_is_from(b">>>"));
+        assert!(!line_is_from(b">"));
+        assert!(!line_is_from(b""));
+        assert!(line_is_from(b"From "));
+        assert!(line_is_from(b">From "));
+    }
 
     #[test]
     fn single_message_gets_separator_and_trailing_newline() {

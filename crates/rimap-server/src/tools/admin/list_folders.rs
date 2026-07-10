@@ -368,5 +368,23 @@ mod tests {
             "name_wire grew to {} bytes; cap not enforced",
             wire.len(),
         );
+        // Lower bound pins the `MAX_FOLDER_NAME_BYTES * 4` raw-input cap: the
+        // 4-byte `A\u{202e}` unit escapes to 9 chars, so a 4096-byte cap keeps
+        // ~9216 wire chars. A shrunken cap (`+ 4` → ~2313, `/ 4` → ~576) would
+        // fall below this floor, so the multiplier cannot silently change.
+        assert!(
+            wire.len() >= 6 * 1024,
+            "name_wire only {} bytes; raw-input cap truncated too aggressively",
+            wire.len(),
+        );
+    }
+
+    #[test]
+    fn escape_wire_name_escapes_del_boundary() {
+        // U+007F DEL is the exclusive upper bound of the printable range; it
+        // must be escaped, not emitted literally into display-safe output.
+        assert_eq!(super::escape_wire_name("\u{7f}"), "\\u{7f}");
+        // U+007E ~ is the last literal printable, pinning the other side.
+        assert_eq!(super::escape_wire_name("\u{7e}"), "~");
     }
 }

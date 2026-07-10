@@ -84,6 +84,10 @@ pub async fn handle(
     // Bound the wrapped payload. The fetch is already capped by
     // `max_fetch_body_bytes`, but that limit can be looser than the
     // forward cap, so re-check here before building/sending.
+    //
+    // cargo-mutants: best-effort — `> with >=` on the forward-size cap. This
+    // handler needs an IMAP fetch plus SMTP send, and the boundary differs only
+    // at an original of exactly 25 MiB, impractical to stage in an e2e run.
     if original.len() > MAX_FORWARD_ORIGINAL_BYTES {
         return Err(rimap_core::RimapError::invalid_input(format!(
             "source message too large to forward ({} bytes); max is {MAX_FORWARD_ORIGINAL_BYTES}",

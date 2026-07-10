@@ -132,6 +132,10 @@ pub async fn handle(
     // Cross-validate: fetch BODYSTRUCTURE and compare its declared
     // MIME type against what mail_parser reports. Best-effort — if
     // the fetch or lookup fails we skip validation silently.
+    //
+    // cargo-mutants: best-effort — deleting `bodystructure: true` skips this
+    // cross-validation. The effect is only observable through an IMAP fetch
+    // returning a BODYSTRUCTURE, which needs the integration harness.
     let spec = FetchSpec {
         bodystructure: true,
         ..FetchSpec::default()

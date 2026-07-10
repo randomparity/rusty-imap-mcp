@@ -173,6 +173,10 @@ pub async fn handle(
 
     let mut truncated = content.meta.body_truncated;
 
+    // cargo-mutants: best-effort — the `> with </>=/==` mutants on this
+    // `max_body_bytes` truncation survive because `body_text` comes from an IMAP
+    // fetch + content parse inside this handler. Exercising the boundary needs a
+    // fetched message body straddling `max`, i.e. the integration harness.
     if let Some(max) = input.max_body_bytes {
         if body_text.len() > max {
             truncate_graphemes_in_place(&mut body_text, max);

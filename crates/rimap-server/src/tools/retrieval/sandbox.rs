@@ -162,8 +162,20 @@ pub(crate) fn write_attachment(
                 let _ = dest.dir.remove_file(&tmp_name);
                 return Ok(dest.canonical().join(&name));
             }
+            // cargo-mutants: best-effort — `match guard ... == AlreadyExists`
+            // forced to `true`. Routing a non-`AlreadyExists` `hard_link` error
+            // through the retry path (instead of returning it) only changes the
+            // surfaced error after ~1000 iterations, and inducing a persistent
+            // non-`AlreadyExists` `hard_link` failure is not portable across the
+            // filesystems CI runs on.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 counter += 1;
+                // cargo-mutants: best-effort — `> with ==` on the collision cap.
+                // `counter` increments by one from 0, so `== 1000` fires one
+                // iteration earlier than `> 1000` (tolerating 1000 vs 1001
+                // collisions); both terminate the loop at ~1000. Distinguishing
+                // them requires 1000 pre-existing colliding filenames, so it is
+                // left annotated rather than killed.
                 if counter > 1000 {
                     let _ = dest.dir.remove_file(&tmp_name);
                     return Err(RimapError::Internal("too many filename collisions".into()));
@@ -334,6 +346,11 @@ pub(crate) fn read_sandboxed_file(
     let mut buf = Vec::new();
     // Hard-cap the read at max_bytes + 1 so a file grown after the stat is
     // detected (buf > max_bytes) rather than read unbounded.
+    //
+    // cargo-mutants: best-effort — `+ with *` (`max_bytes * 1 == max_bytes`)
+    // disables only the post-stat file-growth (TOCTOU) tripwire. Observing it
+    // requires the file to grow between the `metadata()` above and this read,
+    // which the test harness cannot induce deterministically.
     file.take(max_bytes as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|e| RimapError::InternalSourced {
@@ -356,6 +373,11 @@ pub(crate) fn read_sandboxed_file(
 /// # Errors
 ///
 /// Always returns `RimapError::Internal`.
+// cargo-mutants: known-equivalent — the `-> Ok(vec![0])` / `Ok(vec![1])`
+// stubs on this body are `#[cfg(not(unix))]` and are not compiled on Linux CI,
+// so they cannot change behavior here. On a non-Unix build the stub failing
+// closed IS the security property; same shape as `rimap-audit`
+// `self_check.rs:189`.
 #[cfg(not(unix))]
 pub(crate) fn read_sandboxed_file(
     _root: &Path,
@@ -442,6 +464,18 @@ mod tests {
     #[cfg(unix)]
     fn dest_for(dir: &Path) -> DestDir {
         resolve_dest_dir(None, dir, dir).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unique_temp_name_is_prefixed_and_distinct() {
+        // The exclusive-create temp path must carry the operator-recognizable
+        // prefix and differ between concurrent writers; a constant stub breaks
+        // O_EXCL de-dup between download and export.
+        let a = unique_temp_name();
+        let b = unique_temp_name();
+        assert!(a.starts_with(".rimap-tmp-"), "missing temp prefix: {a}");
+        assert_ne!(a, b, "consecutive temp names must differ");
     }
 
     #[test]

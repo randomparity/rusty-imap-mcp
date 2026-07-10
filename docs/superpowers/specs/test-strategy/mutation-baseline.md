@@ -138,9 +138,9 @@ a real test gap.
 
 ## `rimap-server`
 
-**Last refresh:** 2026-07-09 (issue #515 — refresh of the 2026-05-18 #289 baseline).
+**Last refresh:** 2026-07-09 (issue #530 — cold-path triage over the #515 hot-path refresh).
 **Surviving mutants in hot paths (`mcp/{dispatch,audit_envelope,tool_catalog,tool_name,preinit,server,response,error,result_provenance}.rs`, `mcp/wire_validator/`, `boot/`; `fuzz_oracle.rs` covered separately below):** 13 in this run (all annotated as known-equivalent), plus 7 hot-path mutants caught by timeout (documented in the timeout table below).
-**Surviving mutants in best-effort paths (`cli/`, `tools/`, `main.rs`, `lib.rs`):** 54 (unannotated; best-effort tier per spec §6 — see note below).
+**Surviving mutants in cold paths (`cli/`, `tools/`, `main.rs`, `lib.rs`):** **0 unannotated.** Issue #530 triaged the cold-path survivors (45 total = 43 missed + 2 caught-by-timeout; down from the pre-#517 #515 figure of 54): the 43 missed split into 17 killed (new unit tests), 3 known-equivalent, and 23 best-effort — every remaining survivor carries an inline `// cargo-mutants:` annotation and a row in the cold-path table below, and the 2 timeout kills sit in the timeout table.
 
 Run summary (917 mutants total, 2026-07-09 refresh via `cargo mutants
 --package rimap-server --no-shuffle --jobs 10 --jobserver-tasks 40
@@ -152,6 +152,17 @@ binary(=e2e_smtp))' --test-threads 4` on Linux with the `mold` linker):
 migration, multi-account reveal-on-select #439, compose attachments +
 sanitized HTML #408, `thread_of_uid` #410, folder-wide EXPUNGE, and the
 `wire_validator` module split).
+
+Issue #530 cold-path rerun (2026-07-09), scoped to the cold-path files via
+`cargo mutants --package rimap-server --no-shuffle --jobs 10 --timeout 120 -f
+'.../tools/**/*.rs' -f '.../cli/**/*.rs' -f '.../main.rs' -f '.../lib.rs'
+--test-tool nextest -- -E 'not (binary(=e2e) | binary(=e2e_smtp))'
+--test-threads 4`: 614 mutants, 414 caught, **43 missed + 2 timeout**, 155
+unviable, 39 min. The missed count is down from the #515 figure of 54 because
+#517 (real SMTP `message_builder` e2e) landed *after* the #515 refresh
+(PR #516 merged 11:07 UTC; #517 closed 15:09 UTC) and kills several compose
+survivors. The 43 missed split 17 kill / 3 known-equivalent / 23 best-effort;
+the 2 timeouts are new kill-by-timeout survivors (below).
 
 Methodology change vs 2026-05-18: this refresh **runs the container
 integration harnesses** as part of the survey. The wire-driven dovecot
@@ -187,12 +198,21 @@ File-scope corrections vs the 2026-05-18 section:
   (`envelope.rs`, `inbound.rs`, `outbound.rs`, `supervisor.rs`, `mod.rs`);
   the visitor/CRLF known-equivalent rows below moved with it.
 
-Best-effort paths note: 54 cold-path survivors in `tools/retrieval/`,
-`tools/compose/message_builder.rs`, `main.rs`, and `cli/` are not
-annotated inline. Per spec §6 these are best-effort tier (thin wrappers
-over `rimap-imap` whose argument shaping needs an integration harness, plus
-diagnostic-only CLI/JSON output). Per-mutant triage is deferred; the "zero
-unannotated survivors" gate applies to hot paths only.
+Cold-path triage (issue #530): the cold-path survivors are no longer deferred.
+Seventeen were pure-function gaps and are now killed by unit tests (`escape_wire_name`
+DEL escaping, the `sanitize_folder_entry` raw-input cap, `validate_compose_input`
+body_html size, `validate_recipient_set` boundary, `forwarded_subject` multibyte
+truncation, `validate_header_text` injection chars, `line_is_from` all-`>` bound,
+`unique_temp_name`/`export_token` uniqueness, `build_query` control-byte rejection,
+`format_flag` mappings, and the `part_walker` leaf-at-exactly-`MAX_PART_DEPTH`
+boundary). The remaining 26 carry inline `// cargo-mutants:` annotations and the
+cold-path table rows below: 3 known-equivalent and 23 best-effort (thin wrappers
+over `rimap-imap` whose argument shaping needs an
+integration harness, non-portable filesystem error/TOCTOU paths, and diagnostic
+CLI wiring — spec §6 best-effort tier). The retrieval `ExportSource` and
+`fetch_message` truncation rows are attributed to issue #520 (export/retrieval
+over the wire), which will kill them via the harness. The "zero unannotated
+survivors" gate now holds for cold paths too.
 
 | Equivalence class / File:line | Mutation(s) | Reason kept | Annotation site |
 |---|---|---|---|
@@ -201,6 +221,31 @@ unannotated survivors" gate applies to hot paths only.
 | `mcp/wire_validator/envelope.rs` — `OneLevelDupCheck` non-`visit_map` methods (`expecting`, `visit_seq`, `visit_str`/`visit_string`, `visit_unit`/`visit_none`) | stub / constant-return | `expecting` only formats serde diagnostics; `visit_string`/`visit_none` are unreachable from `serde_json::Deserializer::from_str` (strings route through `visit_str`, JSON null through `visit_unit`); a non-draining `visit_seq` leaves the parser mid-array and the outer `deserialize_any(...).unwrap_or(false)` swallows the error to the same "no duplicates" verdict. `visit_map` (the load-bearing method) is killed by the dup-check tests. Which members survive vs. are caught by `mcp_wire_proptest` varies per run. | `mcp/wire_validator/envelope.rs:103` |
 | `mcp/wire_validator/envelope.rs` — `TopAndErrorDupCheck` non-`visit_map` methods (`expecting`, `visit_seq`, `visit_<primitive>`, `visit_unit`/`visit_none`) | stub / constant-return | The dup-check runs before `validate()` parses the line; a non-object top-level then fails `parsed.as_object()` and is rejected with `invalid_request(Value::Null)` — the same id as the dup-check rejection path — so any `visit_<primitive>` verdict yields the same `Reject`. `expecting`/`visit_seq` as above. `visit_map` is killed by `duplicate_top_level_keys_reject` / `duplicate_keys_inside_error_body_reject`. Run-varying subset. | `mcp/wire_validator/envelope.rs:193` |
 | `mcp/server.rs:702` | `replace && with ||` and `replace == with !=` in `<impl ServerHandler>::call_tool` | Test-infrastructure gap: the `use_account` notify gate. Asserting that non-`use_account` calls suppress `notifications/tools/list_changed` needs a `RequestContext<RoleServer>` (no rmcp public test constructor); `e2e_wire` asserts the notification's presence, not its absence. | `mcp/server.rs:692` |
+
+### Cold-path survivors (issue #530)
+
+Line numbers are a 2026-07-09 post-annotation snapshot; the grouping and
+mutation kind are the durable identifiers. Known-equivalent first, then
+best-effort tier.
+
+| File:line | Mutation(s) | Reason kept | Annotation site |
+|---|---|---|---|
+| `tools/retrieval/mbox.rs:73` | `< with <=` on the `escape_from_lines_into` trailing push | At `line_start == msg.len()` the mutated guard passes the empty tail slice to `write_mbox_line`, and `line_is_from(b"")` is false, so nothing is appended — identical to the `<` branch skipping the push. Same shape as `rimap-content` `mime_scrub.rs:187`. | `tools/retrieval/mbox.rs:68` |
+| `tools/retrieval/sandbox.rs` — `#[cfg(not(unix))]` `read_sandboxed_file` | `-> Ok(vec![0])` / `Ok(vec![1])` (2 mutants) | Platform-gated fail-closed stub, not compiled on Linux CI, so it cannot change behavior in this run; on non-Unix the stub failing closed is the security property. Same shape as `rimap-audit` `self_check.rs:189`. | the `#[cfg(not(unix))]` fn body |
+| `tools/retrieval/export_messages.rs:219,241` | `fetch_sizes` stub-returns (4) + `fetch_one_body -> Ok(vec![1])` | The real IMAP-backed `impl ExportSource for AccountState`. The export logic is unit-tested against a fake `ExportSource` (trait seam); this impl's `self.imap.fetch*` round trip is best-effort, covered by **#520** (export over the wire). | `impl ExportSource for AccountState` |
+| `tools/retrieval/fetch_message.rs:181` | `> with </>=/==` (3) on the `max_body_bytes` truncation | `body_text` comes from an IMAP fetch + content parse inside `handle`; exercising the boundary needs a fetched body straddling `max` (harness; **#520**-adjacent). | `tools/retrieval/fetch_message.rs:177` |
+| `tools/retrieval/search.rs:346` | `delete !` in `handle_thread` (`!related.contains(target)`) | `related` is the result of an IMAP `thread_related` round trip; the branch is only distinguishable through the thread integration harness. | `tools/retrieval/search.rs:342` |
+| `tools/retrieval/search.rs:385,403` | `fetch_thread_headers` stub-returns (2) + `delete "Message-ID"` match arm | The function fetches the target's body over IMAP and parses headers; the token parsing it delegates to is unit-tested, this fetch+dispatch shell is harness-covered. | `tools/retrieval/search.rs:381` |
+| `tools/retrieval/search.rs:485` | delete `envelope` / `size` FetchSpec fields in `fetch_and_format_page` | Changes what the page fetch requests; observable only through a real IMAP fetch. `format_search_result`, the consumer, is unit-tested. | `tools/retrieval/search.rs:481` |
+| `tools/retrieval/download_attachment.rs:140` | delete `bodystructure` field from the cross-validation FetchSpec | The MIME cross-validation warning is only observable through an IMAP fetch returning a BODYSTRUCTURE (harness). | `tools/retrieval/download_attachment.rs:132` |
+| `tools/retrieval/sandbox.rs:179` | `> with ==` on the 1000-collision cap in `write_attachment` | Off-by-one, not strict equivalence: `counter` increments by one from 0, so `== 1000` fires one iteration earlier than `> 1000` (tolerating 1000 vs 1001 collisions); both terminate the loop at ~1000. Distinguishing them needs 1000 pre-existing colliding filenames, so it is annotated rather than killed. | `tools/retrieval/sandbox.rs:172` |
+| `tools/retrieval/sandbox.rs:171` | `match guard e.kind() == AlreadyExists` forced to `true` | Routing a non-`AlreadyExists` `hard_link` error through the retry path only changes the surfaced error after ~1000 iterations, and a persistent non-`AlreadyExists` `hard_link` failure is not portable across CI filesystems. | `tools/retrieval/sandbox.rs:165` |
+| `tools/retrieval/sandbox.rs:352` | `+ with *` on `take(max_bytes + 1)` in `read_sandboxed_file` | Disables only the post-stat file-growth (TOCTOU) tripwire; observing it requires the file to grow between the `metadata()` stat and the read, which the harness cannot induce deterministically. | `tools/retrieval/sandbox.rs:346` |
+| `tools/compose/message_builder.rs:52` | `* with +` on `MAX_FORWARD_ORIGINAL_BYTES` | No unit test pins the byte value; it is only observable through the `forward` handler's size gate, which needs an IMAP+SMTP round trip. | `tools/compose/message_builder.rs:50` |
+| `tools/compose/message_builder.rs:451` | `apply_threading_headers -> Ok(Default::default())` | Body fetches the referenced message over IMAP; killing it needs a harness that replies to a real message. | `tools/compose/message_builder.rs:443` |
+| `tools/compose/forward.rs:91` | `> with >=` on the forward-size cap | Handler needs an IMAP fetch plus SMTP send, and the boundary differs only at an original of exactly 25 MiB — impractical to stage in an e2e run. | `tools/compose/forward.rs:84` |
+| `main.rs:645` | `delete match arm Some(Command::DumpToolSchemas)` | `#[cfg(feature = "test-support")]` diagnostic dispatch; CI exercises it via `just regen-tool-schemas`, not by an in-process Rust test. | `main.rs:641` |
+| `main.rs:677` | `run_migrate_keyring -> Ok(())` | CLI wiring over the OS keyring; `migrate_keyring::migrate_one` is unit-tested, but the handler needs a live keyring the unit suite cannot access. | `main.rs:669` |
 
 Mutants caught by timeout (kill-by-timeout — the mutation induces a
 non-terminating loop that the test timeout kills, surfacing as TIMEOUT
@@ -213,6 +258,8 @@ rather than a clean failure; same pattern as `rimap-audit`'s
 | `mcp/server.rs:476` | `replace < with <= in tool_page_window` | `end < len` becomes `end <= len`, so `next` stays `Some` on the final page → non-terminating page walk → TIMEOUT. |
 | `mcp/wire_validator/mod.rs:34` | `replace * with / in BUF_SIZE` | `64 / 1024 == 0` → a zero-capacity duplex buffer whose read loop makes no progress → TIMEOUT. |
 | `mcp/wire_validator/outbound.rs:37` | `replace == with != in passthrough_outbound` | EOF (`n == 0`) no longer returns, so the outbound pump spins on zero-byte reads → TIMEOUT (`passthrough_outbound_drops_on_eof`). |
+| `tools/retrieval/mbox.rs:86` | `replace += with *= in line_is_from` | `j *= 1` never advances past a leading `>`, so the quote-run scan on any `>`-prefixed line spins forever → TIMEOUT (cold-path, issue #530). |
+| `tools/retrieval/sandbox.rs:174` | `replace += with *= in write_attachment` | `counter *= 1` never advances, so a filename collision retries forever without reaching the 1000-cap → TIMEOUT (cold-path, issue #530). |
 
 ### `mcp/fuzz_oracle.rs` (behind `--features fuzzing`)
 
