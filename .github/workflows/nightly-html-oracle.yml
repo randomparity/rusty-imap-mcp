@@ -15,6 +15,7 @@ concurrency:
 jobs:
   html-oracle:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -37,10 +38,10 @@ jobs:
           tool: cargo-deny
 
       - name: Supply-chain audit (oracle graph)
-        run: cargo deny --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
+        run: cargo deny --locked --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
 
       - name: Run differential oracle
-        run: cargo run --manifest-path html-oracle/Cargo.toml -- --repo-root .
+        run: cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root .
 
       - name: Upload report
         if: always()
@@ -49,3 +50,4 @@ jobs:
           name: html-oracle-report
           path: html-oracle/report.json
           if-no-files-found: warn
+          retention-days: 7
