@@ -42,15 +42,36 @@ the PR-blocking check set.
 
 ## Grounding survey — reality the assertions bind to
 
-- **Production entry point:** `rimap_content::html::sanitize(raw: &[u8],
-  charset: Option<&str>) -> Result<HtmlResult, ContentError>` (in
-  `crates/rimap-content/src/html/pipeline.rs`). Reachable from out-of-tree code
-  via the `test-support` feature (the module is `pub` for `test_support`
-  re-export). `HtmlResult` carries `body_text: String`, `anchor_hrefs:
-  Vec<String>`, `body_html: String`, `warnings: Vec<SecurityWarning>`.
-- **Production parser:** `scraper` (wraps `html5ever`) + `ammonia`. Both share
-  the html5ever tokenizer, so a genuinely independent oracle engine must NOT be
-  html5ever-based.
+- **Production entry point:** `mod html` is **private** (`lib.rs` declares `mod
+  html;`, not `pub mod`). The reachable-from-out-of-tree path, under the
+  `test-support` feature, is `rimap_content::test_support::sanitize_html(raw:
+  &[u8], charset: Option<&str>) -> Result<rimap_content::test_support::HtmlResult,
+  ContentError>` (an alias for `crate::html::sanitize`). **Name collision
+  warning:** `rimap_content::sanitize` (re-exported at the crate root from
+  `unicode`) is the *Unicode scrubber*, a different function — the oracle must
+  call `test_support::sanitize_html` for production HTML processing and reserve
+  bare `sanitize` for the Unicode step. `HtmlResult` carries `body_text: String`,
+  `anchor_hrefs: Vec<String>`, `body_html: String`, `warnings:
+  Vec<SecurityWarning>`.
+- **`body_text` is already Unicode-scrubbed.** Production's `extract_text` routes
+  the extracted text through `unicode::sanitize` (NFKC-fold via `normalize_nfkc`
+  → `normalize_line_endings` → `filter_codepoints`, which strips zero-width,
+  bidi-override, and C0/C1 controls → grapheme truncate). So `body_text` is
+  **NFKC-normalized with invisible codepoints removed**, and those strips are
+  announced only by `Unicode*` warning codes (NOT members of `DROP_EXPLAINING`).
+  The reference must apply the *same* scrub before tokenizing, or benign
+  NFKC/codepoint transforms become spurious HARD divergences.
+- **Crate-root re-exports available to the oracle** (from `pub use unicode::{…}`):
+  `rimap_content::decode(bytes, charset)`, `normalize_nfkc`, `filter_codepoints`,
+  and `sanitize` (the Unicode scrubber). The oracle reuses `decode` and
+  `sanitize` so its normalization is byte-identical to production's.
+- **Production parser:** `scraper` (wraps `html5ever`, a full tree-construction
+  parser) + `ammonia`. Both share the html5ever tokenizer, so a genuinely
+  independent oracle engine must NOT be html5ever-based. `lol_html` is a
+  *streaming* rewriter with no tree construction, so it will legitimately diverge
+  from html5ever on malformed HTML (foster-parenting, implicit close, head/body
+  hoisting) — see Failure modes; that structural divergence is a first-class
+  reason the equivalence rule and body-scope gate exist.
 - **Non-content tags production skips** during text extraction
   (`crates/rimap-content/src/html/extract.rs`, `NON_CONTENT_TAGS`): `script`,
   `style`, `noscript`, `template`, `head`, `title`.
@@ -73,8 +94,13 @@ the PR-blocking check set.
   --all-features`), and `just deny` (`cargo deny --all-features check`) because
   those use `--workspace`, which does not descend into excluded members.
 - **`lol_html`** (Cloudflare streaming HTML rewriter) is version 3.0.0,
-  BSD-3-Clause — already on `deny.toml`'s license allowlist (line 25). It has
-  its own WHATWG-conformant tokenizer, independent of html5ever.
+  BSD-3-Clause, with its own WHATWG-conformant tokenizer independent of
+  html5ever. Because the oracle crate is **excluded** from the main workspace,
+  `cargo deny --all-features check` (which scans the workspace lockfile) never
+  sees `lol_html` or its transitives — the `deny.toml` license allowlist is
+  irrelevant to it. Since the oracle *executes* `lol_html` over adversarial email
+  in CI, the nightly workflow runs its own `cargo deny check` scoped to
+  `html-oracle/Cargo.lock` (Component 6) rather than relying on the main gate.
 
 ## Non-goals
 
@@ -118,7 +144,11 @@ html-oracle/
 
 Dependencies: `rimap-content` (path, `features = ["test-support"]`),
 `rimap-core` (path, for `WarningCode`), `lol_html = "3"`, `mail-parser`
-(workspace-pinned version echoed literally), `serde`/`serde_json`, `toml`.
+(workspace-pinned version echoed literally), `url` (href scheme+host parsing —
+the same crate `rimap-content` already uses transitively), `serde`/`serde_json`,
+`toml`. The crate ships its own `html-oracle/deny.toml` (or reuses the root one)
+so the nightly `cargo deny` step has a config; its allowed-licenses list must
+include `lol_html`'s BSD-3-Clause and its transitives' licenses.
 
 Because the crate is excluded from the main workspace, none of its dependencies
 (`lol_html` and transitives) enter `clippy --all-features`, `test-msrv`, or
@@ -128,44 +158,77 @@ own MSRV is irrelevant.
 
 ### Component 2 — reference extractor (`reference.rs`)
 
-`fn extract_reference(html: &str) -> ReferenceExtract` where
+`fn extract_reference(decoded_html: &str) -> Result<ReferenceExtract, ReferenceError>`
+where
 
 ```rust
 struct ReferenceExtract {
     text_tokens: BTreeSet<String>,   // normalized visible-text tokens
-    hrefs: BTreeSet<String>,         // normalized safe-scheme anchor hrefs
+    href_ids:    BTreeSet<String>,   // safe-scheme (scheme, host/domain) identities
 }
 ```
 
-Uses `lol_html::rewrite_str` (or the low-level `HtmlRewriter`) with:
+**Input is already-decoded UTF-8.** The runner decodes each corpus input exactly
+once with `rimap_content::decode(raw, charset)` (Component 4) and hands the *same*
+string to both engines, so byte→str decoding can never be a divergence source
+(finding: charset asymmetry). The reference takes `&str`, not bytes.
 
-- **Text handler:** accumulate text nodes, but suppress accumulation while
-  inside any tag in the *same* `NON_CONTENT_TAGS` set production skips
-  (`script`, `style`, `noscript`, `template`, `head`, `title`). This keeps the
-  two engines agreeing on the spec-uncontroversial exclusions, so those never
-  register as divergences. Depth-tracked element handlers on those tags flip a
-  "suppress" counter on start and off on end.
-- **Anchor handler:** on `<a href>`, parse the scheme; retain only
-  `http`/`https`/`mailto`. Normalize (trim, lowercase scheme + host).
-- **Normalization** (shared with production tokens): Unicode NFC, lowercase,
-  split on Unicode whitespace (`char::is_whitespace`), drop empty tokens. Result
-  is a `BTreeSet<String>` (order-independent, dedup'd).
+Uses `lol_html::HtmlRewriter` (low-level, so text/element handlers and errors are
+observable) with:
 
-The reference engine does **not** implement CSS-hidden detection, href-mismatch
-detection, or ammonia's tag allowlist — only the non-content-tag skip. That is
-the deliberate independence: everything else production does is what the diff
-scrutinizes.
+- **Body scope + non-content suppression:** accumulate text only while inside
+  `<body>` AND not inside any tag in the *same* `NON_CONTENT_TAGS` set production
+  skips (`script`, `style`, `noscript`, `template`, `head`, `title`). Production's
+  `extract_text` walks only `<body>` descendants; the reference mirrors that
+  body-scope so head-hoisted / stray text is not a spurious divergence. Depth
+  counters (one for `<body>` presence, one for suppression) gate accumulation.
+  - *Unclosed-tag note:* `script`/`style`/`title`/`noscript`/`textarea` are
+    raw-/escapable-raw-text elements — **both** tokenizers consume to EOF when
+    they are unclosed, so an unclosed one suppresses the tail consistently in
+    both engines (no masking). `head`/`template` unclosed cases are neutralized
+    by the body-scope gate. Unit tests pin unclosed `<title>`/`<script>`/
+    `<noscript>` behavior so a lol_html version bump cannot silently regress it.
+- **Anchor handler:** on `<a href>`, parse with `url`/scheme inspection; retain
+  only `http`/`https`/`mailto`. Reduce each to a **scheme+host identity** —
+  `(scheme, lowercased host)` for http(s), `(mailto, lowercased domain)` for
+  mailto — and **discard path/query/fragment**. This is deliberate: production's
+  hrefs come from the *ammonia-rewritten* HTML (percent-encoding, entity
+  resolution, and canonicalization applied), so a full-URL-string comparison
+  would flag benign encoding differences as HARD. The mismatch defense the
+  oracle backstops cares about the target host, not path encoding, so scheme+host
+  is the right comparison altitude. The *same* reduction runs on production's
+  `anchor_hrefs`.
+- **Text normalization — byte-identical to production:** apply
+  `rimap_content::sanitize` (the Unicode scrubber: NFKC + line-ending +
+  `filter_codepoints` + grapheme truncate) to the accumulated text, exactly as
+  production's `extract_text` does, THEN lowercase and split on Unicode
+  whitespace (`char::is_whitespace`), dropping empty tokens. Reusing production's
+  scrubber guarantees NFKC folding and invisible-codepoint stripping are
+  identical on both sides, so `Unicode*`-class transforms (which are NOT
+  `DROP_EXPLAINING`) can never produce a HARD divergence. Production's
+  `body_text` is tokenized with the same lowercase + whitespace split (it is
+  already scrubbed). Result is a `BTreeSet<String>`.
+
+`ReferenceError` wraps a `lol_html` rewrite/handler error. The reference engine
+does **not** implement CSS-hidden detection, href-mismatch detection, or
+ammonia's tag allowlist — only the body-scope + non-content-tag skip and the
+shared Unicode scrub. That is the deliberate independence: the tokenizer and the
+tree/streaming shape differ, and everything else production does (hidden
+detection, allowlisting) is what the diff scrutinizes.
 
 ### Component 3 — two-tier equivalence rule (`diff.rs`)
 
 For each corpus input, given production `HtmlResult` and `ReferenceExtract`:
 
 ```
-prod_text_tokens = normalize(result.body_text)
-prod_hrefs       = normalize_safe_scheme(result.anchor_hrefs)
+# body_text is already Unicode-scrubbed; tokenize with the same
+# lowercase + Unicode-whitespace split the reference uses.
+prod_text_tokens = tokenize(result.body_text)
+# reduce production hrefs to the SAME scheme+host identity as the reference.
+prod_href_ids    = safe_scheme_ids(result.anchor_hrefs)
 
 text_reference_only = ref.text_tokens - prod_text_tokens - allowlist_text[input]
-href_reference_only = ref.hrefs       - prod_hrefs       - allowlist_href[input]
+href_reference_only = ref.href_ids    - prod_href_ids    - allowlist_href[input]
 reference_only      = text_reference_only ∪ href_reference_only
 
 if reference_only is empty:
@@ -196,16 +259,21 @@ is not authoritative).
 1. **Raw-HTML seeds:** read every file under `fuzz/corpus/content_html/` as
    `raw: &[u8]`, `charset = None`. Input id = `content_html/<filename>`.
 2. **Injection fixtures:** for each `tests/injection-corpus/*/input.eml`, parse
-   with `mail-parser`; for each `text/html` part, take its decoded bytes +
-   declared charset. Input id = `injection/<dir>[/part<n>]`. Fixtures with no
-   `text/html` part are skipped (logged at info).
-3. For each input: `sanitize()` (skip inputs that return
-   `ContentError::LimitExceeded` — over-cap inputs are a separate concern, logged
-   as skipped), `extract_reference()`, apply the diff.
+   with `mail-parser`; for each `text/html` part, take its raw bytes + declared
+   charset. Input id = `injection/<dir>[/part<n>]`. Fixtures with no `text/html`
+   part are skipped (logged at info).
+3. For each input, **decode once**: `decoded = rimap_content::decode(raw,
+   charset)`. Run production `test_support::sanitize_html(raw, charset)` (skip
+   inputs returning `ContentError::LimitExceeded` — over-cap inputs are a separate
+   concern, counted `skipped`). Run `extract_reference(&decoded)`; on
+   `ReferenceError`, log-and-skip that input, counted `ref_error` (a single
+   hostile input must not abort the whole run). When both succeed, apply the diff.
 4. Write `html-oracle/report.json`: per-input verdict, the divergent tokens,
-   which warnings fired, and totals (`hard`, `soft`, `match`, `skipped`).
-5. Exit code: non-zero iff `hard > 0`. Print a compact human summary to stderr
-   (stdout stays clean for potential piping).
+   which warnings fired, `production_only` (informational), and totals (`hard`,
+   `soft`, `match`, `skipped`, `ref_error`, `stale_allowlist_entries`).
+5. Exit code: non-zero iff `hard > 0` (`ref_error`/`skipped`/`soft` never fail
+   the job). Print a compact human summary to stderr (stdout stays clean for
+   potential piping).
 
 Corpus paths are resolved relative to a `--repo-root` CLI arg (default: the
 crate's `CARGO_MANIFEST_DIR/..`), so the runner works both locally and in CI.
@@ -231,9 +299,14 @@ so the first nightly run establishes the real baseline.
 - Trigger: `schedule` (nightly cron) + `workflow_dispatch`.
 - `permissions: contents: read` (minimal).
 - Single Ubuntu job, stable toolchain via the repo `rust-toolchain.toml`.
-- Steps: checkout (SHA-pinned action) → `cargo run --manifest-path
-  html-oracle/Cargo.toml -- --repo-root .` → `actions/upload-artifact`
-  (SHA-pinned) uploads `html-oracle/report.json` with `if: always()`.
+- Steps: checkout (SHA-pinned action) → `cargo deny --manifest-path
+  html-oracle/Cargo.toml check advisories bans licenses sources` (supply-chain
+  coverage for the oracle's own dependency graph, which the main workspace gate
+  never sees) → `cargo run --manifest-path html-oracle/Cargo.toml -- --repo-root
+  .` → `actions/upload-artifact` (SHA-pinned) uploads `html-oracle/report.json`
+  with `if: always()`. The oracle crate carries its own `deny.toml` (or reuses
+  the root one via `--config`) so `lol_html` + transitives get advisory/license/
+  ban checks despite being out of the main workspace.
 - Job is red iff the runner exits non-zero (a HARD divergence). SOFT and
   informational divergences leave it green; the artifact carries them for the
   retro.
@@ -255,16 +328,35 @@ so the first nightly run establishes the real baseline.
 - **Silent drop (hypothetical bug):** production drops visible `<p>` text with
   *no* warning → reference surfaces it → `Hard`. This is the target signal.
 - **`javascript:` href:** reference restricts to safe schemes, so it never
-  appears in `ref.hrefs` → no divergence. No false positive from policy drops.
-- **U+00A0 / zero-width / bidi tokens:** NFC + whitespace-split normalization
-  may still leave engine-specific artifacts; these are the expected first-run
-  SOFT/allowlist churn. The retro decides whether normalization needs
-  tightening.
+  appears in `ref.href_ids` → no divergence. No false positive from policy drops.
+- **U+00A0 / zero-width / bidi / NFKC-foldable tokens:** because the reference
+  runs the *same* `rimap_content::sanitize` Unicode scrub as production
+  (NFKC + `filter_codepoints`), both sides fold and strip identically → `Match`.
+  This is the fix for the otherwise-fatal flaw where these benign, already-
+  announced Unicode transforms (whose only warnings are `Unicode*`, not
+  `DROP_EXPLAINING`) would have been classified HARD and red-flooded the first
+  nightly over the injection corpus. Covered by a normalization unit test.
+- **Streaming-vs-tree structural divergence (foster-parenting, implicit close,
+  head/body hoisting):** `lol_html` (streaming, no tree construction) and
+  html5ever (full tree construction) can place a text run differently on
+  malformed HTML. The body-scope gate removes the common head-hoist case. Any
+  residual divergence with no explaining warning is a *genuine* tokenizer/
+  structural disagreement — exactly the tokenizer-confusion class the oracle
+  exists to surface — so it is correctly HARD and triaged (real bug → filed;
+  benign → allowlisted). A foster-parenting unit case pins the behavior.
+- **Unclosed suppression tag** (`<title>foo`, `<script>…`EOF): raw-text elements
+  are consumed to EOF by both tokenizers, so suppression is consistent (no
+  masking of later divergences); `head`/`template` are neutralized by body-scope.
+  Unit tests pin this against a `lol_html` regression.
+- **Reference extraction error** (`lol_html` handler/limit error): the runner
+  logs-and-skips that single input (`ref_error` count), never aborting the run.
 - **Malformed `.eml` with no `text/html`:** skipped with an info log, not an
   error.
-- **`mail-parser` and production disagree on charset for a part:** the runner
-  passes the part's declared charset to `sanitize()`, matching production's own
-  call path, so decoding is apples-to-apples.
+- **Charset (both engines):** the runner decodes once via
+  `rimap_content::decode(raw, charset)` and feeds the same string to the
+  reference, while production re-decodes the same `raw`+`charset` internally
+  (idempotent for valid UTF-8). A Windows-1252 unit test guards the path so
+  non-UTF-8 inputs cannot become a corpus-wide divergence source.
 
 ## Testing
 
@@ -283,8 +375,22 @@ coupling):
   skipped by both → `Match`.
 - `safe_scheme_href_only`: `javascript:` href absent from reference; `https:`
   href present and compared.
-- `normalization_nfc_and_whitespace`: `"  Héllo\tWORLD "` and `"héllo world"`
-  normalize to the same token set.
+- `href_identity_ignores_path_and_encoding`: `https://e.com/a%20b?x=%41` and
+  `https://e.com/other` both reduce to the same `(https, e.com)` identity, so a
+  path/query/encoding-only difference is not a divergence.
+- `shared_unicode_scrub_no_false_hard`: a token containing a zero-width joiner
+  and an NFKC-foldable ligature normalizes identically on both sides (production
+  `body_text` vs reference) → `Match`, proving `Unicode*` transforms never HARD.
+- `windows_1252_input_decodes_consistently`: an ISO-8859-1/Windows-1252 seed
+  (byte `0xE9`) yields the same `é` token on both sides via `decode`.
+- `structural_divergence_is_hard`: a foster-parented / body-hoisted text run that
+  the reference surfaces with no explaining warning → `Hard` (the intended
+  tokenizer-confusion signal), confirming the class is not silently dropped.
+- `unclosed_suppression_tag_no_masking`: an unclosed `<script>`/`<title>`/
+  `<noscript>` suppresses only its own raw-text tail consistently and does not
+  mask a later divergence.
+- `reference_error_is_skipped_not_fatal`: a synthesized `ReferenceError` for one
+  input increments `ref_error` and leaves the exit code driven only by `hard`.
 - `missing_reason_is_error`: an allowlist entry without `reason` fails to load.
 - `stale_allowlist_entry_is_reported_not_fatal`: an entry for a non-existent
   input surfaces as a report warning, exit code unaffected.
@@ -328,9 +434,19 @@ how to run it locally.
   Any first-run HARD divergence is triaged before the allowlist is committed —
   if it is a real sanitizer bug, file a separate issue (do not allowlist a real
   bug).
-- **Retro (acceptance criterion):** after ≥1 sprint, review whether the oracle
-  surfaced anything actionable. If it is pure noise, delete the crate + workflow
-  (they are fully isolated, so removal is a clean revert with zero blast radius
-  on the shipped code).
+- **Retro (acceptance criterion) — operational keep/kill bar:** after ≥1 sprint
+  of nightly runs, apply this falsifiable rule:
+  - **KEEP** if *either* (a) at least one HARD divergence led to a filed and
+    confirmed sanitizer bug (the oracle earned its keep by catching a real
+    defect), *or* (b) the gate is stable and low-maintenance — the allowlist has
+    **< 10** entries, is **not growing** week-over-week, and there are **zero
+    unexplained (non-allowlisted) HARD** divergences on the latest run.
+  - **KILL** otherwise — specifically if the allowlist must exceed 10 entries or
+    keep growing just to hold the gate green, and no HARD has ever mapped to a
+    real bug. Delete the crate + workflow (fully isolated, so removal is a clean
+    revert with zero blast radius on shipped code).
+  These thresholds are the decision rule, not aspirations; record the three
+  numbers (allowlist size, growth, unexplained-HARD count) plus any filed bugs in
+  the retro so keep/kill is mechanical, not a judgment call.
 - **Rollback:** delete `html-oracle/`, the workflow, and the `exclude` entry.
   Nothing in the shipped supply chain or PR gates depends on it.
