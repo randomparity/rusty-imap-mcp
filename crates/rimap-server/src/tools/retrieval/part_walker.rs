@@ -168,4 +168,27 @@ mod tests {
         walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
         assert_eq!(ids.len(), 2, "message wrapper and its embedded body");
     }
+
+    #[test]
+    fn message_arm_recursion_is_capped_by_depth() {
+        // The Message arm's `depth + 1` needs its own cap coverage: the
+        // Multipart test drives line 40, not this recursion. A message/rfc822
+        // chain deeper than MAX_PART_DEPTH must stop; the original visits at
+        // most MAX_PART_DEPTH+1 wrappers. A mutated increment that fails to grow
+        // depth (`* 1`) would never trip the cap and visit every layer.
+        let mut bs = single("text", "plain");
+        for _ in 0..(MAX_PART_DEPTH as usize * 2) {
+            bs = BodyStructure::Message {
+                mime_subtype: "rfc822".into(),
+                body: Box::new(bs),
+            };
+        }
+        let mut ids = Vec::new();
+        walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
+        assert!(
+            ids.len() <= MAX_PART_DEPTH as usize + 1,
+            "message-arm recursion must respect the depth cap, visited {}",
+            ids.len()
+        );
+    }
 }
