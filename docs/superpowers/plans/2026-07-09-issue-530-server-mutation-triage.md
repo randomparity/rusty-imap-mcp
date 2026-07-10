@@ -45,7 +45,7 @@ language throughout is **"zero unannotated survivors"** — not "zero missed."
 
 ---
 
-## Bucket 1 — KILL (add unit test), 16 mutants / 12 sites
+## Bucket 1 — KILL (add unit test), 17 mutants / 13 sites
 
 Pure functions with observably-wrong mutants. Each kill is a targeted `#[test]`
 in the file's existing `#[cfg(test)]` module.
@@ -74,27 +74,33 @@ in the file's existing `#[cfg(test)]` module.
       mappings (`Seen`→`\Seen`, `Keyword`→raw).
 - [ ] `retrieval/export_messages.rs:581` `export_token -> String::new()` — non-empty
       and two calls differ.
+- [ ] `retrieval/part_walker.rs:29` `walk_inner` `> with >=` on `MAX_PART_DEPTH`(64) —
+      a leaf nested exactly 64 `Multipart` layers is reached at `depth == 64` and IS
+      visited under `>`; `>=` drops it. `walk_inner` is pure over an arbitrary
+      `BodyStructure`, so this is a constructible-input difference, not an
+      equivalence (the `rimap-content` `raw_parts.rs`/`bodies.rs` analog kills the
+      same mutant). Reclassified from known-equivalent during review iteration 1.
 
-## Bucket 2 — KNOWN-EQUIVALENT (inline annotation + baseline row), 5 mutants / 4 sites
+## Bucket 2 — KNOWN-EQUIVALENT (inline annotation + baseline row), 3 mutants / 2 sites
 
 - [ ] `retrieval/mbox.rs:68` `escape_from_lines_into` `< with <=` — at
       `line_start == msg.len()` the trailing push sees an empty slice;
       `write_mbox_line` emits nothing either way (= `mime_scrub.rs:187`).
-- [ ] `retrieval/sandbox.rs:167` `write_attachment` `> with ==` on the 1000-collision
-      cap — differs only after 1000 pre-existing colliding filenames; both terminate
-      the retry loop at ≈1000.
 - [ ] `retrieval/sandbox.rs:365` `read_sandboxed_file -> Ok(vec![0/1])` ×2 —
       `#[cfg(not(unix))]` fail-closed stub, not compiled on Linux CI (= `self_check.rs:189`).
-- [ ] `retrieval/part_walker.rs:29` `walk_inner` `> with >=` on `MAX_PART_DEPTH`(64) —
-      off-by-one on a defensive recursion cap; no real BODYSTRUCTURE nests 64 deep
-      and the ±1 at the cap is unobservable for any realistic tree (= `raw_parts.rs:71`).
 
-## Bucket 3 — BEST-EFFORT-COLD-PATH (inline annotation + baseline row), 22 mutants / 14 sites
+## Bucket 3 — BEST-EFFORT-COLD-PATH (inline annotation + baseline row), 23 mutants / 15 sites
 
 Thin wrappers over `rimap-imap`, non-portable filesystem error/TOCTOU paths, and
 diagnostic CLI wiring — spec §6 best-effort tier. Killing these means an
 integration harness, not a unit test (mocking `AccountState.imap` would mock our
 own domain types, which AGENTS.md forbids).
+
+- [ ] `retrieval/sandbox.rs:167` `write_attachment` `> with ==` on the 1000-collision
+      cap — off-by-one, not strict equivalence: `== 1000` fires one iteration earlier
+      than `> 1000` (1000 vs 1001 collisions). Distinguishing them needs 1000
+      pre-existing colliding filenames, so annotated rather than killed.
+      Reclassified from known-equivalent during review iteration 1.
 
 - [ ] `retrieval/export_messages.rs:220` `fetch_sizes` ×4, `:243` `fetch_one_body` —
       the real `impl ExportSource for AccountState`; the export *logic* is unit-tested
@@ -128,9 +134,9 @@ own domain types, which AGENTS.md forbids).
 
 ## Done criteria
 
-- [ ] All 16 kills added; each verified with a single-mutant rerun
+- [ ] All 17 kills added; each verified with a single-mutant rerun
       (`cargo mutants -p rimap-server -F '<regex>'` → CAUGHT).
-- [ ] All 27 annotated survivors (5 equivalent + 22 best-effort) carry an inline
+- [ ] All 26 annotated survivors (3 equivalent + 23 best-effort) carry an inline
       `// cargo-mutants:` comment and a `mutation-baseline.md` table row.
 - [ ] `mutation-baseline.md` `rimap-server` best-effort count updated: 54 → 0
       unannotated; the refreshed run figures replace the stale ones.
