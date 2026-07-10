@@ -176,12 +176,20 @@ string to both engines, so byte→str decoding can never be a divergence source
 Uses `lol_html::HtmlRewriter` (low-level, so text/element handlers and errors are
 observable) with:
 
-- **Body scope + non-content suppression:** accumulate text only while inside
-  `<body>` AND not inside any tag in the *same* `NON_CONTENT_TAGS` set production
-  skips (`script`, `style`, `noscript`, `template`, `head`, `title`). Production's
-  `extract_text` walks only `<body>` descendants; the reference mirrors that
-  body-scope so head-hoisted / stray text is not a spurious divergence. Depth
-  counters (one for `<body>` presence, one for suppression) gate accumulation.
+- **Implicit-body model + non-content suppression:** accumulate text by
+  **default** (as if inside body), suppressing only while inside a tag in the
+  *same* `NON_CONTENT_TAGS` set production skips (`script`, `style`, `noscript`,
+  `template`, `head`, `title`). **Do NOT require a literal `<body>` start tag.**
+  Production runs on html5ever, which *synthesizes* an `<html><head><body>`
+  skeleton for every document — `extract_text` selects that synthesized `<body>`
+  (`extract.rs:43`), so a bare fragment like `<p>hi</p>` still yields text.
+  `lol_html` does no tree construction, so a body-presence gate would make the
+  reference accumulate **nothing** on the 10-of-20 `content_html` seeds (and the
+  many bare `div`/`p` email fragments) that lack a literal `<body>` — silently
+  inert, always `Match`. Suppressing the explicit `<head>`/`<title>` region
+  (already in the set) plus defaulting-in-body reproduces html5ever's "text not
+  in head goes to body" placement without tree construction. A suppression depth
+  counter gates accumulation.
   - *Unclosed-tag note:* `script`/`style`/`title`/`noscript`/`textarea` are
     raw-/escapable-raw-text elements — **both** tokenizers consume to EOF when
     they are unclosed, so an unclosed one suppresses the tail consistently in
@@ -198,16 +206,27 @@ observable) with:
   oracle backstops cares about the target host, not path encoding, so scheme+host
   is the right comparison altitude. The *same* reduction runs on production's
   `anchor_hrefs`.
+- **Boundary separators — match `push_text`:** production's `push_text`
+  (`extract.rs:136`) inserts a separating space between adjacent text nodes (when
+  the buffer does not already end in whitespace) *before* the scrub, so
+  `<p>a</p><p>b</p>` yields body_text `"a b"` → tokens `{a, b}`, not `{ab}`. The
+  reference MUST insert an equivalent separator between distinct text chunks — the
+  robust rule is to push a single space at **every element start and end tag** and
+  between separate `lol_html` text chunks. Over-separating is harmless (the later
+  whitespace-split + drop-empty collapses it); *under*-separating merges
+  adjacent-element text into one spurious token that has no explaining warning →
+  false HARD on nearly every multi-paragraph email. This boundary parity is as
+  load-bearing as the Unicode-scrub parity.
 - **Text normalization — byte-identical to production:** apply
   `rimap_content::sanitize` (the Unicode scrubber: NFKC + line-ending +
-  `filter_codepoints` + grapheme truncate) to the accumulated text, exactly as
-  production's `extract_text` does, THEN lowercase and split on Unicode
-  whitespace (`char::is_whitespace`), dropping empty tokens. Reusing production's
-  scrubber guarantees NFKC folding and invisible-codepoint stripping are
-  identical on both sides, so `Unicode*`-class transforms (which are NOT
-  `DROP_EXPLAINING`) can never produce a HARD divergence. Production's
-  `body_text` is tokenized with the same lowercase + whitespace split (it is
-  already scrubbed). Result is a `BTreeSet<String>`.
+  `filter_codepoints` + grapheme truncate) to the separator-joined accumulated
+  text, exactly as production's `extract_text` does, THEN lowercase and split on
+  Unicode whitespace (`char::is_whitespace`), dropping empty tokens. Reusing
+  production's scrubber guarantees NFKC folding and invisible-codepoint stripping
+  are identical on both sides, so `Unicode*`-class transforms (which are NOT
+  `DROP_EXPLAINING`) can never produce a HARD divergence. Production's `body_text`
+  is tokenized with the same lowercase + whitespace split (it is already scrubbed
+  and separator-joined). Result is a `BTreeSet<String>`.
 
 `ReferenceError` wraps a `lol_html` rewrite/handler error. The reference engine
 does **not** implement CSS-hidden detection, href-mismatch detection, or
@@ -270,7 +289,13 @@ is not authoritative).
    hostile input must not abort the whole run). When both succeed, apply the diff.
 4. Write `html-oracle/report.json`: per-input verdict, the divergent tokens,
    which warnings fired, `production_only` (informational), and totals (`hard`,
-   `soft`, `match`, `skipped`, `ref_error`, `stale_allowlist_entries`).
+   `soft`, `match`, `skipped`, `ref_error`, `stale_allowlist_entries`,
+   `compared_nonempty`). `compared_nonempty` counts inputs where the reference
+   produced a non-empty token-or-href set — a **coverage floor** that proves the
+   oracle is actually comparing content, not silently inert (see finding: a
+   body-gate bug could make the reference empty on half the corpus and still show
+   all-`Match`). If `compared_nonempty` is 0 while inputs were processed, the run
+   is treated as a HARD failure (the oracle is broken, not clean).
 5. Exit code: non-zero iff `hard > 0` (`ref_error`/`skipped`/`soft` never fail
    the job). Print a compact human summary to stderr (stdout stays clean for
    potential piping).
@@ -383,6 +408,13 @@ coupling):
   `body_text` vs reference) → `Match`, proving `Unicode*` transforms never HARD.
 - `windows_1252_input_decodes_consistently`: an ISO-8859-1/Windows-1252 seed
   (byte `0xE9`) yields the same `é` token on both sides via `decode`.
+- `bodyless_fragment_is_not_inert`: a bare `<p>visible</p>` (no `<html>`/`<body>`)
+  surfaces the token `visible` from the reference — proving the implicit-body
+  model, so the reference is not silently empty on body-less corpus seeds.
+- `element_boundary_separator_parity`: `<p>a</p><p>b</p>` (and `<b>foo</b><b>bar</b>`)
+  tokenize to `{a, b}` (`{foo, bar}`) on **both** sides → `Match`, pinning the
+  `push_text`-equivalent boundary separator so adjacent-element text never merges
+  into a spurious HARD.
 - `structural_divergence_is_hard`: a foster-parented / body-hoisted text run that
   the reference surfaces with no explaining warning → `Hard` (the intended
   tokenizer-confusion signal), confirming the class is not silently dropped.
@@ -439,8 +471,12 @@ how to run it locally.
   - **KEEP** if *either* (a) at least one HARD divergence led to a filed and
     confirmed sanitizer bug (the oracle earned its keep by catching a real
     defect), *or* (b) the gate is stable and low-maintenance — the allowlist has
-    **< 10** entries, is **not growing** week-over-week, and there are **zero
-    unexplained (non-allowlisted) HARD** divergences on the latest run.
+    **< 10** entries, is **not growing** week-over-week, there are **zero
+    unexplained (non-allowlisted) HARD** divergences on the latest run, **and**
+    `compared_nonempty` covers the bulk of processed inputs (the oracle is
+    demonstrably comparing content — an all-`Match` run with near-zero
+    `compared_nonempty` is a broken/inert oracle, counting as KILL evidence, not
+    KEEP).
   - **KILL** otherwise — specifically if the allowlist must exceed 10 entries or
     keep growing just to hold the gate green, and no HARD has ever mapped to a
     real bug. Delete the crate + workflow (fully isolated, so removal is a clean
