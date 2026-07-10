@@ -153,4 +153,19 @@ mod tests {
             "leaf at exactly MAX_PART_DEPTH must be visited"
         );
     }
+
+    #[test]
+    fn message_arm_visits_wrapper_and_descends_into_embedded_body() {
+        // The `Message` arm has no unit coverage otherwise (only incidental
+        // e2e fixtures exercise a `message/rfc822` BODYSTRUCTURE). It visits the
+        // wrapper then recurses at `depth + 1`; a `+ with -` there computes
+        // `0u32 - 1` at the root and panics, so this pins the descent.
+        let bs = BodyStructure::Message {
+            mime_subtype: "rfc822".into(),
+            body: Box::new(single("text", "plain")),
+        };
+        let mut ids = Vec::new();
+        walk_body_structure(&bs, |id, _| ids.push(id.to_string()));
+        assert_eq!(ids.len(), 2, "message wrapper and its embedded body");
+    }
 }

@@ -140,7 +140,7 @@ a real test gap.
 
 **Last refresh:** 2026-07-09 (issue #530 — cold-path triage over the #515 hot-path refresh).
 **Surviving mutants in hot paths (`mcp/{dispatch,audit_envelope,tool_catalog,tool_name,preinit,server,response,error,result_provenance}.rs`, `mcp/wire_validator/`, `boot/`; `fuzz_oracle.rs` covered separately below):** 13 in this run (all annotated as known-equivalent), plus 7 hot-path mutants caught by timeout (documented in the timeout table below).
-**Surviving mutants in cold paths (`cli/`, `tools/`, `main.rs`, `lib.rs`):** **0 unannotated.** Issue #530 triaged the 54-then-45 cold-path survivors into 17 killed (new unit tests), 3 known-equivalent, and 23 best-effort — every remaining survivor carries an inline `// cargo-mutants:` annotation and a row in the cold-path table below.
+**Surviving mutants in cold paths (`cli/`, `tools/`, `main.rs`, `lib.rs`):** **0 unannotated.** Issue #530 triaged the cold-path survivors (45 total = 43 missed + 2 caught-by-timeout; down from the pre-#517 #515 figure of 54): the 43 missed split into 17 killed (new unit tests), 3 known-equivalent, and 23 best-effort — every remaining survivor carries an inline `// cargo-mutants:` annotation and a row in the cold-path table below, and the 2 timeout kills sit in the timeout table.
 
 Run summary (917 mutants total, 2026-07-09 refresh via `cargo mutants
 --package rimap-server --no-shuffle --jobs 10 --jobserver-tasks 40
