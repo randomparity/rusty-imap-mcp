@@ -113,18 +113,26 @@ the raw MIME container (with a quoted-printable `text/plain` sub-part) as a
 pseudo-HTML body. The surviving `20` token is part of a QP `=20` encoded space,
 not visible text. This is not a production silent drop.
 
+These two are now allowlisted in `html-oracle/epvme-allowlist.toml`, so the
+full EPVME run reports **0 HARD, 0 stale**. That file is merged into the
+allowlist only when `--epvme-dir` is set, so its `epvme/…` entries never show
+as stale in the hermetic `--repo-root` run.
+
 ## If EPVME becomes a CI gate
 
-- **Do not put EPVME ids in the shared `allowlist.toml`.** The hermetic
-  `--repo-root .` nightly does not load EPVME, so any `epvme/…` allowlist entry
-  would always be reported stale by the runner's stale-allowlist check. A
-  gating EPVME job needs its own allowlist file, loaded only when `--epvme-dir`
-  is set.
-- The 2 residual QP-artifact survivors would be the allowlist's first entries
-  (well under the 10-entry keep bar), or suppressed by extending the non-text
-  skip to QP-encoded nested-MIME blobs.
+- **Never add EPVME ids to the shared `allowlist.toml`.** The hermetic
+  `--repo-root .` nightly does not load EPVME, so any `epvme/…` entry there
+  would always be reported stale. EPVME entries live in
+  `html-oracle/epvme-allowlist.toml`, merged only when `--epvme-dir` is set.
 - Keep the run off the every-night hermetic schedule: use `workflow_dispatch`
   or a lower-frequency job with a pinned dataset snapshot + caching.
+
+## Current status
+
+EPVME is a **manual run** for now (no CI job). Invoke the oracle with
+`--epvme-dir` against a locally extracted dataset as shown above. The loader,
+flags, and EPVME allowlist are in place; wiring a scheduled/dispatch CI job is
+deferred to a later session.
 
 ## Bearing on the #529 keep/kill retro
 
