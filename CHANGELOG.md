@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-07-05
+## [0.1.0] - 2026-07-10
 
 ### Fixed
 
@@ -263,7 +263,7 @@ Per-tool `"allow"` / `"deny"` overrides merge on top of the posture.
 Pre-built binaries for five targets:
 
 - `x86_64-unknown-linux-gnu` (native)
-- `aarch64-unknown-linux-gnu` (cross-compiled)
+- `aarch64-unknown-linux-gnu` (QEMU emulation)
 - `aarch64-apple-darwin` (native macOS)
 - `powerpc64le-unknown-linux-gnu` (QEMU emulation)
 - `s390x-unknown-linux-gnu` (QEMU emulation)
@@ -424,9 +424,8 @@ Pre-built binaries for five targets:
   `list_accounts` response to reduce attack-surface fingerprinting.
 - Require labels to be ASCII (RFC 3501 atom syntax) and reject `[`
   consistently at both validator layers to prevent homograph/bidi spoofing.
-- Digest-pin the Rust Docker base image used for ppc64le/s390x release
-  builds to resist tag-repointing supply-chain attacks.
-- Pin `cross` version in release workflow.
+- Digest-pin the Rust Docker base image used for aarch64/ppc64le/s390x
+  release builds to resist tag-repointing supply-chain attacks.
 - Embed SBOMs in native release binaries via `cargo-auditable`.
 - Add SLSA build provenance attestation to release artifacts and
   `SHA256SUMS.txt` via `actions/attest-build-provenance`.
