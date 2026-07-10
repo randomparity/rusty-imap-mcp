@@ -47,16 +47,22 @@ struct Report {
 struct Args {
     repo_root: PathBuf,
     report: PathBuf,
+    epvme_dir: Option<PathBuf>,
+    limit: Option<usize>,
 }
 
 fn parse_args() -> Args {
     let mut repo_root: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
+    let mut epvme_dir: Option<PathBuf> = std::env::var_os("EPVME_DIR").map(PathBuf::from);
+    let mut limit: Option<usize> = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--repo-root" => repo_root = it.next().map(PathBuf::from),
             "--report" => report = it.next().map(PathBuf::from),
+            "--epvme-dir" => epvme_dir = it.next().map(PathBuf::from),
+            "--limit" => limit = it.next().and_then(|v| v.parse().ok()),
             _ => {}
         }
     }
@@ -68,7 +74,12 @@ fn parse_args() -> Args {
     });
     let report =
         report.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("report.json"));
-    Args { repo_root, report }
+    Args {
+        repo_root,
+        report,
+        epvme_dir,
+        limit,
+    }
 }
 
 fn main() -> ExitCode {
@@ -84,13 +95,29 @@ fn main() -> ExitCode {
         }
     };
 
-    let inputs = match corpus::load(&args.repo_root) {
+    let mut inputs = match corpus::load(&args.repo_root) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("html-oracle: corpus load failed: {e}");
             return ExitCode::FAILURE;
         }
     };
+    if let Some(epvme_dir) = &args.epvme_dir {
+        match corpus::load_eml_tree(epvme_dir, "epvme", args.limit) {
+            Ok(mut extra) => {
+                eprintln!(
+                    "html-oracle: EPVME corpus {} html part(s) from {}",
+                    extra.len(),
+                    epvme_dir.display()
+                );
+                inputs.append(&mut extra);
+            }
+            Err(e) => {
+                eprintln!("html-oracle: EPVME load failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     let mut seen_ids: BTreeSet<String> = BTreeSet::new();
     let mut totals = Totals::default();

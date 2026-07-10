@@ -1,6 +1,7 @@
 //! Corpus loader: raw HTML fuzz seeds + text/html parts from injection .eml
-//! fixtures. Each input carries its raw bytes + declared charset so the runner
-//! can decode identically for both engines.
+//! fixtures, plus an optional external `.eml` dataset tree (EPVME). Each input
+//! carries its raw bytes + declared charset so the runner can decode
+//! identically for both engines.
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +28,51 @@ pub fn load(repo_root: &Path) -> Result<Vec<CorpusInput>, CorpusError> {
     load_fuzz_seeds(repo_root, &mut inputs)?;
     load_injection_parts(repo_root, &mut inputs)?;
     Ok(inputs)
+}
+
+/// Load an external tree of `.eml` files (e.g. the EPVME dataset), extracting
+/// each message's text/html parts the *same* way [`load_injection_parts`] does
+/// so the differential stays fair. Absent/unreadable dir is not an error.
+/// `id_prefix` namespaces the ids (content-hash filenames give stable keys).
+pub fn load_eml_tree(
+    dir: &Path,
+    id_prefix: &str,
+    limit: Option<usize>,
+) -> Result<Vec<CorpusInput>, CorpusError> {
+    let mut files = Vec::new();
+    collect_eml_files(dir, &mut files);
+    files.sort();
+    if let Some(limit) = limit {
+        files.truncate(limit);
+    }
+    let mut out = Vec::new();
+    for eml in &files {
+        let stem = eml
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        extract_html_parts(eml, &format!("{id_prefix}/{stem}"), &mut out)?;
+    }
+    Ok(out)
+}
+
+fn collect_eml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return; // absent tree is not an error
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_eml_files(&path, out);
+        } else if path.is_file()
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("eml"))
+        {
+            out.push(path);
+        }
+    }
 }
 
 fn load_fuzz_seeds(repo_root: &Path, out: &mut Vec<CorpusInput>) -> Result<(), CorpusError> {
@@ -67,30 +113,43 @@ fn load_injection_parts(repo_root: &Path, out: &mut Vec<CorpusInput>) -> Result<
         if !eml.is_file() {
             continue;
         }
-        let bytes = std::fs::read(&eml).map_err(|source| CorpusError::Io {
-            path: eml.clone(),
-            source,
-        })?;
-        let Some(msg) = MessageParser::default().parse(&bytes) else {
-            continue;
-        };
         let dir_name = fixture
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        for (part_no, part) in msg.html_bodies().enumerate() {
-            let charset = part
-                .content_type()
-                .and_then(|c| c.attribute("charset"))
-                .map(|s| s.to_string());
-            let raw = part.contents().to_vec();
-            let id = if part_no == 0 {
-                format!("injection/{dir_name}")
-            } else {
-                format!("injection/{dir_name}/part{part_no}")
-            };
-            out.push(CorpusInput { id, raw, charset });
-        }
+        extract_html_parts(&eml, &format!("injection/{dir_name}"), out)?;
+    }
+    Ok(())
+}
+
+/// Parse one `.eml` and push each of its text/html parts as a [`CorpusInput`],
+/// keyed by `id_base` (with a `/partN` suffix for the 2nd+ part). Shared by the
+/// injection corpus and the external `.eml` tree so both feed the engines the
+/// exact same bytes production's `bodies.rs` would.
+fn extract_html_parts(
+    eml: &Path,
+    id_base: &str,
+    out: &mut Vec<CorpusInput>,
+) -> Result<(), CorpusError> {
+    let bytes = std::fs::read(eml).map_err(|source| CorpusError::Io {
+        path: eml.to_path_buf(),
+        source,
+    })?;
+    let Some(msg) = MessageParser::default().parse(&bytes) else {
+        return Ok(());
+    };
+    for (part_no, part) in msg.html_bodies().enumerate() {
+        let charset = part
+            .content_type()
+            .and_then(|c| c.attribute("charset"))
+            .map(|s| s.to_string());
+        let raw = part.contents().to_vec();
+        let id = if part_no == 0 {
+            id_base.to_string()
+        } else {
+            format!("{id_base}/part{part_no}")
+        };
+        out.push(CorpusInput { id, raw, charset });
     }
     Ok(())
 }
@@ -116,6 +175,43 @@ mod tests {
             .find(|i| i.id.starts_with("injection/sample"))
             .expect("html part extracted");
         assert!(String::from_utf8_lossy(&sample.raw).contains("hello"));
+    }
+
+    #[test]
+    fn load_eml_tree_walks_nested_and_prefixes_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("epvme");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let eml = "Content-Type: text/html; charset=utf-8\r\n\r\n<p>hello</p>\r\n";
+        std::fs::write(root.join("aa11.eml"), eml).unwrap();
+        std::fs::write(root.join("sub/bb22.eml"), eml).unwrap();
+        std::fs::write(root.join("note.txt"), b"not an eml").unwrap();
+
+        let inputs = load_eml_tree(&root, "epvme", None).unwrap();
+
+        let ids: std::collections::BTreeSet<_> = inputs.iter().map(|i| i.id.clone()).collect();
+        assert!(ids.contains("epvme/aa11"), "ids: {ids:?}");
+        assert!(ids.contains("epvme/bb22"), "ids: {ids:?}");
+        assert_eq!(inputs.len(), 2, "only .eml files, txt ignored");
+        assert!(String::from_utf8_lossy(&inputs[0].raw).contains("hello"));
+    }
+
+    #[test]
+    fn load_eml_tree_honors_limit_and_absent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("epvme");
+        std::fs::create_dir_all(&root).unwrap();
+        let eml = "Content-Type: text/html; charset=utf-8\r\n\r\n<p>x</p>\r\n";
+        for name in ["a.eml", "b.eml", "c.eml"] {
+            std::fs::write(root.join(name), eml).unwrap();
+        }
+        // Files are sorted before truncation, so the limit is deterministic.
+        let limited = load_eml_tree(&root, "epvme", Some(2)).unwrap();
+        assert_eq!(limited.len(), 2);
+
+        // Absent tree contributes nothing and is not an error.
+        let absent = load_eml_tree(&dir.path().join("missing"), "epvme", None).unwrap();
+        assert!(absent.is_empty());
     }
 
     #[test]
