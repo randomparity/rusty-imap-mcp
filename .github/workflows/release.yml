@@ -65,13 +65,25 @@ jobs:
           toolchain: stable
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.4
-      - run: cargo auditable build --release --locked
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-x86_64-unknown-linux-gnu
+      # vendored-keyring static-links libdbus so the tarball/bottle binary
+      # carries no runtime libdbus-1.so dependency (self-contained on hosts
+      # without libdbus-1-3).
+      - run: cargo auditable build --release --locked -p rimap-server --features vendored-keyring
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="x86_64-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-x86_64-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-x86_64-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
 
   build-linux-aarch64:
     name: build (aarch64-unknown-linux-gnu)
@@ -95,13 +107,22 @@ jobs:
       # Cross.toml at the repo root installs cargo-auditable inside the
       # cross container via a pre-build hook, so `cross auditable build`
       # emits an SBOM identical to the native and QEMU targets.
-      - run: cross auditable build --release --locked --target aarch64-unknown-linux-gnu
-      - name: Rename binary
-        run: cp target/aarch64-unknown-linux-gnu/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-aarch64-unknown-linux-gnu
+      - run: cross auditable build --release --locked --target aarch64-unknown-linux-gnu -p rimap-server --features vendored-keyring
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="aarch64-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/aarch64-unknown-linux-gnu/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-aarch64-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-aarch64-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
 
   build-macos-aarch64:
     name: build (aarch64-apple-darwin)
@@ -120,12 +141,21 @@ jobs:
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.4
       - run: cargo auditable build --release --locked
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-aarch64-apple-darwin
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="aarch64-apple-darwin"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-aarch64-apple-darwin
-          path: ${{ env.BINARY_NAME }}-aarch64-apple-darwin
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-apple-darwin
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
 
   build-linux-ppc64le:
     name: build (powerpc64le-unknown-linux-gnu)
@@ -149,12 +179,23 @@ jobs:
             -w /workspace \
             rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 \
             bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked"
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-powerpc64le-unknown-linux-gnu
+      # Not vendored: ppc64le has no Homebrew bottle path; this tarball retains
+      # a dynamic libdbus link (documented in README as needing libdbus-1-3).
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="powerpc64le-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-powerpc64le-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-powerpc64le-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-powerpc64le-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-powerpc64le-unknown-linux-gnu.tar.gz
 
   build-linux-s390x:
     name: build (s390x-unknown-linux-gnu)
@@ -178,12 +219,23 @@ jobs:
             -w /workspace \
             rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 \
             bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked"
-      - name: Rename binary
-        run: cp target/release/${{ env.BINARY_NAME }} ${{ env.BINARY_NAME }}-s390x-unknown-linux-gnu
+      # Not vendored: s390x has no Homebrew bottle path; this tarball retains a
+      # dynamic libdbus link (documented in README as needing libdbus-1-3).
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          triple="s390x-unknown-linux-gnu"
+          stage="${BINARY_NAME}-${TAG}-${triple}"
+          mkdir "$stage"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ env.BINARY_NAME }}-s390x-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-s390x-unknown-linux-gnu
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-s390x-unknown-linux-gnu
+          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-s390x-unknown-linux-gnu.tar.gz
 
   release:
     name: Create GitHub Release
@@ -212,12 +264,12 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd artifacts
-          sha256sum ${{ env.BINARY_NAME }}-* > SHA256SUMS.txt
+          sha256sum ${{ env.BINARY_NAME }}-*.tar.gz > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-path: |
-            artifacts/rusty-imap-mcp-*
+            artifacts/rusty-imap-mcp-*.tar.gz
             artifacts/SHA256SUMS.txt
       - name: Extract release notes
         env:
@@ -235,14 +287,16 @@ jobs:
             exit 1
           fi
           head -20 RELEASE_NOTES.md
-      - name: Create draft release
+      # Publishes directly (no --draft): the homebrew/bottles jobs download
+      # assets from the public releases/download CDN, which only serves a
+      # published release. See ADR-0002.
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           gh release create "$TAG_NAME" \
-            --draft \
             --title "$TAG_NAME" \
             --notes-file RELEASE_NOTES.md \
-            artifacts/${{ env.BINARY_NAME }}-* \
+            artifacts/${{ env.BINARY_NAME }}-*.tar.gz \
             artifacts/SHA256SUMS.txt
