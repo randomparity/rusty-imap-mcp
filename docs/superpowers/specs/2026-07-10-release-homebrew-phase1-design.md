@@ -2,6 +2,7 @@
 
 Date: 2026-07-10
 Status: Draft (pending user review)
+ADR: [ADR-0002](../../ADR/0002-phased-bzr-release-parity-and-direct-publish.md) — phased bzr-parity, direct-publish releases
 
 ## Summary
 
