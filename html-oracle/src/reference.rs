@@ -156,6 +156,14 @@ pub fn extract_reference(decoded_html: &str) -> Result<ReferenceExtract, Referen
             }))
             .append_element_content_handler(element!("a[href]", move |el| {
                 if let Some(href) = el.get_attribute("href") {
+                    // lol_html returns the raw attribute value; production reads
+                    // hrefs through html5ever, which decodes character references.
+                    // Decode here too so entity-bearing hrefs stay in parity.
+                    let href = if href.contains('&') {
+                        decode_entities(&href)
+                    } else {
+                        href
+                    };
                     s_href.borrow_mut().hrefs.push(href);
                 }
                 Ok(())
@@ -240,6 +248,26 @@ mod tests {
         assert!(!r.href_ids.iter().any(|h| h.starts_with("javascript")));
     }
 
+    #[test]
+    fn href_entities_decoded_like_production() {
+        // lol_html returns the raw attribute value; html5ever (production)
+        // decodes character references in href. The reference must decode too,
+        // or any entity-bearing href is a false divergence.
+        let html = r#"<a href="https://akcosm&eacute;tica.com/p">x</a>"#;
+        let refx = extract_reference(html).unwrap();
+        assert_eq!(
+            refx.href_ids,
+            prod_href_ids(html),
+            "href entity decode diverged: ref={:?}",
+            refx.href_ids
+        );
+        assert!(
+            !refx.href_ids.iter().any(|h| h.contains("&eacute;")),
+            "raw entity leaked into href id: {:?}",
+            refx.href_ids
+        );
+    }
+
     /// Token-for-token parity with production for the same input is the core
     /// differential-fairness invariant: any divergence here would be a false
     /// HARD in the runner. `prod_tokens` mirrors `diff::classify`'s tokenizing
@@ -248,6 +276,13 @@ mod tests {
         let prod = rimap_content::test_support::sanitize_html(html.as_bytes(), Some("utf-8"))
             .expect("production sanitize");
         crate::norm::tokenize(&prod.body_text)
+    }
+
+    /// Production-side href identities, for href-parity assertions.
+    fn prod_href_ids(html: &str) -> std::collections::BTreeSet<String> {
+        let prod = rimap_content::test_support::sanitize_html(html.as_bytes(), Some("utf-8"))
+            .expect("production sanitize");
+        crate::norm::href_identities(prod.anchor_hrefs.iter())
     }
 
     #[test]

@@ -90,6 +90,17 @@ mod tests {
     }
 
     #[test]
+    fn concatenated_blocks_merge() {
+        // The runner merges the base and EPVME allowlists by concatenating their
+        // TOML text; two `[[allow]]` blocks must parse as one combined array.
+        let base = "[[allow]]\ninput = \"content_html/x\"\ntokens = [\"foo\"]\nreason = \"r1\"\n";
+        let epvme = "[[allow]]\ninput = \"epvme/abc\"\ntokens = [\"20\"]\nreason = \"r2\"\n";
+        let a = load(&format!("{base}\n{epvme}")).unwrap();
+        assert!(a.tokens_for("content_html/x").contains("foo"));
+        assert!(a.tokens_for("epvme/abc").contains("20"));
+    }
+
+    #[test]
     fn empty_allowlist_loads() {
         let a = load("# no entries yet\n").unwrap();
         assert!(a.tokens_for("anything").is_empty());
