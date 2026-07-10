@@ -70,10 +70,16 @@ fn collect_eml_files(dir: &Path, out: &mut Vec<PathBuf>) {
         return; // absent tree is not an error
     };
     for entry in entries.flatten() {
+        // Use the entry's own file type, which does NOT follow symlinks, so a
+        // symlinked directory cycle cannot drive unbounded recursion. Symlinks
+        // are skipped entirely (neither is_dir nor is_file for a symlink).
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             collect_eml_files(&path, out);
-        } else if path.is_file()
+        } else if file_type.is_file()
             && path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -203,6 +209,23 @@ mod tests {
         assert!(ids.contains("epvme/bb22"), "ids: {ids:?}");
         assert_eq!(inputs.len(), 2, "only .eml files, txt ignored");
         assert!(String::from_utf8_lossy(&inputs[0].raw).contains("hello"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn load_eml_tree_skips_symlink_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("epvme");
+        std::fs::create_dir_all(&root).unwrap();
+        let eml = "Content-Type: text/html; charset=utf-8\r\n\r\n<p>hi</p>\r\n";
+        std::fs::write(root.join("real.eml"), eml).unwrap();
+        // A symlink pointing back at the root would recurse forever if followed.
+        std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
+
+        // Must terminate (no stack overflow) and find only the real file.
+        let inputs = load_eml_tree(&root, "epvme", None).unwrap();
+        assert_eq!(inputs.len(), 1, "symlink cycle must not be followed");
+        assert!(inputs[0].id.ends_with("real"));
     }
 
     #[test]
