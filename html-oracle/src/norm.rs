@@ -8,10 +8,17 @@ use std::collections::BTreeSet;
 pub fn tokenize(scrubbed: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for word in scrubbed.split(char::is_whitespace) {
-        if word.is_empty() {
+        // Trim leading/trailing non-alphanumerics so that a word carrying
+        // adjacent punctuation (`member,`, `(usdrugs)`) tokenizes the same as
+        // the bare word. This removes the dominant differential noise source:
+        // the two engines place text-node boundaries around stray tags
+        // differently, which a whitespace-only split turns into `member,`
+        // vs `member` + `,`. Interior punctuation (`x&y`, `e.g`) is preserved.
+        let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.is_empty() {
             continue;
         }
-        out.insert(word.to_lowercase());
+        out.insert(trimmed.to_lowercase());
     }
     out
 }
@@ -25,7 +32,13 @@ pub fn href_identity(href: &str) -> Option<String> {
         .strip_prefix("mailto:")
         .or_else(|| trimmed.strip_prefix("MAILTO:"))
     {
-        let domain = rest.rsplit('@').next()?;
+        // Drop any `?subject=…&body=…` header block before the address, then
+        // require an actual recipient: a header-only mailto has no identity.
+        let addr = rest.split('?').next().unwrap_or(rest);
+        if !addr.contains('@') {
+            return None;
+        }
+        let domain = addr.rsplit('@').next()?;
         if domain.is_empty() {
             return None;
         }
@@ -86,6 +99,35 @@ mod tests {
             href_identity("mailto:Foo@Example.com"),
             Some("mailto|example.com".to_string())
         );
+    }
+
+    #[test]
+    fn href_identity_mailto_strips_headers_and_requires_recipient() {
+        // A recipient with ?subject=…&body=… headers keeps only scheme|domain.
+        assert_eq!(
+            href_identity("mailto:a@b.com?subject=unsubscribe&body=please"),
+            Some("mailto|b.com".to_string())
+        );
+        // A header-only mailto with no recipient has no identity (was junk before).
+        assert_eq!(
+            href_identity("mailto:?subject=unsubscribe&body=please"),
+            None
+        );
+        assert_eq!(href_identity("mailto:commercecorps.live?subject=x"), None);
+    }
+
+    #[test]
+    fn tokenize_strips_edge_punctuation() {
+        // Trailing/leading punctuation must not create distinct tokens: production
+        // often keeps `member,` as one text run while the reference emits `member`
+        // + `,` around a stray tag. Both must reduce to {member}.
+        let t = tokenize("Member, (USDrugs). x&y");
+        assert!(t.contains("member"), "{t:?}");
+        assert!(t.contains("usdrugs"), "{t:?}");
+        assert!(t.contains("x&y"), "interior punctuation kept: {t:?}");
+        assert!(!t.contains(","));
+        assert!(!t.contains("member,"));
+        assert!(!t.contains("(usdrugs)"));
     }
 
     #[test]

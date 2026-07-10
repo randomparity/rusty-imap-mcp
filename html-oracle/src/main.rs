@@ -82,6 +82,19 @@ fn parse_args() -> Args {
     }
 }
 
+/// True when a decoded body is mostly Unicode replacement characters (`U+FFFD`),
+/// the signature of a mis-decoded / binary part rather than real HTML text.
+/// Legitimate non-Latin text decodes to real codepoints, not `U+FFFD`, so a low
+/// threshold does not exclude international content.
+fn is_mostly_binary(text: &str) -> bool {
+    let total = text.chars().filter(|c| !c.is_whitespace()).count();
+    if total == 0 {
+        return false;
+    }
+    let replacement = text.chars().filter(|c| *c == '\u{FFFD}').count();
+    replacement * 10 > total
+}
+
 fn main() -> ExitCode {
     let args = parse_args();
 
@@ -139,6 +152,13 @@ fn main() -> ExitCode {
             }
         };
         let decoded = rimap_content::decode(&input.raw, input.charset.as_deref());
+        if is_mostly_binary(&decoded) {
+            // A part that decodes to mostly replacement characters is not HTML
+            // text; two tokenizers shred byte-soup differently, so comparing it
+            // yields noise, not sanitizer signal. Skip it.
+            totals.skipped += 1;
+            continue;
+        }
         let refx = match reference::extract_reference(&decoded) {
             Ok(r) => r,
             Err(e) => {
@@ -235,5 +255,24 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_mostly_binary_flags_replacement_soup_only() {
+        assert!(is_mostly_binary("\u{FFFD}\u{FFFD}\u{FFFD}abc"));
+        // Legitimate international text has no replacement chars.
+        assert!(!is_mostly_binary("Καλημέρα κόσμε"));
+        assert!(!is_mostly_binary("hello world"));
+        // A lone stray replacement char in real text is not enough to skip.
+        assert!(!is_mostly_binary(
+            "a normal sentence with one \u{FFFD} glitch"
+        ));
+        // Empty / whitespace-only is not binary.
+        assert!(!is_mostly_binary("   "));
     }
 }
