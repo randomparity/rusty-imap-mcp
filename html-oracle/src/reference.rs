@@ -1,14 +1,16 @@
 //! Independent reference extractor over `lol_html` (its own WHATWG tokenizer,
-//! not html5ever). Mirrors production's non-content suppression, implicit-body
-//! scope, text-node boundary separation, and Unicode scrub — so the only
-//! remaining divergence axis is the tokenizer.
+//! not html5ever). To keep the differential fair, it equalizes every
+//! non-tokenizer axis production applies during extraction: non-content
+//! suppression, implicit-body scope, text-node boundary separation, HTML
+//! character-reference decoding, `<![CDATA[` handling, and the Unicode scrub —
+//! so the only remaining divergence axis is the tokenizer itself.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use lol_html::html_content::TextType;
-use lol_html::{HtmlRewriter, Settings, element, end_tag, text};
+use lol_html::{HtmlRewriter, Settings, comments, element, end_tag, text};
 
 use crate::norm;
 
@@ -41,21 +43,40 @@ struct State {
     node: String,
     /// Suppression depth: > 0 means inside a non-content subtree.
     suppress: usize,
+    /// Mirrors production `walk_children`'s `after_cdata` flag: set by a
+    /// `<![CDATA[` bogus-comment, cleared at the next element boundary. While
+    /// set, text siblings are dropped (CDATA-leak defense).
+    after_cdata: bool,
     hrefs: Vec<String>,
 }
 
 impl State {
-    /// Mirror of production `push_text`: insert one separating space when the
-    /// buffer is non-empty and does not already end in whitespace.
+    /// Flush the current text node into the buffer, equalizing the two
+    /// non-tokenizer axes production applies during extraction:
+    ///
+    /// 1. **Entity decoding** — production parses via html5ever, which decodes
+    ///    character references (`&amp;`, `&nbsp;`, `&#65;`); `lol_html` is a
+    ///    rewriter and yields raw source, so decode here at node granularity
+    ///    (an entity may split across streaming chunks).
+    /// 2. **`]]>` drop** — mirror production `push_text`, which drops any text
+    ///    node containing `]]>`. Checked post-decode to match html5ever's order
+    ///    (an entity-encoded `]]>` decodes first, then is dropped).
+    ///
+    /// Then apply the push_text boundary separator (one space when the buffer is
+    /// non-empty and does not already end in whitespace).
     fn flush_node(&mut self) {
         if self.node.is_empty() {
+            return;
+        }
+        let decoded = html_escape::decode_html_entities(&self.node).into_owned();
+        self.node.clear();
+        if decoded.contains("]]>") {
             return;
         }
         if !self.buf.is_empty() && !self.buf.ends_with(char::is_whitespace) {
             self.buf.push(' ');
         }
-        self.buf.push_str(&self.node);
-        self.node.clear();
+        self.buf.push_str(&decoded);
     }
 }
 
@@ -65,7 +86,9 @@ pub fn extract_reference(decoded_html: &str) -> Result<ReferenceExtract, Referen
     let selector = NON_CONTENT_TAGS.join(", ");
     {
         let s_suppress = Rc::clone(&state);
+        let s_reset = Rc::clone(&state);
         let s_text = Rc::clone(&state);
+        let s_comment = Rc::clone(&state);
         let s_href = Rc::clone(&state);
 
         let settings = Settings::new()
@@ -82,9 +105,25 @@ pub fn extract_reference(decoded_html: &str) -> Result<ReferenceExtract, Referen
                 }))?;
                 Ok(())
             }))
+            // Any element boundary clears after_cdata, mirroring production
+            // `walk_children` resetting the flag when it encounters an element
+            // child. Registered before the text handler so it runs first.
+            .append_element_content_handler(element!("*", move |_el| {
+                s_reset.borrow_mut().after_cdata = false;
+                Ok(())
+            }))
+            .append_element_content_handler(comments!("*", move |c| {
+                // html5ever/lol_html parse `<![CDATA[ … ]]>` in HTML content as a
+                // bogus comment whose text starts with `[CDATA[`. Production
+                // suppresses the following text sibling; set the flag to match.
+                if c.text().starts_with("[CDATA[") {
+                    s_comment.borrow_mut().after_cdata = true;
+                }
+                Ok(())
+            }))
             .append_element_content_handler(text!("*", move |t| {
                 let mut st = s_text.borrow_mut();
-                if st.suppress == 0 && t.text_type() == TextType::Data {
+                if st.suppress == 0 && !st.after_cdata && t.text_type() == TextType::Data {
                     let chunk = t.as_str().to_string();
                     st.node.push_str(&chunk);
                     if t.last_in_text_node() {
@@ -177,5 +216,58 @@ mod tests {
             .unwrap();
         assert!(r.href_ids.contains("https|e.com"));
         assert!(!r.href_ids.iter().any(|h| h.starts_with("javascript")));
+    }
+
+    /// Token-for-token parity with production for the same input is the core
+    /// differential-fairness invariant: any divergence here would be a false
+    /// HARD in the runner. `prod_tokens` mirrors `diff::classify`'s tokenizing
+    /// of `body_text`.
+    fn prod_tokens(html: &str) -> std::collections::BTreeSet<String> {
+        let prod = rimap_content::test_support::sanitize_html(html.as_bytes(), Some("utf-8"))
+            .expect("production sanitize");
+        crate::norm::tokenize(&prod.body_text)
+    }
+
+    #[test]
+    fn html_entities_decoded_to_match_production() {
+        // &eacute; -> é, &nbsp; -> U+00A0 (whitespace), &amp; -> & (a decoded
+        // ampersand is correct — production produces the same "x&y" token).
+        let html = "<p>caf&eacute;&nbsp;x&amp;y</p>";
+        let refx = extract_reference(html).unwrap();
+        assert!(
+            !refx
+                .text_tokens
+                .iter()
+                .any(|t| t.contains("&amp;") || t.contains("&nbsp;")),
+            "raw named entity leaked undecoded: {:?}",
+            refx.text_tokens
+        );
+        assert_eq!(
+            refx.text_tokens,
+            prod_tokens(html),
+            "reference must equal production token-for-token"
+        );
+    }
+
+    #[test]
+    fn cdata_sibling_text_matches_production() {
+        // Production drops the CDATA content and the trailing "b" sibling
+        // (after_cdata); the reference must do the same, not surface "b".
+        let html = "<p>a<![CDATA[ hello ]]>b</p>";
+        let refx = extract_reference(html).unwrap();
+        assert_eq!(
+            refx.text_tokens,
+            prod_tokens(html),
+            "cdata handling diverged: ref={:?}",
+            refx.text_tokens
+        );
+    }
+
+    #[test]
+    fn entity_encoded_cdata_terminator_dropped() {
+        // `&#93;&#93;&gt;` decodes to `]]>`, which production drops.
+        let html = "<p>ok<span>&#93;&#93;&gt; leak</span></p>";
+        let refx = extract_reference(html).unwrap();
+        assert_eq!(refx.text_tokens, prod_tokens(html));
     }
 }
