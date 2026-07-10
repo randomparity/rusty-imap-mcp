@@ -300,3 +300,69 @@ jobs:
             --notes-file RELEASE_NOTES.md \
             artifacts/${{ env.BINARY_NAME }}-*.tar.gz \
             artifacts/SHA256SUMS.txt
+
+  # Renders homebrew/rusty-imap-mcp.rb.template into the tap on stable v* tags.
+  # Prerelease tags never reach here (verify-tag rejects any '-'); the guard is
+  # retained as forward-compatible defense for the Phase 2 -dev model.
+  homebrew:
+    name: Bump randomparity/homebrew-tap
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    # Gates the HOMEBREW_TAP_TOKEN behind an environment (matches the
+    # sonarcloud/SONAR_TOKEN pattern). Unconfigured today, so no approval stall.
+    environment: homebrew-tap
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout rusty-imap-mcp (for template)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Checkout tap
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: randomparity/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+          persist-credentials: true
+      - name: Render formula
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          BASE="https://github.com/randomparity/rusty-imap-mcp/releases/download/${TAG}"
+          # --retry absorbs releases/download CDN propagation lag: this job runs
+          # seconds after publish and the CDN can briefly 404/5xx a live asset.
+          fetch_sha() {
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-all-errors --retry-delay 5 "$1" | sha256sum | awk '{print $1}'
+          }
+          MAC_ARM_SHA=$(fetch_sha   "${BASE}/rusty-imap-mcp-${TAG}-aarch64-apple-darwin.tar.gz")
+          LINUX_ARM_SHA=$(fetch_sha "${BASE}/rusty-imap-mcp-${TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          LINUX_INTEL_SHA=$(fetch_sha "${BASE}/rusty-imap-mcp-${TAG}-x86_64-unknown-linux-gnu.tar.gz")
+          SRC_SHA=$(fetch_sha "https://github.com/randomparity/rusty-imap-mcp/archive/refs/tags/${TAG}.tar.gz")
+          mkdir -p tap/Formula
+          sed \
+            -e "s|{{VERSION}}|${VERSION}|g" \
+            -e "s|{{MAC_ARM_SHA}}|${MAC_ARM_SHA}|g" \
+            -e "s|{{LINUX_ARM_SHA}}|${LINUX_ARM_SHA}|g" \
+            -e "s|{{LINUX_INTEL_SHA}}|${LINUX_INTEL_SHA}|g" \
+            -e "s|{{SRC_SHA}}|${SRC_SHA}|g" \
+            homebrew/rusty-imap-mcp.rb.template > tap/Formula/rusty-imap-mcp.rb
+      - name: Commit and push
+        working-directory: tap
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/rusty-imap-mcp.rb
+          if git diff --staged --quiet; then
+            echo "Formula already up-to-date for ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git commit -m "rusty-imap-mcp ${TAG#v}"
+          git push
