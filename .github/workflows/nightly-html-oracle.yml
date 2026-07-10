@@ -1,0 +1,51 @@
+name: nightly-html-oracle
+
+on:
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-html-oracle
+  cancel-in-progress: false
+
+jobs:
+  html-oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          workspaces: html-oracle
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+        with:
+          tool: cargo-deny
+
+      - name: Supply-chain audit (oracle graph)
+        run: cargo deny --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
+
+      - name: Run differential oracle
+        run: cargo run --manifest-path html-oracle/Cargo.toml -- --repo-root .
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: html-oracle-report
+          path: html-oracle/report.json
+          if-no-files-found: warn

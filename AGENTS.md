@@ -129,6 +129,26 @@ the audit record, and post-fault recovery.
   tight timeout budgets. CI: `.github/workflows/nightly-chaos.yml`. Spec:
   `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`.
 
+### Differential HTML oracle (nightly, #529)
+
+`html-oracle/` is a crate **excluded** from the workspace (like `fuzz/`, own
+`Cargo.lock`) that diffs the production HTML→text sanitizer against an
+independent `lol_html` tokenizer over the fuzz + injection HTML corpus. It
+red-flags text the sanitizer drops with no explaining `SecurityWarning` (a
+silent-drop bug). Run locally:
+
+```bash
+cargo run --manifest-path html-oracle/Cargo.toml -- --repo-root .
+```
+
+Exits non-zero only on a HARD (silent-drop) divergence; writes
+`html-oracle/report.json`. Warning-explained (SOFT) drops stay green and land in
+the report for triage. Being excluded, it never touches the PR gates
+(`clippy --all-features`, `test-msrv`, `cargo-deny`); the nightly workflow
+(`.github/workflows/nightly-html-oracle.yml`) runs it and a scoped `cargo deny`
+on its own graph. Spec:
+`docs/superpowers/specs/2026-07-10-issue-529-differential-html-oracle-design.md`.
+
 ## Toolchain and MSRV
 
 - **Dev toolchain:** Rust 1.94.0, pinned in `rust-toolchain.toml`. Rustup
