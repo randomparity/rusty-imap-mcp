@@ -95,19 +95,45 @@ feed both tarballs and Homebrew bottles — are built with a new
 `vendored-keyring` cargo feature that **static-links libdbus** into the binary,
 so it carries no runtime `libdbus-1.so` dependency. Mechanism:
 
-- `crates/rimap-config/Cargo.toml` declares an optional, Linux-only direct
-  dependency on `dbus-secret-service` (version-pinned to the tree's `4.1` to
-  satisfy cargo-deny's wildcard ban and match keyring's transitive pin) and a
-  feature `vendored-keyring = ["dep:dbus-secret-service", "dbus-secret-service/vendored"]`.
+- `crates/rimap-config/Cargo.toml` declares an optional, **Linux-target-gated**
+  direct dependency and a **weak** feature reference (mirroring bzr exactly —
+  the strong `dep:` form is a cross-platform sharp edge, see below):
+
+  ```toml
+  [target.'cfg(target_os = "linux")'.dependencies]
+  dbus-secret-service = { version = "4.1", optional = true, default-features = false }
+
+  [features]
+  vendored-keyring = ["dbus-secret-service?/vendored"]
+  ```
+
+  The `4.1` pin satisfies cargo-deny's wildcard ban and unifies with keyring
+  3.6.3's transitive `dbus-secret-service 4.1.0`. The weak `?/vendored` means
+  "if `dbus-secret-service` is otherwise in the graph, turn on its `vendored`
+  feature." On Linux keyring pulls it in (non-optionally, via
+  `linux-native-sync-persistent`), so `vendored` applies:
   `dbus-secret-service/vendored` -> `dbus/vendored` -> `libdbus-sys/vendored`
-  compiles libdbus from source via `cc`. Cargo feature unification applies the
-  `vendored` feature to the single `dbus-secret-service` instance keyring
-  already uses.
+  compiles libdbus from source via `cc` (`rustc-link-lib=static=dbus`;
+  libdbus-sys gates its pkg-config probe off under `vendored`). On macOS/Windows
+  the dep is absent, so `?/vendored` is a **clean no-op** — no feature-resolution
+  error even under `--all-features`. (The strong
+  `["dep:dbus-secret-service", "dbus-secret-service/vendored"]` form would
+  force-activate a target-gated dep on non-Linux targets and can error during
+  resolution; the weak form is why bzr uses `?/`.)
 - `crates/rimap-server/Cargo.toml` re-exports it:
   `vendored-keyring = ["rimap-config/vendored-keyring"]`.
-- The feature is **off by default** — local and non-release Linux builds keep
-  using the faster system libdbus. Only the release build's x86_64/aarch64
-  Linux legs pass `--features vendored-keyring`.
+- The feature is **off by default** for local dev and the release build's
+  x86_64/aarch64 Linux legs pass `--features vendored-keyring` explicitly.
+  **However** — this is a cargo feature, so any `--all-features` invocation
+  activates it, and several Linux guardrails run `--all-features`:
+  `cargo clippy/check/llvm-cov` (ci.yml), the MSRV check and `cargo deny`
+  (justfile). Those Linux jobs will therefore compile libdbus from source too.
+  This is **accepted**: the C compile is bounded (ubuntu runners ship the
+  toolchain; `cc` is already ubiquitous in the graph), non-Linux `--all-features`
+  is a no-op per the weak form, and cutting vendoring off the feature axis is not
+  possible (a cargo feature is inherently `--all-features`-reachable). The
+  supply-chain review confirms the cargo-deny graph delta (notably `cc` as a
+  build-dep of `libdbus-sys` under `vendored`) stays within `deny.toml` rules.
 
 The **ppc64le and s390x** tarballs are **not** vendored (they have no Homebrew
 bottle path and are niche): they retain the dynamic libdbus link and the README
@@ -194,10 +220,13 @@ The `homebrew` job (`needs: release`, `if: !contains(github.ref_name, '-')`):
 1. Checks out this repo (for the template) and the tap
    (`repository: randomparity/homebrew-tap`, `token: HOMEBREW_TAP_TOKEN`,
    `path: tap`).
-2. `curl --fail --silent --location <asset> | sha256sum` for each prebuilt
-   tarball (mac arm64, Linux x86_64, Linux aarch64) and the GitHub
-   source tarball (`archive/refs/tags/<tag>.tar.gz`) for the Intel-mac
-   source branch.
+2. `curl --fail --silent --location --retry 5 --retry-all-errors --retry-delay 5 <asset> | sha256sum`
+   for each prebuilt tarball (mac arm64, Linux x86_64, Linux aarch64) and the
+   GitHub source tarball (`archive/refs/tags/<tag>.tar.gz`) for the Intel-mac
+   source branch. The `--retry` flags absorb releases/download CDN propagation
+   lag: with `--draft` dropped, this job runs seconds after publish and the CDN
+   can briefly 404/5xx an asset that exists. The bottle build's asset pulls get
+   the same retry treatment.
 3. `sed` the placeholders into `tap/Formula/rusty-imap-mcp.rb`.
 4. Commit + push (no-op guard when the formula is already current).
 
@@ -300,7 +329,8 @@ release.yml
 | Tag pushed but `Cargo.toml` not matching          | `verify-tag` hard-fails before any build            |
 | No dated CHANGELOG section for the tag            | Release-notes step errors (existing behavior)       |
 | Prerelease tag (`vX.Y.Z-rc1`)                     | `verify-tag` hard-fails (see prerelease note below) — nothing builds |
-| A tarball asset 404s during `homebrew` sha fetch  | `curl --fail` errors the job; formula not pushed    |
+| Transient CDN 404/5xx right after publish          | `curl --retry` absorbs propagation lag; only a persistent miss fails the job |
+| A tarball asset genuinely missing (404 after retries) | `curl --fail` errors the job; formula not pushed |
 | A bottle leg fails                                | `bottles-merge` skipped; formula stays bottle-less  |
 | Rendered formula is invalid Ruby                  | `ruby -c` gate blocks the bottle-merge push         |
 | `HOMEBREW_TAP_TOKEN` missing/expired              | tap checkout/push fails; release + tarballs unaffected |
@@ -327,12 +357,16 @@ Phase 1.
 - **Formula parse**: `ruby -c Formula/rusty-imap-mcp.rb` gate in
   `bottles-merge`; `brew test` (`--version` substring assertion) runs inside
   each bottle build.
-- **Linux vendoring (libdbus)**: run the x86_64 Linux tarball binary in a
-  **clean container that does not have `libdbus-1-3` installed** and confirm
-  `rusty-imap-mcp --version` succeeds. `brew test` on a CI runner cannot catch a
-  missing-libdbus regression because the runner has libdbus; this check is the
-  one that actually proves §1b works. `ldd rusty-imap-mcp` on the x86_64/aarch64
-  Linux binaries must show **no `libdbus-1.so`** entry.
+- **Linux vendoring (libdbus)**: prove §1b for **both** Linux triples with an
+  arch-independent linkage check — `readelf -d <bin> | grep NEEDED` (or
+  `objdump -p`) must show **no `libdbus-1.so`** entry. `ldd` is unusable for the
+  aarch64 binary (cross-built via `cross`; `ldd` on a foreign-arch ELF from the
+  x86_64 runner does not resolve NEEDED). Then run the binary with `--version`:
+  the x86_64 binary in a **clean container without `libdbus-1-3`**, and the
+  aarch64 binary under `qemu-user`. `brew test` on a libdbus-equipped CI runner
+  cannot catch a missing-libdbus regression, so these are the checks that
+  actually prove §1b. The plan must also confirm the `cross` aarch64 image ships
+  the target C toolchain the vendored `cc` build needs.
 - **End-to-end**: the `v0.1.0` tag push is the acceptance test — release
   published, formula pushed to the tap, bottles built and merged, and
   `brew install randomparity/tap/rusty-imap-mcp` succeeding on a supported
