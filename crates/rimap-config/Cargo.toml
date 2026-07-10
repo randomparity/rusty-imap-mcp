@@ -17,8 +17,10 @@ workspace = true
 test-support = []
 # Static-link libdbus so release Linux binaries carry no runtime libdbus-1.so
 # dependency (needed for self-contained tarballs / Homebrew bottles). Off by
-# default. Weak `?/vendored`: on macOS/Windows the dep is absent, so this is a
-# clean no-op — no feature-resolution error under --all-features.
+# default. Strong `dep:` form is required — keyring pulls dbus-secret-service
+# through its own edge, so a weak `?/vendored` never fires. The dep is
+# Linux-cfg-gated, so this is a clean no-op on macOS/Windows (no
+# feature-resolution error under --all-features).
 vendored-keyring = ["dep:dbus-secret-service", "dbus-secret-service/vendored"]
 
 [dependencies]

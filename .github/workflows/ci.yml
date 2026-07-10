@@ -47,6 +47,17 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Enforce the rustls-only invariant: OpenSSL is pinned in Cargo.lock via
+      # dbus-secret-service's `vendored` -> `openssl?/vendored` weak edge, but
+      # must never enter the build graph. Mirrors `just check-no-openssl`.
+      - name: Assert OpenSSL stays out of the build graph
+        run: |
+          if cargo tree -i openssl-sys --all-features --target all 2>/dev/null | grep -q openssl-sys; then
+            echo "::error::openssl-sys entered the build graph — rustls-only invariant broken"
+            cargo tree -i openssl-sys --all-features --target all
+            exit 1
+          fi
+          echo "ok: openssl-sys is not in the build graph"
 
   check-macos:
     name: check (macOS)
