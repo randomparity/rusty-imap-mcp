@@ -96,18 +96,24 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-      - name: Install libdbus-1-dev
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+      - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3  # v4.1.0
         with:
-          toolchain: stable
-          targets: aarch64-unknown-linux-gnu
-      - name: Install cross
-        run: cargo install cross --locked --version 0.2.5
-      # Cross.toml at the repo root installs cargo-auditable inside the
-      # cross container via a pre-build hook, so `cross auditable build`
-      # emits an SBOM identical to the native and QEMU targets.
-      - run: cross auditable build --release --locked --target aarch64-unknown-linux-gnu -p rimap-server --features vendored-keyring
+          platforms: linux/arm64
+      # Built inside an emulated aarch64 container (same pattern as the ppc64le
+      # and s390x jobs) rather than via `cross`: cross 0.2.5 rejects the
+      # `auditable` custom subcommand host-side before its Cross.toml pre-build
+      # hook can install cargo-auditable in the container. Building natively in
+      # the target container also compiles the vendored libdbus for aarch64
+      # without a cross C toolchain. vendored-keyring static-links libdbus so
+      # the tarball/bottle binary carries no runtime libdbus-1.so dependency.
+      - name: Build in aarch64 container
+        # rust:1.88.0-bookworm as of 2026-04-13
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 \
+            bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked -p rimap-server --features vendored-keyring"
       - name: Package tarball
         env:
           TAG: ${{ github.ref_name }}
@@ -116,7 +122,7 @@ jobs:
           triple="aarch64-unknown-linux-gnu"
           stage="${BINARY_NAME}-${TAG}-${triple}"
           mkdir "$stage"
-          cp "target/aarch64-unknown-linux-gnu/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
           cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
           tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

@@ -1,9 +1,0 @@
-# Cross configuration for the aarch64-unknown-linux-gnu release build.
-# Installs cargo-auditable inside the cross container so the release
-# binary embeds an SBOM identical to the four other targets. See issue
-# #79 and .github/workflows/release.yml.
-[target.aarch64-unknown-linux-gnu]
-pre-build = [
-    "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config",
-    "cargo install cargo-auditable --locked --version 0.7.4",
-]
