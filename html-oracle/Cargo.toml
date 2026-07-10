@@ -15,7 +15,10 @@ path = "src/main.rs"
 rimap-content = { path = "../crates/rimap-content", version = "0.1.0", features = ["test-support"] }
 rimap-core = { path = "../crates/rimap-core", version = "0.1.0" }
 lol_html = "3"
-html-escape = "0.2"
+# Same html5ever engine production uses — decodes character references
+# byte-identically (incl. legacy semicolon-less names + longest-prefix).
+# lol_html still does the tokenization; scraper only decodes isolated text.
+scraper = { version = "0.27", default-features = false }
 mail-parser = "0.11"
 url = "2"
 serde = { version = "1", features = ["derive"] }

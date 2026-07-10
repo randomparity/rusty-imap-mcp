@@ -50,14 +50,30 @@ struct State {
     hrefs: Vec<String>,
 }
 
+/// Decode HTML character references with the *same* html5ever engine
+/// production uses (via `scraper`), guaranteeing byte-identical handling —
+/// including the legacy semicolon-less named references (`&copy`, `&amp`,
+/// `&nbsp`) and longest-prefix matching that a standalone decoder gets wrong.
+///
+/// `lol_html` still tokenizes independently (it isolated `raw` as one text
+/// node); html5ever is used only to decode references *within* that already-
+/// isolated text, so the tokenizer-boundary divergence the oracle exists to
+/// catch is unaffected. Parsed as a fragment: a text node contains no `<`, so
+/// no new tokenization occurs — only char-ref decoding.
+fn decode_entities(raw: &str) -> String {
+    scraper::Html::parse_fragment(raw)
+        .root_element()
+        .text()
+        .collect()
+}
+
 impl State {
     /// Flush the current text node into the buffer, equalizing the two
     /// non-tokenizer axes production applies during extraction:
     ///
-    /// 1. **Entity decoding** — production parses via html5ever, which decodes
-    ///    character references (`&amp;`, `&nbsp;`, `&#65;`); `lol_html` is a
-    ///    rewriter and yields raw source, so decode here at node granularity
-    ///    (an entity may split across streaming chunks).
+    /// 1. **Entity decoding** — [`decode_entities`] via html5ever, matching
+    ///    production. Done at node granularity because a reference is contiguous
+    ///    within a single text node (never split across nodes).
     /// 2. **`]]>` drop** — mirror production `push_text`, which drops any text
     ///    node containing `]]>`. Checked post-decode to match html5ever's order
     ///    (an entity-encoded `]]>` decodes first, then is dropped).
@@ -68,7 +84,7 @@ impl State {
         if self.node.is_empty() {
             return;
         }
-        let decoded = html_escape::decode_html_entities(&self.node).into_owned();
+        let decoded = decode_entities(&self.node);
         self.node.clear();
         if decoded.contains("]]>") {
             return;
@@ -269,5 +285,26 @@ mod tests {
         let html = "<p>ok<span>&#93;&#93;&gt; leak</span></p>";
         let refx = extract_reference(html).unwrap();
         assert_eq!(refx.text_tokens, prod_tokens(html));
+    }
+
+    #[test]
+    fn legacy_semicolonless_entities_match_production() {
+        // html5ever decodes legacy semicolon-less named refs and longest-
+        // prefix-matches them; the reference must match production exactly.
+        for html in [
+            "<p>&copy 2020</p>",
+            "<p>a&ampb</p>",
+            "<p>a&amp b</p>",
+            "<p>&notanentity; end</p>",
+            "<p>price &lt; 5 &amp; qty &gt; 0</p>",
+        ] {
+            let refx = extract_reference(html).unwrap();
+            assert_eq!(
+                refx.text_tokens,
+                prod_tokens(html),
+                "entity decode diverged from html5ever for {html:?}: ref={:?}",
+                refx.text_tokens
+            );
+        }
     }
 }
