@@ -335,14 +335,27 @@ jobs:
           BASE="https://github.com/randomparity/rusty-imap-mcp/releases/download/${TAG}"
           # --retry absorbs releases/download CDN propagation lag: this job runs
           # seconds after publish and the CDN can briefly 404/5xx a live asset.
-          fetch_sha() {
+          curl_retry() {
             curl --fail --silent --show-error --location \
-              --retry 5 --retry-all-errors --retry-delay 5 "$1" | sha256sum | awk '{print $1}'
+              --retry 5 --retry-all-errors --retry-delay 5 "$1"
           }
-          MAC_ARM_SHA=$(fetch_sha   "${BASE}/rusty-imap-mcp-${TAG}-aarch64-apple-darwin.tar.gz")
-          LINUX_ARM_SHA=$(fetch_sha "${BASE}/rusty-imap-mcp-${TAG}-aarch64-unknown-linux-gnu.tar.gz")
-          LINUX_INTEL_SHA=$(fetch_sha "${BASE}/rusty-imap-mcp-${TAG}-x86_64-unknown-linux-gnu.tar.gz")
-          SRC_SHA=$(fetch_sha "https://github.com/randomparity/rusty-imap-mcp/archive/refs/tags/${TAG}.tar.gz")
+          # The release job already published SHA256SUMS.txt over the tarballs;
+          # parse it (one small request) instead of re-downloading each tarball.
+          SUMS="$(curl_retry "${BASE}/SHA256SUMS.txt")"
+          sum_for() {
+            local s
+            s=$(printf '%s\n' "$SUMS" | awk -v f="$1" '$2 == f { print $1 }')
+            if [ -z "$s" ]; then
+              echo "::error::no SHA256SUMS.txt entry for $1" >&2
+              exit 1
+            fi
+            printf '%s' "$s"
+          }
+          MAC_ARM_SHA=$(sum_for   "rusty-imap-mcp-${TAG}-aarch64-apple-darwin.tar.gz")
+          LINUX_ARM_SHA=$(sum_for "rusty-imap-mcp-${TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          LINUX_INTEL_SHA=$(sum_for "rusty-imap-mcp-${TAG}-x86_64-unknown-linux-gnu.tar.gz")
+          # The GitHub source archive is not in SHA256SUMS.txt — hash it directly.
+          SRC_SHA=$(curl_retry "https://github.com/randomparity/rusty-imap-mcp/archive/refs/tags/${TAG}.tar.gz" | sha256sum | awk '{print $1}')
           mkdir -p tap/Formula
           sed \
             -e "s|{{VERSION}}|${VERSION}|g" \
