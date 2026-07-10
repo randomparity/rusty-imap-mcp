@@ -8,13 +8,15 @@ use std::collections::BTreeSet;
 pub fn tokenize(scrubbed: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for word in scrubbed.split(char::is_whitespace) {
-        // Trim leading/trailing non-alphanumerics so that a word carrying
-        // adjacent punctuation (`member,`, `(usdrugs)`) tokenizes the same as
-        // the bare word. This removes the dominant differential noise source:
-        // the two engines place text-node boundaries around stray tags
-        // differently, which a whitespace-only split turns into `member,`
-        // vs `member` + `,`. Interior punctuation (`x&y`, `e.g`) is preserved.
-        let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+        // Trim only *noise* from the edges: ASCII punctuation and the Unicode
+        // replacement char (`U+FFFD`, from mis-decoded bytes). This collapses
+        // the dominant differential noise source — the two engines place
+        // text-node boundaries around stray tags differently, so a
+        // whitespace-only split yields `member,` vs `member` + `,` — while
+        // still keeping symbol/emoji-only visible runs (`★★★★★`, `🎉`) as
+        // tokens, so a production drop of purely-symbolic visible text is still
+        // caught. Interior punctuation (`x&y`, `e.g`) is preserved.
+        let trimmed = word.trim_matches(|c: char| c.is_ascii_punctuation() || c == '\u{FFFD}');
         if trimmed.is_empty() {
             continue;
         }
@@ -128,6 +130,20 @@ mod tests {
         assert!(!t.contains(","));
         assert!(!t.contains("member,"));
         assert!(!t.contains("(usdrugs)"));
+    }
+
+    #[test]
+    fn tokenize_keeps_symbol_only_runs_but_drops_pure_noise() {
+        // Symbol/emoji-only visible runs must survive so a production drop of
+        // them is still catchable (they are not ASCII punctuation).
+        let t = tokenize("★★★★★ 🎉 hello");
+        assert!(t.contains("★★★★★"), "star run dropped: {t:?}");
+        assert!(t.contains("🎉"), "emoji dropped: {t:?}");
+        assert!(t.contains("hello"));
+        // Pure ASCII-punctuation and replacement-char runs are noise -> dropped.
+        let n = tokenize(", -- \u{FFFD}\u{FFFD} word");
+        assert_eq!(n.len(), 1, "only `word` should survive: {n:?}");
+        assert!(n.contains("word"));
     }
 
     #[test]
