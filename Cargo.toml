@@ -10,7 +10,7 @@ members = [
     "crates/rimap-server",
     "crates/rimap-smtp",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "html-oracle"]
 
 [workspace.package]
 version = "0.1.0"
