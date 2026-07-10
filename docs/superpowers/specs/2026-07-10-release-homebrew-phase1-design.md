@@ -79,6 +79,44 @@ Bare binaries are **replaced** by tarballs (not shipped alongside), matching
 bzr. The `release` job's `SHA256SUMS.txt` step covers `rusty-imap-mcp-v*.tar.gz`
 and the build-provenance attestation subject-path updates to the tarballs.
 
+### 1b. Linux libdbus vendoring (tarball + bottle correctness)
+
+The keyring backend (`keyring = { features = ["linux-native-sync-persistent"] }`)
+pulls `dbus-secret-service` -> `libdbus-sys` on Linux, so the Linux binary
+**dynamically links C libdbus** (why `release.yml` installs `libdbus-1-dev` on
+every Linux build). A tarball or poured Homebrew bottle cannot declare a system
+`libdbus-1-3` dependency, so a distributed Linux binary would fail to load
+(`--version` errors before `main`) on any host without libdbus — a class of
+minimal Homebrew-on-Linux and container hosts. `brew test` on a CI runner that
+has libdbus installed would pass while real users break.
+
+Fix (mirrors bzr): the **x86_64 and aarch64 Linux** binaries — the targets that
+feed both tarballs and Homebrew bottles — are built with a new
+`vendored-keyring` cargo feature that **static-links libdbus** into the binary,
+so it carries no runtime `libdbus-1.so` dependency. Mechanism:
+
+- `crates/rimap-config/Cargo.toml` declares an optional, Linux-only direct
+  dependency on `dbus-secret-service` (version-pinned to the tree's `4.1` to
+  satisfy cargo-deny's wildcard ban and match keyring's transitive pin) and a
+  feature `vendored-keyring = ["dep:dbus-secret-service", "dbus-secret-service/vendored"]`.
+  `dbus-secret-service/vendored` -> `dbus/vendored` -> `libdbus-sys/vendored`
+  compiles libdbus from source via `cc`. Cargo feature unification applies the
+  `vendored` feature to the single `dbus-secret-service` instance keyring
+  already uses.
+- `crates/rimap-server/Cargo.toml` re-exports it:
+  `vendored-keyring = ["rimap-config/vendored-keyring"]`.
+- The feature is **off by default** — local and non-release Linux builds keep
+  using the faster system libdbus. Only the release build's x86_64/aarch64
+  Linux legs pass `--features vendored-keyring`.
+
+The **ppc64le and s390x** tarballs are **not** vendored (they have no Homebrew
+bottle path and are niche): they retain the dynamic libdbus link and the README
+notes those two tarballs require a system `libdbus-1-3`. macOS is unaffected
+(`apple-native` uses the Security framework, no libdbus). Adding
+`--features vendored-keyring` is a supply-chain-relevant change (new direct dep,
+feature unification) and is called out for the supply-chain review in the
+implementation plan.
+
 ### 2. Release job: draft -> published
 
 The `release` job drops `--draft` from `gh release create` so the release
@@ -88,6 +126,15 @@ publishes immediately on tag push. This is required: the `homebrew` and
 assets from a **published** release. Publishing directly (rather than gating
 on a manual draft-review step) is the approved tradeoff for Phase 1; a
 review gate returns with the release-prep PR when the `-dev` model lands.
+
+The `release` job declares `environment: release`. As of this design that
+environment is **referenced but not configured** (the repo's only configured
+environment is `sonarcloud`), so it carries **no required-reviewer or wait-timer
+protection** — publishing is genuinely immediate on tag push, and the
+homebrew/bottles jobs do not stall. This is deliberate for Phase 1: a future
+maintainer who adds required-reviewer protection to the `release` environment
+would silently gate the tap/bottle pipeline behind manual approval, so any such
+change must be paired with revisiting this section.
 
 ### 3. Homebrew formula template + `homebrew` job
 
@@ -162,9 +209,12 @@ Mirror bzr's two-stage bottle build:
   `macos-14` (arm64 macOS; oldest arm runner so the `arm64_sonoma` bottle
   pours on newer macOS too), `ubuntu-latest` (x86_64 Linux), and
   `ubuntu-24.04-arm` (arm64 Linux). Each leg:
-  - On Linux, ensures Homebrew is on PATH and installs `libdbus-1-3` (the
-    keyring default feature links libdbus at runtime; `brew test` runs
-    `--version`, so the loader needs it).
+  - On Linux, ensures Homebrew is on PATH. **No `libdbus-1-3` install is
+    needed**: the x86_64/aarch64 Linux tarball binaries the formula pours are
+    built with `vendored-keyring` (static libdbus, §1b), so neither the bottle
+    runner nor the end user needs a system libdbus. (This is the payoff of §1b —
+    the bottle would otherwise pass `brew test` on a libdbus-equipped runner and
+    break for users without it.)
   - `brew tap randomparity/tap`; `brew install --build-bottle randomparity/tap/rusty-imap-mcp`.
   - `brew bottle --json --no-rebuild --root-url <release-base>`.
   - Renames the double-dash local bottle file to the single-dash form
@@ -216,6 +266,9 @@ Adapted from bzr's `RELEASING.md`, written for the **current** version model:
   `sha256sum --ignore-missing -c SHA256SUMS.txt`, `tar xzf`, then
   `chmod`/place `rusty-imap-mcp` on `$PATH`. Keep the macOS Gatekeeper
   quarantine note.
+- Note that the **ppc64le and s390x** Linux tarballs are not libdbus-vendored
+  (§1b) and require a system `libdbus-1-3` at runtime; the x86_64/aarch64 Linux
+  and macOS tarballs are self-contained.
 
 ## Data flow
 
@@ -224,7 +277,8 @@ git tag vX.Y.Z (on main merge commit) ──> push
         │
         ▼
 release.yml
-  verify-tag ──> build (×5 triples) ──> package rusty-imap-mcp-vX.Y.Z-<triple>.tar.gz
+  verify-tag ──> build (×5 triples; x86_64+aarch64 Linux use --features vendored-keyring)
+             ──> package rusty-imap-mcp-vX.Y.Z-<triple>.tar.gz
         │
         ▼
   release (publish): SHA256SUMS.txt + provenance + gh release create (no --draft)
@@ -245,11 +299,23 @@ release.yml
 |--------------------------------------------------|-----------------------------------------------------|
 | Tag pushed but `Cargo.toml` not matching          | `verify-tag` hard-fails before any build            |
 | No dated CHANGELOG section for the tag            | Release-notes step errors (existing behavior)       |
-| Prerelease tag (`vX.Y.Z-rc1`)                     | `homebrew`/`bottles`/`bottles-merge` skipped (`if`) |
+| Prerelease tag (`vX.Y.Z-rc1`)                     | `verify-tag` hard-fails (see prerelease note below) — nothing builds |
 | A tarball asset 404s during `homebrew` sha fetch  | `curl --fail` errors the job; formula not pushed    |
 | A bottle leg fails                                | `bottles-merge` skipped; formula stays bottle-less  |
 | Rendered formula is invalid Ruby                  | `ruby -c` gate blocks the bottle-merge push         |
 | `HOMEBREW_TAP_TOKEN` missing/expired              | tap checkout/push fails; release + tarballs unaffected |
+| Intel-mac `{{SRC_SHA}}` mismatch (GitHub regenerated the auto source tarball) | `brew install` hard-fails on Intel mac only, post-release; recover by re-fetching `SRC_SHA` and pushing a formula fixup commit |
+
+**Prerelease tags are not supported in Phase 1.**
+`scripts/check-release-version.sh` (run by `verify-tag`) enforces
+`^v[0-9]+\.[0-9]+\.[0-9]+$` and rejects any `-`, so a tag like `v0.1.0-rc1`
+fails before any build job runs — no release, no brew jobs. The
+`if: !contains(github.ref_name, '-')` guards on the homebrew/bottles/bottles-merge
+jobs are therefore **unreachable in Phase 1**; they are retained deliberately as
+forward-compatible defense for Phase 2 (the `-dev`/prerelease model), so that
+phase does not have to re-add them. Loosening `verify-tag` to accept prerelease
+suffixes (and adding `--prerelease` to `gh release create`) is Phase 2 work, not
+Phase 1.
 
 ## Testing strategy
 
@@ -261,6 +327,12 @@ release.yml
 - **Formula parse**: `ruby -c Formula/rusty-imap-mcp.rb` gate in
   `bottles-merge`; `brew test` (`--version` substring assertion) runs inside
   each bottle build.
+- **Linux vendoring (libdbus)**: run the x86_64 Linux tarball binary in a
+  **clean container that does not have `libdbus-1-3` installed** and confirm
+  `rusty-imap-mcp --version` succeeds. `brew test` on a CI runner cannot catch a
+  missing-libdbus regression because the runner has libdbus; this check is the
+  one that actually proves §1b works. `ldd rusty-imap-mcp` on the x86_64/aarch64
+  Linux binaries must show **no `libdbus-1.so`** entry.
 - **End-to-end**: the `v0.1.0` tag push is the acceptance test — release
   published, formula pushed to the tap, bottles built and merged, and
   `brew install randomparity/tap/rusty-imap-mcp` succeeding on a supported
@@ -278,5 +350,12 @@ release.yml
 
 ## Open questions
 
-None at design time. Phase 2+ specs will address the `-dev` version model,
-crates.io publishing, and deb/rpm + manpages + installers.
+None blocking. Carried risks (not blockers for Phase 1):
+
+- The `vendored-keyring` feature adds a direct optional `dbus-secret-service`
+  dependency and relies on cargo feature unification applying `vendored` to the
+  instance keyring already pulls. The implementation plan routes this through
+  the supply-chain review (cargo-deny, `deny.toml` wildcard rules) and verifies
+  the resulting binary via `ldd` (no `libdbus-1.so`).
+- Phase 2+ specs will address the `-dev` version model, crates.io publishing
+  (8-crate workspace, name availability), and deb/rpm + manpages + installers.
