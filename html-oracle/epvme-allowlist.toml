@@ -1,0 +1,15 @@
+# Known-benign divergences specific to the external EPVME corpus.
+#
+# This file is merged into the allowlist ONLY when --epvme-dir is set, so its
+# `epvme/…` entries never appear stale in the hermetic --repo-root nightly run
+# (which does not load EPVME). See docs/security/html-oracle-epvme-discovery.md.
+
+[[allow]]
+input = "epvme/b9777a256c75a82027e4d9f36871e099"
+tokens = ["20"]
+reason = "quoted-printable =20 (encoded space) on a multipart/mixed sample whose html_bodies() returns the raw nested-MIME container; the `20` is QP artifact, not visible text"
+
+[[allow]]
+input = "epvme/ee557c9fb9ffe6cbd92b9360c833954b"
+tokens = ["20"]
+reason = "quoted-printable =20 (encoded space) on a multipart/mixed sample whose html_bodies() returns the raw nested-MIME container; the `20` is QP artifact, not visible text"

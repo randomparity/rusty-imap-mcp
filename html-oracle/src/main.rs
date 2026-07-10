@@ -99,7 +99,17 @@ fn main() -> ExitCode {
     let args = parse_args();
 
     let allowlist_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("allowlist.toml");
-    let allow_text = std::fs::read_to_string(&allowlist_path).unwrap_or_default();
+    let mut allow_text = std::fs::read_to_string(&allowlist_path).unwrap_or_default();
+    if args.epvme_dir.is_some() {
+        // Merge the EPVME-specific allowlist only when the EPVME corpus is
+        // loaded, so its `epvme/…` entries never show as stale in the hermetic
+        // --repo-root run. Concatenated `[[allow]]` blocks parse as one array.
+        let epvme_allow = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("epvme-allowlist.toml");
+        if let Ok(extra) = std::fs::read_to_string(&epvme_allow) {
+            allow_text.push('\n');
+            allow_text.push_str(&extra);
+        }
+    }
     let allow = match allowlist::load(&allow_text) {
         Ok(a) => a,
         Err(e) => {
