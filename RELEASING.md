@@ -30,9 +30,18 @@ containing `-`.
 ## One-time setup (before the first release)
 
 1. Confirm `randomparity/homebrew-tap` exists with a `Formula/` directory.
-2. Create a fine-grained PAT with **`Contents: Write`** on
-   `randomparity/homebrew-tap` and add it to this repo's secrets as
-   `HOMEBREW_TAP_TOKEN`. See [`homebrew/README.md`](homebrew/README.md).
+2. Create a **fine-grained** PAT scoped to `randomparity/homebrew-tap` only,
+   with **`Contents: Write`** (no other repos, no other scopes — this bounds the
+   blast radius), and add it to this repo's secrets as `HOMEBREW_TAP_TOKEN`. See
+   [`homebrew/README.md`](homebrew/README.md).
+3. **Protect the `v*` tags.** Because the release publishes directly (no draft
+   — ADR-0002), the tag push *is* the release: it publishes the GitHub Release
+   and pushes to the public Homebrew tap with no further human gate. Tag
+   protection is the control that replaces the draft. Restrict who can create
+   `v*` tags per [`scripts/setup-tag-protection.md`](scripts/setup-tag-protection.md).
+4. **Optional:** configure the `homebrew-tap` deployment environment with
+   required reviewers to add an approval gate before the tap is pushed. Leaving
+   it unconfigured (the default) means the tap bump runs unattended.
 
 ## Release checklist
 
