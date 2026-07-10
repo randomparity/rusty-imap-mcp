@@ -80,26 +80,58 @@ not plausibly text before comparing.
 - Allowlisting 103 per-input entries would bury the signal in noise and is the
   wrong fix — the noise is systematic, not per-input.
 
-## Required hardening before EPVME can gate
+## Hardening applied
 
-1. **Punctuation/boundary-robust comparison.** Strip leading/trailing
-   punctuation from tokens (or compare on substantial words) so `member,` and
-   `member` + `,` do not diverge. This collapses bucket 1 (~60).
-2. **Skip non-text parts.** When a part decodes to a high proportion of
-   replacement/control characters (the `UnicodeC0C1Stripped` signal), exclude it
-   from the differential rather than comparing tokenized noise. This collapses
-   bucket 2 (~37).
-3. **Faithful href handling.** Entity-decode href attribute values in the
-   reference (reuse `decode_entities`), and return `None` (or bare domain) from
-   `href_identity` for a `mailto:` with no recipient. This collapses bucket 3 (6).
+All three noise sources were fixed in the same branch (commit
+`feat(html-oracle): harden comparison against wild-corpus noise`):
 
-With those three in place, re-run over EPVME and re-triage; only then is a
-recurring EPVME regression gate worth building. The hermetic `--repo-root .`
-nightly stays unchanged in the meantime.
+1. **Punctuation/boundary-robust comparison.** `norm::tokenize` trims
+   leading/trailing non-alphanumerics, so `member,` and `member` + `,` reduce to
+   the same token. Interior punctuation (`x&y`, `e.g`) is preserved. Collapsed
+   bucket 1.
+2. **Skip non-text parts.** The runner skips any part whose decoded body is
+   >10% `U+FFFD` replacement characters (`is_mostly_binary`). Legitimate
+   non-Latin text decodes to real codepoints, not `U+FFFD`, so international
+   content is not excluded. Collapsed bucket 2.
+3. **Faithful href handling.** The reference entity-decodes href attribute
+   values via `decode_entities`; `href_identity` drops the `?subject=&body=`
+   header block from `mailto:` and requires an actual recipient. Collapsed
+   bucket 3.
+
+## Results after hardening (full corpus)
+
+| Metric | Before | After |
+| --- | --- | --- |
+| HARD | 103 | **2** |
+| SOFT | 164 | 84 |
+| skipped (binary) | 1 | 168 |
+| exact match | 47,608 | 47,622 |
+
+The **2 residual HARD** (`epvme/b9777a25…`, `epvme/ee557c9f…`) are the same
+nested-MIME-blob family: `multipart/mixed` samples where `html_bodies()` returns
+the raw MIME container (with a quoted-printable `text/plain` sub-part) as a
+pseudo-HTML body. The surviving `20` token is part of a QP `=20` encoded space,
+not visible text. This is not a production silent drop.
+
+## If EPVME becomes a CI gate
+
+- **Do not put EPVME ids in the shared `allowlist.toml`.** The hermetic
+  `--repo-root .` nightly does not load EPVME, so any `epvme/…` allowlist entry
+  would always be reported stale by the runner's stale-allowlist check. A
+  gating EPVME job needs its own allowlist file, loaded only when `--epvme-dir`
+  is set.
+- The 2 residual QP-artifact survivors would be the allowlist's first entries
+  (well under the 10-entry keep bar), or suppressed by extending the non-text
+  skip to QP-encoded nested-MIME blobs.
+- Keep the run off the every-night hermetic schedule: use `workflow_dispatch`
+  or a lower-frequency job with a pinned dataset snapshot + caching.
 
 ## Bearing on the #529 keep/kill retro
 
 The oracle *did* find something real — not a sanitizer bug, but three concrete
 faithfulness gaps in its own comparison layer that curated fixtures could not
-reach. That argues **keep**, conditional on the hardening above landing so the
-allowlist stays small and the HARD channel is trustworthy.
+reach. Those gaps are now fixed, and the hardened oracle runs the full EPVME
+corpus at 2 HARD / 47,876 (0.006%), zero of them a production silent drop.
+That argues **keep**: the HARD channel is now trustworthy on wild input, the
+allowlist stays empty, and the differential agrees with production on 47,622
+real adversarial bodies.
