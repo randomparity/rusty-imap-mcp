@@ -84,7 +84,14 @@ impl State {
         if self.node.is_empty() {
             return;
         }
-        let decoded = decode_entities(&self.node);
+        // html5ever character-reference decoding only ever fires on `&`, so a
+        // node with no `&` (and text nodes never contain `<`) decodes to itself
+        // — skip the per-node fragment parse in that common case.
+        let decoded = if self.node.contains('&') {
+            decode_entities(&self.node)
+        } else {
+            std::mem::take(&mut self.node)
+        };
         self.node.clear();
         if decoded.contains("]]>") {
             return;
@@ -140,8 +147,7 @@ pub fn extract_reference(decoded_html: &str) -> Result<ReferenceExtract, Referen
             .append_element_content_handler(text!("*", move |t| {
                 let mut st = s_text.borrow_mut();
                 if st.suppress == 0 && !st.after_cdata && t.text_type() == TextType::Data {
-                    let chunk = t.as_str().to_string();
-                    st.node.push_str(&chunk);
+                    st.node.push_str(t.as_str());
                     if t.last_in_text_node() {
                         st.flush_node();
                     }

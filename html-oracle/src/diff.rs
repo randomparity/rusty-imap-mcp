@@ -34,14 +34,9 @@ pub struct Divergence {
 }
 
 fn has_explaining_warning(prod: &HtmlResult) -> bool {
-    for w in &prod.warnings {
-        for code in DROP_EXPLAINING {
-            if w.code == *code {
-                return true;
-            }
-        }
-    }
-    false
+    prod.warnings
+        .iter()
+        .any(|w| DROP_EXPLAINING.contains(&w.code))
 }
 
 pub fn classify(
