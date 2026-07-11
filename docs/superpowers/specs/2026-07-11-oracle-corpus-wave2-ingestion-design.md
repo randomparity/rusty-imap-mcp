@@ -74,12 +74,16 @@ tree is what `validate.yml` gates. **No network runs in CI** — CI only validat
 already-committed bytes. New modules:
 
 - **`build_wave2.py`** — entry point. Orchestrates
-  fetch → iterate → filter → scrub → wrap → fingerprint-dedup → cap → `write_tree`,
+  fetch → iterate → filter → scrub → wrap → fingerprint-dedup → cap → write,
   with a `--check` mode that regenerates `wave2/` and fails on any byte drift.
-  Reuses Wave 1's `build_eml`, `_encode_body` (CRLF-exact CTE selection),
-  content-hash stem, and `write_tree` by **importing** them from `build_wave1`
-  (no behavior-changing refactor of `build_wave1.py`; a post-change
-  `build_wave1.py --check` guards Wave-1 byte-identity).
+  Reuses **only** the small, stable pieces of `build_wave1`/`validate` by import
+  (`build_wave1._encode_body` for CRLF-clean **base64** payloads — the CTE Wave 1
+  uses; `validate.html_part_texts` + `validate.structural_fingerprint` so the
+  generator's dedup scope is byte-identical to the validator's criterion-6 check).
+  It writes its **own** `.eml` assembly, `meta.toml`, `wave2/` tree writer, and
+  `--check` diff — it does **not** reuse `build_wave1.build_eml` (takes a
+  wave-1 `Candidate`) or `build_wave1.write_tree` (hardcoded to `wave1/`), and
+  makes **no** change to `build_wave1.py`.
 - **`sources.py`** — per-source fetch: download the pinned URL to a gitignored
   `tools/ingest/.cache/`, **verify the recorded SHA-256 before any use**
   (hard-fail on mismatch), then iterate the archive/mbox **in memory in archive
@@ -98,13 +102,15 @@ already-committed bytes. New modules:
    declared charset (as Wave 1 did for templates).
 2. **Scrub** PII patterns across the whole decoded HTML source (below); markup
    structure is preserved (only text/value/comment content is rewritten).
-3. **Wrap** the scrubbed HTML as a fresh CRLF `.eml` with a chosen charset
-   (UTF-8) and CTE (7bit if ASCII-clean, else quoted-printable or base64 — the
-   Wave-1 `_encode_body` rule), then compute the **content-hash stem** over the
-   final `.eml` bytes.
-4. **Fingerprint** with the validator's `structural_fingerprint`; **drop** if the
-   fingerprint already exists **tree-wide** — the seen-set is preloaded from all
-   454 Wave-1 inputs and grows across the Wave-2 run. This enforces validator
+3. **Wrap** the scrubbed HTML as a fresh CRLF `.eml` (`text/html; charset=utf-8`,
+   **base64** CTE via `build_wave1._encode_body`, as Wave 1 does), then compute the
+   **content-hash stem** over the final `.eml` bytes.
+4. **Fingerprint** exactly as the validator's criterion 6 does —
+   `structural_fingerprint("\x1e".join(html_part_texts(eml_bytes)))` over the
+   **built** `.eml` (not the raw scrubbed html), so the generator's dedup scope
+   matches the validator byte-for-byte; **drop** if the fingerprint already exists
+   **tree-wide** — the seen-set is preloaded from all 454 Wave-1 inputs (their
+   `.eml` fingerprinted the same way) and grows across the Wave-2 run. This enforces validator
    criterion 6 (tree-wide structural uniqueness) at generation time and prevents
    a real newsletter skeleton from colliding with a Wave-1 template. Dedup is
    **keep-first** over a fully-deterministic traversal (see §"Determinism").
@@ -133,9 +139,11 @@ decoded HTML string, redacting three PII patterns to fixed placeholder tokens
   whitespace, the comment terminator `-->`), so a raw-source match could span a
   boundary and silently delete an attribute name or eat a `-->` on exactly the
   messy adversarial markup Wave 2 ingests. Instead it redacts **within each parsed
-  node's content in isolation** — text data, individual attribute *values*, and
-  comment data — via the parser's source offsets, so a match is confined to one
-  node and can never consume a markup delimiter, tag name, or attribute name.
+  content span in isolation** — text runs, individual quoted attribute *values*,
+  and comment inner content — via a structure-aware tokenization that tiles the
+  source exactly into markup vs content, so a match is confined to one span and
+  can never consume a markup delimiter, tag name, or attribute name. Exact tiling
+  is proven by a byte-identity test (a PII-free input round-trips unchanged).
   Because `structural_fingerprint` hashes the tag/attr-**name** sequence and
   **ignores attribute values** (validate.py `structural_fingerprint` /
   `_StructureCollector`), the fingerprint is invariant under this node-scoped
@@ -231,11 +239,14 @@ not from an order-independent tie-break:
 ## `meta.toml` contract (Wave 2)
 
 Per input: `redistribution_basis = "research-corpus"` (not an SPDX `license`);
-`source`, `source_url`, `notes` (non-empty; `notes` records the filter, the
-scrub scope, and — for Nazario — the CC-BY-4.0 attribution); `wave = 2`; ISO
-`added`; `scrub = ["text-nodes-redacted", "attr-values-redacted"]` (the two
-`SCRUB_STEPS` labels available; comment redaction is folded under them and spelled
-out in `notes`); `probes = []` (Wave-2 inputs are not canaries).
+**`redistribution_note`** (non-empty — the validator's `redistribution_basis`
+branch requires it; records the per-source basis, e.g. the CC-BY-4.0 attribution
+for Nazario or the public-release basis for Enron/SpamAssassin); `source`,
+`source_url`, `notes` (non-empty; `notes` records the filter and the scrub scope
+text+attr+comments); `wave = 2`; ISO `added`;
+`scrub = ["text-nodes-redacted", "attr-values-redacted"]` (the two `SCRUB_STEPS`
+labels available; comment redaction is folded under them and spelled out in
+`notes`); `probes = []` (Wave-2 inputs are not canaries).
 
 **Canaries.** Criterion 8 is tree-wide and already satisfied by Wave 1's three
 families; Wave 2 adds none. Validation must still show all three families present
@@ -343,9 +354,13 @@ after generating 300 files:
   **ignores attribute values** (`for name, _value in attrs`), so PII-substring
   redaction of values/text/comments leaves the fingerprint invariant.
 - **`SCRUB_STEPS`** includes `text-nodes-redacted` and `attr-values-redacted`;
-  **`REDISTRIBUTION_BASES`** includes `research-corpus`. The plan's first task
-  still re-confirms `probes = []` is accepted for a non-canary input before
-  authoring.
+  **`REDISTRIBUTION_BASES`** includes `research-corpus`.
+- **Provenance branch requires `redistribution_note`.** `_validate_provenance_basis`
+  takes the `redistribution_basis` branch whenever that key is present and then
+  **hard-requires a non-empty `redistribution_note`** (Wave 1 never hit this — it
+  used the `license` branch). Every Wave-2 `meta.toml` must carry it. The plan's
+  first task re-confirms the full Wave-2 meta (incl. `redistribution_note`,
+  `probes = []`) validates clean before authoring.
 
 ## Acceptance criteria
 

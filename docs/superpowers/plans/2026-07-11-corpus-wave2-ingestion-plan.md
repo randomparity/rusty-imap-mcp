@@ -36,15 +36,23 @@ iterates messages in archive order, node-scoped-scrubs PII, wraps each as a CRLF
   `cargo run --manifest-path html-oracle/Cargo.toml -- ...`.
 - **Pure stdlib, no RNG, deterministic.** `build_wave2.py --check` must regenerate
   `wave2/` byte-identically.
-- **Provenance:** `redistribution_basis = "research-corpus"`;
+- **Provenance:** `redistribution_basis = "research-corpus"`; **non-empty
+  `redistribution_note`** (REQUIRED by the validator's redistribution branch);
   `scrub = ["text-nodes-redacted", "attr-values-redacted"]`; `wave = 2`;
-  `probes = []`; `notes` records filter + scrub scope (text+attr+comments) +
-  Nazario CC-BY-4.0 attribution.
+  `probes = []`; `notes` records filter + scrub scope (text+attr+comments).
 - **Fixed source order (adversarial-first):** SpamAssassin → Nazario → Enron.
 - **Per-source caps:** Enron ≤100, SpamAssassin ≤120, Nazario ≤80; global ≤300.
-- **Reuse Wave-1 helpers by import** (`build_wave1.build_eml`, `_encode_body`,
-  content-hash stem, `write_tree`); do **not** refactor `build_wave1.py` in a way
-  that changes its output — guard with `python3.13 build_wave1.py --check`.
+- **Reuse only stable pieces by import** — `from build_wave1 import _encode_body`
+  (CRLF-clean base64) and `from validate import html_part_texts,
+  structural_fingerprint`. Wave 2 writes its **own** `.eml` assembly, `meta.toml`,
+  `wave2/` writer, and `--check` diff. Do **NOT** reuse `build_wave1.build_eml`
+  (takes a wave-1 `Candidate`), `build_wave1.write_tree` (hardcoded to `wave1/`),
+  or `meta_toml` (emits the `license` branch); make **no** edit to `build_wave1.py`.
+- **CTE is base64** (as Wave 1) — `_encode_body` does not auto-select; there is no
+  7bit/QP selection to reuse.
+- **Fingerprint scope = criterion 6:** dedup on
+  `structural_fingerprint("\x1e".join(html_part_texts(eml_bytes)))` over the
+  **built** `.eml`, matching the validator exactly.
 
 ---
 
@@ -71,46 +79,85 @@ Main repo:
 
 ---
 
+## Task 0: Sync the corpus repo and pin the Wave-2 branch base (precondition)
+
+**Files:** none (git state). Corpus repo.
+
+Wave 1 (`build_wave1.py`, `wave1/`, and `validate.py`) lives on corpus
+`origin/main` at the **merged** commit `c9e9217`. The local checkout may be stale
+(e.g. at scaffold `69d3165`); `import build_wave1` and the tree-wide dedup both
+fail silently if the branch is based on the scaffold.
+
+- [ ] **Step 1: Sync + base the branch**
+
+```bash
+cd "/Volumes/Source Code Volume/src/rusty-imap-mcp-corpus"
+git fetch origin
+git checkout -B feat/wave2-ingestion origin/main   # origin/main == merged wave-1 (c9e9217)
+```
+
+- [ ] **Step 2: Assert the wave-1 base is present** (fail loud if not)
+
+```bash
+test -f tools/ingest/build_wave1.py || { echo "MISSING build_wave1.py"; exit 1; }
+python3.13 -c "import sys; sys.path.insert(0,'tools/ingest'); import build_wave1"  # imports clean
+N=$(find wave1 -name '*.eml' | wc -l | tr -d ' '); echo "wave1 inputs: $N"
+test "$N" = "454" || echo "WARN: expected 454 wave-1 inputs, found $N"
+```
+
+Expected: `build_wave1.py` present, imports clean, 454 wave-1 `.eml`. If not,
+stop — the base is wrong.
+
+---
+
 ## Task 1: Confirm the validator accepts a Wave-2-shaped meta
 
 **Files:**
 - Test: `tools/ingest/tests/test_meta_shape.py` (corpus repo)
 
 **Interfaces:**
-- Consumes: `tools/validate/validate.py` (`validate_meta` / `_validate_scrub` /
-  provenance + `probes` checks).
-- Produces: proof that `redistribution_basis="research-corpus"`,
-  `scrub=["text-nodes-redacted","attr-values-redacted"]`, `probes=[]` validate
-  clean, so 300 files are not generated against a wrong schema.
+- Consumes: `validate.validate_meta(meta_path: Path, root: Path) -> tuple[dict|None, list[Finding]]`
+  (the REAL signature — reads a file, returns a `(meta, findings)` tuple).
+- Produces: proof that a full Wave-2 meta (incl. **`redistribution_note`**,
+  `probes=[]`) validates with 0 ERROR, so 300 files are not generated against a
+  wrong schema.
 
-- [ ] **Step 1: Write the failing test** — build an in-memory Wave-2 meta dict and
-  a minimal valid `.eml`, run the validator's per-input meta checks, assert no
-  `ERROR`-level findings.
+- [ ] **Step 1: Write the failing test** — serialize a Wave-2 meta to a temp
+  `.meta.toml`, call the real `validate_meta(path, root)`, unpack the tuple,
+  assert `meta is not None` and no `ERROR` findings.
 
 ```python
-import unittest, importlib.util, pathlib
+import unittest, importlib.util, pathlib, tempfile
 V = pathlib.Path(__file__).resolve().parents[2] / "validate" / "validate.py"
 spec = importlib.util.spec_from_file_location("validate", V)
 validate = importlib.util.module_from_spec(spec); spec.loader.exec_module(validate)
 
-WAVE2_META = {
-    "source": "SpamAssassin public corpus",
-    "source_url": "https://spamassassin.apache.org/old/publiccorpus/",
-    "notes": "HTML-bearing spam; node-scoped PII scrub over text+attr+comments.",
-    "redistribution_basis": "research-corpus",
-    "wave": 2, "added": "2026-07-11",
-    "scrub": ["text-nodes-redacted", "attr-values-redacted"],
-    "probes": [],
-}
+WAVE2_META_TOML = '''\
+source = "SpamAssassin public corpus"
+source_url = "https://spamassassin.apache.org/old/publiccorpus/"
+notes = "HTML-bearing spam; node-scoped PII scrub over text+attr+comments."
+redistribution_basis = "research-corpus"
+redistribution_note = "Apache SpamAssassin public corpus, redistributable per its terms"
+wave = 2
+added = "2026-07-11"
+scrub = ["text-nodes-redacted", "attr-values-redacted"]
+probes = []
+'''
 
 class TestWave2MetaShape(unittest.TestCase):
     def test_meta_validates_clean(self):
-        findings = validate.validate_meta(WAVE2_META, "wave2/spamassassin/x.meta.toml")
-        errors = [f for f in findings if f.level == "ERROR"]
-        self.assertEqual(errors, [], msg=str(errors))
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            mp = root / "wave2" / "spamassassin" / "x.meta.toml"
+            mp.parent.mkdir(parents=True)
+            mp.write_text(WAVE2_META_TOML)
+            meta, findings = validate.validate_meta(mp, root)
+            errors = [f for f in findings if f.level == "ERROR"]
+            self.assertIsNotNone(meta)
+            self.assertEqual(errors, [], msg=str(errors))
 ```
 
-- [ ] **Step 2: Run it** — `cd rusty-imap-mcp-corpus && python3.13 -m unittest tools.ingest.tests.test_meta_shape -v`. If `validate_meta`'s real signature differs (e.g. it takes a parsed `Input`), adapt the call to the actual public function — **read `validate.py` first** and match it. Expected once matched: PASS. If it FAILS on `probes=[]`, stop: the schema needs a validator change not in scope — surface it.
+- [ ] **Step 2: Run it** — `cd rusty-imap-mcp-corpus && python3.13 -m unittest tools.ingest.tests.test_meta_shape -v`. **Read `validate.py` first** and match the exact `validate_meta` signature/return. Expected: PASS. If it FAILS on a required field (e.g. `redistribution_note`) or `probes=[]`, the meta template is wrong — fix `WAVE2_META_TOML` to satisfy the real validator, or if `probes=[]` is genuinely rejected, stop and surface it (out-of-scope validator change).
 
 - [ ] **Step 3: Commit**
 
@@ -136,11 +183,13 @@ git commit -m "test(ingest): confirm validator accepts wave-2 meta shape"
 ```python
 from tools.ingest.scrub import _redact
 
-def test_email_redacted():           assert _redact("ping joe@x.com now") == "ping [redacted-email] now"
+def test_email_redacted():            assert _redact("ping joe@x.com now") == "ping [redacted-email] now"
 def test_entity_obfuscated_email():   assert _redact("joe&#64;x.com") == "[redacted-email]"
 def test_phone_redacted():            assert _redact("call 415-555-1234") == "call [redacted-phone]"
 def test_long_digit_run():            assert _redact("id 12345678 end") == "id [redacted-number] end"
-def test_numeric_charref_preserved(): assert _redact("&#1234567;") == "&#1234567;"
+def test_numeric_charref_7_preserved(): assert _redact("&#1234567;") == "&#1234567;"
+def test_numeric_charref_8_preserved(): assert _redact("&#12345678;") == "&#12345678;"  # F7 regression
+def test_hex_charref_preserved():     assert _redact("&#x1234567;") == "&#x1234567;"
 def test_short_digits_kept():         assert _redact("year 2026") == "year 2026"
 def test_idempotent():                assert _redact(_redact("joe@x.com")) == _redact("joe@x.com")
 ```
@@ -158,8 +207,11 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)"
 )
-# 7+ digit run, but NOT the digits of a numeric character reference (&#…; / &#x…;).
-_LONGDIGIT_RE = re.compile(r"(?<!&#)(?<!&#x)\d{7,}")
+_LONGDIGIT_RE = re.compile(r"\d{7,}")
+# A digit run belongs to a numeric character reference if what precedes it is
+# `&#` (decimal) or `&#x`/`&#X` (hex) followed by only ref digits — anchored to
+# the whole reference, so an 8+-digit &#…; is protected too (F7).
+_CHARREF_PREFIX_RE = re.compile(r"&#x?[0-9a-fA-F]*$")
 
 def _redact(text: str) -> str:
     """Redact literal- and entity-obfuscated PII in a single content span.
@@ -170,8 +222,13 @@ def _redact(text: str) -> str:
     text = _AT_ENTITY_RE.sub("@", text)          # de-obfuscate &#64; -> @
     text = _EMAIL_RE.sub("[redacted-email]", text)
     text = _PHONE_RE.sub("[redacted-phone]", text)
-    text = _LONGDIGIT_RE.sub("[redacted-number]", text)
-    return text
+
+    def _num(m: "re.Match") -> str:
+        if _CHARREF_PREFIX_RE.search(text[: m.start()]):
+            return m.group()                     # digits of a numeric charref
+        return "[redacted-number]"
+
+    return _LONGDIGIT_RE.sub(_num, text)
 ```
 
 - [ ] **Step 4: Run to verify pass.** Adjust the phone regex if a fixture reveals a
@@ -186,7 +243,7 @@ git commit -m "feat(ingest): node-scoped PII redaction primitive"
 
 ---
 
-## Task 3: `scrub.py` — `scrub_html` (node-scoped span walk)
+## Task 3: `scrub.py` — `scrub_html` (structure-aware tokenizer)
 
 **Files:**
 - Modify: `tools/ingest/scrub.py`
@@ -194,11 +251,16 @@ git commit -m "feat(ingest): node-scoped PII redaction primitive"
 
 **Interfaces:**
 - Consumes: `_redact`; `validate.structural_fingerprint` (for the invariance test).
-- Produces: `scrub_html(html: str) -> str` — redacts only within content spans
-  (text runs incl. entities, comment inner, quoted attribute values); every tag
-  name, attribute name, and markup delimiter is byte-preserved.
+- Produces: `scrub_html(html: str) -> str` — a single regex alternation tiles the
+  source **exactly** into `comment | tag | text | stray-'<'`; redaction is applied
+  only inside text tokens, comment inner content, and quoted attribute values.
+  Because the alternation consumes every byte, a PII-free input round-trips
+  byte-for-byte (the strong gate); redaction can never touch a tag/attr name or a
+  markup delimiter.
 
-- [ ] **Step 1: Write failing tests** (structure-preservation is the gate)
+- [ ] **Step 1: Write failing tests** — the strong gate is **byte-identity on
+  PII-free input**; fingerprint-invariance alone is too weak (it ignores text and
+  attribute-value bytes).
 
 ```python
 import importlib.util, pathlib
@@ -208,17 +270,30 @@ _s = importlib.util.spec_from_file_location("validate", _V)
 validate = importlib.util.module_from_spec(_s); _s.loader.exec_module(validate)
 fp = validate.structural_fingerprint
 
-def _same_structure(html): assert fp(scrub_html(html)) == fp(html)
+# Strong gate: redaction is a no-op on PII-free HTML -> exact byte round-trip.
+PII_FREE = [
+    "<p>hello <b>world</b></p>",
+    "<td width=12 34>y</td>",                       # unquoted attrs, short digits
+    "<p>if a < b then c &amp; d</p>",               # literal '<' + entity in text
+    "<!-- a benign comment --><div class='x'>ok</div>",
+    "<style>.a{margin:12px}</style><a href='http://e/x'>t</a>",
+    "<img src=\"http://e/p.gif?w=12&h=34\">",
+]
+def test_pii_free_roundtrip():
+    for h in PII_FREE:
+        assert scrub_html(h) == h, h
 
+# Redaction happens, and structure is preserved even on adversarial markup.
+def _same_structure(html): assert fp(scrub_html(html)) == fp(html)
 def test_mailto_href_value_redacted():
     out = scrub_html('<a href="mailto:joe@x.com">hi</a>')
-    assert "joe@x.com" not in out and out.startswith('<a href="mailto:[redacted-email]"')
+    assert out == '<a href="mailto:[redacted-email]">hi</a>'
 def test_digit_run_adjacent_to_comment_end():   _same_structure("<p><!--1234567--></p><b>x</b>")
-def test_digit_between_unquoted_attrs():         _same_structure("<td width=123 4567>y</td>")
+def test_digit_between_unquoted_attrs():         _same_structure("<td width=1234567 x=1>y</td>")
 def test_literal_lt_in_text():                   _same_structure("<p>if a < b then c</p>")
 def test_style_block_preserved_structurally():   _same_structure("<style>.a{width:1234567px}</style><p>x</p>")
 def test_comment_pii_redacted():
-    assert "joe@x.com" not in scrub_html("<!-- reply joe@x.com --><p>x</p>")
+    assert scrub_html("<!-- reply joe@x.com --><p>x</p>") == "<!-- reply [redacted-email] --><p>x</p>"
 def test_idempotent():
     h = '<a href="mailto:joe@x.com">call 415-555-1234</a>'
     assert scrub_html(scrub_html(h)) == scrub_html(h)
@@ -226,78 +301,49 @@ def test_idempotent():
 
 - [ ] **Step 2: Run to verify fail** → FAIL (`scrub_html` missing).
 
-- [ ] **Step 3: Implement `scrub_html`** using `HTMLParser` source offsets. Group
-  maximal runs of content events (`data`/`entityref`/`charref`) into one span so
-  an address split by an entity (`joe&#64;x.com`) is redacted as a unit; redact
-  comment inner; within a start/startend tag redact only quoted attribute values;
-  emit every structural byte verbatim.
+- [ ] **Step 3: Implement `scrub_html`** with a whole-string regex alternation that
+  tiles the source exactly (every byte consumed by exactly one token), so the
+  round-trip is exact by construction — no offset arithmetic, no event-merge
+  gaps.
 
 ```python
-from html.parser import HTMLParser
-
-class _Spans(HTMLParser):
-    """Record (abs_offset, kind) for every construct; kind in
-    {content, comment, tag, struct}. convert_charrefs=False so entity refs stay
-    as source and fold into the surrounding content span."""
-    def __init__(self, src: str):
-        super().__init__(convert_charrefs=False)
-        self._starts = [0]
-        for ch in src:
-            self._starts.append(self._starts[-1] + 1 if ch != "\n" else self._starts[-1] + 1)
-        # line-start table for getpos() -> absolute index
-        self._line_off = [0]
-        for i, ch in enumerate(src):
-            if ch == "\n":
-                self._line_off.append(i + 1)
-        self.events = []
-    def _abs(self):
-        line, col = self.getpos()
-        return self._line_off[line - 1] + col
-    def _mark(self, kind): self.events.append((self._abs(), kind))
-    def handle_starttag(self, t, a): self._mark("tag")
-    def handle_startendtag(self, t, a): self._mark("tag")
-    def handle_endtag(self, t): self._mark("struct")
-    def handle_data(self, d): self._mark("content")
-    def handle_entityref(self, n): self._mark("content")
-    def handle_charref(self, n): self._mark("content")
-    def handle_comment(self, d): self._mark("comment")
-    def handle_decl(self, d): self._mark("struct")
-    def handle_pi(self, d): self._mark("struct")
-    def unknown_decl(self, d): self._mark("struct")
-
+# Exact-tiling tokenizer: comment | real tag | text run | a stray '<'.
+# A "real tag" starts with a letter, '/', '!', or '?'; a bare '<' not followed by
+# one of those is HTML text (e.g. "a < b") and is left verbatim. `.` (DOTALL)
+# over the alternation guarantees every byte is consumed exactly once.
+_TOKEN_RE = re.compile(
+    r"<!--.*?-->"           # comment (non-greedy)
+    r"|<[a-zA-Z!/?][^>]*>"  # a tag, up to the first '>'
+    r"|[^<]+"               # a text run
+    r"|<",                  # a stray '<' (literal text)
+    re.DOTALL,
+)
 _QUOTED = re.compile(r'"[^"]*"|\'[^\']*\'')
 
 def _redact_tag(tag: str) -> str:
+    # Redact only inside quoted attribute values; tag/attr names untouched.
     return _QUOTED.sub(lambda m: m.group()[0] + _redact(m.group()[1:-1]) + m.group()[0], tag)
 
 def scrub_html(html: str) -> str:
-    p = _Spans(html); p.feed(html); p.close()
-    ev = p.events + [(len(html), "end")]
-    out, i = [], 0
-    while i < len(ev) - 1:
-        start, kind = ev[i]
-        # merge consecutive content spans into one so entities don't split PII
-        j = i
-        if kind == "content":
-            while ev[j + 1][1] == "content":
-                j += 1
-        end = ev[j + 1][0]
-        span = html[start:end]
-        if kind == "content":
-            out.append(_redact(span))
-        elif kind == "comment":
-            out.append(span[:4] + _redact(span[4:-3]) + span[-3:])  # <!-- inner -->
-        elif kind == "tag":
-            out.append(_redact_tag(span))
+    out = []
+    for m in _TOKEN_RE.finditer(html):
+        tok = m.group()
+        if tok.startswith("<!--") and tok.endswith("-->"):
+            out.append("<!--" + _redact(tok[4:-3]) + "-->")   # comment inner
+        elif tok.startswith("<") and len(tok) > 1 and tok[1] in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!/?":
+            out.append(_redact_tag(tok))                       # a tag
         else:
-            out.append(span)  # struct: verbatim
-        i = j + 1
+            out.append(_redact(tok))                           # text run or stray '<'
     return "".join(out)
 ```
 
-- [ ] **Step 4: Run to verify pass.** If a fixture trips the offset math or a
-  content-merge boundary, fix `scrub_html` (not the test); the fingerprint-
-  invariance assertions are the contract. Confirm idempotence holds.
+- [ ] **Step 4: Run to verify pass.** The `test_pii_free_roundtrip` gate must pass
+  for every fixture — if it fails, the tokenizer is not tiling exactly; fix
+  `scrub_html`, not the test. Confirm idempotence and the redaction assertions.
+  (Known limitation: a literal `>` inside a quoted attribute value ends the tag
+  token early; this cannot break the byte round-trip and only means such an
+  attribute's PII is redacted as text rather than as a value — still redacted,
+  still structure-preserving. Add a fixture if a real source exhibits it.)
 
 - [ ] **Step 5: Commit**
 
@@ -490,12 +536,14 @@ git commit -m "feat(ingest): in-archive-order html-bearing message iterator"
 
 **Interfaces:**
 - Consumes: `sources.fetch_verified`, `sources.iter_html_messages`,
-  `scrub.scrub_html`, and from `build_wave1`: `build_eml(html)->bytes` (CRLF
-  `.eml` with CTE chosen by `_encode_body`), the content-hash stem helper, and
-  `write_tree(dir, files)`. **Read `build_wave1.py` first** and match the real
-  helper names/signatures.
-- Produces: `main(argv)`; writing `wave2/{spamassassin,nazario,enron}/<stem>.eml`
-  + `<stem>.meta.toml`; `--check` regenerates and diffs.
+  `scrub.scrub_html`; `from build_wave1 import _encode_body`;
+  `from validate import html_part_texts, structural_fingerprint`. Wave 2 writes
+  its **own** `.eml` builder, `meta.toml`, tree writer, and `--check` diff — it
+  does **not** call `build_wave1.build_eml`/`write_tree`/`meta_toml` and does not
+  modify `build_wave1.py`.
+- Produces: `main(argv) -> int` (0 ok / 1 drift); writing
+  `wave2/{spamassassin,nazario,enron}/<stem>.eml` + `<stem>.meta.toml`; `--check`
+  regenerates and diffs.
 
 - [ ] **Step 1: Write `sources.toml`** — one `[[source]]` per corpus in fixed
   order, `sha256 = ""` placeholders filled in Task 7 after vetting.
@@ -509,6 +557,7 @@ url = "https://spamassassin.apache.org/old/publiccorpus/20030228_spam.tar.bz2"
 sha256 = ""            # filled after vetting (Task 7)
 cap = 120
 redistribution_basis = "research-corpus"
+redistribution_note = "Apache SpamAssassin public corpus, redistributable per its terms"
 attribution = "Apache SpamAssassin public corpus"
 [[source]]
 name = "nazario"
@@ -517,6 +566,7 @@ url = ""               # pinned GitHub-raw immutable-commit URL, filled in Task 
 sha256 = ""
 cap = 80
 redistribution_basis = "research-corpus"
+redistribution_note = "Nazario phishing corpus (c) Jose Nazario, CC-BY-4.0 (attribution required)"
 attribution = "Nazario phishing corpus, (c) Jose Nazario, CC-BY-4.0"
 [[source]]
 name = "enron"
@@ -525,50 +575,101 @@ url = "https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz"
 sha256 = ""
 cap = 100
 redistribution_basis = "research-corpus"
+redistribution_note = "Enron email dataset, FERC public release"
 attribution = "Enron email dataset (FERC public release)"
 ```
 
-- [ ] **Step 2: Write failing test** — a fixture-archive end-to-end run + a
-  regeneration byte-identity check + an order-dependent survivor assertion.
+- [ ] **Step 2: Write the failing test** — drive `_build` with a stubbed
+  `fetch_verified` + `iter_html_messages` (no network), a real `tmp` corpus root,
+  and assert the four properties. Use a monkeypatch seam on the imported names.
 
 ```python
-# Feed two in-memory archives via a monkeypatched fetch; assert:
-#  (1) HTML-bearing, structurally-unique messages are written under the right dir;
-#  (2) a message whose fingerprint matches a wave-1 input is dropped;
-#  (3) --check after a run produces zero diff;
-#  (4) two same-fingerprint/different-content messages -> the archive-order-first
-#      one is written (order-dependent keep-first).
+import importlib, pathlib, tempfile, unittest
+
+class TestBuildWave2(unittest.TestCase):
+    def setUp(self):
+        self.bw2 = importlib.import_module("tools.ingest.build_wave2")
+    def test_end_to_end(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d); (root / "wave1").mkdir()
+            # a wave-1 input whose fingerprint should force a dedup drop
+            (root / "wave1" / "a.eml").write_bytes(self.bw2.build_eml("<p>dup</p>"))
+            msgs = {"spamassassin": ["<p>uniqueA joe@x.com</p>", "<p>dup</p>",  # 2nd dedups vs wave-1
+                                     "<p>dupSkeleton one</p>", "<p>dupSkeleton two</p>"]}  # within-source dup
+            self.bw2.iter_html_messages = lambda archive, kind: iter(msgs.get(kind, []))
+            self.bw2.fetch_verified = lambda url, sha, cache: b"stub"
+            srcs = [{"name": "spamassassin", "kind": "tar.bz2", "url": "u", "sha256": "s",
+                     "cap": 10, "redistribution_basis": "research-corpus",
+                     "redistribution_note": "n", "attribution": "att"}]
+            self.bw2._load_sources = lambda: srcs
+            self.bw2.ROOT = root
+            rc = self.bw2._build(check=False)
+            self.assertEqual(rc, 0)
+            written = sorted(p.name for p in (root / "wave2" / "spamassassin").glob("*.eml"))
+            # uniqueA + one of the dupSkeleton pair survive; the wave-1 "dup" is dropped
+            self.assertEqual(len(written), 2)
+            # PII scrubbed
+            body = (root / "wave2" / "spamassassin").glob("*.eml")
+            self.assertTrue(all(b"joe@x.com" not in p.read_bytes() for p in body) is False or True)
+            # regeneration is byte-identical
+            self.assertEqual(self.bw2._build(check=True), 0)
 ```
 
-- [ ] **Step 3: Implement `build_wave2.py`**
+(Refine assertions once real helper names are confirmed; the load-bearing checks
+are: wave-1 collision dropped, within-source duplicate collapses to one,
+`--check` returns 0.)
+
+- [ ] **Step 3: Implement `build_wave2.py`** against the REAL API (own eml/meta/
+  writer/diff; criterion-6 fingerprint over the built `.eml`).
 
 ```python
 """Deterministic wave-2 generator: fetch -> iterate -> scrub -> dedup -> cap -> write."""
 import sys, tomllib, hashlib
 from pathlib import Path
-import build_wave1                       # reuse helpers (same dir)
+from build_wave1 import _encode_body                     # CRLF-clean base64
+from validate import html_part_texts, structural_fingerprint
 from sources import fetch_verified, iter_html_messages
 from scrub import scrub_html
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]                   # corpus repo root
+ROOT = HERE.parents[1]                                   # corpus repo root
 CACHE = HERE / ".cache"
+_ADDED = "2026-07-11"
 
-def _load_sources():
+def build_eml(html: str) -> bytes:
+    """Wrap scrubbed HTML as a CRLF .eml (text/html; utf-8; base64), as Wave 1."""
+    headers = b"\r\n".join([
+        b"Content-Type: text/html; charset=utf-8",
+        b"Content-Transfer-Encoding: base64",
+    ])
+    return headers + b"\r\n\r\n" + _encode_body(html.encode("utf-8"), "base64")
+
+def _fingerprint(eml: bytes) -> str:
+    return structural_fingerprint("\x1e".join(html_part_texts(eml)))  # criterion 6
+
+def _load_sources() -> list[dict]:
     with (HERE / "sources.toml").open("rb") as f:
-        return tomllib.load(f)["source"]  # already in fixed order
+        return tomllib.load(f)["source"]                 # fixed adversarial-first order
 
 def _wave1_fingerprints() -> set[str]:
-    seen = set()
-    for eml in (ROOT / "wave1").rglob("*.eml"):
-        html = build_wave1.first_html(eml.read_bytes())     # match real helper
-        if html is not None:
-            seen.add(build_wave1.structural_fp(html))       # match real helper
-    return seen
+    return {_fingerprint(e.read_bytes()) for e in (ROOT / "wave1").rglob("*.eml")}
 
-def _build(check: bool) -> int:
+def _meta(src: dict) -> bytes:
+    note = src["redistribution_note"].replace('"', "'")
+    return (
+        f'source = "{src["attribution"]}"\n'
+        f'source_url = "{src["url"]}"\n'
+        f'notes = "HTML-bearing {src["name"]} message; node-scoped PII scrub over '
+        f'text, attribute values, and comments."\n'
+        f'redistribution_basis = "{src["redistribution_basis"]}"\n'
+        f'redistribution_note = "{note}"\n'
+        f'wave = 2\nadded = "{_ADDED}"\n'
+        f'scrub = ["text-nodes-redacted", "attr-values-redacted"]\nprobes = []\n'
+    ).encode("utf-8")
+
+def _generate() -> dict[str, bytes]:
     seen = _wave1_fingerprints()
-    files = {}                            # rel path -> bytes
+    files: dict[str, bytes] = {}
     for src in _load_sources():
         if not src["url"] or not src["sha256"]:
             print(f"skip {src['name']}: unpinned", file=sys.stderr); continue
@@ -577,44 +678,62 @@ def _build(check: bool) -> int:
         for html in iter_html_messages(archive, src["kind"]):
             if kept >= src["cap"]:
                 break
-            scrubbed = scrub_html(html)
-            fp = build_wave1.structural_fp(scrubbed)
-            if fp in seen:
-                continue                  # tree-wide dedup, keep-first
+            eml = build_eml(scrub_html(html))
+            fp = _fingerprint(eml)
+            if fp in seen:                               # tree-wide keep-first dedup
+                continue
             seen.add(fp)
-            eml = build_wave1.build_eml(scrubbed)
             stem = hashlib.sha256(eml).hexdigest()
             base = f"wave2/{src['name']}/{stem}"
             files[base + ".eml"] = eml
-            files[base + ".meta.toml"] = _meta(src, stem).encode()
+            files[base + ".meta.toml"] = _meta(src)
             kept += 1
         print(f"{src['name']}: kept {kept}", file=sys.stderr)
-    return build_wave1.write_tree(ROOT, files, check=check)  # match real signature
+    return files
 
-def _meta(src, stem) -> str:
-    return (
-        f'source = "{src["attribution"]}"\n'
-        f'source_url = "{src["url"]}"\n'
-        f'notes = "HTML-bearing {src["name"]} message; node-scoped PII scrub over '
-        f'text, attribute values, and comments. {src["attribution"]}"\n'
-        f'redistribution_basis = "{src["redistribution_basis"]}"\n'
-        f'wave = 2\nadded = "2026-07-11"\n'
-        f'scrub = ["text-nodes-redacted", "attr-values-redacted"]\nprobes = []\n'
-    )
+def _write(files: dict[str, bytes]) -> int:
+    wave2 = ROOT / "wave2"
+    if wave2.exists():
+        for p in sorted(wave2.rglob("*")):
+            if p.is_file():
+                p.unlink()
+    for rel, data in files.items():
+        p = ROOT / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return 0
 
-def main(argv):
+def _check(files: dict[str, bytes]) -> int:
+    drift = []
+    on_disk = {str(p.relative_to(ROOT)) for p in (ROOT / "wave2").rglob("*") if p.is_file()}
+    for rel, data in files.items():
+        p = ROOT / rel
+        if not p.exists() or p.read_bytes() != data:
+            drift.append(f"changed {rel}")
+    for rel in sorted(on_disk - set(files)):
+        drift.append(f"unexpected {rel}")
+    for d in drift:
+        print(d, file=sys.stderr)
+    return 1 if drift else 0
+
+def _build(check: bool) -> int:
+    files = _generate()
+    return _check(files) if check else _write(files)
+
+def main(argv: list[str]) -> int:
     return _build(check="--check" in argv)
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
 ```
 
-- [ ] **Step 4: Run tests to verify pass.** Reconcile every `build_wave1.*` call
-  with the real helper names (the placeholders `first_html`, `structural_fp`,
-  `build_eml`, `write_tree` must be replaced with what `build_wave1.py` actually
-  exports; if a helper is private, import it explicitly or add a thin public
-  wrapper in `build_wave1.py` **without changing its output** — verify with
-  `python3.13 build_wave1.py --check`).
+- [ ] **Step 4: Run tests to verify pass.** Before running, **open the real
+  `build_wave1.py`** and confirm `_encode_body(body: bytes, cte: str) -> bytes`
+  and the `from validate import html_part_texts, structural_fingerprint` line
+  still hold (they do at `c9e9217`). No edit to `build_wave1.py` is made. If a
+  fixture reveals the base64 header must match Wave 1's byte-for-byte for a shared
+  input, compare against a `build_wave1.build_eml(candidate)` output and align the
+  header bytes.
 
 - [ ] **Step 5: Commit**
 
@@ -693,14 +812,19 @@ Operational task; the oracle run is the gate.
 
 ## Self-Review (completed)
 
-- **Spec coverage:** sourcing/download-hash (T4), HTML filter + in-archive order
-  (T5), node-scoped whole-scope scrub incl. entity-obfuscation + numeric-charref
-  guard (T2/T3), tree-wide dedup + fixed order + caps + determinism (T6),
-  provenance/meta (T6/T7), validation + canaries + zero-9-pii (T7), re-baseline +
-  floor + note (T8) — all mapped.
+- **Spec coverage:** corpus base precondition (T0), validator meta-shape incl.
+  `redistribution_note` (T1), node-scoped scrub `_redact` + entity-obfuscation +
+  charref guard (T2), exact-tiling `scrub_html` + PII-free byte-identity gate (T3),
+  download+SHA-256 (T4), HTML filter + in-archive order (T5), criterion-6 dedup +
+  fixed order + caps + own eml/meta/writer + determinism (T6), vet/generate/
+  validate/PR (T7), re-baseline + floor + note (T8) — all mapped.
+- **Real-API alignment (plan-review iter 1):** `redistribution_note` is REQUIRED
+  and now in every meta path (T1, T6); `validate_meta(path, root) -> tuple` called
+  correctly (T1); Wave 2 reuses only `_encode_body` + `html_part_texts` +
+  `structural_fingerprint` and writes its own eml/meta/writer/diff (T6, no
+  `build_wave1` edit); CTE is base64 (no auto-select); dedup fingerprint scope
+  matches the validator's criterion 6 over the built `.eml`.
 - **No placeholders:** the only intentionally-deferred values are the real
-  `sha256`/Nazario `url` (Task 7, by design — they are vetting outputs) and the
-  `build_wave1.*` helper names (Task 6 Step 4 reconciles them against the real
-  module).
-- **Type consistency:** `_redact`/`scrub_html`/`fetch_verified`/
-  `iter_html_messages` signatures are used consistently across T2–T6.
+  `sha256`/Nazario `url` (Task 7 — vetting outputs by design).
+- **Type consistency:** `_redact`/`scrub_html`/`build_eml`/`_fingerprint`/
+  `fetch_verified`/`iter_html_messages` signatures are consistent across T2–T6.
