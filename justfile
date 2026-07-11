@@ -213,6 +213,11 @@ prune-containers:
 man:
     cargo run -p xtask --no-default-features --release --locked -- man --out man/man1
 
+# Unit + fixture tests for install.sh (no network; file:// fixtures). Covers the
+# target map, checksum verify, and every handled exit code. Part of `ci`.
+test-installer:
+    bash scripts/install.test.sh
+
 # Unit and fast tests (no Proton Bridge).
 test: prune-containers
     cargo nextest run --workspace --locked --no-tests=pass
@@ -355,7 +360,7 @@ semver-checks:
     cargo semver-checks check-release --workspace
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-installer
     typos
 
 # Re-run pre-commit hooks across all files.
