@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: randomparity/rusty-imap-mcp-corpus
-          ref: 8387292061098d1299aa504cffb7be0a5bcb4dde  # PINNED — bump via reviewed PR only (wave-1, #551)
+          ref: c9e9217257c853916ac52644e673eb0782525029  # PINNED — bump via reviewed PR only (wave-1, #551)
           path: corpus
           token: ${{ secrets.CORPUS_READ_TOKEN }}
           persist-credentials: false

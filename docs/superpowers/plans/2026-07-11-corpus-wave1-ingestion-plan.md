@@ -105,7 +105,7 @@ then open the main-repo PR for review.**
 
 - [x] Wave-1 inputs ingested + passing `validate.yml`, all three canary families
       present. (454 inputs; corpus PR merged at SHA
-      `8387292061098d1299aa504cffb7be0a5bcb4dde`.)
+      `c9e9217257c853916ac52644e673eb0782525029`.)
 - [x] First nightly over the pinned wave-1 corpus green (0 HARD, 83.0 % coverage);
       `corpus-allowlist.toml` (0 entries, triaged) + `--corpus-min-compared 338`
       populated from it.
@@ -114,7 +114,9 @@ then open the main-repo PR for review.**
 
 ## Outcome (as merged)
 
-- Corpus repo PR #1 merged → pinned SHA `8387292061098d1299aa504cffb7be0a5bcb4dde`.
+- Corpus repo PR #1 (ingestion) + PR #2 (review follow-up: body-hash exclusion
+  guard + honest curation docs; `wave1/` byte-identical) merged → pinned SHA
+  `c9e9217257c853916ac52644e673eb0782525029`.
 - Curated to comparable inputs (operator decision): empty-reference and
   non-comparable (foster-parenting/frameset/plaintext/NUL) html5lib cases
   excluded at ingestion; all exclusions are benign reference-limitation

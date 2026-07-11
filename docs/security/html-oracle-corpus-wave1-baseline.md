@@ -15,7 +15,7 @@ propped up by the tame in-repo corpus — the whole point of the per-prefix coun
 ## Pinned corpus
 
 - Repo: `randomparity/rusty-imap-mcp-corpus` (private)
-- Pinned SHA: `8387292061098d1299aa504cffb7be0a5bcb4dde` (wave-1 ingestion)
+- Pinned SHA: `c9e9217257c853916ac52644e673eb0782525029` (wave-1 ingestion)
 - Inputs: **454** — 402 html5lib-tests, 14 email templates, 38 synthetic
   (all MIT/permissive, PII-free). Generated deterministically; see that repo's
   `tools/ingest/README.md`.
@@ -25,7 +25,7 @@ propped up by the tame in-repo corpus — the whole point of the per-prefix coun
 ```bash
 # Check out the corpus at the pinned SHA (nightly does this into corpus/).
 git clone git@github.com:randomparity/rusty-imap-mcp-corpus.git corpus
-git -C corpus checkout 8387292061098d1299aa504cffb7be0a5bcb4dde
+git -C corpus checkout c9e9217257c853916ac52644e673eb0782525029
 
 cargo run --locked --manifest-path html-oracle/Cargo.toml -- \
   --repo-root . --corpus-root corpus --corpus-min-compared 338 \
@@ -67,14 +67,24 @@ the allowlist is empty.
 The wave-1 nightly produces **0 HARD** and needs **0 allowlist entries**. During
 ingestion the html5lib corpus surfaced a class of *benign* divergences where the
 streaming `lol_html` reference cannot match production's full html5ever tree
-construction — foster-parenting / adoption-agency text merges, `<frameset>`
-character-data discarding, NUL→U+FFFD replacement, and `<plaintext>` streaming
-errors. In every case production loses **no** visible text (it merges or
-replaces-with-U+FFFD, never silently drops), so none is a sanitizer bug. These
-are curated out at corpus-repo ingestion (documented, reproducible, keyed by
-reason) rather than suppressed per-input here — the runtime `corpus-allowlist.toml`
-stays empty, which is the healthy state. Had any divergence been a real silent
-drop it would have been filed as a bug and its input removed, never allowlisted.
+construction. In every case production's output matches the browser-visible text
+and the streaming reference over-reports — via one of three benign mechanisms:
+
+- **adjacency / foster-parenting / adoption-agency merges** — production merges
+  two adjacent runs the reference splits (`hello`+`excite` → `helloexcite`);
+  every character is preserved, nothing is dropped;
+- **inert-subtree suppression** — production correctly emits *no* text for
+  content that is non-visible per HTML5 (`<frameset>`, `<template>` bodies,
+  `<plaintext>` streaming errors), while the streaming reference retains it;
+- **NUL replacement** — production maps a NUL byte to a *visible* U+FFFD (HTML5
+  parse-error rule) where the reference drops it.
+
+None is a sanitizer bug: no browser-**visible** text is silently dropped. These
+are curated out at corpus-repo ingestion (documented, reproducible, body-hash
+guarded) rather than suppressed per-input here — the runtime
+`corpus-allowlist.toml` stays empty, which is the healthy state. Had any
+divergence been a real silent drop of visible text it would have been filed as a
+bug and its input removed, never hidden.
 
 ## Floor
 
