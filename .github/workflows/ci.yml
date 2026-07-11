@@ -208,6 +208,8 @@ jobs:
           tool: just
       - name: Validate publish metadata
         run: just check-metadata
+      - name: Unit-test publish-crates.sh
+        run: just test-publish-script
 
   deny:
     name: cargo-deny

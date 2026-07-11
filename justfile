@@ -328,8 +328,20 @@ check-metadata:
     #!/usr/bin/env bash
     ./scripts/check-publishable-metadata.sh
 
+# Unit-test the pure functions in publish-crates.sh (429 parse, -dev guard,
+# publish order). No crates.io access. Mirrored in the `publish-checks` CI job.
+test-publish-script:
+    #!/usr/bin/env bash
+    bash ./scripts/publish-crates.test.sh
+
+# Dry-run the crates.io publish: package all 8 crates (workspace) without
+# uploading. Validates manifests/metadata; runs on a normal -dev branch.
+publish-dry-run:
+    #!/usr/bin/env bash
+    ./scripts/publish-crates.sh --dry-run
+
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script
     typos
 
 # Re-run pre-commit hooks across all files.
