@@ -20,5 +20,8 @@ docs/superpoweres/plans/
 tests/mcp-conformance/node_modules/
 tests/mcp-conformance/coverage/
 
+# Generated manpages (xtask / `just man`; shipped in release artifacts, never committed)
+/man/
+
 # IBM Bob
 .bob/

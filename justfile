@@ -204,6 +204,15 @@ prune-containers:
         "$tool" volume rm -f "$vol" 2>/dev/null || true
     done || true
 
+# Generate roff manpages into man/man1/ (consumed by tarball/deb/rpm packaging).
+# The pages exclude test-support subcommands because xtask depends on rimap-server
+# with default-features = false (its `default = []`), so those #[cfg(feature =
+# "test-support")] subcommands are compiled out of the CLI entirely (they are also
+# #[command(hide = true)]). `--no-default-features` here is xtask-scoped defense
+# and matches the release job's invocation exactly.
+man:
+    cargo run -p xtask --no-default-features --release --locked -- man --out man/man1
+
 # Unit and fast tests (no Proton Bridge).
 test: prune-containers
     cargo nextest run --workspace --locked --no-tests=pass
