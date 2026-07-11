@@ -38,10 +38,11 @@ FALLBACK_SLEEP="${FALLBACK_SLEEP:-660}"
 # How long to poll the sparse index for a just-published version before moving on.
 INDEX_TIMEOUT="${INDEX_TIMEOUT:-120}"
 
-# Read the workspace version (uniform across members).
+# Read the workspace version (uniform across members via workspace inheritance,
+# so any member's version is the workspace version).
 workspace_version() {
     cargo metadata --no-deps --format-version 1 |
-        python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="rimap-core"))'
+        python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])'
 }
 
 # Guard: in real mode refuse a -dev version (defense in depth beside verify-tag);

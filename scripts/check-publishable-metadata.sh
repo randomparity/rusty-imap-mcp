@@ -23,10 +23,12 @@ import json
 import os
 import sys
 
-# Valid crates.io category slugs used by this workspace. Source of truth:
-# https://crates.io/category_slugs  (keep this set in sync when adding a
-# category to a crate's manifest).
-VALID_CATEGORIES = {
+# The crates.io category slugs this workspace intentionally uses — an explicit
+# allowlist, not a mirror of crates.io's full set. A typo (e.g. "emial") is not
+# in the set and fails here; adding a genuinely new category is a deliberate
+# two-line change (manifest + this set). Valid slugs:
+# https://crates.io/category_slugs
+ALLOWED_CATEGORIES = {
     "email",
     "config",
     "parser-implementations",
@@ -51,10 +53,11 @@ for pkg in sorted(meta["packages"], key=lambda p: p["name"]):
 
     categories = pkg.get("categories") or []
     for slug in categories:
-        if slug not in VALID_CATEGORIES:
+        if slug not in ALLOWED_CATEGORIES:
             errors.append(
-                f"{name}: invalid category slug {slug!r} "
-                f"(not in {sorted(VALID_CATEGORIES)})"
+                f"{name}: category slug {slug!r} is not in this workspace's "
+                f"allowlist {sorted(ALLOWED_CATEGORIES)} "
+                f"(a typo, or a new category to add to the script)"
             )
 
     keywords = pkg.get("keywords") or []

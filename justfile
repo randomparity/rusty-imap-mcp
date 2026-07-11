@@ -325,19 +325,16 @@ check-tools-doc:
 # Validate per-crate crates.io publish metadata (description, category slugs,
 # keyword limits). Mirrored in the `publish-checks` CI job (issue #544).
 check-metadata:
-    #!/usr/bin/env bash
     ./scripts/check-publishable-metadata.sh
 
 # Unit-test the pure functions in publish-crates.sh (429 parse, -dev guard,
 # publish order). No crates.io access. Mirrored in the `publish-checks` CI job.
 test-publish-script:
-    #!/usr/bin/env bash
-    bash ./scripts/publish-crates.test.sh
+    ./scripts/publish-crates.test.sh
 
 # Dry-run the crates.io publish: package all 8 crates (workspace) without
 # uploading. Validates manifests/metadata; runs on a normal -dev branch.
 publish-dry-run:
-    #!/usr/bin/env bash
     ./scripts/publish-crates.sh --dry-run
 
 # Check the workspace public APIs against their last crates.io release for
@@ -346,7 +343,6 @@ publish-dry-run:
 # --version 0.48.0`). No-ops on crates with no published baseline, so it is not
 # part of `ci`; the release workflow runs it as a publish gate.
 semver-checks:
-    #!/usr/bin/env bash
     cargo semver-checks check-release --workspace
 
 # Full local-CI equivalent. If this passes, CI will pass.

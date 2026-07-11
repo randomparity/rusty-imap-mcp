@@ -21,6 +21,29 @@ check() {
     fi
 }
 
+# Assert a command succeeds / fails, reusing the failures bookkeeping.
+expect_ok() {
+    local desc="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        echo "ok: ${desc}"
+    else
+        echo "FAIL: ${desc} — command failed, expected success" >&2
+        failures=$((failures + 1))
+    fi
+}
+
+expect_fail() {
+    local desc="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        echo "FAIL: ${desc} — command succeeded, expected failure" >&2
+        failures=$((failures + 1))
+    else
+        echo "ok: ${desc}"
+    fi
+}
+
 # --- parse_retry_after ------------------------------------------------------
 # Real crates.io new-crate 429 message shape (cargo 1.94.0): the retry time is
 # an RFC 2822 / HTTP-date after "try again after", NOT a seconds value.
@@ -55,30 +78,52 @@ check "publish_outcome: 5xx server error is fail" "fail" \
     "$(publish_outcome 101 'error: failed to get a 200 OK response, got 502 Bad Gateway')"
 
 # --- version_ok_to_publish --------------------------------------------------
-if version_ok_to_publish "0.1.0" "real"; then
-    echo "ok: version_ok_to_publish allows a clean version in real mode"
-else
-    echo "FAIL: version_ok_to_publish rejected a clean version in real mode" >&2
-    failures=$((failures + 1))
-fi
+expect_ok "version_ok_to_publish allows a clean version in real mode" \
+    version_ok_to_publish "0.1.0" "real"
+expect_fail "version_ok_to_publish blocks a -dev version in real mode" \
+    version_ok_to_publish "0.1.1-dev" "real"
+expect_ok "version_ok_to_publish allows a -dev version under --dry-run" \
+    version_ok_to_publish "0.1.1-dev" "dry-run"
 
-if version_ok_to_publish "0.1.1-dev" "real" 2>/dev/null; then
-    echo "FAIL: version_ok_to_publish allowed a -dev version in real mode" >&2
-    failures=$((failures + 1))
-else
-    echo "ok: version_ok_to_publish blocks a -dev version in real mode"
-fi
+# --- publish order is a valid topological sort of the real workspace DAG -----
+# Not a tautology against a hand-copied list: derive the workspace members and
+# their intra-workspace normal/build dependency edges from `cargo metadata` and
+# assert CRATES is exactly those members, each published after its deps. Guards
+# the hand-maintained CRATES order against a new crate or a new dep edge.
+order_problems="$(
+    CRATES="${CRATES[*]}" python3 - <<'PY'
+import json
+import os
+import subprocess
 
-if version_ok_to_publish "0.1.1-dev" "dry-run"; then
-    echo "ok: version_ok_to_publish allows a -dev version under --dry-run"
-else
-    echo "FAIL: version_ok_to_publish blocked a -dev version under --dry-run" >&2
-    failures=$((failures + 1))
-fi
+order = os.environ["CRATES"].split()
+meta = json.loads(
+    subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+)
+members = {p["name"] for p in meta["packages"]}
+# Publish ordering depends on normal + build deps only (dev-deps are not in the
+# published dependency graph); exclude self-edges (the path-only self dev-deps).
+edges = {
+    p["name"]: {
+        d["name"]
+        for d in p["dependencies"]
+        if d["name"] in members and d["name"] != p["name"] and d.get("kind") in (None, "build")
+    }
+    for p in meta["packages"]
+}
 
-# --- publish order ----------------------------------------------------------
-expected_order="rimap-core rimap-config rimap-audit rimap-content rimap-authz rimap-imap rimap-smtp rimap-server"
-check "CRATES is the 8 crates in topological DAG order" "$expected_order" "${CRATES[*]}"
+problems = []
+if set(order) != members:
+    problems.append(f"CRATES {sorted(order)} != workspace members {sorted(members)}")
+pos = {name: i for i, name in enumerate(order)}
+for crate in order:
+    for dep in edges.get(crate, ()):
+        if pos.get(dep, len(order)) >= pos[crate]:
+            problems.append(f"{crate} published before its dependency {dep}")
+print("; ".join(problems))
+PY
+)"
+check "CRATES is a valid topological order of the workspace DAG" "" "$order_problems"
 
 if [ "$failures" -eq 0 ]; then
     echo "all publish-script unit tests passed"
