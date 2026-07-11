@@ -881,7 +881,15 @@ baseline; it lands in the wave-1 SHA-bump PR under #551).
   line that the nightly also runs `--corpus-root corpus` against the pinned
   `rusty-imap-mcp-corpus` checkout, and that `--corpus-root <dir>` +
   `--corpus-min-compared <N>` exist for local runs. Reference the corpus-expansion
-  spec.
+  spec. **Also record the token dependency (fail-loud, by design):** after this
+  PR the nightly always performs the token-authenticated corpus checkout, so an
+  expired/rotated/revoked `CORPUS_READ_TOKEN` — or an unresolvable pinned SHA —
+  reddens the *whole* oracle nightly (including the hermetic in-repo run). This is
+  intentional over a silent degrade-to-hermetic (which would hide the auth
+  failure). First triage on a red nightly: check the corpus-checkout step, then
+  the token secret, then the pinned SHA. The heavier rollback (revert the
+  `--corpus-root` wiring to fall back to `--repo-root .`) is the spec's documented
+  escape hatch if the corpus tier is abandoned.
 
 - [ ] **Step 4 — commit:**
   `git commit -m "ci(oracle): pinned-SHA corpus checkout + --corpus-root in nightly (#550)"`
@@ -898,6 +906,12 @@ baseline; it lands in the wave-1 SHA-bump PR under #551).
   `cargo fmt --manifest-path html-oracle/Cargo.toml -- --check`
   `cargo deny --locked --manifest-path html-oracle/Cargo.toml check`
 - [ ] **Step 2 — main workspace unaffected:** `just check && just lint`.
+- [ ] **Step 2b — frozen files are byte-identical to base** (mechanizes the
+  "no change to diff/reference/normalization logic" non-goal instead of trusting
+  PR-diff review):
+  `git fetch origin && git diff --exit-code origin/main -- html-oracle/src/diff.rs html-oracle/src/reference.rs html-oracle/src/norm.rs html-oracle/src/allowlist.rs html-oracle/epvme-allowlist.toml`
+  Expected: exit 0 (empty diff). A non-empty diff means logic leaked into a
+  frozen file — revert that drift before proceeding.
 - [ ] **Step 3 — local plumbing proof** against an empty corpus dir:
   `mkdir -p /tmp/empty-corpus && cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root . --corpus-root /tmp/empty-corpus`
   Expected: exit 0; `report.json` has `corpus.total == 0` and no
