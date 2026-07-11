@@ -99,23 +99,44 @@ index_has_version() {
         grep -q "\"vers\":\"${version}\""
 }
 
-# Publish one crate, retrying on a new-crate 429. Skips if crates.io reports the
-# version already exists (race with our own check). Exits on any other failure.
+# Classify a `cargo publish` result into an action: ok | skip | retry | fail.
+# Pure function ((exit code, captured output) -> decision) so the failure
+# classification is unit-testable without invoking cargo. `skip` covers a race
+# where crates.io already has the version; `retry` is a new-crate 429; any other
+# non-zero exit is a genuine `fail` (auth error, verify build failure, 5xx).
+publish_outcome() {
+    local rc="$1" out="$2"
+    if [ "$rc" -eq 0 ]; then
+        echo "ok"
+    elif printf '%s' "$out" | grep -qiE 'already (exists|uploaded)'; then
+        echo "skip"
+    elif printf '%s' "$out" | grep -qiE '429|too many'; then
+        echo "retry"
+    else
+        echo "fail"
+    fi
+}
+
+# Publish one crate, retrying on a new-crate 429. Exits non-zero on any genuine
+# failure so a broken/partial release fails the CI job (never silently green).
 publish_one() {
     local crate="$1" version="$2" out rc wait
     while true; do
-        if out=$(cargo publish -p "$crate" --locked 2>&1); then
-            printf '%s\n' "$out"
+        # Capture the real exit code: `rc=$?` after `if cmd; then ...; fi` would
+        # read the *if statement's* status (0 when the condition is false and no
+        # branch runs), silently masking a failed publish. See issue #544.
+        out=$(cargo publish -p "$crate" --locked 2>&1) && rc=0 || rc=$?
+        printf '%s\n' "$out" >&2
+        case "$(publish_outcome "$rc" "$out")" in
+        ok)
             echo "published: ${crate}@${version}"
             return 0
-        fi
-        rc=$?
-        printf '%s\n' "$out" >&2
-        if printf '%s' "$out" | grep -qiE 'already (exists|uploaded)'; then
+            ;;
+        skip)
             echo "skip: ${crate}@${version} already published"
             return 0
-        fi
-        if printf '%s' "$out" | grep -qiE '429|too many'; then
+            ;;
+        retry)
             wait=$(parse_retry_after "$out")
             if [ "$wait" -lt 0 ]; then
                 wait="$FALLBACK_SLEEP"
@@ -128,10 +149,12 @@ publish_one() {
             fi
             echo "rate limited: sleeping $((wait + 30))s then retrying ${crate} ..." >&2
             sleep "$((wait + 30))"
-            continue
-        fi
-        echo "error: publishing ${crate} failed (rc=${rc}); fix and re-run to resume" >&2
-        exit "$rc"
+            ;;
+        *)
+            echo "error: publishing ${crate} failed (rc=${rc}); fix and re-run to resume" >&2
+            exit "$rc"
+            ;;
+        esac
     done
 }
 

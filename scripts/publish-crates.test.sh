@@ -39,6 +39,21 @@ fi
 check "parse_retry_after clamps a past timestamp to 0" "0" "$(parse_retry_after "$past_msg")"
 check "parse_retry_after returns -1 sentinel when no timestamp present" "-1" "$(parse_retry_after "$non_429")"
 
+# --- publish_outcome (silent-failure guard, issue #544) ---------------------
+# A genuine (non-429, non-already-exists) failure MUST classify as `fail` so the
+# caller exits non-zero — otherwise a broken/partial release goes green in CI.
+check "publish_outcome: rc=0 is ok" "ok" "$(publish_outcome 0 'Uploading rimap-core v0.1.0')"
+check "publish_outcome: already-exists race is skip" "skip" \
+    "$(publish_outcome 101 'error: crate version 0.1.0 already exists on crates.io index')"
+check "publish_outcome: 429 is retry" "retry" \
+    "$(publish_outcome 101 'the remote server responded with an error (status 429 Too Many Requests): ... too many new crates ...')"
+check "publish_outcome: 403 auth error is fail" "fail" \
+    "$(publish_outcome 101 'error: failed to publish: the remote server responded with an error (status 403 Forbidden): must be authenticated')"
+check "publish_outcome: verify build error is fail" "fail" \
+    "$(publish_outcome 101 'error: could not compile rimap-core (lib) due to 1 previous error')"
+check "publish_outcome: 5xx server error is fail" "fail" \
+    "$(publish_outcome 101 'error: failed to get a 200 OK response, got 502 Bad Gateway')"
+
 # --- version_ok_to_publish --------------------------------------------------
 if version_ok_to_publish "0.1.0" "real"; then
     echo "ok: version_ok_to_publish allows a clean version in real mode"
