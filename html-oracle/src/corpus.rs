@@ -15,6 +15,12 @@ pub enum CorpusError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// A present `meta.toml` that does not parse. Distinct from an *absent* meta
+    /// (tolerated, empty probes): a corrupt one at the pinned SHA is a corpus
+    /// regression and must fail loud rather than silently drop the input out of
+    /// the canary population.
+    #[error("failed to parse {path}: {message}")]
+    Meta { path: PathBuf, message: String },
 }
 
 #[derive(Debug)]
@@ -58,30 +64,42 @@ pub fn load_eml_tree(
     id_prefix: &str,
     limit: Option<usize>,
 ) -> Result<Vec<CorpusInput>, CorpusError> {
-    let mut files = Vec::new();
-    collect_eml_files(dir, &mut files);
-    files.sort();
-    if let Some(limit) = limit {
-        files.truncate(limit);
-    }
-    let mut out = Vec::new();
-    for eml in &files {
-        let stem = eml
-            .file_stem()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        extract_html_parts(eml, &format!("{id_prefix}/{stem}"), &mut out)?;
-    }
-    Ok(out)
+    load_eml_tree_with(dir, id_prefix, limit, |_, _| Ok(()))
 }
 
 /// Load an external corpus tree the same way [`load_eml_tree`] does (walk, sort,
 /// deterministic `limit`), keyed under `corpus/…`, additionally attaching each
-/// input's sibling `<stem>.meta.toml` `probes` families. A missing/unparseable
-/// meta yields empty `probes` (the input still loads) and logs a warning — the
-/// corpus repo's self-validation (issue #549) is the gate that guarantees valid
-/// metadata at the pinned SHA.
+/// input's sibling `<stem>.meta.toml` `probes` families. Like `load_eml_tree`
+/// this flattens the tree to `corpus/<stem>` ids and so assumes stems are unique
+/// across the tree — the corpus repo satisfies this with content-hash filenames
+/// (a shared stem means identical bytes, a benign duplicate). An *absent* sibling
+/// meta yields empty `probes` (the input still loads); an *unparsable* one is a
+/// hard error (see [`CorpusError::Meta`]) so a corrupt pin fails loud instead of
+/// silently dropping a canary. The corpus repo's self-validation (issue #549) is
+/// the upstream gate on metadata validity at the pinned SHA.
 pub fn load_corpus_tree(dir: &Path, limit: Option<usize>) -> Result<Vec<CorpusInput>, CorpusError> {
+    load_eml_tree_with(dir, "corpus", limit, |eml, inputs| {
+        let probes = read_probes(eml)?;
+        for input in inputs {
+            input.probes = probes.clone();
+        }
+        Ok(())
+    })
+}
+
+/// Shared walk/sort/`limit`/extract driver for the external `.eml` trees. After
+/// each file's html parts are extracted, `on_file` runs with the source path and
+/// a mutable slice of that file's freshly-added inputs, so a caller can attach
+/// sibling metadata (or do nothing). Keeps EPVME and corpus loading in lockstep.
+fn load_eml_tree_with<F>(
+    dir: &Path,
+    id_prefix: &str,
+    limit: Option<usize>,
+    mut on_file: F,
+) -> Result<Vec<CorpusInput>, CorpusError>
+where
+    F: FnMut(&Path, &mut [CorpusInput]) -> Result<(), CorpusError>,
+{
     let mut files = Vec::new();
     collect_eml_files(dir, &mut files);
     files.sort();
@@ -95,27 +113,25 @@ pub fn load_corpus_tree(dir: &Path, limit: Option<usize>) -> Result<Vec<CorpusIn
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let first = out.len();
-        extract_html_parts(eml, &format!("corpus/{stem}"), &mut out)?;
-        let probes = read_probes(eml);
-        for input in &mut out[first..] {
-            input.probes = probes.clone();
-        }
+        extract_html_parts(eml, &format!("{id_prefix}/{stem}"), &mut out)?;
+        on_file(eml, &mut out[first..])?;
     }
     Ok(out)
 }
 
-fn read_probes(eml: &Path) -> Vec<String> {
+/// Read a corpus input's sibling `<stem>.meta.toml` `probes`. An absent/unreadable
+/// meta is tolerated (empty probes); a present-but-unparsable one is a hard error.
+fn read_probes(eml: &Path) -> Result<Vec<String>, CorpusError> {
     let meta_path = eml.with_extension("meta.toml");
     let Ok(text) = std::fs::read_to_string(&meta_path) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    match toml::from_str::<Meta>(&text) {
-        Ok(meta) => meta.probes,
-        Err(e) => {
-            eprintln!("html-oracle: unparsable {}: {e}", meta_path.display());
-            Vec::new()
-        }
-    }
+    toml::from_str::<Meta>(&text)
+        .map(|meta| meta.probes)
+        .map_err(|e| CorpusError::Meta {
+            path: meta_path,
+            message: e.to_string(),
+        })
 }
 
 fn collect_eml_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -270,6 +286,19 @@ mod tests {
             .find(|i| i.id == "corpus/aa11")
             .expect("loaded");
         assert_eq!(got.probes, vec!["stray-tag-boundary", "entity-href"]);
+    }
+
+    #[test]
+    fn load_corpus_tree_rejects_unparsable_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        let eml = "Content-Type: text/html; charset=utf-8\r\n\r\n<p>hi</p>\r\n";
+        std::fs::write(root.join("cc33.eml"), eml).unwrap();
+        // Present but corrupt: a hard error, not a silent empty-probes drop.
+        std::fs::write(root.join("cc33.meta.toml"), "probes = [not valid toml").unwrap();
+        let err = load_corpus_tree(&root, None).unwrap_err();
+        assert!(matches!(err, CorpusError::Meta { .. }), "{err:?}");
     }
 
     #[test]
