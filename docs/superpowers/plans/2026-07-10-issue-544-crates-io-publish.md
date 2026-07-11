@@ -28,11 +28,23 @@ rate-limit handling are load-bearing.
 - **Base:** `main`. **Guardrail umbrella:** `just ci`. Per-commit, run the
   guardrails relevant to what changed:
   - Rust manifests: `just check`, `just deny`, and `cargo test -p <touched>`.
-  - Shell: `shellcheck <script>` and `shfmt -d -i 2 <script>` (repo uses
-    `shfmt`; match existing `scripts/*.sh` style — verify indent by reading a
-    sibling script first).
-  - Workflow: `actionlint .github/workflows/release.yml` and
-    `zizmor .github/workflows/release.yml`.
+  - Shell: `shellcheck <script>` and `shfmt -d -i 4 <script>` — the repo's prek
+    hooks pin shfmt to `-i 4 -d` (`.pre-commit-config.yaml`) and every sibling
+    `scripts/*.sh` is 4-space indented. Shell quality is enforced at **commit
+    time via prek** (shellcheck + shfmt hooks), not in `ci.yml`; run
+    `prek run --files <new scripts>` before committing.
+  - Workflow: `actionlint` and `zizmor` on **every** workflow file you edit —
+    `release.yml` (Task 5) and `ci.yml` (Task 2/3, see below).
+- **How PR CI actually gates (critical):** `ci.yml` does **not** run `just ci`.
+  Each gate is a dedicated `ci.yml` job (e.g. `tool-schema-drift`,
+  `tools-doc-drift`) or an inlined step (the openssl guard is a step in the
+  `clippy` job "Mirrors `just check-no-openssl`"). Adding a check to the `just
+  ci` recipe gives **local** coverage only. To gate PRs, a check must be
+  **mirrored into `ci.yml`** as a job/step. The `just` targets below are for
+  local/prek convenience; their PR-gating comes from the `ci.yml` job in Task 2.
+  (Note: a *new* `ci.yml` job is not a *required* status check until the
+  operator adds it to branch protection — that promotion is optional operator
+  config, called out where relevant.)
 - CI runs `--locked`. Manifest edits that change resolution must regenerate and
   commit `Cargo.lock` (and `html-oracle/Cargo.lock` if `rimap-core`/
   `rimap-content` deps change — they do not here). Removing a `version =` from a
@@ -107,13 +119,16 @@ publishable manifests.
 
 **Files:**
 - Add: `scripts/check-publishable-metadata.sh`
-- Modify: `justfile` (add a `check-metadata` target), and wire it into the `ci`
-  recipe so it gates PRs the same way `check-no-openssl` does (read the existing
-  `ci` recipe and mirror the pattern).
+- Modify: `justfile` (add a `check-metadata` target — local convenience).
+- Modify: `.github/workflows/ci.yml` (add a **dedicated job** that runs the
+  check — this is what actually gates PRs; mirror the `tools-doc-drift` job
+  shape: SHA-pinned checkout + Rust toolchain, then the `just` target).
 
 **Where this fits:** Realizes spec SC #2a. `cargo publish --dry-run` is offline
-and cannot validate crates.io category slugs; this script catches a typo'd or
-retired slug in CI instead of it being silently dropped at publish.
+and cannot validate crates.io category slugs; a dedicated `ci.yml` job catches a
+typo'd or retired slug on every PR instead of it being silently dropped at
+publish. (Adding to the `just ci` recipe alone would **not** gate PRs — see
+Global Constraints.)
 
 **Steps:**
 
@@ -130,15 +145,25 @@ retired slug in CI instead of it being silently dropped at publish.
   - `keywords` count ≤ 5 and each ≤ 20 chars (crates.io limits).
   Prefer parsing via `cargo metadata --no-deps --format-version 1` piped to a
   small filter, or a simple per-file scan — whichever stays `shellcheck`-clean.
-- [ ] Add `just check-metadata` running the script, and add it to `ci`.
+- [ ] Add a `just check-metadata` target running the script (local/prek
+  convenience).
+- [ ] Add a dedicated `ci.yml` job (name e.g. `publish-checks`) that runs
+  `just check-metadata` (Task 3 appends `just test-publish-script` to the same
+  job). Mirror the `tools-doc-drift` job: `permissions: { contents: read }`,
+  SHA-pinned `actions/checkout` + `dtolnay/rust-toolchain` (reuse the exact SHAs
+  already in `ci.yml`), no `libdbus` needed (the check only reads manifests via
+  `cargo metadata --no-deps`). Do **not** add it to the `just ci` recipe as the
+  gating mechanism — the job is the gate.
 
 **Acceptance criteria:**
-- `shellcheck` and `shfmt -d` clean on the script.
+- `shellcheck` and `shfmt -i 4 -d` clean on the script (via `prek run`).
 - `just check-metadata` exits 0 on the current tree.
+- The new `ci.yml` job runs `just check-metadata`; `actionlint` + `zizmor` clean
+  on `ci.yml`.
 - Mutating a category to a bogus slug locally makes it exit non-zero (prove the
   check bites), then revert.
 
-**Rollback:** delete the script + justfile lines.
+**Rollback:** delete the script, justfile lines, and the `ci.yml` job.
 
 ---
 
@@ -168,9 +193,16 @@ first paced local reservation (spec Decision 7).
     `User-Agent` (crates.io requires one); HTTP 200 ⇒ already present (skip),
     404 ⇒ needs publish. Treat other/transient codes as "unknown" and let
     `cargo publish` be the source of truth.
-  - `parse_retry_after <stderr-text>`: extract the retry time from cargo's
-    new-crate 429 message; return seconds to sleep. Keep it a pure function
-    (input string → integer) so the test file can exercise it.
+  - `parse_retry_after <stderr-text>`: crates.io's new-crate 429 message embeds
+    an **absolute timestamp** ("...try again after `<timestamp>`..."), not a
+    Retry-After seconds value — so this function must extract that timestamp and
+    compute `max(0, timestamp - now)` seconds. Keep it a pure function (input
+    string → integer seconds) so the test can exercise it. **Safe fallback:** if
+    the timestamp cannot be parsed (message format changed), return a sentinel
+    that makes the caller do a documented bounded fixed sleep *or* exit with a
+    clear "resume later" message — never a wrong/huge sleep and never a silent
+    abort. This path fires at the burst boundary (crate #6) during the
+    irreversible first reservation, so degrade predictably.
   - `index_has_version <crate> <version>`: GET
     `https://index.crates.io/ri/ma/<crate>` (4+-char names use the
     `<first2>/<next2>/<name>` layout) and check for the exact version line.
@@ -190,18 +222,23 @@ first paced local reservation (spec Decision 7).
 - [ ] Implement `scripts/publish-crates.test.sh`: source the script's functions
   (guard the script's `main` behind a `${BASH_SOURCE[0]} == ${0}` check so
   sourcing does not execute it) and assert:
-  - `parse_retry_after` on a synthesized cargo 429 stderr sample returns the
-    expected seconds; on a non-429 string returns empty/zero.
+  - `parse_retry_after` on a **realistic cargo 429 fixture** (use the documented
+    crates.io message form with an absolute timestamp — cite the format in a
+    comment; do not invent a seconds-based format) returns a positive delta; on
+    a past timestamp returns 0; on an unparseable string returns the fallback
+    sentinel; on a non-429 string returns empty/zero.
   - the `-dev` guard is skipped under `--dry-run` and enforced otherwise
     (call the guard function with a `-dev` version in each mode).
   - the ordered crate list is exactly the 8 crates in DAG order.
 - [ ] Add `just publish-dry-run` (`scripts/publish-crates.sh --dry-run`) and
-  `just test-publish-script` (`bash scripts/publish-crates.test.sh`); wire
-  `test-publish-script` into `ci`.
+  `just test-publish-script` (`bash scripts/publish-crates.test.sh`) targets.
+  Add `just test-publish-script` as a step to the `publish-checks` `ci.yml` job
+  created in Task 2 (this is its PR gate; the `just ci` recipe is not).
 
 **Acceptance criteria:**
-- `shellcheck` + `shfmt -d` clean on both scripts.
-- `just test-publish-script` exits 0.
+- `shellcheck` + `shfmt -i 4 -d` clean on both scripts (via `prek run`).
+- `just test-publish-script` exits 0, and the `publish-checks` `ci.yml` job runs
+  it; `actionlint` + `zizmor` clean on `ci.yml`.
 - `just publish-dry-run` exits 0 **on the current `-dev` branch** (all 8 package
   with complete metadata; no missing `description`/`license`; no version-less
   regular deps).
