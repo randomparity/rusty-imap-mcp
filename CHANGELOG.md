@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Version model: `Cargo.toml` now carries the next planned version with a
+  `-dev` suffix (e.g. `0.1.1-dev`); release-prep strips it and a
+  `post-release-bump` job re-bumps after each release. See ADR-0003.
+
 ## [0.1.0] - 2026-07-10
 
 ### Fixed
