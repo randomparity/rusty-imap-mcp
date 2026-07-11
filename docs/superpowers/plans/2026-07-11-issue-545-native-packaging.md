@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - **Branch:** `feat/native-packaging-545`. **Base:** `main`. Never commit on `main`.
-- **Guardrails (must stay green):** `just ci` (= `fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script typos`). Prek hooks run `shellcheck`, `shfmt`, `actionlint`, `zizmor` on commit. Clippy is `-D warnings`, workspace-wide.
+- **Guardrails (must stay green):** `just ci` — dependency recipes `fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script`, and the recipe body also runs a `typos` pass. This task appends **`test-installer`** to that dependency list (Task 3). Prek hooks run `shellcheck`, `shfmt`, `actionlint`, `zizmor`, `typos` on commit. Clippy is `-D warnings`, workspace-wide.
 - **Rust:** edition 2024, MSRV 1.88.0 (`just test-msrv`), dev toolchain 1.94.0. Dependencies declared once in root `[workspace.dependencies]`; member crates use `{ workspace = true }` — never inline versions.
 - **Clippy invariants:** no `unwrap()`/`panic!`/`todo!`/`print_stdout`/`print_stderr` in non-test code; no `#[allow]` (use `#[expect(reason=…)]`); `thiserror` for libs, `anyhow` for `rimap-server`/`xtask`; newtypes over primitives; explicit destructuring (no `matches!`); 100-char lines; absolute imports only; Google-style docstrings on public APIs; `#![deny(missing_docs)]` on public crates.
 - **Package arch scope:** amd64 + arm64 only (both `vendored-keyring`). Packages declare **no** libdbus dependency. ppc64le/s390x stay tarball-only.
@@ -31,6 +31,7 @@
 - **Modify** `crates/rimap-server/src/cli/mod.rs` — add `pub fn command()`; widen submodule visibility (`pub(crate) mod` → `pub mod`).
 - **Create** `xtask/Cargo.toml`, `xtask/src/main.rs`, `xtask/src/main_tests.rs`.
 - **Modify** root `Cargo.toml` — add `xtask` to `members`; add `clap_mangen` to `[workspace.dependencies]`.
+- **Modify** root `Cargo.lock` — regenerated (new `xtask` + `clap_mangen` graph) and **must be committed**; both `just man` and the release `manpages` job run `cargo … --locked`, which aborts on a tag checkout whose committed lock lacks these entries.
 - **Modify** `crates/rimap-server/Cargo.toml` — add `[package.metadata.deb]` + `[package.metadata.generate-rpm]`.
 - **Create** `install.sh` (repo root), `scripts/install.test.sh`.
 - **Modify** `justfile` — add `man` and `test-installer` recipes; append `test-installer` to `ci`.
@@ -278,7 +279,7 @@ fn generate_man(out: &Path) -> Result<()> {
 mod tests;
 ```
 
-- [ ] **Step 5: Run the test, watch it fail then pass** — `cargo test -p xtask --no-default-features 2>&1 | tail -20`. (First run before main.rs existed = compile fail; after Step 4 = PASS.)
+- [ ] **Step 5: Run the test, watch it fail then pass** — `cargo test -p xtask --no-default-features 2>&1 | tail -20`. (First run before main.rs existed = compile fail; after Step 4 = PASS.) This resolve **updates the tracked root `Cargo.lock`** with the new `xtask` + `clap_mangen` graph — confirm with `git status --short Cargo.lock` (expect it modified). It must be committed (Step 9), or the `--locked` manpages job fails at tag time.
 
 - [ ] **Step 6: Add the `just man` recipe** — in `justfile`, near the build recipes, add:
 
@@ -305,7 +306,7 @@ man:
 - [ ] **Step 9: Commit**
 
 ```bash
-git add xtask/ Cargo.toml justfile .gitignore
+git add xtask/ Cargo.toml Cargo.lock justfile .gitignore
 git commit -m "feat(xtask): generate clap_mangen manpages"
 ```
 
@@ -1006,10 +1007,10 @@ git commit -m "docs(packaging): document deb/rpm, installer, manpages"
 
 - [ ] `just man && ls man/man1/ | rg -v dump-tool` shows the expected pages; `ls man/man1/ | rg dump-tool` is empty.
 - [ ] `just test-installer` passes.
-- [ ] `just ci` is green (includes `fmt-check lint test test-msrv deny … test-installer typos`).
+- [ ] `just ci` is green (dependency recipes `fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-installer`, plus the body's `typos` pass).
 - [ ] `actionlint .github/workflows/release.yml` and `zizmor .github/workflows/release.yml` clean.
 - [ ] `git status` clean except intended files; `man/man1/` is untracked/ignored (never staged).
-- [ ] Working tree diff touches only the files in "File Structure"; no unrelated edits.
+- [ ] Working tree diff touches only the files in "File Structure" (which includes the regenerated root `Cargo.lock`); no unrelated edits.
 
 ## Rollback / cleanup
 
