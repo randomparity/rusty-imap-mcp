@@ -127,3 +127,89 @@ base64 = { workspace = true }
 proptest = { workspace = true }
 # Blocking HTTP client for the Mailpit retrieval API (e2e_smtp_real.rs).
 ureq = { workspace = true }
+
+# --- Native packaging (issue #545, ADR-0006). amd64/arm64 only; the packaged
+# binary static-links libdbus (vendored-keyring), so no libdbus runtime dep.
+# Man pages come from `just man` / the release `manpages` job into ../../man/man1.
+#
+# Asset source path bases differ between the two tools (source-verified):
+#  * cargo-deb resolves non-`target/` sources relative to THIS manifest dir
+#    (crates/rimap-server/), so the deb block uses `../../` for workspace-root
+#    files; the `target/release/` binary prefix is special (rewritten for
+#    --target).
+#  * cargo-generate-rpm globs non-`target/` sources relative to the CWD (the
+#    workspace root, where `cargo generate-rpm -p crates/rimap-server` runs), so
+#    the rpm block uses NO `../../`.
+[package.metadata.deb]
+# The crate is rimap-server but the product/binary/installer/tarballs are all
+# rusty-imap-mcp; name the package to match so users `apt install rusty-imap-mcp`.
+name = "rusty-imap-mcp"
+maintainer = "David Christensen <randomparity@gmail.com>"
+copyright = "2026 David Christensen <randomparity@gmail.com>"
+license-file = ["../../LICENSE-MIT", "0"]
+extended-description = "Security-first Model Context Protocol server for IMAP email access."
+section = "mail"
+priority = "optional"
+# Explicit deps only: cargo-deb's $auto would ldd the wrong arch when packaging
+# the arm64 binary on an x86_64 host. The binary is self-contained (vendored
+# static libdbus), so libc6 is the sole runtime requirement.
+depends = "libc6"
+recommends = "ca-certificates"
+assets = [
+    ["target/release/rusty-imap-mcp", "usr/bin/", "755"],
+    ["../../man/man1/rusty-imap-mcp.1", "usr/share/man/man1/", "644"],
+    ["../../man/man1/rusty-imap-mcp-*.1", "usr/share/man/man1/", "644"],
+    ["../../README.md", "usr/share/doc/rusty-imap-mcp/README.md", "644"],
+    ["../../CHANGELOG.md", "usr/share/doc/rusty-imap-mcp/CHANGELOG.md", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/rusty-imap-mcp/LICENSE-MIT", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/rusty-imap-mcp/LICENSE-APACHE", "644"],
+    ["../../NOTICE", "usr/share/doc/rusty-imap-mcp/NOTICE", "644"],
+]
+
+[package.metadata.generate-rpm]
+# Match the deb/product name (crate is rimap-server; product is rusty-imap-mcp).
+name = "rusty-imap-mcp"
+summary = "Security-first MCP server for IMAP email access"
+# Disable rpm-build's automatic Requires (host ldd is wrong for a cross-built,
+# statically-linked binary); declare the sole runtime dep explicitly.
+auto-req = "no"
+
+[package.metadata.generate-rpm.requires]
+glibc = "*"
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/rusty-imap-mcp"
+dest = "/usr/bin/rusty-imap-mcp"
+mode = "755"
+[[package.metadata.generate-rpm.assets]]
+source = "man/man1/rusty-imap-mcp.1"
+dest = "/usr/share/man/man1/rusty-imap-mcp.1"
+mode = "644"
+doc = true
+[[package.metadata.generate-rpm.assets]]
+source = "man/man1/rusty-imap-mcp-*.1"
+dest = "/usr/share/man/man1/"
+mode = "644"
+doc = true
+[[package.metadata.generate-rpm.assets]]
+source = "README.md"
+dest = "/usr/share/doc/rusty-imap-mcp/README.md"
+mode = "644"
+doc = true
+[[package.metadata.generate-rpm.assets]]
+source = "CHANGELOG.md"
+dest = "/usr/share/doc/rusty-imap-mcp/CHANGELOG.md"
+mode = "644"
+doc = true
+[[package.metadata.generate-rpm.assets]]
+source = "LICENSE-MIT"
+dest = "/usr/share/licenses/rusty-imap-mcp/LICENSE-MIT"
+mode = "644"
+[[package.metadata.generate-rpm.assets]]
+source = "LICENSE-APACHE"
+dest = "/usr/share/licenses/rusty-imap-mcp/LICENSE-APACHE"
+mode = "644"
+[[package.metadata.generate-rpm.assets]]
+source = "NOTICE"
+dest = "/usr/share/licenses/rusty-imap-mcp/NOTICE"
+mode = "644"
