@@ -603,13 +603,14 @@ class TestBuildWave2(unittest.TestCase):
             root = pathlib.Path(d); (root / "wave1").mkdir()
             # wave-1 seed with the <p> skeleton -> any wave-2 <p>-only msg dedups out
             (root / "wave1" / "a.eml").write_bytes(self.bw2.build_eml("<p>seed</p>"))
-            msgs = {"spamassassin": [
+            msgs = [
                 "<div><a href='mailto:joe@x.com'>x</a></div>",           # distinct skeleton, has PII
                 "<p>collides with wave-1 skeleton</p>",                    # dropped (== <p> seed)
                 "<table><tr><td>one</td></tr></table>",                   # distinct skeleton
                 "<table><tr><td>two</td></tr></table>",                   # within-source dup of prev -> dropped
-            ]}
-            self.bw2.iter_html_messages = lambda archive, kind: iter(msgs.get(kind, []))
+            ]
+            # _generate calls iter_html_messages(archive, src["kind"]); return msgs regardless of kind
+            self.bw2.iter_html_messages = lambda archive, kind: iter(msgs)
             self.bw2.fetch_verified = lambda url, sha, cache: b"stub"
             self.bw2._load_sources = lambda: [{
                 "name": "spamassassin", "kind": "tar.bz2", "url": "u", "sha256": "s",
