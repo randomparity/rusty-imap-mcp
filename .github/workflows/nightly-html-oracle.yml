@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: randomparity/rusty-imap-mcp-corpus
-          ref: c9e9217257c853916ac52644e673eb0782525029  # PINNED — bump via reviewed PR only (wave-1, #551)
+          ref: d90cafe938a2c1e2d5d99b9d37893c1ab1d0fb09  # PINNED — bump via reviewed PR only (wave-2, #554)
           path: corpus
           token: ${{ secrets.CORPUS_READ_TOKEN }}
           persist-credentials: false
@@ -51,10 +51,10 @@ jobs:
 
       - name: Run differential oracle
         # CORPUS_MIN_COMPARED = floor(0.9 × corpus_compared_nonempty) from the
-        # wave-1 baseline (#551: 0.9 × 376 = 338); recompute and bump alongside
+        # wave-2 baseline (#554: 0.9 × 575 = 517); recompute and bump alongside
         # the pinned SHA. Unset it to disable the floor (empty-corpus proof).
         env:
-          CORPUS_MIN_COMPARED: "338"
+          CORPUS_MIN_COMPARED: "517"
         run: >
           cargo run --locked --manifest-path html-oracle/Cargo.toml --
           --repo-root . --corpus-root corpus
