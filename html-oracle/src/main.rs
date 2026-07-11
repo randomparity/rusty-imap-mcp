@@ -371,18 +371,19 @@ fn check_canaries(records: &[CorpusRecord]) -> Vec<String> {
         .filter(|r| r.probes.iter().any(|p| p == BINARY_FAMILY))
         .collect();
     if !bin.is_empty() {
-        // Healthy iff the is_mostly_binary guard fired (BinarySkip). Any other
-        // outcome means the guard did NOT fire — either it regressed (input
-        // reached the comparison stage) or the input errored earlier in
-        // sanitize. The message names all three hypotheses so triage is not
-        // biased toward a false security-regression conclusion.
+        // Healthy when the is_mostly_binary guard fired at least once (≥1
+        // BinarySkip) — symmetric with the text families' ≥1-live rule, so a
+        // multipart canary whose clean part also compares is not a false FAIL.
+        // Zero BinarySkip means the guard did NOT fire on any tagged input:
+        // either it regressed (inputs reached the comparison stage) or they
+        // errored earlier in sanitize. The message names all three hypotheses
+        // so triage is not biased toward a false security-regression conclusion.
         let via_guard = bin.iter().filter(|r| r.kind == Kind::BinarySkip).count();
-        if via_guard != bin.len() {
-            let off = bin.len() - via_guard;
+        if via_guard == 0 {
             fails.push(format!(
-                "binary-part canary unhealthy ({via_guard}/{} skipped via is_mostly_binary, \
-                 {off} did not): the is_mostly_binary guard regressed, this canary no longer \
-                 decodes to >10% U+FFFD, or it was skipped/errored by a different stage",
+                "binary-part canary unhealthy (0/{} tagged inputs skipped via is_mostly_binary): \
+                 the is_mostly_binary guard regressed, this canary no longer decodes to >10% \
+                 U+FFFD, or it was skipped/errored by a different stage",
                 bin.len()
             ));
         }
@@ -651,6 +652,17 @@ mod tests {
         let fails = check_canaries(&[rec(&["binary-part"], Kind::SanitizeSkip)]);
         assert_eq!(fails.len(), 1);
         assert!(fails[0].contains("different stage"));
+    }
+
+    #[test]
+    fn binary_part_canary_tolerates_multipart_dilution() {
+        // A canary eml with one binary part (guard fires) and one clean part
+        // (compares) must stay healthy: the guard fired at least once.
+        let fails = check_canaries(&[
+            rec(&["binary-part"], Kind::BinarySkip),
+            rec(&["binary-part"], Kind::ComparedNonempty),
+        ]);
+        assert!(fails.is_empty(), "{fails:?}");
     }
 
     #[test]
