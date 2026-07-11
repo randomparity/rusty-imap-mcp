@@ -322,8 +322,14 @@ check-tools-doc:
         exit 1
     fi
 
+# Validate per-crate crates.io publish metadata (description, category slugs,
+# keyword limits). Mirrored in the `publish-checks` CI job (issue #544).
+check-metadata:
+    #!/usr/bin/env bash
+    ./scripts/check-publishable-metadata.sh
+
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata
     typos
 
 # Re-run pre-commit hooks across all files.
