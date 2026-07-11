@@ -44,8 +44,10 @@ per-wave baseline note.
 - **Promotion** of any Wave-2 divergence into the curated
   `tests/injection-corpus/` assertion tier — that path is per-divergence.
 - **Changing the oracle or validator contracts.** Wave 2 uses the existing
-  `redistribution_basis` / `scrub` / `probes` schema slots as-is. (One optional
-  validator touch is called out under "Open validator question".)
+  `redistribution_basis` / `scrub` / `probes` schema slots as-is and adds **no**
+  validator change — comment redaction is folded under the existing `SCRUB_STEPS`
+  labels rather than adding a `comments-redacted` value (see "meta.toml contract"
+  and "Validator facts confirmed").
 
 ## Sources
 
