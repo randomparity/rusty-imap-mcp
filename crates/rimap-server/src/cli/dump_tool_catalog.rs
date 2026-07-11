@@ -6,8 +6,8 @@
 
 use std::io::Write;
 
+use crate::mcp::TOOL_DEFS;
 use rimap_core::tool::ToolName;
-use rimap_server::mcp::TOOL_DEFS;
 
 /// Print each entry of the static `TOOL_DEFS` map as one line of
 /// JSON to the given writer. Iteration order follows `ToolName::all()`

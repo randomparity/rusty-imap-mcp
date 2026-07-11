@@ -150,7 +150,7 @@ pub async fn run<W: Write>(path: &Path, out: &mut W) -> anyhow::Result<()> {
         // Errors are reported inline but do not abort the dry-run — a
         // multi-account config may have one unreachable host and still
         // want to print the matrix for the others.
-        let conn_cfg = rimap_server::boot::registry::build_account_connection(id, acfg);
+        let conn_cfg = crate::boot::registry::build_account_connection(id, acfg);
         let preflight_result = rimap_imap::preflight::probe_preflight(&conn_cfg).await;
         match &preflight_result {
             Ok(info) => {

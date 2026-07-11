@@ -2,8 +2,6 @@
 
 #![deny(missing_docs)]
 
-mod cli;
-
 use rimap_server::boot::{audit_init, logging, registry};
 use rimap_server::mcp::server;
 
@@ -14,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{CommandFactory, FromArgMatches};
+use clap::FromArgMatches;
 use rimap_authz::DispatchGuard;
 use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
@@ -30,12 +28,10 @@ use rmcp::service::ServerInitializeError;
 use secrecy::ExposeSecret;
 use tokio::io::AsyncWriteExt;
 
-use crate::cli::{AuditAction, Cli, Command};
+use rimap_server::cli::{self, AuditAction, Cli, Command};
 
 fn parse_cli() -> Result<Cli, clap::Error> {
-    let matches = Cli::command()
-        .version(rimap_core::version::version())
-        .get_matches();
+    let matches = cli::command().get_matches();
     Cli::from_arg_matches(&matches)
 }
 
