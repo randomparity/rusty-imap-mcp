@@ -2,9 +2,16 @@
 #
 # This file is merged into the allowlist ONLY when --corpus-root is set, so its
 # `corpus/…` entries never appear stale in the hermetic --repo-root nightly run
-# (which does not load the corpus). Populate from the wave-1 baseline; never
-# allowlist a real sanitizer silent-drop — file an issue instead. Each entry
-# REQUIRES a `reason` (fail closed).
+# (which does not load the corpus). Never allowlist a real sanitizer silent-drop
+# — file an issue instead. Each entry REQUIRES a `reason` (fail closed).
+#
+# Wave-1 baseline (#551): triaged to ZERO entries. The wave-1 corpus produces 0
+# HARD divergences — the only benign divergences html5lib surfaced were streaming
+# lol_html reference limitations (foster-parenting, frameset, NUL, plaintext),
+# which are curated out at corpus-repo ingestion (see that repo's
+# tools/ingest/README.md), not suppressed here per-input. An empty allowlist is
+# the healthy state; add an entry only when a future wave's nightly surfaces a
+# genuinely benign per-input divergence.
 #
 # [[allow]]
 # input = "corpus/<content-hash-stem>"
