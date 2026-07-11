@@ -39,6 +39,13 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Allow wildcard version reqs *only* for path (workspace-internal) deps: the
+# oracle's `rimap-content` / `rimap-core` path deps carry no `version =`, so they
+# serialize as `*`. A path dep resolves to a specific local crate, never an
+# arbitrary registry version, so this does not weaken the wildcard ban's real
+# purpose (catching accidental `foo = "*"` registry deps). Mirrors the root
+# `deny.toml`. Required by cargo-deny ≥ 0.19, which flags path-dep wildcards.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
