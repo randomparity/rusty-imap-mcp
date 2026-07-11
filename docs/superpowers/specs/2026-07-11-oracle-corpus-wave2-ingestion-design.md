@@ -196,7 +196,11 @@ skeleton, so selection among survivors is secondary to the dedup. Rule:
 - Caps: **Enron ≤ 100, SpamAssassin ≤ 120, Nazario ≤ 80**, global **≤ 300**.
   Spam/phishing HTML stresses a sanitizer harder than benign corporate mail, so
   they get the larger share; if a source yields fewer unique skeletons, take what
-  exists.
+  exists. The caps are a **ceiling, not a target**: because the fingerprint is
+  tag/attr-name-only, template-heavy real mail dedups hard, so **structural
+  diversity — not the cap — is the binding limit** and the actual yield may be
+  well below 300. The generator logs per-source kept/dropped counts; a genuinely
+  small yield is recorded in the baseline note (with a lower `N`), not forced up.
 - Fully deterministic (no RNG). Caps live in `sources.toml`, so a re-baseline can
   adjust them in a reviewed change.
 

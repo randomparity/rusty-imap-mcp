@@ -28,7 +28,7 @@ iterates messages in archive order, node-scoped-scrubs PII, wraps each as a CRLF
   `feat/corpus-wave2-ingestion-554`.
 - **Corpus guardrail:** `python tools/validate/validate.py --corpus-root .` +
   `python -m unittest discover -s tools/validate -p 'test_*.py'` +
-  `python -m unittest discover -s tools/ingest -p 'test_*.py'`. Local Python must
+  `python -m unittest discover -s tools/ingest/tests -p 'test_*.py'`. Local Python must
   be ≥3.11 (system is 3.9 → use `python3.13`).
 - **Main-repo guardrails:** `just ci` umbrella; individually gated: `rustfmt`,
   `clippy`, `check (macOS)`, `test (stable)`, `test (MSRV 1.88.0)`, `cargo-deny`,
@@ -579,45 +579,52 @@ redistribution_note = "Enron email dataset, FERC public release"
 attribution = "Enron email dataset (FERC public release)"
 ```
 
-- [ ] **Step 2: Write the failing test** — drive `_build` with a stubbed
-  `fetch_verified` + `iter_html_messages` (no network), a real `tmp` corpus root,
-  and assert the four properties. Use a monkeypatch seam on the imported names.
+- [ ] **Step 2: Write the failing test.** **Critical: criterion-6 dedup is
+  tag/attr-NAME only** — `_StructureCollector` has no `handle_data`, so text and
+  attribute *values* are ignored. Fixtures that must survive as distinct inputs
+  MUST differ in tag/attr **names**, not text. Drive `_build` with stubbed fetch +
+  iterator (no network), a temp corpus root, and check the real properties.
 
 ```python
-import importlib, pathlib, tempfile, unittest
+import importlib, pathlib, tempfile, unittest, base64, email
+from email import policy
 
 class TestBuildWave2(unittest.TestCase):
     def setUp(self):
         self.bw2 = importlib.import_module("tools.ingest.build_wave2")
+    def _html_of(self, eml_bytes):  # decode the built .eml back to HTML text
+        msg = email.message_from_bytes(eml_bytes, policy=policy.default)
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                return part.get_payload(decode=True).decode("utf-8")
+        return ""
     def test_end_to_end(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d); (root / "wave1").mkdir()
-            # a wave-1 input whose fingerprint should force a dedup drop
-            (root / "wave1" / "a.eml").write_bytes(self.bw2.build_eml("<p>dup</p>"))
-            msgs = {"spamassassin": ["<p>uniqueA joe@x.com</p>", "<p>dup</p>",  # 2nd dedups vs wave-1
-                                     "<p>dupSkeleton one</p>", "<p>dupSkeleton two</p>"]}  # within-source dup
+            # wave-1 seed with the <p> skeleton -> any wave-2 <p>-only msg dedups out
+            (root / "wave1" / "a.eml").write_bytes(self.bw2.build_eml("<p>seed</p>"))
+            msgs = {"spamassassin": [
+                "<div><a href='mailto:joe@x.com'>x</a></div>",           # distinct skeleton, has PII
+                "<p>collides with wave-1 skeleton</p>",                    # dropped (== <p> seed)
+                "<table><tr><td>one</td></tr></table>",                   # distinct skeleton
+                "<table><tr><td>two</td></tr></table>",                   # within-source dup of prev -> dropped
+            ]}
             self.bw2.iter_html_messages = lambda archive, kind: iter(msgs.get(kind, []))
             self.bw2.fetch_verified = lambda url, sha, cache: b"stub"
-            srcs = [{"name": "spamassassin", "kind": "tar.bz2", "url": "u", "sha256": "s",
-                     "cap": 10, "redistribution_basis": "research-corpus",
-                     "redistribution_note": "n", "attribution": "att"}]
-            self.bw2._load_sources = lambda: srcs
+            self.bw2._load_sources = lambda: [{
+                "name": "spamassassin", "kind": "tar.bz2", "url": "u", "sha256": "s",
+                "cap": 10, "redistribution_basis": "research-corpus",
+                "redistribution_note": "n", "attribution": "att"}]
             self.bw2.ROOT = root
-            rc = self.bw2._build(check=False)
-            self.assertEqual(rc, 0)
-            written = sorted(p.name for p in (root / "wave2" / "spamassassin").glob("*.eml"))
-            # uniqueA + one of the dupSkeleton pair survive; the wave-1 "dup" is dropped
-            self.assertEqual(len(written), 2)
-            # PII scrubbed
-            body = (root / "wave2" / "spamassassin").glob("*.eml")
-            self.assertTrue(all(b"joe@x.com" not in p.read_bytes() for p in body) is False or True)
-            # regeneration is byte-identical
-            self.assertEqual(self.bw2._build(check=True), 0)
+            self.assertEqual(self.bw2._build(check=False), 0)
+            written = list((root / "wave2" / "spamassassin").glob("*.eml"))
+            self.assertEqual(len(written), 2)                      # div-skeleton + table-skeleton
+            texts = [self._html_of(p.read_bytes()) for p in written]
+            joined = "\n".join(texts)
+            self.assertIn("[redacted-email]", joined)              # real PII gate (decoded)
+            self.assertNotIn("joe@x.com", joined)
+            self.assertEqual(self.bw2._build(check=True), 0)       # regeneration byte-identical
 ```
-
-(Refine assertions once real helper names are confirmed; the load-bearing checks
-are: wave-1 collision dropped, within-source duplicate collapses to one,
-`--check` returns 0.)
 
 - [ ] **Step 3: Implement `build_wave2.py`** against the REAL API (own eml/meta/
   writer/diff; criterion-6 fingerprint over the built `.eml`).
@@ -626,22 +633,29 @@ are: wave-1 collision dropped, within-source duplicate collapses to one,
 """Deterministic wave-2 generator: fetch -> iterate -> scrub -> dedup -> cap -> write."""
 import sys, tomllib, hashlib
 from pathlib import Path
-from build_wave1 import _encode_body                     # CRLF-clean base64
-from validate import html_part_texts, structural_fingerprint
-from sources import fetch_verified, iter_html_messages
-from scrub import scrub_html
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent                   # tools/ingest
 ROOT = HERE.parents[1]                                   # corpus repo root
+# Bootstrap sys.path exactly as build_wave1.py does, so bare imports resolve under
+# direct-script, `-m unittest tools.ingest.tests.<mod>`, and discover alike.
+sys.path.insert(0, str(HERE))                            # build_wave1, sources, scrub
+sys.path.insert(0, str(ROOT / "tools" / "validate"))    # validate
+from build_wave1 import _encode_body                     # noqa: E402  CRLF-clean base64
+from validate import html_part_texts, structural_fingerprint  # noqa: E402
+from sources import fetch_verified, iter_html_messages   # noqa: E402
+from scrub import scrub_html                             # noqa: E402
+
 CACHE = HERE / ".cache"
 _ADDED = "2026-07-11"
 
 def build_eml(html: str) -> bytes:
-    """Wrap scrubbed HTML as a CRLF .eml (text/html; utf-8; base64), as Wave 1."""
-    headers = b"\r\n".join([
+    """Wrap scrubbed HTML as a CRLF .eml matching Wave 1's header shape
+    (MIME-Version + text/html; charset=utf-8; base64 CTE)."""
+    headers = b"\r\n".join((
+        b"MIME-Version: 1.0",
         b"Content-Type: text/html; charset=utf-8",
         b"Content-Transfer-Encoding: base64",
-    ])
+    ))
     return headers + b"\r\n\r\n" + _encode_body(html.encode("utf-8"), "base64")
 
 def _fingerprint(eml: bytes) -> str:
@@ -674,13 +688,15 @@ def _generate() -> dict[str, bytes]:
         if not src["url"] or not src["sha256"]:
             print(f"skip {src['name']}: unpinned", file=sys.stderr); continue
         archive = fetch_verified(src["url"], src["sha256"], CACHE)
-        kept = 0
+        kept = dropped = seen_msgs = 0
         for html in iter_html_messages(archive, src["kind"]):
             if kept >= src["cap"]:
                 break
+            seen_msgs += 1
             eml = build_eml(scrub_html(html))
             fp = _fingerprint(eml)
             if fp in seen:                               # tree-wide keep-first dedup
+                dropped += 1
                 continue
             seen.add(fp)
             stem = hashlib.sha256(eml).hexdigest()
@@ -688,7 +704,11 @@ def _generate() -> dict[str, bytes]:
             files[base + ".eml"] = eml
             files[base + ".meta.toml"] = _meta(src)
             kept += 1
-        print(f"{src['name']}: kept {kept}", file=sys.stderr)
+        # Observability: structure-only dedup can collapse template-heavy real mail
+        # HARD, so surface the drop rate — low kept vs high dropped means low
+        # structural diversity, which the operator must weigh against the floor.
+        print(f"{src['name']}: kept {kept}, dropped-as-dup {dropped} "
+              f"(scanned {seen_msgs})", file=sys.stderr)
     return files
 
 def _write(files: dict[str, bytes]) -> int:
@@ -761,8 +781,18 @@ branch `feat/wave2-ingestion`.
   fetched from a stable pinned URL or cleared for redistribution, remove its
   `[[source]]` entry, note it in the PR, and proceed with the rest.
 - [ ] **Step 2: Generate** — `python3.13 tools/ingest/build_wave2.py`. Inspect the
-  per-source `kept` counts (expect up to the caps; real mail should dedup less
-  than Wave 1's tree-construction pathology).
+  per-source `kept` / `dropped-as-dup` / `scanned` counts. **Reality check:**
+  criterion-6 dedup is on the tag/attr-**name** skeleton only, and real
+  marketing/phishing mail is template-heavy, so structural diversity — not the
+  caps — is the binding limit. Expect kept ≪ cap with high drop rates.
+  **Expected floor:** aim for a combined `compared_nonempty` that keeps
+  `N = floor(0.9 × compared_nonempty)` meaningful and clears the spec's 60%
+  coverage bar. **Contingency if the total surviving skeletons are too few**
+  (e.g. < ~60 combined): add more SpamAssassin subsets (`spam_2`, `hard_ham` —
+  more distinct skeletons) to `sources.toml`; do **not** raise caps (dedup, not
+  the cap, is the limiter). If diversity is genuinely low, record the smaller
+  wave and a lower `N` in the Task 8 baseline note as a legitimate outcome — the
+  oracle run is the gate, not a target count.
 - [ ] **Step 3: Determinism** — `python3.13 tools/ingest/build_wave2.py --check`
   → zero diff. Re-run `build_wave1.py --check` → still byte-identical.
 - [ ] **Step 4: Validate** — `python3.13 tools/validate/validate.py --corpus-root .`
