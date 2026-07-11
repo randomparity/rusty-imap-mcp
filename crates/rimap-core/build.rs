@@ -3,13 +3,15 @@
 //! Emits three `cargo:rustc-env` variables consumed by `src/version.rs`:
 //!
 //! - `RIMAP_VERSION` — the user-facing version string. Bare `CARGO_PKG_VERSION`
-//!   when HEAD is exactly the tag `v<CARGO_PKG_VERSION>`; otherwise
-//!   `<CARGO_PKG_VERSION>-dev+g<short-sha>[.dirty]`.
+//!   when HEAD is exactly the tag `v<CARGO_PKG_VERSION>` (a clean base);
+//!   otherwise `<CARGO_PKG_VERSION>+g<short-sha>[.dirty]`. The `-dev`
+//!   pre-release now lives in `Cargo.toml` (the next planned version), so this
+//!   script only appends git provenance — it never synthesizes `-dev`.
 //! - `RIMAP_COMMIT` — the short SHA (or `unknown` outside a git checkout).
 //! - `RIMAP_RELEASE` — `"true"` or `"false"` depending on the release/dev path.
 //!
 //! Every git failure path falls back to `RIMAP_VERSION =
-//! <CARGO_PKG_VERSION>-dev+gunknown`, so vendored or `cargo package` builds
+//! <CARGO_PKG_VERSION>+gunknown`, so vendored or `cargo package` builds
 //! still compile without surprise breakage.
 
 use std::process::Command;
@@ -37,7 +39,7 @@ fn main() {
         } else {
             short_sha.clone()
         };
-        (format!("{base}-dev{suffix}"), commit)
+        (format!("{base}{suffix}"), commit)
     };
 
     println!("cargo:rustc-env=RIMAP_VERSION={version}");

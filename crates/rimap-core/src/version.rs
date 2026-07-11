@@ -8,8 +8,9 @@
 /// The user-facing version string.
 ///
 /// `X.Y.Z` for release builds (HEAD is exactly the tag `v<X.Y.Z>`);
-/// `X.Y.Z-dev+g<short-sha>[.dirty]` otherwise. Outside a git checkout
-/// the suffix is `-dev+gunknown`.
+/// `X.Y.Z[-dev]+g<short-sha>[.dirty]` otherwise, where the `-dev` (if any)
+/// comes from the workspace `Cargo.toml` version, not from `build.rs`.
+/// Outside a git checkout the suffix is `+gunknown`.
 #[must_use]
 pub fn version() -> &'static str {
     env!("RIMAP_VERSION")

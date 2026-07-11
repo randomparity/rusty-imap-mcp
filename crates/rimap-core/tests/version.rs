@@ -32,12 +32,27 @@ fn commit_matches_expected_shape() {
 }
 
 #[test]
+fn build_script_does_not_synthesize_dev_suffix() {
+    // Any `-dev` must come from the manifest base (CARGO_PKG_VERSION), never
+    // from build.rs. Inspect only the part build.rs appended to the base.
+    let v = version();
+    let base = env!("CARGO_PKG_VERSION");
+    let appended = v.strip_prefix(base).unwrap_or(v);
+    assert!(
+        !appended.contains("-dev"),
+        "build.rs must not synthesize -dev; version() = {v:?}, base = {base:?}"
+    );
+}
+
+#[test]
 fn release_flag_agrees_with_version_shape() {
     let v = version();
-    let has_dev = v.contains("-dev");
+    // A release build is exactly one with no `+g…` build-metadata suffix:
+    // release = clean base; dev / release-prep / no-git all carry `+g…`.
+    let has_build_metadata = v.contains("+g");
     assert_eq!(
         is_release(),
-        !has_dev,
-        "is_release() must be true exactly when version() lacks a -dev suffix"
+        !has_build_metadata,
+        "is_release() must be true exactly when version() lacks a +g build-metadata suffix"
     );
 }
