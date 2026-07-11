@@ -1,7 +1,14 @@
 # Release Versioning Design
 
 Date: 2026-05-11
-Status: Approved (pending implementation plan)
+Status: Implemented; version-model decision superseded by [ADR-0003](../../ADR/0003-manifest-dev-version-model.md)
+
+> **Superseded (2026-07-10):** the "no `-dev` in the manifest" and "no
+> automatic version bumping" non-goals below are reversed by
+> [ADR-0003](../../ADR/0003-manifest-dev-version-model.md) /
+> [the manifest `-dev` version-model design](2026-07-10-dev-version-model-design.md)
+> (Phase 2A of the bzr-parity release process). The `build.rs` /
+> `verify-tag` machinery this spec established otherwise still stands.
 
 ## Summary
 
