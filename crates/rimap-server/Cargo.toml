@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Rusty IMAP MCP server: security-first MCP server for IMAP email access."
+categories = ["email", "command-line-utilities"]
+keywords = ["imap", "email", "mcp", "security"]
 
 [lints]
 workspace = true
@@ -116,7 +118,9 @@ rimap-smtp = { path = "../rimap-smtp", version = "0.1.1-dev", features = ["test-
 # Self dev-dep enables the `test-support` feature unconditionally for
 # integration tests, so `ImapMcpServer::execute_tool_for_test` is in
 # scope without every test harness passing `--features test-support`.
-rimap-server = { path = ".", version = "0.1.1-dev", features = ["test-support"] }
+# Path-only (no version): cargo drops path-only dev-deps from the published
+# manifest, so `cargo publish` verify never resolves a not-yet-published self.
+rimap-server = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util"] }
 tempfile = { workspace = true }
 base64 = { workspace = true }

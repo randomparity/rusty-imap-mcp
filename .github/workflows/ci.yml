@@ -188,6 +188,29 @@ jobs:
             exit 1
           fi
 
+  # crates.io publish guardrails (issue #544): per-crate metadata validity
+  # (category slugs `cargo publish --dry-run` cannot check offline) and the
+  # publish-script function tests. No libdbus/build — `cargo metadata` only
+  # reads manifests and the script tests are pure bash.
+  publish-checks:
+    name: publish checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: 1.94.0
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+        with:
+          tool: just
+      - name: Validate publish metadata
+        run: just check-metadata
+      - name: Unit-test publish-crates.sh
+        run: just test-publish-script
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04

@@ -307,6 +307,49 @@ jobs:
             artifacts/${{ env.BINARY_NAME }}-*.tar.gz \
             artifacts/SHA256SUMS.txt
 
+  # Publish the 8 workspace crates to crates.io in dependency order, after the
+  # GitHub Release + artifacts are up (a downstream leaf: its failure does not
+  # un-publish the release). Stable tags only, push only — never a -dev tag or
+  # workflow_dispatch. Gated behind the `crates-io` environment holding
+  # CARGO_REGISTRY_TOKEN, with no required reviewer (ADR-0004). The FIRST publish
+  # reserves 8 new names and exceeds crates.io's new-crate burst (5); reserve
+  # locally first (RELEASING.md). Subsequent releases publish new versions
+  # (burst 30) in one run.
+  publish-crates:
+    name: Publish to crates.io
+    needs: release
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    # Steady-state (new versions of existing crates, burst 30) finishes in a few
+    # minutes. Cap the job so a pathological rate-limit retry loop fails fast
+    # rather than idling toward GitHub's default cap; the first 8-new-name
+    # publish is documented as a local, paced run (RELEASING.md), not this job.
+    timeout-minutes: 30
+    environment: crates-io
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      # The publish verify build compiles rimap-config -> keyring (Linux libdbus).
+      - name: Install libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+        with:
+          tool: cargo-semver-checks@0.48.0
+      # Gate: fail the publish on accidental SemVer breakage vs the last
+      # crates.io release. No-ops on the first release (no baseline).
+      - name: Check for SemVer breakage
+        run: cargo semver-checks check-release --workspace
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: ./scripts/publish-crates.sh
+
   # Renders homebrew/rusty-imap-mcp.rb.template into the tap on stable v* tags.
   # Prerelease tags never reach here (verify-tag rejects any '-'); the guard is
   # retained as forward-compatible defense for the Phase 2 -dev model.

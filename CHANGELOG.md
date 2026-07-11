@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
+  new `publish-crates` release job. Publishes in dependency order with an
+  idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by
+  `cargo-semver-checks` and the `crates-io` deployment environment. See #544 /
+  ADR-0004 and RELEASING.md.
+
 ### Changed
 
 - Version model: `Cargo.toml` now carries the next planned version with a
   `-dev` suffix (e.g. `0.1.1-dev`); release-prep strips it and a
   `post-release-bump` job re-bumps after each release. See ADR-0003.
+- `rimap-content` now declares `license = "(MIT OR Apache-2.0) AND
+  Unicode-3.0"` to cover its vendored Unicode 16.0 TR39 `confusables.txt` data
+  (correcting a stale note that misnamed the license `Unicode-DFS-2016`). Every
+  crate now carries `keywords`/`categories` for crates.io discoverability.
 
 ## [0.1.0] - 2026-07-10
 

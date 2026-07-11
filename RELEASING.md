@@ -55,6 +55,27 @@ containing `-`.
 4. **Optional:** configure the `homebrew-tap` deployment environment with
    required reviewers to add an approval gate before the tap is pushed. Leaving
    it unconfigured (the default) means the tap bump runs unattended.
+5. **crates.io publishing (issue #544).**
+   1. **Reserve the 8 crate names first, locally.** crates.io throttles *new*
+      crate names to a burst of 5 then 1 every 10 minutes, so publishing all 8
+      names cannot finish in one CI run. Reserve them by running the publish
+      script locally at the release version, where it can sleep through the
+      refill for free:
+
+      ```bash
+      # On the tagged (or release-prep) commit, at the clean release version:
+      CARGO_REGISTRY_TOKEN=<your-token> ./scripts/publish-crates.sh
+      ```
+
+      The script publishes `rimap-core → … → rimap-server` in order, skips any
+      version already up (so it is resumable), and on a `429` parses the "try
+      again after" time and sleeps. Expect the first run to span ~30+ minutes as
+      it paces past the burst limit. After the names exist, every subsequent
+      tagged release publishes new *versions* (burst 30) in one CI run.
+   2. Add `CARGO_REGISTRY_TOKEN` (a crates.io API token scoped to publish) to
+      the **`crates-io`** deployment environment's secrets. The `publish-crates`
+      job runs unattended once this is set (no required reviewer — ADR-0004);
+      add a required reviewer to the environment if you want a manual gate.
 
 ## Release checklist
 
@@ -117,6 +138,13 @@ Pushing a `v*` tag triggers `release.yml`, which:
   x86_64/arm64 Linux, upload them to the release, and commit the `bottle do`
   block to the tap formula. If any bottle leg fails, the formula stays
   bottle-less and installs fall back to the binary-download path.
+- **`publish-crates`** — publishes the 8 workspace crates to crates.io in
+  dependency order (`rimap-core → … → rimap-server`) after the GitHub Release is
+  up. Stable tags only; gated behind the `crates-io` environment and
+  `cargo-semver-checks`. Idempotent (skips versions already published) and
+  rate-limit-aware. **The first release's 8 new names exceed the burst limit —
+  reserve them locally first (one-time setup step 5).** A failure here does not
+  un-publish the GitHub Release.
 - **`post-release-bump`** — on a stable release, opens a PR bumping the
   workspace to the next `-dev` (`cargo set-version --workspace`) and prepending
   `## [Unreleased]` to the CHANGELOG. See checklist step 6 for the CI-kickoff
@@ -125,7 +153,8 @@ Pushing a `v*` tag triggers `release.yml`, which:
 ## After tagging
 
 Watch the pipeline succeed in order:
-`verify-tag → build ×5 → release → homebrew → bottles → bottles-merge`.
+`verify-tag → build ×5 → release → {publish-crates, homebrew → bottles → bottles-merge}`
+(`publish-crates` and `homebrew` both fan out from `release`).
 
 Then verify the install on a supported platform:
 
@@ -139,7 +168,5 @@ For a Linux bottle, also confirm it runs in a clean container **without**
 
 ## Planned (later phases)
 
-- crates.io publishing (all 8 workspace crates, in dependency order) —
-  [#544](https://github.com/randomparity/rusty-imap-mcp/issues/544).
 - deb/rpm packaging, manpages, and `install.sh` / `install.ps1` installers —
   [#545](https://github.com/randomparity/rusty-imap-mcp/issues/545).

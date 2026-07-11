@@ -8,6 +8,8 @@ repository.workspace = true
 authors.workspace = true
 readme.workspace = true
 description = "IMAP session, TLS pinning, and read operations for rusty-imap-mcp"
+categories = ["email", "network-programming"]
+keywords = ["imap", "email", "tls", "mcp"]
 
 [features]
 default = []

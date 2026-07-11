@@ -322,8 +322,31 @@ check-tools-doc:
         exit 1
     fi
 
+# Validate per-crate crates.io publish metadata (description, category slugs,
+# keyword limits). Mirrored in the `publish-checks` CI job (issue #544).
+check-metadata:
+    ./scripts/check-publishable-metadata.sh
+
+# Unit-test the pure functions in publish-crates.sh (429 parse, -dev guard,
+# publish order). No crates.io access. Mirrored in the `publish-checks` CI job.
+test-publish-script:
+    ./scripts/publish-crates.test.sh
+
+# Dry-run the crates.io publish: package all 8 crates (workspace) without
+# uploading. Validates manifests/metadata; runs on a normal -dev branch.
+publish-dry-run:
+    ./scripts/publish-crates.sh --dry-run
+
+# Check the workspace public APIs against their last crates.io release for
+# accidental SemVer breakage (issue #544). Requires a network baseline and
+# `cargo-semver-checks` installed (`cargo install cargo-semver-checks --locked
+# --version 0.48.0`). No-ops on crates with no published baseline, so it is not
+# part of `ci`; the release workflow runs it as a publish gate.
+semver-checks:
+    cargo semver-checks check-release --workspace
+
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script
     typos
 
 # Re-run pre-commit hooks across all files.
