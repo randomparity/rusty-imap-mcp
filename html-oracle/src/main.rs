@@ -207,25 +207,26 @@ struct Outcome {
     corpus_records: Vec<CorpusRecord>,
 }
 
-/// Assemble the allowlist: the base `allowlist.toml` plus, only when the EPVME
-/// corpus is loaded, `epvme-allowlist.toml`. Merging the EPVME file only then
-/// keeps its `epvme/…` entries from showing as stale in the hermetic
-/// `--repo-root` run. Concatenated `[[allow]]` blocks parse as one array.
+/// Assemble the allowlist: the base `allowlist.toml` plus each loaded external
+/// source's companion file (`epvme-allowlist.toml`, `corpus-allowlist.toml`).
+/// See [`append_allowlist`] for why a source's file is merged only when loaded.
 fn assemble_allowlist(with_epvme: bool, with_corpus: bool) -> Result<allowlist::Allowlist, String> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut text = std::fs::read_to_string(manifest.join("allowlist.toml")).unwrap_or_default();
-    if with_epvme && let Ok(extra) = std::fs::read_to_string(manifest.join("epvme-allowlist.toml"))
-    {
-        text.push('\n');
-        text.push_str(&extra);
-    }
-    if with_corpus
-        && let Ok(extra) = std::fs::read_to_string(manifest.join("corpus-allowlist.toml"))
-    {
-        text.push('\n');
-        text.push_str(&extra);
-    }
+    append_allowlist(&mut text, &manifest, with_epvme, "epvme-allowlist.toml");
+    append_allowlist(&mut text, &manifest, with_corpus, "corpus-allowlist.toml");
     allowlist::load(&text).map_err(|e| e.to_string())
+}
+
+/// Concatenate a per-source allowlist file onto `text` when `enabled`. Merging
+/// a source's file only when that source is loaded keeps its entries from
+/// showing as stale in a run that does not load it. Concatenated `[[allow]]`
+/// blocks parse as one array.
+fn append_allowlist(text: &mut String, manifest: &Path, enabled: bool, file: &str) {
+    if enabled && let Ok(extra) = std::fs::read_to_string(manifest.join(file)) {
+        text.push('\n');
+        text.push_str(&extra);
+    }
 }
 
 /// Assemble the corpus: the in-repo sources, plus the external EPVME tree when
@@ -261,7 +262,7 @@ fn run_inputs(inputs: &[corpus::CorpusInput], allow: &allowlist::Allowlist) -> O
         out.totals.total += 1;
         out.seen_ids.insert(input.id.clone());
         let kind = process_one(input, allow, &mut out);
-        if input.id.starts_with("corpus/") {
+        if input.id.split('/').next() == Some(corpus::CORPUS_ID_PREFIX) {
             out.corpus_records.push(CorpusRecord {
                 probes: input.probes.clone(),
                 kind,
@@ -340,6 +341,17 @@ fn check_floor(compared_nonempty: usize, min: Option<usize>) -> Option<String> {
     }
 }
 
+/// Count the records tagged with `family`, and how many of them are `healthy`,
+/// in a single pass: `(tagged_total, healthy)`.
+fn tally_family(records: &[CorpusRecord], family: &str, healthy: Kind) -> (usize, usize) {
+    records
+        .iter()
+        .filter(|r| r.probes.iter().any(|p| p == family))
+        .fold((0, 0), |(tagged, ok), r| {
+            (tagged + 1, ok + usize::from(r.kind == healthy))
+        })
+}
+
 /// Assert direction-aware canary health over the `corpus/` records. Only
 /// *present* families are checked (an empty corpus asserts nothing, keeping the
 /// plumbing proof green); absent-family detection is deferred to the wave-1
@@ -348,45 +360,28 @@ fn check_floor(compared_nonempty: usize, min: Option<usize>) -> Option<String> {
 fn check_canaries(records: &[CorpusRecord]) -> Vec<String> {
     let mut fails = Vec::new();
     for family in TEXT_TOKEN_FAMILIES {
-        let tagged: Vec<&CorpusRecord> = records
-            .iter()
-            .filter(|r| r.probes.iter().any(|p| p == family))
-            .collect();
-        if tagged.is_empty() {
-            continue;
-        }
-        let live = tagged
-            .iter()
-            .filter(|r| r.kind == Kind::ComparedNonempty)
-            .count();
-        if live == 0 {
+        let (tagged, live) = tally_family(records, family, Kind::ComparedNonempty);
+        if tagged > 0 && live == 0 {
             fails.push(format!(
                 "canary family '{family}' has tagged inputs but produced 0 live comparisons — \
                  comparison-layer hardening regressed (its guard inputs went inert)"
             ));
         }
     }
-    let bin: Vec<&CorpusRecord> = records
-        .iter()
-        .filter(|r| r.probes.iter().any(|p| p == BINARY_FAMILY))
-        .collect();
-    if !bin.is_empty() {
-        // Healthy when the is_mostly_binary guard fired at least once (≥1
-        // BinarySkip) — symmetric with the text families' ≥1-live rule, so a
-        // multipart canary whose clean part also compares is not a false FAIL.
-        // Zero BinarySkip means the guard did NOT fire on any tagged input:
-        // either it regressed (inputs reached the comparison stage) or they
-        // errored earlier in sanitize. The message names all three hypotheses
-        // so triage is not biased toward a false security-regression conclusion.
-        let via_guard = bin.iter().filter(|r| r.kind == Kind::BinarySkip).count();
-        if via_guard == 0 {
-            fails.push(format!(
-                "binary-part canary unhealthy (0/{} tagged inputs skipped via is_mostly_binary): \
-                 the is_mostly_binary guard regressed, this canary no longer decodes to >10% \
-                 U+FFFD, or it was skipped/errored by a different stage",
-                bin.len()
-            ));
-        }
+    // Healthy when the is_mostly_binary guard fired at least once (≥1 BinarySkip)
+    // — symmetric with the text families' ≥1-live rule, so a multipart canary
+    // whose clean part also compares is not a false FAIL. Zero BinarySkip means
+    // the guard did NOT fire on any tagged input: either it regressed (inputs
+    // reached the comparison stage) or they errored earlier in sanitize. The
+    // message names all three hypotheses so triage is not biased toward a false
+    // security-regression conclusion.
+    let (bin_tagged, via_guard) = tally_family(records, BINARY_FAMILY, Kind::BinarySkip);
+    if bin_tagged > 0 && via_guard == 0 {
+        fails.push(format!(
+            "binary-part canary unhealthy (0/{bin_tagged} tagged inputs skipped via \
+             is_mostly_binary): the is_mostly_binary guard regressed, this canary no longer \
+             decodes to >10% U+FFFD, or it was skipped/errored by a different stage"
+        ));
     }
     fails
 }

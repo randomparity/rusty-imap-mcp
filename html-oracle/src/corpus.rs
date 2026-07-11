@@ -39,6 +39,11 @@ struct Meta {
     probes: Vec<String>,
 }
 
+/// First id segment for external corpus inputs (`corpus/<stem>`). Shared by the
+/// loader that produces the ids and the runner that recognizes them, so the
+/// source-namespacing convention lives in one place.
+pub const CORPUS_ID_PREFIX: &str = "corpus";
+
 pub fn load(repo_root: &Path) -> Result<Vec<CorpusInput>, CorpusError> {
     let mut inputs = Vec::new();
     load_fuzz_seeds(repo_root, &mut inputs)?;
@@ -78,7 +83,7 @@ pub fn load_eml_tree(
 /// silently dropping a canary. The corpus repo's self-validation (issue #549) is
 /// the upstream gate on metadata validity at the pinned SHA.
 pub fn load_corpus_tree(dir: &Path, limit: Option<usize>) -> Result<Vec<CorpusInput>, CorpusError> {
-    load_eml_tree_with(dir, "corpus", limit, |eml, inputs| {
+    load_eml_tree_with(dir, CORPUS_ID_PREFIX, limit, |eml, inputs| {
         let probes = read_probes(eml)?;
         for input in inputs {
             input.probes = probes.clone();
