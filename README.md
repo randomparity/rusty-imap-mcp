@@ -253,9 +253,12 @@ man rusty-imap-mcp
 ```
 
 The packaged amd64/arm64 binary static-links libdbus, so **no** `libdbus-1-3` /
-`dbus-libs` runtime package is needed. The `curl … | sh` installer places only
-the binary — its manpage ships inside the tarball under `share/man/man1/`, or
-run `rusty-imap-mcp --help`.
+`dbus-libs` runtime package is needed. Both packages are built against
+**glibc 2.36** (Debian 12+, Ubuntu 24.04+, Fedora 37+) and declare that floor,
+so `apt`/`dnf` refuse cleanly on older systems; there, use `cargo install
+rusty-imap-mcp --locked` or build from source instead. The `curl … | sh`
+installer places only the binary — its manpage ships inside the tarball under
+`share/man/man1/`, or run `rusty-imap-mcp --help`.
 
 ### Installing a prebuilt binary
 

@@ -50,25 +50,33 @@ it via the library. Building `xtask` with `default-features = false` keeps the
 `--allow-empty-accounts`) out of the shipped manpages, so they reflect the
 production CLI.
 
-**2. Package `.deb` and `.rpm` for amd64 + arm64 only; declare no libdbus
-dependency.** Both packaged arches are the `vendored-keyring` (static-libdbus)
-legs, so `[package.metadata.deb]` and `[package.metadata.generate-rpm]` declare
-only the C runtime (`libc6` / `glibc`) plus `ca-certificates` (recommended).
-`powerpc64le` and `s390x` remain **tarball-only** (they are not vendored and have
-a near-zero packaged audience), which is why no per-arch libdbus-dependency
-handling is needed at all.
+**2. Package `.deb` and `.rpm` for amd64 + arm64 only; no libdbus dependency, but
+a declared glibc floor.** Both packaged arches are the `vendored-keyring`
+(static-libdbus) legs, so `[package.metadata.deb]` and
+`[package.metadata.generate-rpm]` declare no libdbus dependency — only the C
+runtime plus `ca-certificates` (recommended). Because the tools' `$auto`/`ldd`
+dependency detection is disabled (it reads the wrong arch when cross-packaging),
+the glibc requirement is declared **explicitly with a version floor**
+(`libc6 (>= 2.36)` / `glibc >= 2.36`), matching the glibc of the build container
+(decision 3). Without a floor the package manager would report a satisfied
+install on an older-glibc distro and the binary would then crash at runtime with
+`GLIBC_x.xx not found` — strictly worse than the tarball path; the floor makes
+`apt`/`dnf` refuse cleanly instead. `powerpc64le` and `s390x` remain
+**tarball-only** (not vendored, near-zero packaged audience).
 
 **3. Build packages host-side with `cargo-deb` / `cargo-generate-rpm --target`,
-reconciling the emulated arm64 binary path.** `cargo deb --no-build --no-strip
---target <triple>` and `cargo generate-rpm --target <triple>` package an
-already-built binary and derive the Debian/RPM `Architecture` field from the Rust
-target triple. The x86_64 leg builds natively into
-`target/x86_64-unknown-linux-gnu/release/` (add `--target` to its `cargo
-auditable build`). The aarch64 leg builds in an emulated container; its command
-gains `--target aarch64-unknown-linux-gnu` so the binary lands at
-`target/aarch64-unknown-linux-gnu/release/` on the shared volume, where the
-host-side packaging tools (running as the runner user after a `chown -R` of the
-root-owned `target/`) find it with the correct architecture metadata. Packaging
+from a single glibc baseline.** `cargo deb --no-build --no-strip --target
+<triple>` and `cargo generate-rpm --target <triple>` package an already-built
+binary and derive the Debian/RPM `Architecture` field from the Rust target
+triple. **Both** the x86_64 and aarch64 packaged binaries are built inside the
+same `rust:1.88.0-bookworm` container (glibc 2.36) — x86_64 as a native amd64
+container (no QEMU), aarch64 emulated — each with `--target <triple>` so the
+binary lands at `target/<triple>/release/` on the shared volume. This gives both
+arches **one** glibc baseline, so a single declared floor (decision 2) is
+accurate for both rather than the x86_64 leg silently requiring a newer glibc
+than arm64. After the container step, a `chown -R` returns the root-owned
+`target/` to the runner user so the host-side packaging tools (running as that
+user) can read the binary with the correct architecture metadata. Packaging
 tools thus never run under emulation.
 
 ## Consequences

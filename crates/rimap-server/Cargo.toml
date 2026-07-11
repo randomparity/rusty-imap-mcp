@@ -152,8 +152,11 @@ section = "mail"
 priority = "optional"
 # Explicit deps only: cargo-deb's $auto would ldd the wrong arch when packaging
 # the arm64 binary on an x86_64 host. The binary is self-contained (vendored
-# static libdbus), so libc6 is the sole runtime requirement.
-depends = "libc6"
+# static libdbus), so glibc is the sole runtime requirement. Both arches are
+# built in rust:1.88.0-bookworm (glibc 2.36), so declare that floor — the
+# package manager then refuses cleanly on older systems instead of installing a
+# binary that crashes at runtime with `GLIBC_x.xx not found`.
+depends = "libc6 (>= 2.36)"
 recommends = "ca-certificates"
 assets = [
     ["target/release/rusty-imap-mcp", "usr/bin/", "755"],
@@ -174,8 +177,10 @@ summary = "Security-first MCP server for IMAP email access"
 # statically-linked binary); declare the sole runtime dep explicitly.
 auto-req = "no"
 
+# Both arches build in rust:1.88.0-bookworm (glibc 2.36); declare that floor so
+# dnf/rpm refuse cleanly on older systems rather than crash at runtime.
 [package.metadata.generate-rpm.requires]
-glibc = "*"
+glibc = ">= 2.36"
 
 [[package.metadata.generate-rpm.assets]]
 source = "target/release/rusty-imap-mcp"
