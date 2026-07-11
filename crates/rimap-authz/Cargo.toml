@@ -12,8 +12,8 @@ description = "Posture-based authorization, rate limiting, and circuit breaker f
 workspace = true
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.1.0" }
-rimap-config = { path = "../rimap-config", version = "0.1.0" }
+rimap-core = { path = "../rimap-core", version = "0.1.1-dev" }
+rimap-config = { path = "../rimap-config", version = "0.1.1-dev" }
 thiserror = { workspace = true }
 governor = { workspace = true }
 parking_lot = { workspace = true }

@@ -15,7 +15,7 @@ workspace = true
 test-injection = []
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.1.0" }
+rimap-core = { path = "../rimap-core", version = "0.1.1-dev" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -13,7 +13,7 @@ members = [
 exclude = ["fuzz", "html-oracle"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1-dev"
 edition = "2024"
 rust-version = "1.88.0"
 license = "MIT OR Apache-2.0"
