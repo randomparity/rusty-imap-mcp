@@ -1,0 +1,12 @@
+# Known-benign divergences specific to the external corpus tree (issue #550).
+#
+# This file is merged into the allowlist ONLY when --corpus-root is set, so its
+# `corpus/…` entries never appear stale in the hermetic --repo-root nightly run
+# (which does not load the corpus). Populate from the wave-1 baseline; never
+# allowlist a real sanitizer silent-drop — file an issue instead. Each entry
+# REQUIRES a `reason` (fail closed).
+#
+# [[allow]]
+# input = "corpus/<content-hash-stem>"
+# tokens = ["benignword"]
+# reason = "why this divergence is benign"

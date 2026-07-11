@@ -22,6 +22,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout corpus (pinned SHA)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          repository: randomparity/rusty-imap-mcp-corpus
+          ref: 69d31655e51ade38dd7ed6ee8209336d80516562  # PINNED — bump via reviewed PR only
+          path: corpus
+          token: ${{ secrets.CORPUS_READ_TOKEN }}
+          persist-credentials: false
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
@@ -41,7 +50,7 @@ jobs:
         run: cargo deny --locked --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
 
       - name: Run differential oracle
-        run: cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root .
+        run: cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root . --corpus-root corpus
 
       - name: Upload report
         if: always()

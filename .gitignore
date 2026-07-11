@@ -11,6 +11,11 @@
 .desloppify/
 docs/superpoweres/plans/
 
+# Oracle corpus — the nightly checks out the private rusty-imap-mcp-corpus
+# into corpus/ (issue #550). CI-only; keep a local checkout from being
+# accidentally committed into this repo.
+/corpus/
+
 # Conformance suite — installed deps and coverage outputs
 tests/mcp-conformance/node_modules/
 tests/mcp-conformance/coverage/
