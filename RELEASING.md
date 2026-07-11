@@ -6,25 +6,38 @@ Homebrew formula (with native bottles) in
 release is cut by pushing a `vX.Y.Z` git tag; the rest is automated by
 [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
-This is **Phase 1** of the release process. See
-[ADR-0002](docs/ADR/0002-phased-bzr-release-parity-and-direct-publish.md) and
-[the Phase 1 design](docs/superpowers/specs/2026-07-10-release-homebrew-phase1-design.md)
-for scope and the planned later phases.
+See [ADR-0002](docs/ADR/0002-phased-bzr-release-parity-and-direct-publish.md)
+for the phased bzr-parity plan. Phase 1 (tarballs + Homebrew tap + bottles) and
+Phase 2A (the manifest `-dev` version model,
+[ADR-0003](docs/ADR/0003-manifest-dev-version-model.md)) are implemented;
+crates.io publish and native packaging remain (see "Planned" below).
 
 ## Version-number convention
 
-`Cargo.toml` always carries a clean semver (`version = "0.1.0"`) — there is **no
-`-dev` suffix in the manifest**. `crates/rimap-core/build.rs` computes the
-runtime version at build time: a build from a `vX.Y.Z` tag reports the bare
-`X.Y.Z`; every other build reports `X.Y.Z-dev+g<sha>` (with `.dirty` when the
-worktree is dirty). Cutting a release is therefore "tag and push" — no manifest
-edit at release time.
+Between releases, `[workspace.package].version` carries the **next planned
+version with a `-dev` suffix** (e.g. after `v0.1.0` ships, `main` lives at
+`0.1.1-dev`). The suffix is a placeholder — the actual release version is
+chosen at release-prep per SemVer based on what landed; patch is the default,
+minor when features accumulated. `crates/rimap-core/build.rs` appends git
+provenance: a build from the `vX.Y.Z` tag (a clean, stripped base) reports the
+bare `X.Y.Z`; every other build reports `<base>+g<sha>` (with `.dirty`), so a
+dev build reports `0.1.1-dev+g<sha>`. SemVer orders `0.1.1-dev` after `0.1.0`
+and before `0.1.1` — see [ADR-0003](docs/ADR/0003-manifest-dev-version-model.md).
+
+Because the 8 workspace crates pin each other with explicit `version`
+requirements (needed for crates.io), a version change must move the workspace
+version **and** all intra-workspace requirements together. Always use
+`cargo set-version --workspace <version>` (from `cargo-edit`:
+`cargo install cargo-edit --locked`) — never hand-edit the version.
 
 The `verify-tag` job (mirrored locally by
 [`scripts/check-release-version.sh`](scripts/check-release-version.sh)) hard-fails
 if the tag does not match `Cargo.toml` or is not exactly `^v[0-9]+\.[0-9]+\.[0-9]+$`.
+It runs against the **stripped** manifest at tag time, so it also catches a
+forgotten `-dev` strip (tagging `v0.1.1` while the manifest still says
+`0.1.1-dev` fails the clean-version check).
 
-**Prerelease tags are not supported in Phase 1** — `verify-tag` rejects any tag
+**Prerelease tags are not supported** — `verify-tag` rejects any tag
 containing `-`.
 
 ## One-time setup (before the first release)
@@ -45,12 +58,16 @@ containing `-`.
 
 ## Release checklist
 
-1. Ensure `Cargo.toml` `[workspace.package].version` equals the intended tag
-   version (no `-` suffix).
-2. Ensure `CHANGELOG.md` has a dated section for the version using the exact
-   heading `## [X.Y.Z] - YYYY-MM-DD` — the release job extracts the release
-   notes by matching that heading, and a different format produces an empty
-   release body.
+1. On a `release/vX.Y.Z-prep` branch, **strip `-dev`** across the workspace:
+
+   ```bash
+   cargo set-version --workspace X.Y.Z   # choose patch/minor per what landed
+   cargo build                            # refresh Cargo.lock
+   ```
+
+2. Rename the `CHANGELOG.md` `## [Unreleased]` heading to
+   `## [X.Y.Z] - YYYY-MM-DD` (exact format — the release job extracts notes by
+   matching `## [X.Y.Z]`, and a different format produces an empty release body).
 3. Run the local checks:
 
    ```bash
@@ -58,8 +75,8 @@ containing `-`.
    scripts/check-release-version.sh vX.Y.Z
    ```
 
-4. Land any release-prep changes via a normal PR to `main` (direct pushes to
-   `main` are blocked). The merge commit on `main` is what you tag.
+4. Open the prep PR to `main` (direct pushes are blocked) and merge it. The
+   merge commit on `main` is what you tag.
 5. Tag the merge commit and push:
 
    ```bash
@@ -68,6 +85,13 @@ containing `-`.
    git tag -a vX.Y.Z -m "rusty-imap-mcp vX.Y.Z"
    git push origin vX.Y.Z
    ```
+
+6. After the release publishes, the **`post-release-bump`** job opens a
+   `chore/post-release-bump-vX.Y.(Z+1)-dev` PR automatically (stable tags
+   only). **Merge prerequisite:** because it is opened by `GITHUB_TOKEN`, it
+   does **not** trigger `pull_request` CI — push an empty commit to its branch
+   (or run `just ci` locally) to get a green signal before merging. Edit the
+   version on the PR first if the next release is a minor/major bump.
 
 ## What automation does
 
@@ -93,6 +117,10 @@ Pushing a `v*` tag triggers `release.yml`, which:
   x86_64/arm64 Linux, upload them to the release, and commit the `bottle do`
   block to the tap formula. If any bottle leg fails, the formula stays
   bottle-less and installs fall back to the binary-download path.
+- **`post-release-bump`** — on a stable release, opens a PR bumping the
+  workspace to the next `-dev` (`cargo set-version --workspace`) and prepending
+  `## [Unreleased]` to the CHANGELOG. See checklist step 6 for the CI-kickoff
+  merge prerequisite.
 
 ## After tagging
 
@@ -111,6 +139,7 @@ For a Linux bottle, also confirm it runs in a clean container **without**
 
 ## Planned (later phases)
 
-- The `-dev`-in-`Cargo.toml` version model (release-prep + post-release-bump).
-- crates.io publishing (all 8 workspace crates, in dependency order).
-- deb/rpm packaging, manpages, and `install.sh` / `install.ps1` installers.
+- crates.io publishing (all 8 workspace crates, in dependency order) —
+  [#544](https://github.com/randomparity/rusty-imap-mcp/issues/544).
+- deb/rpm packaging, manpages, and `install.sh` / `install.ps1` installers —
+  [#545](https://github.com/randomparity/rusty-imap-mcp/issues/545).

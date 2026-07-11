@@ -2483,7 +2483,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rimap-audit"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "async-channel 2.5.0",
  "fs4",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-authz"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "governor",
  "parking_lot",
@@ -2520,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-config"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "dbus-secret-service",
  "directories",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-content"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "addr",
  "ammonia",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-core"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "hex",
  "proptest",
@@ -2588,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-imap"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "async-channel 2.5.0",
  "async-imap",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-server"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-smtp"
-version = "0.1.0"
+version = "0.1.1-dev"
 dependencies = [
  "lettre",
  "rcgen",

@@ -12,8 +12,8 @@ name = "html-oracle"
 path = "src/main.rs"
 
 [dependencies]
-rimap-content = { path = "../crates/rimap-content", version = "0.1.0", features = ["test-support"] }
-rimap-core = { path = "../crates/rimap-core", version = "0.1.0" }
+rimap-content = { path = "../crates/rimap-content", features = ["test-support"] }
+rimap-core = { path = "../crates/rimap-core" }
 lol_html = "3"
 # Same html5ever engine production uses — decodes character references
 # byte-identically (incl. legacy semicolon-less names + longest-prefix).

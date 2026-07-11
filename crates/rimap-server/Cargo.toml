@@ -68,13 +68,13 @@ name = "rusty-imap-mcp"
 path = "src/main.rs"
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.1.0" }
-rimap-config = { path = "../rimap-config", version = "0.1.0" }
-rimap-authz = { path = "../rimap-authz", version = "0.1.0" }
-rimap-audit = { path = "../rimap-audit", version = "0.1.0" }
-rimap-content = { path = "../rimap-content", version = "0.1.0" }
-rimap-imap = { path = "../rimap-imap", version = "0.1.0" }
-rimap-smtp = { path = "../rimap-smtp", version = "0.1.0" }
+rimap-core = { path = "../rimap-core", version = "0.1.1-dev" }
+rimap-config = { path = "../rimap-config", version = "0.1.1-dev" }
+rimap-authz = { path = "../rimap-authz", version = "0.1.1-dev" }
+rimap-audit = { path = "../rimap-audit", version = "0.1.1-dev" }
+rimap-content = { path = "../rimap-content", version = "0.1.1-dev" }
+rimap-imap = { path = "../rimap-imap", version = "0.1.1-dev" }
+rimap-smtp = { path = "../rimap-smtp", version = "0.1.1-dev" }
 mail-builder = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
@@ -109,14 +109,14 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 jsonschema = { workspace = true }
 mail-parser = { workspace = true }
-rimap-audit = { path = "../rimap-audit", version = "0.1.0", features = ["test-injection"] }
-rimap-config = { path = "../rimap-config", version = "0.1.0", features = ["test-support"] }
-rimap-imap = { path = "../rimap-imap", version = "0.1.0", features = ["test-support"] }
-rimap-smtp = { path = "../rimap-smtp", version = "0.1.0", features = ["test-support"] }
+rimap-audit = { path = "../rimap-audit", version = "0.1.1-dev", features = ["test-injection"] }
+rimap-config = { path = "../rimap-config", version = "0.1.1-dev", features = ["test-support"] }
+rimap-imap = { path = "../rimap-imap", version = "0.1.1-dev", features = ["test-support"] }
+rimap-smtp = { path = "../rimap-smtp", version = "0.1.1-dev", features = ["test-support"] }
 # Self dev-dep enables the `test-support` feature unconditionally for
 # integration tests, so `ImapMcpServer::execute_tool_for_test` is in
 # scope without every test harness passing `--features test-support`.
-rimap-server = { path = ".", version = "0.1.0", features = ["test-support"] }
+rimap-server = { path = ".", version = "0.1.1-dev", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util"] }
 tempfile = { workspace = true }
 base64 = { workspace = true }

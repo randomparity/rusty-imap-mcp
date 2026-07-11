@@ -22,8 +22,8 @@ workspace = true
 test-support = []
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.1.0" }
-rimap-config = { path = "../rimap-config", version = "0.1.0" }
+rimap-core = { path = "../rimap-core", version = "0.1.1-dev" }
+rimap-config = { path = "../rimap-config", version = "0.1.1-dev" }
 
 lettre = { workspace = true }
 thiserror = { workspace = true }
@@ -46,4 +46,4 @@ tokio-rustls = { workspace = true }
 rcgen = { workspace = true }
 # Self dev-dep enables `test-support` for this crate's own tests so the
 # fake and its tests compile under a plain `cargo test -p rimap-smtp`.
-rimap-smtp = { path = ".", version = "0.1.0", features = ["test-support"] }
+rimap-smtp = { path = ".", version = "0.1.1-dev", features = ["test-support"] }

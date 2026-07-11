@@ -41,7 +41,7 @@ the wire-driven Dovecot e2e harness for tool dispatch + audit-log attribution.
 
 ## Repository status
 
-The workspace (v0.1.0) is feature-complete. The eight member crates under `crates/` implement
+The workspace is feature-complete for its 0.1.x line. The eight member crates under `crates/` implement
 24 advertised MCP tools (22 posture-gated + 2 infrastructure), backed by 27 `ToolName`
 capability variants (three are full-posture sub-capabilities of `search`, `fetch_message`,
 and `create_draft`), multi-account support, SMTP sending, an audit log, and a content
