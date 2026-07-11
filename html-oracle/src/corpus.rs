@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use mail_parser::{MessageParser, MimeHeaders as _};
+use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CorpusError {
@@ -21,6 +22,15 @@ pub struct CorpusInput {
     pub id: String,
     pub raw: Vec<u8>,
     pub charset: Option<String>,
+    /// Hardening families this input exercises, from its sibling `meta.toml`
+    /// (`--corpus-root` inputs only; empty for in-repo and `--epvme-dir` inputs).
+    pub probes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Meta {
+    #[serde(default)]
+    probes: Vec<String>,
 }
 
 pub fn load(repo_root: &Path) -> Result<Vec<CorpusInput>, CorpusError> {
@@ -63,6 +73,49 @@ pub fn load_eml_tree(
         extract_html_parts(eml, &format!("{id_prefix}/{stem}"), &mut out)?;
     }
     Ok(out)
+}
+
+/// Load an external corpus tree the same way [`load_eml_tree`] does (walk, sort,
+/// deterministic `limit`), keyed under `corpus/…`, additionally attaching each
+/// input's sibling `<stem>.meta.toml` `probes` families. A missing/unparseable
+/// meta yields empty `probes` (the input still loads) and logs a warning — the
+/// corpus repo's self-validation (issue #549) is the gate that guarantees valid
+/// metadata at the pinned SHA.
+pub fn load_corpus_tree(dir: &Path, limit: Option<usize>) -> Result<Vec<CorpusInput>, CorpusError> {
+    let mut files = Vec::new();
+    collect_eml_files(dir, &mut files);
+    files.sort();
+    if let Some(limit) = limit {
+        files.truncate(limit);
+    }
+    let mut out = Vec::new();
+    for eml in &files {
+        let stem = eml
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let first = out.len();
+        extract_html_parts(eml, &format!("corpus/{stem}"), &mut out)?;
+        let probes = read_probes(eml);
+        for input in &mut out[first..] {
+            input.probes = probes.clone();
+        }
+    }
+    Ok(out)
+}
+
+fn read_probes(eml: &Path) -> Vec<String> {
+    let meta_path = eml.with_extension("meta.toml");
+    let Ok(text) = std::fs::read_to_string(&meta_path) else {
+        return Vec::new();
+    };
+    match toml::from_str::<Meta>(&text) {
+        Ok(meta) => meta.probes,
+        Err(e) => {
+            eprintln!("html-oracle: unparsable {}: {e}", meta_path.display());
+            Vec::new()
+        }
+    }
 }
 
 fn collect_eml_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -110,6 +163,7 @@ fn load_fuzz_seeds(repo_root: &Path, out: &mut Vec<CorpusInput>) -> Result<(), C
                 id: format!("content_html/{name}"),
                 raw,
                 charset: None,
+                probes: Vec::new(),
             });
         }
     }
@@ -164,7 +218,12 @@ fn extract_html_parts(
         } else {
             format!("{id_base}/part{part_no}")
         };
-        out.push(CorpusInput { id, raw, charset });
+        out.push(CorpusInput {
+            id,
+            raw,
+            charset,
+            probes: Vec::new(),
+        });
     }
     Ok(())
 }
@@ -190,6 +249,43 @@ mod tests {
             .find(|i| i.id.starts_with("injection/sample"))
             .expect("html part extracted");
         assert!(String::from_utf8_lossy(&sample.raw).contains("hello"));
+    }
+
+    #[test]
+    fn load_corpus_tree_reads_probes_and_prefixes_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("corpus");
+        std::fs::create_dir_all(root.join("wave1")).unwrap();
+        let eml = "Content-Type: text/html; charset=utf-8\r\n\r\n<p>hi</p>\r\n";
+        std::fs::write(root.join("wave1/aa11.eml"), eml).unwrap();
+        std::fs::write(
+            root.join("wave1/aa11.meta.toml"),
+            "probes = [\"stray-tag-boundary\", \"entity-href\"]\n",
+        )
+        .unwrap();
+
+        let inputs = load_corpus_tree(&root, None).unwrap();
+        let got = inputs
+            .iter()
+            .find(|i| i.id == "corpus/aa11")
+            .expect("loaded");
+        assert_eq!(got.probes, vec!["stray-tag-boundary", "entity-href"]);
+    }
+
+    #[test]
+    fn load_corpus_tree_tolerates_missing_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("corpus");
+        std::fs::create_dir_all(&root).unwrap();
+        let eml = "Content-Type: text/html; charset=utf-8\r\n\r\n<p>hi</p>\r\n";
+        std::fs::write(root.join("bb22.eml"), eml).unwrap();
+        // No sibling meta.toml.
+        let inputs = load_corpus_tree(&root, None).unwrap();
+        let got = inputs
+            .iter()
+            .find(|i| i.id == "corpus/bb22")
+            .expect("loaded");
+        assert!(got.probes.is_empty());
     }
 
     #[test]
