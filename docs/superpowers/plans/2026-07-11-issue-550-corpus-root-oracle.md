@@ -92,7 +92,9 @@ met without spawning the binary.
 **Interfaces produced:**
 - `Args` gains `corpus_root: Option<PathBuf>` and
   `corpus_min_compared: Option<usize>`.
-- `enum ParsedArgs { Run(Box<Args>), Help }` (box to keep the variant small).
+- `enum ParsedArgs { Run(Box<Args>), Help, Error(String) }` (box to keep the
+  `Run` variant small; `Error` carries a diagnostic for a present-but-invalid
+  flag value — fail fast rather than silently degrade).
 - `fn parse_args_from<I: Iterator<Item = String>>(iter: I, epvme_env:
   Option<PathBuf>, corpus_env: Option<PathBuf>) -> ParsedArgs` — pure; env
   defaults injected. `parse_args()` reads `EPVME_DIR` / `CORPUS_ROOT` from the
@@ -145,6 +147,18 @@ fn help_flag_yields_help_and_names_both_roots() {
     assert!(USAGE.contains("--corpus-root"));
     assert!(USAGE.contains("--corpus-min-compared"));
 }
+
+#[test]
+fn unparseable_min_compared_is_an_error_not_a_silent_disable() {
+    // A typo must NOT collapse to "no floor" — that would silently remove the
+    // very guard the flag exists to provide.
+    let parsed = parse_args_from(
+        ["--corpus-min-compared", "notanumber"].iter().map(|s| s.to_string()),
+        None,
+        None,
+    );
+    assert!(matches!(parsed, ParsedArgs::Error(_)));
+}
 ```
 
 - [ ] **Step 2 — run, verify fail:**
@@ -167,6 +181,7 @@ struct Args {
 enum ParsedArgs {
     Run(Box<Args>),
     Help,
+    Error(String),
 }
 
 const USAGE: &str = "\
@@ -213,9 +228,21 @@ fn parse_args_from<I: Iterator<Item = String>>(
             "--report" => report = it.next().map(PathBuf::from),
             "--epvme-dir" => epvme_dir = it.next().map(PathBuf::from),
             "--corpus-root" => corpus_root = it.next().map(PathBuf::from),
-            "--corpus-min-compared" => {
-                corpus_min_compared = it.next().and_then(|v| v.parse().ok());
-            }
+            "--corpus-min-compared" => match it.next() {
+                Some(v) => match v.parse() {
+                    Ok(n) => corpus_min_compared = Some(n),
+                    Err(_) => {
+                        return ParsedArgs::Error(format!(
+                            "--corpus-min-compared expects a non-negative integer, got {v:?}"
+                        ));
+                    }
+                },
+                None => {
+                    return ParsedArgs::Error(
+                        "--corpus-min-compared requires a value".to_string(),
+                    );
+                }
+            },
             "--limit" => limit = it.next().and_then(|v| v.parse().ok()),
             _ => {}
         }
@@ -249,6 +276,10 @@ fn main() -> ExitCode {
             eprint!("{USAGE}");
             return ExitCode::SUCCESS;
         }
+        ParsedArgs::Error(msg) => {
+            eprintln!("html-oracle: {msg}");
+            return ExitCode::FAILURE;
+        }
     };
     // …rest unchanged for now…
 }
@@ -277,7 +308,11 @@ the EPVME path and its existing tests are untouched; add a sibling
 
 **Interfaces produced:**
 - `CorpusInput` gains `pub probes: Vec<String>` (empty for all non-corpus
-  inputs; `extract_html_parts` sets `probes: Vec::new()`).
+  inputs). `CorpusInput` does **not** derive `Default`, and it is constructed at
+  **two** sites — both must set `probes: Vec::new()` or the crate won't compile
+  (`missing field probes`): `load_fuzz_seeds` (`corpus.rs:~109`) and
+  `extract_html_parts` (`corpus.rs:~167`). `load_corpus_tree` then overwrites the
+  field on the corpus inputs it produces.
 - `pub fn load_corpus_tree(dir: &Path, limit: Option<usize>) ->
   Result<Vec<CorpusInput>, CorpusError>` — same walk/sort/limit as
   `load_eml_tree` with a hardcoded `"corpus"` prefix, plus a sibling
@@ -321,8 +356,10 @@ fn load_corpus_tree_tolerates_missing_meta() {
 - [ ] **Step 2 — run, verify fail:**
   `cargo test --manifest-path html-oracle/Cargo.toml --lib corpus::tests::load_corpus_tree`
 
-- [ ] **Step 3 — implement.** Add the `probes` field to `CorpusInput`, set it in
-  `extract_html_parts`, and add:
+- [ ] **Step 3 — implement.** Add the `probes` field to `CorpusInput`, set
+  `probes: Vec::new()` at **both** construction sites (`load_fuzz_seeds` and
+  `extract_html_parts` — grep `CorpusInput {` to confirm you caught them all),
+  and add:
 
 ```rust
 use serde::Deserialize;
@@ -634,7 +671,17 @@ fn binary_part_canary_is_inverted() {
     let fails = check_canaries(&[rec(&["binary-part"], Kind::ComparedNonempty)]);
     assert_eq!(fails.len(), 1);
     assert!(fails[0].contains("is_mostly_binary"));
-    assert!(fails[0].contains("no longer decodes")); // names both hypotheses
+    assert!(fails[0].contains("no longer decodes")); // names the decode hypothesis
+}
+
+#[test]
+fn binary_part_canary_flags_non_guard_skip_without_misattribution() {
+    // A binary-part input that errored in sanitize (never reached the guard) is
+    // still unhealthy, but the message must name the "different stage" path too,
+    // not assert a false is_mostly_binary regression.
+    let fails = check_canaries(&[rec(&["binary-part"], Kind::SanitizeSkip)]);
+    assert_eq!(fails.len(), 1);
+    assert!(fails[0].contains("different stage"));
 }
 ```
 
@@ -673,13 +720,19 @@ fn check_canaries(records: &[CorpusRecord]) -> Vec<String> {
     let bin: Vec<&CorpusRecord> =
         records.iter().filter(|r| r.probes.iter().any(|p| p == BINARY_FAMILY)).collect();
     if !bin.is_empty() {
-        let skipped = bin.iter().filter(|r| r.kind == Kind::BinarySkip).count();
-        if skipped != bin.len() {
-            let live = bin.len() - skipped;
+        // Healthy iff the is_mostly_binary guard fired (BinarySkip). Any other
+        // outcome means the guard did NOT fire — either it regressed (input
+        // reached the comparison stage: ComparedEmpty/ComparedNonempty/RefError)
+        // or the input errored earlier in sanitize (SanitizeSkip). The message
+        // names all three hypotheses so triage is not biased toward a false
+        // security-regression conclusion.
+        let via_guard = bin.iter().filter(|r| r.kind == Kind::BinarySkip).count();
+        if via_guard != bin.len() {
+            let off = bin.len() - via_guard;
             fails.push(format!(
-                "binary-part canary unhealthy ({skipped}/{} skipped by is_mostly_binary, \
-                 {live} produced a live comparison/HARD): the is_mostly_binary guard regressed \
-                 OR this canary no longer decodes to >10% U+FFFD",
+                "binary-part canary unhealthy ({via_guard}/{} skipped via is_mostly_binary, \
+                 {off} did not): the is_mostly_binary guard regressed, this canary no longer \
+                 decodes to >10% U+FFFD, or it was skipped/errored by a different stage",
                 bin.len()
             ));
         }
@@ -770,9 +823,9 @@ fn empty_corpus_plumbing_proof_greens() {
 run the oracle with `--corpus-root`. The floor flag is **absent** for now (no
 baseline; it lands in the wave-1 SHA-bump PR under #551).
 
-- [ ] **Step 1 — add the corpus checkout + non-empty assertion + `--corpus-root`
-  run** to `nightly-html-oracle.yml`. Insert after the existing main `Checkout`
-  step and before `Install Rust toolchain`:
+- [ ] **Step 1 — add the corpus checkout + `--corpus-root` run** to
+  `nightly-html-oracle.yml`. Insert **only** the checkout step after the existing
+  main `Checkout` step and before `Install Rust toolchain`:
 
 ```yaml
       - name: Checkout corpus (pinned SHA)
@@ -783,20 +836,16 @@ baseline; it lands in the wave-1 SHA-bump PR under #551).
           path: corpus
           token: ${{ secrets.CORPUS_READ_TOKEN }}
           persist-credentials: false
-
-      - name: Assert corpus checkout is non-empty
-        run: test -d corpus && test -n "$(find corpus -maxdepth 4 -name '*.eml' -print -quit)" \
-          || { echo "corpus checkout missing or has no .eml"; ls -la corpus || true; exit 1; }
 ```
 
-  > The empty-but-valid corpus commit has **zero** `.eml`, so the non-empty
-  > assertion would fail against it. Confirm the pinned SHA's tree during
-  > implementation: if `69d3165…` genuinely has no `.eml`, the non-empty guard
-  > must be **added in the wave-1 SHA-bump PR** (when inputs exist), not here —
-  > for the plumbing proof, checkout-only (no non-empty assert) is correct. Match
-  > the spec's rollout: the assertion guards a *populated* pin. Decide from the
-  > actual tree at build time; default to **including the checkout, deferring the
-  > non-empty assert** so the plumbing proof greens.
+  > **Do NOT add a "non-empty corpus" assertion in this PR.** The pinned commit
+  > `69d3165…` is the empty-but-valid corpus (zero `.eml`, verified: it is the
+  > only commit on the repo and #549's scaffold), so a
+  > `find corpus -name '*.eml'` guard would exit 1 and turn the plumbing-proof
+  > nightly red — the opposite of the acceptance criterion. The non-empty
+  > assertion belongs in the **#551 wave-1 SHA-bump PR**, where the pin points at
+  > a populated tree. Here, checkout-only is correct; the oracle loading zero
+  > corpus inputs and still greening on the in-repo seeds *is* the proof.
 
   Change the run step to:
 
@@ -843,6 +892,25 @@ baseline; it lands in the wave-1 SHA-bump PR under #551).
 - [ ] **Step 4 — Cargo.lock parity:** if `html-oracle/Cargo.lock` changed, it is
   committed (the crate has its own lock; see the fuzz-lockfile-parity convention).
   No new deps were added, so the lock should be unchanged.
+- [ ] **Step 5 — exercise the real nightly path before merge.** Nothing in PR CI
+  runs `nightly-html-oracle.yml` (it is `schedule` / `workflow_dispatch` only), so
+  the private-repo checkout, `CORPUS_READ_TOKEN`, and pinned SHA are otherwise
+  first exercised only at the first post-merge nightly. Gate the PR on a manual
+  run against the pushed feature branch:
+  - Confirm the prerequisites exist: corpus repo `randomparity/rusty-imap-mcp-corpus`
+    is readable, commit `69d31655e51ade38dd7ed6ee8209336d80516562` resolves
+    (`gh api repos/randomparity/rusty-imap-mcp-corpus/commits/69d3165 --jq .sha`),
+    and the `CORPUS_READ_TOKEN` secret is set
+    (`gh secret list --json name -q '.[].name' | grep -qx CORPUS_READ_TOKEN`).
+  - After pushing the branch (Task-6 workflow present on it), trigger:
+    `gh workflow run nightly-html-oracle.yml --ref feat/corpus-root-oracle-550`
+    then poll the run to completion (`gh run list --workflow nightly-html-oracle.yml
+    --branch feat/corpus-root-oracle-550 --limit 1 --json databaseId,status,conclusion`)
+    and confirm `conclusion == success` — the corpus checkout resolved, the oracle
+    loaded zero corpus inputs, and it exited 0 on the in-repo seeds.
+  - If the token secret is not yet provisioned, this step is **blocked on the
+    operator** — surface it in the PR body as a pre-merge checklist item rather
+    than merging an unexercised auth path.
 
 ---
 
@@ -860,7 +928,15 @@ baseline; it lands in the wave-1 SHA-bump PR under #551).
 - **Canary direction:** text families assert ≥1 `ComparedNonempty`; `binary-part`
   asserts *all tagged are `BinarySkip`* (inverted) — the one genuinely new
   mechanism, unit-tested in `binary_part_canary_is_inverted`.
-- **Verify-at-build points** (flagged inline, not placeholders): the pinned SHA's
-  tree shape decides whether the workflow's non-empty assert is included now or
-  deferred to wave-1; `Path::with_extension("meta.toml")` sibling convention;
-  zizmor's stance on the second checkout `token:`.
+- **Non-empty assert deferred:** the pinned SHA `69d3165…` is the empty-but-valid
+  corpus, so Task 6 ships the corpus **checkout only** — the non-empty guard lands
+  in the #551 wave-1 SHA-bump PR against a populated pin. Shipping it now would
+  red the plumbing proof.
+- **Pre-merge auth exercise:** PR CI never runs the schedule-only nightly, so
+  Task 7 Step 5 manually `workflow_dispatch`-runs it on the feature branch to
+  exercise the real private checkout + `CORPUS_READ_TOKEN` + pin before merge;
+  blocked-on-operator if the secret is unprovisioned.
+- **Verify-at-build points** (flagged inline, not placeholders):
+  `Path::with_extension("meta.toml")` sibling convention; both `CorpusInput`
+  construction sites take the new `probes` field; zizmor's stance on the second
+  checkout `token:`.
