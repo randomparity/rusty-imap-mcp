@@ -297,7 +297,15 @@ compatible.
   from a shared GitHub-runner IP would make this a self-inflicted flaky gate,
   finding B). Pinning still exercises the whole user-facing chain that can break in
   a release: `detect_target` → tarball + `SHA256SUMS.txt` download → checksum →
-  extract → install → `--version` matches `Cargo.toml`. The one branch pinning
+  extract → install → an **independent** `--version` check. **Version verification is a separate,
+  explicit step — not install.sh's exit code (iter-4 finding):** install.sh's
+  post-install `--version` smoke is *advisory* (exit 0 even on failure, §5), so
+  the job independently runs the installed binary, captures
+  `rusty-imap-mcp --version`, and **fails unless it equals the `Cargo.toml`
+  version** (e.g. `test "$("$DIR/rusty-imap-mcp" --version)" = "rusty-imap-mcp
+  $EXPECTED"`). Trusting install.sh's always-0 exit code would silently pass
+  marker-bake / tag-vs-manifest skew or a broken binary — the exact breakage this
+  leaf exists to catch. The one branch pinning
   skips — the API latest-version resolve (exit 4) — is covered **deterministically**
   by the host shell test's fixture/mock (below), not by a live API call. Stable
   tags only.
