@@ -40,14 +40,23 @@ downloads**. `sources.toml` records each `url` + `sha256` + `redistribution_basi
 + attribution + selection caps. Provenance uses the `redistribution_basis =
 "research-corpus"` branch of `meta.toml`, not an SPDX `license`.
 
-**2. Structure-preserving text-node scrub for all Wave-2 real mail.** Every
-Wave-2 input is redacted with a deterministic text-node-only redactor
-(`scrub.py`: email / phone / long-digit → fixed placeholder tokens), recorded as
-`scrub = ["text-nodes-redacted"]`. Markup bytes (tags, attribute names *and*
-values, comments) pass through verbatim, so the `structural_fingerprint` is
-invariant and the oracle still probes the true tokenizer shape. Because both
-sanitizers see the same scrubbed text, text-drop detection is unaffected. The
-`scrub` marker activates the validator's advisory PII scan as a backstop.
+**2. Structure-preserving whole-source PII scrub for all Wave-2 real mail.** Every
+Wave-2 input is redacted with a deterministic fixed-regex substitution over the
+**entire decoded HTML source** (`scrub.py`: email / phone / long-digit → fixed
+placeholder tokens), recorded as
+`scrub = ["text-nodes-redacted", "attr-values-redacted"]`. The scope is
+whole-source — text, attribute values (e.g. `mailto:` hrefs), and comments —
+because the validator's `scan_pii` scans `html_part_texts` (the whole decoded
+source), and real mail carries real addresses in those markup positions (a
+genuine PII leak, not just a WARN). It is nonetheless **structure-preserving**:
+the PII character classes contain none of the markup delimiters `< > " '`, so a
+match can never span a tag/attribute boundary, and `structural_fingerprint`
+ignores attribute values — so the fingerprint is invariant and the oracle still
+probes the true tokenizer shape. Because both sanitizers see the same redacted
+input, text/href-drop detection is unaffected (redacting a PII *substring* of an
+attribute value leaves the token itself intact and comparable). Redaction and the
+advisory `scan_pii` now share scope, so any residual `9-pii` WARN is a real miss,
+not expected noise.
 
 **3. Nazario sourced from an immutable git-mirror commit, not `monkey.org`.**
 The canonical `monkey.org` host is flaky; a GitHub-raw URL at a pinned commit
@@ -63,9 +72,9 @@ hashed, or cleared for redistribution is **dropped**, not force-added.
   mismatch and must be re-pinned in a reviewed change — it cannot silently alter
   the corpus.
 - Scrubbing costs a small, low-stakes slice of what the parent design framed as
-  "Wave-3 scrub tooling," delivered early. It is intentionally *light* (three
-  patterns, text nodes only) — the general scrub framework remains a Wave-3
-  concern.
+  "Wave-3 scrub tooling," delivered early. It is intentionally *light* (three PII
+  patterns, substring redaction over the source) — the general scrub framework
+  (structural rewrites, consent tracking) remains a Wave-3 concern.
 - The advisory PII scan now actually runs on Wave-2 inputs (it was inert while
   everything was `["none"]`), giving a machine backstop behind human PR review.
 - A future public-repo flip re-scrutinizes these inputs but starts from
@@ -92,13 +101,16 @@ hashed, or cleared for redistribution is **dropped**, not force-added.
 - **No scrub — commit filtered public-corpus bodies as-is (`scrub=["none"]`).**
   Rejected: the validator's PII scan is bypassed for `["none"]`, so real PII would
   ride in unchecked, and a public flip would republish real people's mail. The
-  text-node scrub is oracle-neutral, so there is no fidelity cost to justify the
-  risk.
-- **Scrub attribute values too (`attr-values-redacted`).** Deferred (not adopted
-  for Wave 2): redacting attribute values risks altering an `href`/`src` token the
-  oracle compares, needing extra care to stay structure-preserving. Text-node
-  scrub covers rendered-text PII, which is what the advisory scan checks; attr
-  scrubbing can be added if a concrete need appears.
+  scrub is oracle-neutral, so there is no fidelity cost to justify the risk.
+- **Text-node-only scrub (`scrub=["text-nodes-redacted"]`).** Rejected after
+  design review: `scan_pii` scans the whole decoded HTML source, and real mail
+  carries real addresses in `mailto:`/`tel:` hrefs, tracking URLs, and comments —
+  so a text-node-only scrub both fires `9-pii` WARN on most inputs *and leaves
+  real PII in the committed markup*. Redacting PII **substrings** across the whole
+  source (decision 2) is oracle-neutral by the same argument as text scrubbing
+  (the fingerprint ignores attribute values), so there is no reason to leave
+  markup-resident PII in. The redaction targets PII substrings only — not whole
+  attribute values or names — so `href`/`src` tokens and structure are preserved.
 - **Run the generator (with its downloads) in the corpus repo's CI.** Rejected:
   CI would then depend on external hosts and hit rate limits; validating the
   already-committed `wave2/` bytes at a pinned SHA is hermetic and matches the

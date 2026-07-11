@@ -80,8 +80,10 @@ already-committed bytes. New modules:
   `build_wave1.py --check` guards Wave-1 byte-identity).
 - **`sources.py`** — per-source fetch: download the pinned URL to a gitignored
   `tools/ingest/.cache/`, **verify the recorded SHA-256 before any use**
-  (hard-fail on mismatch), then iterate the archive/mbox and yield messages
-  carrying ≥1 `text/html` part.
+  (hard-fail on mismatch), then iterate the archive/mbox **in memory in archive
+  order** (`tarfile`/`mailbox`; never extract-then-`os.walk`) and yield messages
+  carrying ≥1 `text/html` part. Sources are processed in a fixed order (see
+  §"Selection").
 - **`scrub.py`** — deterministic, structure-preserving text-node redactor
   (see below).
 - **`sources.toml`** — reproducibility manifest: per source `url`, `sha256`,
@@ -92,7 +94,8 @@ already-committed bytes. New modules:
 
 1. **Extract** the message's `text/html` part(s), decoded to text via the
    declared charset (as Wave 1 did for templates).
-2. **Scrub** text-node content (below); markup is byte-preserved.
+2. **Scrub** PII patterns across the whole decoded HTML source (below); markup
+   structure is preserved (only text/value/comment content is rewritten).
 3. **Wrap** the scrubbed HTML as a fresh CRLF `.eml` with a chosen charset
    (UTF-8) and CTE (7bit if ASCII-clean, else quoted-printable or base64 — the
    Wave-1 `_encode_body` rule), then compute the **content-hash stem** over the
@@ -101,29 +104,52 @@ already-committed bytes. New modules:
    fingerprint already exists **tree-wide** — the seen-set is preloaded from all
    454 Wave-1 inputs and grows across the Wave-2 run. This enforces validator
    criterion 6 (tree-wide structural uniqueness) at generation time and prevents
-   a real newsletter skeleton from colliding with a Wave-1 template.
+   a real newsletter skeleton from colliding with a Wave-1 template. Dedup is
+   **keep-first** over a fully-deterministic traversal (see §"Determinism").
 5. **Select** per §"Selection".
 
 ### Scrub design (`scrub.py`)
 
-- Redacts, **within text nodes only**, three PII patterns to fixed placeholder
-  tokens: email address → `[redacted-email]`, North-American phone →
-  `[redacted-phone]`, long digit run (≥7 digits) → `[redacted-number]`. Tokens
-  are the same strings the validator's `_EMAIL_RE` / `_PHONE_RE` will *not*
-  match, so a clean scrub yields no advisory `9-pii` WARN.
-- **Structure-preserving:** all markup bytes (tags, attribute names *and values*,
-  comments, doctype) pass through **verbatim**; only rendered text-node content is
-  rewritten. The `structural_fingerprint` (tag/attr-name sequence) is therefore
-  invariant under scrub, and the oracle still probes the true tokenizer shape.
-- **Deterministic:** fixed regexes, fixed replacement tokens, no RNG — so the
-  content-hash stem is stable and `--check` is byte-identical.
-- **Oracle-neutral:** because both production and the reference sanitizer see the
-  same scrubbed text, text-drop detection is unaffected (a dropped
-  `[redacted-email]` is as detectable as a dropped address).
+**Scope: the whole decoded HTML source, not text nodes only.** The validator's
+`scan_pii` scans `html_part_texts`, which is `raw.decode(charset)` of each
+`text/html` part — i.e. the **entire HTML source** including attribute values,
+`mailto:`/`tel:` hrefs, tracking-URL query strings, and comments (validate.py
+`html_part_texts` / `scan_pii`). Real Enron/SpamAssassin/Nazario mail carries
+real addresses and phone numbers in exactly those markup positions — a genuine
+PII leak, not merely a validator-WARN. So the redactor operates over the full
+decoded HTML string, redacting three PII patterns to fixed placeholder tokens
+**wherever they occur** (text, attribute values, comments):
 
-Recorded as `scrub = ["text-nodes-redacted"]`, which activates the validator's
-advisory PII scan (`scan_pii` skips `["none"]` inputs) as a backstop against a
-missed pattern.
+- email → `[redacted-email]`, North-American phone → `[redacted-phone]`, long
+  digit run (≥7) → `[redacted-number]`. The tokens do not match the validator's
+  `_EMAIL_RE` / `_PHONE_RE`, so a complete redaction yields **zero** `9-pii` WARN.
+
+- **Structure-preserving (proven, not asserted).** The redactor is a fixed-regex
+  substitution over the source string, and the PII character classes
+  (`[\w.+-]`, `[\w-]`, `[\w.-]`, `[\d\s.()+-]`) contain **none** of the markup
+  delimiters `< > " '` — so a match can never span a tag/attribute boundary. Only
+  text/value/comment *content* is rewritten; every tag name and attribute name is
+  byte-preserved. Because `structural_fingerprint` hashes the tag/attr-**name**
+  sequence and **ignores attribute values** (validate.py `structural_fingerprint`
+  / `_StructureCollector`), the fingerprint is invariant under scrub.
+
+- **Oracle-neutral.** Both production and the reference sanitizer see the same
+  redacted input, so a dropped `[redacted-email]` (in text *or* an `href`) is as
+  detectable as a dropped address; redacting a PII *substring* of an attribute
+  value leaves the `href`/`src` token itself intact and comparable.
+
+- **Deterministic + edge cases.** Fixed regexes, fixed tokens, no RNG → the
+  content-hash stem is stable and `--check` is byte-identical. The redactor must
+  **not corrupt numeric character references** (`&#1234567;`): the long-digit
+  rule excludes a digit run immediately preceded by `&#`/`&#x`. `<script>`/
+  `<style>` raw-text and CDATA are treated as ordinary source (a redacted digit
+  run in CSS is harmless and still structure-invariant).
+
+Recorded as `scrub = ["text-nodes-redacted", "attr-values-redacted"]` — the two
+scopes the redaction actually touches. This activates the validator's advisory
+PII scan (`scan_pii` skips `["none"]` inputs), which — because the redaction and
+the scan now share the same whole-source scope — becomes a **precise** backstop:
+any residual `9-pii` WARN is a real redactor miss, not expected markup noise.
 
 ## Selection
 
@@ -139,16 +165,43 @@ skeleton, so selection among survivors is secondary to the dedup. Rule:
 - Fully deterministic (no RNG). Caps live in `sources.toml`, so a re-baseline can
   adjust them in a reviewed change.
 
+**Source-processing order (adversarial-first).** The tree-wide seen-set is shared
+across sources, so whichever source is processed first claims any skeleton common
+to several (e.g. a marketing-table layout in both Enron and spam). To make the
+cap-weighting intent (§ above) an outcome rather than an accident of order,
+sources are processed in a **fixed, documented order that favors the
+higher-signal sources: SpamAssassin → Nazario → Enron.** A cross-source skeleton
+collision therefore resolves toward the adversarial source, and Enron (benign,
+largest) fills only the residual. The order is recorded in `sources.toml`.
+
 Inputs are written under `wave2/{enron,spamassassin,nazario}/<stem>.eml` +
 `<stem>.meta.toml`. Wave subdirectories are cosmetic to the oracle (it walks the
 whole tree); they organize provenance and per-source review.
+
+## Determinism
+
+`--check` byte-identity requires the *entire* traversal to be a pure function of
+the pinned archive bytes, not just the final sort:
+
+- **In-archive iteration only.** `sources.py` iterates each source **in memory in
+  archive order** — `tarfile`/`mailbox` member order — and **never** extracts to
+  disk and `os.walk`s it (a filesystem walk yields platform-dependent order,
+  which would silently change which member wins a fingerprint collision). Combined
+  with the fixed source order above, the full candidate sequence is deterministic.
+- **Order-stable dedup.** Keep-first over that deterministic sequence yields a
+  stable collision winner; the final per-source stem sort makes the *written set*
+  independent of anything but the surviving candidates.
+- A `--check` test shuffles the *within-source candidate order* and asserts the
+  written tree is unchanged, proving the guarantee rather than assuming it.
 
 ## `meta.toml` contract (Wave 2)
 
 Per input: `redistribution_basis = "research-corpus"` (not an SPDX `license`);
 `source`, `source_url`, `notes` (non-empty; `notes` records the filter, the
-scrub, and — for Nazario — the CC-BY-4.0 attribution); `wave = 2`; ISO `added`;
-`scrub = ["text-nodes-redacted"]`; `probes = []` (Wave-2 inputs are not canaries).
+scrub scope, and — for Nazario — the CC-BY-4.0 attribution); `wave = 2`; ISO
+`added`; `scrub = ["text-nodes-redacted", "attr-values-redacted"]` (the two
+`SCRUB_STEPS` scopes the whole-source redaction touches); `probes = []` (Wave-2
+inputs are not canaries).
 
 **Canaries.** Criterion 8 is tree-wide and already satisfied by Wave 1's three
 families; Wave 2 adds none. Validation must still show all three families present
@@ -183,8 +236,9 @@ whether that is a legitimate reference-limitation or a real defect.
   changed upstream must be re-pinned in a reviewed change.
 - **Source URL dead / archive unfetchable → drop that source** (logged), don't
   substitute.
-- **PII scan WARN** on a Wave-2 input → the redactor missed a pattern → fix
-  `scrub.py`, never suppress the warning.
+- **PII scan WARN** on a Wave-2 input → a real redactor miss (the scan and the
+  redaction share whole-source scope) → **extend `scrub.py`** until the WARN
+  clears; never suppress it and never allowlist the input.
 - **Structural collision with Wave 1** → the input is dropped at generation, so
   the combined tree never violates criterion 6.
 - **Malformed / unparsable source message** → skipped (a corpus of hundreds
@@ -198,15 +252,20 @@ whether that is a legitimate reference-limitation or a real defect.
 Corpus repo (pure-stdlib Python ≥3.11, `unittest`, mirroring the validator's
 tests):
 
-- `scrub.py`: redaction is complete (all three patterns), structure-preserving
-  (markup bytes unchanged; fingerprint invariant), idempotent, and deterministic;
-  a scrubbed body produces no `9-pii` WARN.
+- `scrub.py`: redaction is complete (all three patterns in text, attribute
+  values, and comments), **structure-preserving** (tag/attr-name bytes unchanged;
+  `structural_fingerprint` invariant), **idempotent**, and deterministic; a
+  scrubbed body produces no `9-pii` WARN. Edge-case fixtures asserting
+  byte-identical markup: `mailto:`/`tel:` href, a literal `<` in text, an HTML
+  comment containing an address, a `<style>` block, and a numeric character
+  reference (`&#1234567;`) that must **not** be corrupted.
 - `sources.py`: SHA-256 verification accepts a matching archive and **hard-fails**
   a mismatch (mocked bytes — no network in tests); HTML-bearing filter selects
-  only messages with a `text/html` part.
+  only messages with a `text/html` part; iteration follows in-archive order.
 - Tree-wide dedup: a candidate whose fingerprint matches a Wave-1 input is
-  dropped.
-- `build_wave2.py --check` determinism over a small fixture archive.
+  dropped; a cross-source collision resolves to the fixed-order winner.
+- `build_wave2.py --check` determinism, including a **shuffle-invariance** test
+  (shuffling within-source candidate order leaves the written tree unchanged).
 
 Main repo: the oracle run over the combined corpus is the integration gate; the
 baseline note records the numbers. No Rust code changes are expected (workflow +
@@ -217,10 +276,11 @@ docs + `corpus-allowlist.toml`/floor only).
 - **Malware-inert.** The corpus is HTML text the oracle sanitizes but never
   renders or executes; worst case from a hostile input is a false HARD (noisy,
   self-announcing), never RCE/exfiltration (parent design threat model).
-- **PII.** Real mail carries PII; the text-node scrub + the activated advisory
-  scan + human review of the ingestion PR are the layered mitigation. The repo
-  stays **private**; a future public flip is its own reviewed decision and would
-  re-scrutinize these inputs.
+- **PII.** Real mail carries PII in both rendered text and markup (`mailto:`
+  hrefs, tracking URLs, comments); the whole-source scrub + the activated advisory
+  scan (same scope) + human review of the ingestion PR are the layered mitigation.
+  The repo stays **private**; a future public flip is its own reviewed decision and
+  would re-scrutinize these inputs.
 - **Download trust.** Build-time downloads are pinned by SHA-256; a compromised
   mirror cannot change the committed bytes without a hash mismatch that hard-fails
   the build. CI never downloads — it validates committed bytes at a pinned SHA.
@@ -228,22 +288,29 @@ docs + `corpus-allowlist.toml`/floor only).
   input; Nazario's CC-BY-4.0 attribution is recorded. Anything unclearable is
   dropped, not force-added.
 
-## Open validator question (resolve in the plan)
+## Validator facts confirmed (design-time, against current `validate.py`)
 
-Wave 1 asserted the validator accepts `probes = []` and
-`redistribution_basis = "research-corpus"` for a non-canary input. The plan's
-first task **confirms both against the current `validate.py`** (reading
-`_validate_scrub`, the provenance check, and the `probes` shape check) before any
-input is authored, so a schema surprise is caught at design time, not after
-generating 300 files.
+Confirmed by reading the current `validate.py` so no schema surprise surfaces
+after generating 300 files:
+
+- **`scan_pii` scope:** scans `html_part_texts` = `raw.decode(charset)` of each
+  `text/html` part — the **whole HTML source**, not rendered text nodes. This is
+  what forces the whole-source scrub scope above.
+- **`structural_fingerprint`:** hashes the tag/attr-**name** sequence and
+  **ignores attribute values** (`for name, _value in attrs`), so PII-substring
+  redaction of values/text/comments leaves the fingerprint invariant.
+- **`SCRUB_STEPS`** includes `text-nodes-redacted` and `attr-values-redacted`;
+  **`REDISTRIBUTION_BASES`** includes `research-corpus`. The plan's first task
+  still re-confirms `probes = []` is accepted for a non-canary input before
+  authoring.
 
 ## Acceptance criteria
 
 - [ ] Wave-2 inputs under `wave2/` pass `validate.yml` (content-hash stems,
       CRLF-exact, ≥1 `text/html` part, `redistribution_basis` provenance,
-      `scrub = ["text-nodes-redacted"]` with no `9-pii` WARN, tree-wide
-      structural + stem uniqueness); all three canary families still present
-      tree-wide.
+      `scrub = ["text-nodes-redacted", "attr-values-redacted"]` with **zero**
+      residual `9-pii` WARN, tree-wide structural + stem uniqueness); all three
+      canary families still present tree-wide.
 - [ ] Generator deterministic (`--check` byte-identical) and sources each archive
       by pinned SHA-256; `sources.toml` records url+hash+basis+attribution;
       un-clearable/unfetchable sources dropped.
