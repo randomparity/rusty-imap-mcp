@@ -1,7 +1,7 @@
 # Native Packaging: deb/rpm, Manpages, and Shell Installer (Phase 4) Design
 
 Date: 2026-07-11
-Status: Reviewed (adversarial spec review — 4 findings addressed: feature-unification hazard, package-content assertion, installer security framing, installer-variant/smoke coverage)
+Status: Reviewed (adversarial spec review, 2 iterations — 7 findings addressed: feature-unification hazard, package-content assertion, installer security framing, installer-variant/smoke coverage; then checksummed-copy identity, installer-smoke API flakiness/leaf semantics, and error-path test coverage)
 Issue: [#545](https://github.com/randomparity/rusty-imap-mcp/issues/545) — "Phase 2C: deb/rpm packages, manpages, and shell installer"
 ADR: [ADR-0006](../../ADR/0006-native-packaging-build-topology.md) — native packaging build topology; extends [ADR-0002](../../ADR/0002-phased-bzr-release-parity-and-direct-publish.md) Phase 4
 Reference: [`randomparity/bzr`](https://github.com/randomparity/bzr) — the same four subsystems, already shipped
@@ -268,9 +268,16 @@ compatible.
 - **`release` job:** after downloading artifacts, stage `install.sh` with the tag
   baked into its default-version line (a marker-replacement step; assert the
   marker was found so a silent no-op fails the release). Expand `SHA256SUMS.txt`
-  generation to hash **every** release file — tarballs, `.deb`, `.rpm`, and
-  `install.sh` — so the installer's own integrity can be checked and packages get
-  published checksums. Attach `install.sh` + `.deb` + `.rpm` to the release
+  generation to hash **every** release file — tarballs, `.deb`, `.rpm`, and the
+  staged (tag-baked) `install.sh`. **Which `install.sh` the checksum covers
+  (finding A):** the hashed file is the **release-asset copy** (marker baked), so
+  `SHA256SUMS.txt` gives the *pinned, verifiable* install path — download that
+  asset, check it against the manifest, run it (no API call, deterministic
+  version). It does **not** cover the convenience raw one-liner (`curl raw | sh`),
+  whose repo copy has the marker unset and therefore a different hash; that path
+  rests on TLS+origin trust only (Security posture). README documents the two
+  paths distinctly and never implies the piped raw script is checksum-verifiable.
+  Attach `install.sh` + `.deb` + `.rpm` to the release
   (extend the `gh release create` asset globs). Extend the provenance attestation
   `subject-path` to cover the `.deb`/`.rpm` alongside the tarballs +
   `SHA256SUMS.txt` (resolved decision — closes the Scorecard Signed-Releases gap
@@ -280,17 +287,20 @@ compatible.
     change the tarball lines it matches. Verified by keeping tarball filenames
     identical.
 - **New `installer-smoke` job** (`needs: release`, `runs-on: ubuntu-latest`,
-  `contents: read`): checks out the repo (for the `Cargo.toml` version and the
-  **user-facing `install.sh`**), then exercises the path users actually run (F4).
-  It runs the **checked-out repo copy** of `install.sh` with
-  `RUSTY_IMAP_MCP_VERSION` **unset**, so `detect_target` + the latest-version API
-  resolve + download + checksum + install are all covered against the
-  just-published release — i.e. the marker-unset variant the README one-liner
-  fetches from raw. It asserts the installed `rusty-imap-mcp --version` output
-  contains the `Cargo.toml` version. (The release-asset copy differs only in its
-  baked default version, so testing the repo copy covers both; the version-pin
-  path is additionally unit-covered via `RUSTY_IMAP_MCP_VERSION` +
-  `RUSTY_IMAP_MCP_BASE_URL` overrides in a shell test.) Stable tags only.
+  `contents: read`): a **downstream leaf** — like `publish-crates`/`homebrew`, its
+  failure does **not** un-publish the already-created release (finding B); it is a
+  post-publish signal, not a gate. It checks out the repo (for the `Cargo.toml`
+  version and the user-facing `install.sh`) and runs the **checked-out repo copy**
+  with **`RUSTY_IMAP_MCP_VERSION=<the just-pushed tag>`** — pinning the version
+  **deterministically** so the job never touches the unauthenticated latest-version
+  API (whose 60-req/hr/IP limit the spec flags as a real hazard — driving it live
+  from a shared GitHub-runner IP would make this a self-inflicted flaky gate,
+  finding B). Pinning still exercises the whole user-facing chain that can break in
+  a release: `detect_target` → tarball + `SHA256SUMS.txt` download → checksum →
+  extract → install → `--version` matches `Cargo.toml`. The one branch pinning
+  skips — the API latest-version resolve (exit 4) — is covered **deterministically**
+  by the host shell test's fixture/mock (below), not by a live API call. Stable
+  tags only.
 
 ### 5. `install.sh` (repo root)
 
@@ -352,13 +362,20 @@ this residual trust model plainly and points security-sensitive users at
 - `RELEASING.md`: move #545 out of "Planned"; document the `manpages` and
   `installer-smoke` jobs and the package/installer assets in "What automation
   does"; update the pipeline order diagram.
-- `README.md`: add an install section covering the one-line installer, the
-  `.deb`/`.rpm` packages (with the "no libdbus needed on amd64/arm64" note), and
-  a pointer to `man rusty-imap-mcp`. State the installer's **residual trust
-  model** (integrity-not-authenticity — "Security posture") and the
-  `RUSTY_IMAP_MCP_VERSION=vX.Y.Z` pin as the reliable path when the latest-version
-  API is rate-limited, and point security-sensitive users at `gh attestation
-  verify` for authenticity.
+- `README.md`: add an install section covering the `.deb`/`.rpm` packages (with
+  the "no libdbus needed on amd64/arm64" note), a pointer to `man rusty-imap-mcp`,
+  and **two clearly-distinguished installer paths** (finding A):
+  1. *Convenience:* `curl -fsSL <raw install.sh URL> | sh` — TLS+origin trust
+     only, resolves the latest tag via the API; **not** checksum-verifiable
+     (you're piping). Pin with `RUSTY_IMAP_MCP_VERSION=vX.Y.Z` when the
+     unauthenticated API is rate-limited.
+  2. *Verifiable:* download the release-asset `install.sh`, check it against
+     `SHA256SUMS.txt`, then run it — pinned version, no API call, and the file
+     you verify is the file you run.
+
+  State the installer's **residual trust model** (integrity-not-authenticity —
+  "Security posture") and point security-sensitive users at `gh attestation
+  verify` on the downloaded tarball/package for authenticity.
 - Homebrew template: add `man1.install "..."` so a source/bottle install also
   places the man page (best-effort; does not gate the bottle).
 
@@ -403,10 +420,22 @@ this residual trust model plainly and points security-sensitive users at
   (§1): top page + always-present subcommand pages + `about` string. Runs in
   `just test` / `just ci` on the host. The negative (no test-support page) is
   enforced by the `manpages`-job guard, not this test (F1).
-- **Installer shell test:** a host-runnable test exercises the version-pin path
-  (`RUSTY_IMAP_MCP_VERSION` + `RUSTY_IMAP_MCP_BASE_URL` pointed at a local
-  fixture) and the unsupported-platform + missing-command exit codes, so installer
-  logic has a signal independent of a live release (F4).
+- **Installer shell test:** a host-runnable test (fixtures via
+  `RUSTY_IMAP_MCP_BASE_URL`; no network) that exercises the happy version-pin path
+  **and deliberately triggers every handled error path** (finding C — repo
+  standard: each handled error has a triggering test):
+  - exit 2 — unsupported platform (`uname` shim / forced unknown arch).
+  - exit 3 — a required command absent (`sha256sum`/`shasum`, `curl`/`wget`).
+  - **exit 4** — latest-version resolve failure: fixture API endpoint returning a
+    403 / unparsable `tag_name`, and a missing tarball (download 404).
+  - **exit 5** — checksum mismatch: fixture `SHA256SUMS.txt` records a wrong hash
+    for the tarball (this is the F3 integrity control — its trigger must be
+    tested).
+  - **exit 6** — extract failure: a fixture "tarball" that is garbage but whose
+    recorded checksum matches (so it clears exit 5 and fails at `tar`).
+
+  This gives installer logic a deterministic signal independent of a live
+  release, and keeps the API-resolve branch off the flaky live path (finding B).
 - **Static:** `shellcheck` + `shfmt` on `install.sh` (prek); `actionlint` +
   `zizmor` on the workflow (prek + CI required check). A `just`-runnable local
   packaging smoke is **out of scope** (requires the tools installed) but the
