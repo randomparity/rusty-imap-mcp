@@ -331,11 +331,18 @@ POSIX `sh` (`set -eu`), shellcheck/shfmt-clean. Adapted from bzr's installer:
   the tarball's SHA-256 (`sha256sum -c` / `shasum -a 256 -c`) **for corruption/
   truncation** (see "Security posture" — integrity, not authenticity), extracts,
   installs the binary `0755` to the prefix, and (unless skipped) runs `--version`
-  as a smoke check. On smoke failure emits a libdbus hint scoped to the
-  non-vendored arches (ppc64le/s390x): install `libdbus-1-3`/`dbus-libs`, or use
-  the `.deb`/`.rpm`, or `cargo install`. Prints a PATH hint if the prefix is not
-  on `PATH`. Distinct non-zero exit codes per failure class (3 = missing cmd, 2 =
-  unsupported platform, 4 = version-resolve/download, 5 = checksum, 6 = extract).
+  as a smoke check. **The smoke check is advisory, not fatal:** the binary is
+  already installed on disk, so a failure prints the hint and the installer still
+  **exits 0** — it does not report a failed install for a binary that is correctly
+  placed and merely needs a runtime lib (the ppc64le/s390x libdbus case). This
+  return contract is explicit so wrapping automation can trust exit 0 = "binary
+  installed" (a distinct exit would wrongly signal the file is absent). On smoke
+  failure the hint is scoped to the non-vendored arches (ppc64le/s390x): install
+  `libdbus-1-3`/`dbus-libs`, or use the `.deb`/`.rpm`, or `cargo install`. Prints a
+  PATH hint if the prefix is not on `PATH`. Distinct non-zero exit codes cover the
+  **pre-install** failure classes only (3 = missing cmd, 2 = unsupported platform,
+  4 = version-resolve/download, 5 = checksum, 6 = extract); a post-install smoke
+  failure is exit 0 + advisory hint by the contract above.
 - A marker line (`RUSTY_IMAP_MCP_VERSION="${RUSTY_IMAP_MCP_VERSION:-}"`) is what
   the release job rewrites to bake the tag; the version-pin comment documents it.
   The rewrite step asserts the marker was found (else the release fails), so a
@@ -375,7 +382,11 @@ this residual trust model plainly and points security-sensitive users at
 
   State the installer's **residual trust model** (integrity-not-authenticity —
   "Security posture") and point security-sensitive users at `gh attestation
-  verify` on the downloaded tarball/package for authenticity.
+  verify` on the downloaded tarball/package for authenticity. Note that `man
+  rusty-imap-mcp` resolves only after a `.deb`/`.rpm` install (which places the
+  page on the system `MANPATH`); the `curl … | sh` installer installs **only the
+  binary**, so raw-installer users read `--help` or the man page shipped inside
+  the tarball under `share/man/man1/`.
 - Homebrew template: add `man1.install "..."` so a source/bottle install also
   places the man page (best-effort; does not gate the bottle).
 
@@ -433,6 +444,9 @@ this residual trust model plainly and points security-sensitive users at
     tested).
   - **exit 6** — extract failure: a fixture "tarball" that is garbage but whose
     recorded checksum matches (so it clears exit 5 and fails at `tar`).
+  - **advisory smoke failure → exit 0** — a fixture "binary" that installs and
+    clears the checksum but exits non-zero on `--version`; assert the installer
+    still exits 0 and prints the libdbus hint (the advisory contract in §5).
 
   This gives installer logic a deterministic signal independent of a live
   release, and keeps the API-resolve branch off the flaky live path (finding B).
