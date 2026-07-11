@@ -46,4 +46,6 @@ tokio-rustls = { workspace = true }
 rcgen = { workspace = true }
 # Self dev-dep enables `test-support` for this crate's own tests so the
 # fake and its tests compile under a plain `cargo test -p rimap-smtp`.
-rimap-smtp = { path = ".", version = "0.1.1-dev", features = ["test-support"] }
+# Path-only (no version): cargo drops path-only dev-deps from the published
+# manifest, so `cargo publish` verify never resolves a not-yet-published self.
+rimap-smtp = { path = ".", features = ["test-support"] }

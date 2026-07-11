@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Configuration loading, validation, and credential resolution for rusty-imap-mcp."
+categories = ["config", "email"]
+keywords = ["imap", "config", "credentials", "mcp"]
 
 [lints]
 workspace = true

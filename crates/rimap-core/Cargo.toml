@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Shared core types for rusty-imap-mcp: Message, Folder, Posture, audit records."
+categories = ["email"]
+keywords = ["imap", "email", "mcp", "types"]
 build = "build.rs"
 
 [lints]

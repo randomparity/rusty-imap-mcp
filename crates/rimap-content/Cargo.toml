@@ -3,14 +3,17 @@ name = "rimap-content"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-# TODO: data/confusables.txt is licensed under Unicode-DFS-2016. If
-# this crate is ever published to crates.io, update the license field
-# to reflect the vendored data and add "Unicode-DFS-2016" to the
-# workspace deny.toml allow list.
-license.workspace = true
+# Crate-level license override: the code is MIT OR Apache-2.0 (workspace
+# default), but data/confusables.txt is vendored Unicode 16.0 TR39 data under
+# the Unicode License v3 (SPDX: Unicode-3.0). build.rs compiles it in, so the
+# file ships in the package and the expression must cover it. Unicode-3.0 is
+# already on deny.toml's allow list. Attribution: data/NOTICE.
+license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 repository.workspace = true
 authors.workspace = true
 description = "MIME parsing, Unicode-safe sanitization, and look-alike detection for rusty-imap-mcp."
+categories = ["email", "parser-implementations", "text-processing"]
+keywords = ["mime", "email", "sanitization", "unicode"]
 
 [lints]
 workspace = true
@@ -58,9 +61,11 @@ insta = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Self dev-dep (path-only, no version): enables `test-support` for this crate's
+# own tests. cargo drops path-only dev-deps from the published manifest, so
+# `cargo publish` verify never resolves a not-yet-published self.
 [dev-dependencies.rimap-content]
 path = "."
-version = "0.1.1-dev"
 features = ["test-support"]
 
 # `phf` is consumed by the `include!`-expanded output of `build.rs`, so

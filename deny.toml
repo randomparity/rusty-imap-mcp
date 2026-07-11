@@ -58,6 +58,15 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
+# Allow wildcard version reqs *only* for path (workspace-internal) deps. The
+# three self-referential dev-deps (rimap-content/rimap-smtp/rimap-server depend
+# on themselves to enable their own `test-support` feature) are path-only with
+# no `version =` so that `cargo publish` drops them from the published manifest
+# (a versioned self dev-dep would try to resolve a not-yet-published self at
+# publish-verify time — issue #544). A path dep resolves to a specific local
+# crate, never an arbitrary registry version, so this does not weaken the
+# wildcard ban's real purpose (catching accidental `foo = "*"` registry deps).
+allow-wildcard-paths = true
 highlight = "all"
 # Documented exceptions. Each entry must justify why a workaround is preferable
 # to upgrading the offending dependency.

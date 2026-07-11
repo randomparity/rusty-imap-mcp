@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Posture-based authorization, rate limiting, and circuit breaker for rusty-imap-mcp."
+categories = ["email", "authentication"]
+keywords = ["authorization", "rate-limiting", "email", "mcp"]
 
 [lints]
 workspace = true
