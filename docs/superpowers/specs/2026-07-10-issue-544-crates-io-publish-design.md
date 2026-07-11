@@ -28,12 +28,16 @@ driven release pipeline. Non-goal: deb/rpm/manpages/installers (issue #545).
   are workspace-inherited. Only `rimap-smtp` currently carries
   `keywords`/`categories`.
 - **License blocker (`rimap-content`):** the crate vendors
-  `data/confusables.txt` (Unicode TR39), licensed **Unicode-DFS-2016**.
-  `build.rs` reads the file at build time and emits a `phf::Map` to `OUT_DIR`,
-  so the data file **must** ship inside the published package — it cannot be
-  excluded. The crate currently inherits the workspace `MIT OR Apache-2.0`,
-  which does not cover the vendored data. A `TODO` in
-  `crates/rimap-content/Cargo.toml` already prescribes the fix.
+  `data/confusables.txt` (Unicode TR39). Its header is `© 2024 Unicode, Inc.`,
+  dated `2024-08-14`, Unicode 16.0 — i.e. released under the **Unicode License
+  v3**, SPDX identifier **`Unicode-3.0`** (*not* the older `Unicode-DFS-2016`;
+  the crate's stale `TODO` and `data/NOTICE` both misname it, conflating the two
+  — this spec corrects that). `build.rs` reads the file at build time and emits
+  a `phf::Map` to `OUT_DIR`, so the data file **must** ship inside the published
+  package — it cannot be excluded. The crate currently inherits the workspace
+  `MIT OR Apache-2.0`, which does not cover the vendored data. Crucially,
+  `deny.toml` **already allows `Unicode-3.0`** (line 27), so the correct fix
+  needs **no** `deny.toml` change.
 - **Version invariant (from ADR-0003):** `main` lives at `X.Y.Z-dev`; a
   release-prep PR strips `-dev` via `cargo set-version --workspace X.Y.Z`,
   which also rewrites the 24 intra-workspace path-dep `version =` fields to the
@@ -53,11 +57,16 @@ driven release pipeline. Non-goal: deb/rpm/manpages/installers (issue #545).
   ```
   A valid linear topological publish order:
   **core → config → audit → content → authz → imap → smtp → server.**
-- **Self-referential dev-dependencies:** `rimap-smtp` and `rimap-server` each
-  dev-depend on themselves (`path = "."`, with `version =`) to enable their own
-  `test-support`/`test-injection` features in tests. This is a supported cargo
-  pattern but is a known friction point at `cargo publish` verify time and must
-  be validated empirically (see Risks).
+- **Self-referential dev-dependencies (three crates):** `rimap-content`
+  (`[dev-dependencies.rimap-content]` table-header form), `rimap-smtp`, and
+  `rimap-server` each dev-depend on themselves (`path = "."`, with `version =`)
+  to enable their own `test-support`/`test-injection` features in tests. This is
+  a supported cargo pattern but is a known friction point at `cargo publish`
+  verify time (the `version =` is stripped-to-registry in the published manifest,
+  referencing a version not yet on the registry). This PR **proactively removes
+  the `version =`** from all three self dev-deps, making them path-only — cargo
+  drops path-only dev-deps from the published manifest entirely, eliminating the
+  risk while keeping local `cargo test` working (see Risks).
 - **Release trigger:** `release.yml` runs on `push` of a `v*` tag. Jobs:
   `verify-tag → build ×5 → release → homebrew → bottles → bottles-merge`, plus
   `post-release-bump`. `homebrew`/`bottles*` are stable-only
@@ -102,10 +111,13 @@ These are recorded with alternatives in ADR-0004; summarized here.
    (no-ops until a baseline exists).
 
 5. **`rimap-content` relicense.** Override the workspace license on the crate:
-   `license = "(MIT OR Apache-2.0) AND Unicode-DFS-2016"`, remove the `TODO`,
-   and add `"Unicode-DFS-2016"` to `deny.toml`'s `[licenses] allow` list. The
-   existing `crates/rimap-content/NOTICE` (git-tracked, ships with the package)
-   carries the attribution.
+   `license = "(MIT OR Apache-2.0) AND Unicode-3.0"`, and remove the `TODO`.
+   **No `deny.toml` change** — `Unicode-3.0` is already on the allow list. Fix
+   `crates/rimap-content/data/NOTICE`, which currently misnames the license as
+   "Unicode License v3 (Unicode-DFS-2016)"; it should read Unicode License v3
+   (`Unicode-3.0`). The `data/NOTICE` file is git-tracked and ships with the
+   package (the whole `data/` dir is packaged because `build.rs` reads
+   `confusables.txt`), carrying the attribution.
 
 6. **Metadata completeness.** Add `keywords` (≤ 5, ≤ 20 chars each) and
    `categories` (valid crates.io slugs only) to the seven crates that lack them;
@@ -134,9 +146,15 @@ These are recorded with alternatives in ADR-0004; summarized here.
 | rimap-smtp | *(unchanged)* `smtp, email, mcp` | `email, network-programming` |
 | rimap-server | `imap, email, mcp, security` | `email, command-line-utilities` |
 
-Category slugs are validated against the crates.io category list;
-unknown slugs are dropped with a warning by `cargo publish`, so the
-`--dry-run` guardrail surfaces any typo.
+Category slugs are chosen from the published crates.io category list
+(`email`, `config`, `parser-implementations`, `text-processing`,
+`authentication`, `network-programming`, `command-line-utilities` are all
+valid). **`cargo publish --dry-run` does not validate slugs** — it never
+contacts the registry; crates.io enforces the list server-side at upload and
+silently *warns-and-ignores* an unknown slug (a bad slug is non-fatal but means
+the category simply is not applied). A small unit test asserts the chosen slugs
+against a pinned copy of the category list so a typo is caught in CI rather than
+silently dropped at publish.
 
 ### `scripts/publish-crates.sh`
 
@@ -147,18 +165,30 @@ unknown slugs are dropped with a warning by `cargo publish`, so the
   (skip), 404 means publish. A descriptive `User-Agent` is sent (crates.io
   requires one).
 - Reads the version once from the workspace (`cargo metadata` or the workspace
-  `Cargo.toml`), asserts it contains no `-dev` (defense in depth beside
-  `verify-tag`), and uses it for every crate (workspace-uniform version).
+  `Cargo.toml`) and uses it for every crate (workspace-uniform version). In
+  **real-publish mode only** it asserts the version contains no `-dev` (defense
+  in depth beside `verify-tag`); the assertion is **skipped under `--dry-run`**
+  so the dry-run runs on a normal `-dev` working branch (`main` lives at
+  `X.Y.Z-dev`) — see Success Criterion #1.
 - `--dry-run`: runs `cargo publish --dry-run --locked -p <crate>` for the leaf
   (`rimap-core`, fully build-verifiable) and
   `cargo publish --dry-run --no-verify --locked -p <crate>` for dependents
   (metadata/packaging validation without a registry-resolved build, which is
   impossible pre-publish for unpublished deps). This catches missing
-  `description`/`license`, version-less deps, and bad category slugs.
+  `description`/`license` and version-less deps. It does **not** validate
+  category slugs (dry-run is offline — that is the unit test's job) and does
+  **not** exercise a dependent's real verify build (see the self-dev-dep note in
+  Risks — the risk is instead removed at the source by making self dev-deps
+  path-only).
 - Real mode: `cargo publish -p <crate> --locked`, honoring
-  `CARGO_REGISTRY_TOKEN` from the environment. After each publish, a bounded
-  poll (e.g. up to ~120 s) on the crates.io API confirms index availability
-  before the next crate, augmenting cargo's own wait.
+  `CARGO_REGISTRY_TOKEN` from the environment. Ordering safety between dependent
+  publishes relies on **cargo's built-in publish-wait** (cargo ≥ 1.66 blocks
+  until the crate is resolvable from the *sparse index* — the surface a
+  dependent's verify build actually queries — before returning). The web-API
+  `GET .../crates/<crate>/<version>` is used **only** for the `already_published`
+  skip decision, not as an index-readiness signal (the web API and
+  `index.crates.io` propagate independently, so a web-API 200 does not prove the
+  sparse index is ready — cargo's own wait is the authoritative guard).
 
 ### `release.yml` — `publish-crates` job
 
@@ -200,10 +230,19 @@ publish-crates:
 
 ## Success criteria (falsifiable)
 
-1. `just publish-dry-run` exits 0 locally: all 8 crates package with complete
-   metadata and version-carrying deps; no missing `description`/`license`.
+1. `just publish-dry-run` exits 0 locally **on a normal `-dev` branch** (the
+   `-dev` guard is skipped under `--dry-run`): all 8 crates package with complete
+   metadata and version-carrying regular deps; no missing `description`/`license`.
 2. `cargo deny check licenses` (`just deny`) is green with `rimap-content`
-   declaring `(MIT OR Apache-2.0) AND Unicode-DFS-2016`.
+   declaring `(MIT OR Apache-2.0) AND Unicode-3.0` and **no** new `deny.toml`
+   allow-list entry (`Unicode-3.0` is already allowed).
+2a. A unit test asserts every crate's `categories` are members of a pinned
+   crates.io category-slug list (`cargo publish --dry-run` cannot, being offline).
+2b. `cargo package --list -p rimap-content` includes `data/NOTICE` and
+   `data/confusables.txt` (attribution + data actually ship).
+2c. No crate's *published* manifest carries a self-referential dev-dependency
+   with a `version =` (all three are path-only), verified by inspecting the
+   packaged manifest or the `[dev-dependencies]` sections.
 3. `scripts/publish-crates.sh --dry-run` and the script itself are
    `shellcheck`- and `shfmt`-clean.
 4. `actionlint` and `zizmor` pass on the edited `release.yml`; every `uses:` is
@@ -218,22 +257,29 @@ publish-crates:
 
 ## Risks & mitigations
 
-- **Self-referential dev-dependency at publish verify.** `rimap-smtp` /
-  `rimap-server` dev-depend on themselves. If `cargo publish` verify rejects
-  this, the mitigation is to make the self dev-dep **path-only** (drop
-  `version =`); cargo strips path-only dev-deps from the published manifest.
-  This must be **verified empirically during build** (a full local
-  registry-backed publish, or accepted-and-checked at first real publish). The
-  plan carries an explicit investigation task with this decision point.
+- **Self-referential dev-dependency at publish verify (3 crates).**
+  `rimap-content`, `rimap-smtp`, and `rimap-server` dev-depend on themselves.
+  Rather than defer to an empirical check at the first (irreversible) publish,
+  this PR **removes the risk at the source**: drop `version =` from all three
+  self dev-deps, making them path-only. cargo drops path-only dev-deps from the
+  published manifest, so publish verify never tries to resolve a
+  not-yet-published self version; local `cargo test` still resolves them via
+  `path = "."`. A plan task confirms all three are converted and that a normal
+  `cargo test -p <crate>` still enables the intended `test-*` feature.
 - **Partial publish (irreversibility).** If crate *k* fails after 1..k-1
   succeeded, those versions are permanently public. Mitigations: topological
   order minimizes cross-dependency failures; idempotent skip-by-version makes a
   same-tag re-run resume; a bug fix requires a new patch tag (normal crates.io
   practice). Documented in RELEASING.md.
 - **Index propagation lag between dependent publishes.** Mitigated by cargo's
-  built-in publish-wait plus the script's bounded availability poll.
+  built-in publish-wait, which blocks on the *sparse index* (the surface a
+  dependent's verify build resolves against). The web-API GET is used only for
+  the skip decision, not as an index-readiness signal.
 - **`cargo-semver-checks` false gate on first release.** No baseline ⇒ treated
-  as new crates ⇒ passes. Verified by the dry-run path; the gate only bites from
-  release #2.
-- **Unknown category slug.** Silently dropped by cargo (warning). Surfaced by
-  the `--dry-run` guardrail; slugs chosen from the published category list.
+  as new crates ⇒ passes. The gate only bites from release #2. (Not verifiable
+  by the offline dry-run; asserted by reasoning about semver-checks' documented
+  no-baseline behavior.)
+- **Unknown category slug.** Non-fatal — crates.io warns-and-ignores at upload,
+  so the category is silently not applied (it does **not** fail the publish).
+  `cargo publish --dry-run` is offline and cannot catch it; a unit test against
+  a pinned slug list catches typos in CI.

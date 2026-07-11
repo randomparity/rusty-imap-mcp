@@ -50,10 +50,19 @@ It no-ops on the first release (no baseline) and, from the second release
 onward, fails the publish when a crate's public API changed incompatibly
 without an appropriate version bump.
 
-A supporting non-topology decision: **`rimap-content` is relicensed** to
-`(MIT OR Apache-2.0) AND Unicode-DFS-2016` (it vendors Unicode TR39
-`confusables.txt`, which `build.rs` compiles in, so the data must ship), and
-`Unicode-DFS-2016` is added to `deny.toml`'s allow list.
+Two supporting non-topology decisions:
+
+- **`rimap-content` is relicensed** to `(MIT OR Apache-2.0) AND Unicode-3.0`
+  (it vendors Unicode 16.0 TR39 `confusables.txt` — © 2024, Unicode License v3
+  = SPDX `Unicode-3.0` — which `build.rs` compiles in, so the data must ship).
+  `Unicode-3.0` is **already** on `deny.toml`'s allow list, so no `deny.toml`
+  change is needed; the stale `TODO`/`NOTICE` that misnamed it `Unicode-DFS-2016`
+  are corrected.
+- **The three self-referential dev-dependencies** (`rimap-content`,
+  `rimap-smtp`, `rimap-server` dev-depend on themselves to enable their own
+  `test-*` features) are made **path-only** (drop `version =`) so cargo strips
+  them from the published manifest and `cargo publish` verify never tries to
+  resolve a not-yet-published self version.
 
 ## Consequences
 
@@ -83,10 +92,14 @@ A supporting non-topology decision: **`rimap-content` is relicensed** to
   Bash script with explicit ordering and idempotent skip is easier to reason
   about, needs no extra CI tool trust, and makes the partial-publish/resume
   behavior explicit. Revisit if the crate count or ordering complexity grows.
-- **Excluding `confusables.txt` from the `rimap-content` package to avoid the
-  Unicode-DFS-2016 license.** Rejected: `build.rs` reads the file at build
-  time, so an excluded file breaks the published crate's build. The data must
-  ship; the license expression must cover it.
+- **Excluding `confusables.txt` from the `rimap-content` package to avoid
+  declaring the Unicode data license.** Rejected: `build.rs` reads the file at
+  build time, so an excluded file breaks the published crate's build. The data
+  must ship; the license expression must cover it (`Unicode-3.0`).
+- **Deferring the self-dev-dep fix to an empirical check at first publish.**
+  Rejected: the first publish is irreversible and mid-chain; converting the
+  self dev-deps to path-only up front removes the risk deterministically rather
+  than discovering it after earlier crates are already public.
 - **Reserving the eight names inside this PR's diff.** Rejected: an irreversible
   external write does not belong in a reviewable code branch. Reservation is a
   discrete operational step; the pipeline makes publishing possible.
