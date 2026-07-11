@@ -122,16 +122,24 @@ decoded HTML string, redacting three PII patterns to fixed placeholder tokens
 
 - email → `[redacted-email]`, North-American phone → `[redacted-phone]`, long
   digit run (≥7) → `[redacted-number]`. The tokens do not match the validator's
-  `_EMAIL_RE` / `_PHONE_RE`, so a complete redaction yields **zero** `9-pii` WARN.
+  `_EMAIL_RE` / `_PHONE_RE`, so a complete redaction of *literal-form* PII yields
+  **zero** `9-pii` WARN.
 
-- **Structure-preserving (proven, not asserted).** The redactor is a fixed-regex
-  substitution over the source string, and the PII character classes
-  (`[\w.+-]`, `[\w-]`, `[\w.-]`, `[\d\s.()+-]`) contain **none** of the markup
-  delimiters `< > " '` — so a match can never span a tag/attribute boundary. Only
-  text/value/comment *content* is rewritten; every tag name and attribute name is
-  byte-preserved. Because `structural_fingerprint` hashes the tag/attr-**name**
-  sequence and **ignores attribute values** (validate.py `structural_fingerprint`
-  / `_StructureCollector`), the fingerprint is invariant under scrub.
+- **Node-scoped, structure-preserving by construction.** The redactor does **not**
+  regex over the raw source string — a phone/long-digit class includes `\s` and
+  `-`, which are themselves HTML structural delimiters (unquoted-attribute
+  whitespace, the comment terminator `-->`), so a raw-source match could span a
+  boundary and silently delete an attribute name or eat a `-->` on exactly the
+  messy adversarial markup Wave 2 ingests. Instead it redacts **within each parsed
+  node's content in isolation** — text data, individual attribute *values*, and
+  comment data — via the parser's source offsets, so a match is confined to one
+  node and can never consume a markup delimiter, tag name, or attribute name.
+  Because `structural_fingerprint` hashes the tag/attr-**name** sequence and
+  **ignores attribute values** (validate.py `structural_fingerprint` /
+  `_StructureCollector`), the fingerprint is invariant under this node-scoped
+  scrub. (This is *not* the ADR-0005-rejected text-node-only scrub: attribute
+  values and comments are in scope; only the *span* a regex may consume is
+  node-local.)
 
 - **Oracle-neutral.** Both production and the reference sanitizer see the same
   redacted input, so a dropped `[redacted-email]` (in text *or* an `href`) is as
@@ -139,17 +147,30 @@ decoded HTML string, redacting three PII patterns to fixed placeholder tokens
   value leaves the `href`/`src` token itself intact and comparable.
 
 - **Deterministic + edge cases.** Fixed regexes, fixed tokens, no RNG → the
-  content-hash stem is stable and `--check` is byte-identical. The redactor must
-  **not corrupt numeric character references** (`&#1234567;`): the long-digit
-  rule excludes a digit run immediately preceded by `&#`/`&#x`. `<script>`/
-  `<style>` raw-text and CDATA are treated as ordinary source (a redacted digit
-  run in CSS is harmless and still structure-invariant).
+  content-hash stem is stable and `--check` is byte-identical. Node-scoping plus a
+  guard against corrupting numeric character references (a digit run preceded by
+  `&#`/`&#x` is left intact) covers the known hazards; the fixtures in "Testing"
+  assert `structural_fingerprint` invariance for a digit run adjacent to `-->`,
+  inside a comment, and separating two unquoted attributes.
 
 Recorded as `scrub = ["text-nodes-redacted", "attr-values-redacted"]` — the two
 scopes the redaction actually touches. This activates the validator's advisory
-PII scan (`scan_pii` skips `["none"]` inputs), which — because the redaction and
-the scan now share the same whole-source scope — becomes a **precise** backstop:
-any residual `9-pii` WARN is a real redactor miss, not expected markup noise.
+PII scan (`scan_pii` skips `["none"]` inputs). Because the redaction and the scan
+share the whole decoded-source scope, a residual `9-pii` WARN is a real
+**literal-form** redactor miss (not expected markup noise) — but see the
+entity-obfuscation blind spot below: **zero `9-pii` WARN does not prove zero
+committed PII.**
+
+**Entity-obfuscation blind spot.** `scan_pii` runs `_EMAIL_RE` over the raw
+decoded source *without* char-ref conversion, so an entity-obfuscated address
+(`joe&#64;x.com`, where `&#64;` is `@`) — a standard spam/phishing evasion,
+present in the very Nazario/SpamAssassin sources here — matches neither the
+scanner nor a literal-form redactor. The redactor therefore **detects on a
+char-ref-decoded view of each node** (redacting the raw entity span when its
+decoded form matches PII) as a first line, but this cannot be assumed complete.
+**Human PR review of every Wave-2 ingestion is the backstop for entity-encoded
+PII, and any future public-repo flip must re-scrutinize these inputs rather than
+trust the machine scan.**
 
 ## Selection
 
@@ -180,19 +201,26 @@ whole tree); they organize provenance and per-source review.
 
 ## Determinism
 
-`--check` byte-identity requires the *entire* traversal to be a pure function of
-the pinned archive bytes, not just the final sort:
+`--check` byte-identity rests on the *entire* traversal being a pure function of
+the pinned archive bytes. Determinism comes from a **fully-ordered traversal**,
+not from an order-independent tie-break:
 
 - **In-archive iteration only.** `sources.py` iterates each source **in memory in
   archive order** — `tarfile`/`mailbox` member order — and **never** extracts to
-  disk and `os.walk`s it (a filesystem walk yields platform-dependent order,
-  which would silently change which member wins a fingerprint collision). Combined
-  with the fixed source order above, the full candidate sequence is deterministic.
-- **Order-stable dedup.** Keep-first over that deterministic sequence yields a
-  stable collision winner; the final per-source stem sort makes the *written set*
-  independent of anything but the surviving candidates.
-- A `--check` test shuffles the *within-source candidate order* and asserts the
-  written tree is unchanged, proving the guarantee rather than assuming it.
+  disk and `os.walk`s it (a filesystem walk yields platform-dependent order).
+- **One total candidate order:** fixed source order (SpamAssassin → Nazario →
+  Enron) then in-archive order within each source. Keep-first over this total
+  order picks a deterministic winner for **every** fingerprint collision — both
+  cross-source (resolves to the earlier source) and within-source structural
+  duplicates, which are *common* in spam blasts (many messages share a skeleton
+  with differing text → same fingerprint, different content-hash stems). The
+  first in traversal order wins; the final per-source stem sort orders the written
+  set.
+- **`--check` is a plain regeneration byte-identity check** — regenerate `wave2/`
+  from the cached pinned archives and assert zero diff. (No shuffle-invariance
+  claim: keep-first is order-*dependent* by design, so the guarantee is "same
+  pinned bytes + same traversal ⇒ same tree," not "any candidate order ⇒ same
+  tree.")
 
 ## `meta.toml` contract (Wave 2)
 
@@ -255,10 +283,13 @@ tests):
 - `scrub.py`: redaction is complete (all three patterns in text, attribute
   values, and comments), **structure-preserving** (tag/attr-name bytes unchanged;
   `structural_fingerprint` invariant), **idempotent**, and deterministic; a
-  scrubbed body produces no `9-pii` WARN. Edge-case fixtures asserting
-  byte-identical markup: `mailto:`/`tel:` href, a literal `<` in text, an HTML
-  comment containing an address, a `<style>` block, and a numeric character
-  reference (`&#1234567;`) that must **not** be corrupted.
+  scrubbed body produces no `9-pii` WARN. Fixtures asserting `structural_finger`
+  `print` invariance (the node-scoping guarantee): a ≥7-digit run **adjacent to a
+  comment terminator** (`<!--1234567-->`), **inside** a comment, and **separating
+  two unquoted attributes** (`<td width=123 4567>`); plus `mailto:`/`tel:` href, a
+  literal `<` in text, a `<style>` block, and a numeric character reference
+  (`&#1234567;`) left intact. One fixture asserts an **entity-obfuscated** address
+  (`joe&#64;x.com`) is detected via the decoded view.
 - `sources.py`: SHA-256 verification accepts a matching archive and **hard-fails**
   a mismatch (mocked bytes — no network in tests); HTML-bearing filter selects
   only messages with a `text/html` part; iteration follows in-archive order.
@@ -277,10 +308,13 @@ docs + `corpus-allowlist.toml`/floor only).
   renders or executes; worst case from a hostile input is a false HARD (noisy,
   self-announcing), never RCE/exfiltration (parent design threat model).
 - **PII.** Real mail carries PII in both rendered text and markup (`mailto:`
-  hrefs, tracking URLs, comments); the whole-source scrub + the activated advisory
-  scan (same scope) + human review of the ingestion PR are the layered mitigation.
-  The repo stays **private**; a future public flip is its own reviewed decision and
-  would re-scrutinize these inputs.
+  hrefs, tracking URLs, comments); the node-scoped whole-scope scrub + the
+  activated advisory scan + human review of the ingestion PR are the layered
+  mitigation. The machine scan catches **literal-form** PII; **entity-obfuscated**
+  PII (`&#64;` for `@`) is a known blind spot the redactor mitigates via a
+  char-ref-decoded detection view but human review must backstop. The repo stays
+  **private**; a future public flip is its own reviewed decision that must
+  re-scrutinize these inputs, not trust the scan.
 - **Download trust.** Build-time downloads are pinned by SHA-256; a compromised
   mirror cannot change the committed bytes without a hash mismatch that hard-fails
   the build. CI never downloads — it validates committed bytes at a pinned SHA.

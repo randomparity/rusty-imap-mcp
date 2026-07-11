@@ -49,14 +49,19 @@ whole-source — text, attribute values (e.g. `mailto:` hrefs), and comments —
 because the validator's `scan_pii` scans `html_part_texts` (the whole decoded
 source), and real mail carries real addresses in those markup positions (a
 genuine PII leak, not just a WARN). It is nonetheless **structure-preserving**:
-the PII character classes contain none of the markup delimiters `< > " '`, so a
-match can never span a tag/attribute boundary, and `structural_fingerprint`
-ignores attribute values — so the fingerprint is invariant and the oracle still
-probes the true tokenizer shape. Because both sanitizers see the same redacted
-input, text/href-drop detection is unaffected (redacting a PII *substring* of an
-attribute value leaves the token itself intact and comparable). Redaction and the
-advisory `scan_pii` now share scope, so any residual `9-pii` WARN is a real miss,
-not expected noise.
+redaction is **node-scoped** (applied within each parsed text / attribute-value /
+comment span, never as a regex over the raw source), so a match — whose phone/
+digit classes include `\s` and `-`, both HTML structural delimiters — can never
+consume a markup delimiter, tag name, or attribute name; and
+`structural_fingerprint` ignores attribute values, so the fingerprint is
+invariant and the oracle still probes the true tokenizer shape. Because both
+sanitizers see the same redacted input, text/href-drop detection is unaffected
+(redacting a PII *substring* of an attribute value leaves the token itself intact
+and comparable). Redaction and the advisory `scan_pii` share scope, so a residual
+`9-pii` WARN is a real literal-form miss — but **entity-obfuscated PII**
+(`&#64;` for `@`) evades both a raw-source scanner and a literal redactor, so the
+redactor detects on a char-ref-decoded view and human PR review backstops it;
+zero WARN does not prove zero PII.
 
 **3. Nazario sourced from an immutable git-mirror commit, not `monkey.org`.**
 The canonical `monkey.org` host is flaky; a GitHub-raw URL at a pinned commit
