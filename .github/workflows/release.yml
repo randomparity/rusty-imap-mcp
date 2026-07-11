@@ -501,3 +501,58 @@ jobs:
           fi
           git commit -m "rusty-imap-mcp ${TAG#v}: add bottles"
           git push
+
+  # After a stable release, open a PR bumping the workspace to the next -dev
+  # (ADR-0003). Skipped for prerelease tags and non-tag events.
+  post-release-bump:
+    name: Open post-release version-bump PR
+    needs: [release]
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: stable
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked --version 0.13.11
+      - name: Compute next -dev and rewrite versions
+        id: bump
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          released="${TAG#v}"
+          IFS=. read -r major minor patch <<< "$released"
+          next="${major}.${minor}.$((patch + 1))-dev"
+          cargo set-version --workspace "$next"
+          cargo update --workspace
+          cargo update --manifest-path html-oracle/Cargo.toml -p rimap-core -p rimap-content
+          if ! grep -q '^## \[Unreleased\]' CHANGELOG.md; then
+            awk 'BEGIN{done=0} /^## \[/ && !done {print "## [Unreleased]"; print ""; done=1} {print}' \
+              CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: chore/post-release-bump-v${{ steps.bump.outputs.next }}
+          commit-message: "chore: bump version to ${{ steps.bump.outputs.next }} after ${{ github.ref_name }} release"
+          title: "chore: bump version to ${{ steps.bump.outputs.next }} after ${{ github.ref_name }}"
+          add-paths: |
+            Cargo.toml
+            Cargo.lock
+            crates/*/Cargo.toml
+            html-oracle/Cargo.lock
+            CHANGELOG.md
+          body: |
+            Automated post-release bump to `${{ steps.bump.outputs.next }}` after the `${{ github.ref_name }}` release (ADR-0003).
+
+            **CI kick-off required before merge:** PRs opened by `GITHUB_TOKEN` do not trigger `pull_request` CI. Push an empty commit to this branch, or run `just ci` locally, to get a green signal. If the next release is a minor/major bump, edit the version on this PR first.
