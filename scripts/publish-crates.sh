@@ -96,7 +96,7 @@ index_has_version() {
     local crate="$1" version="$2" prefix
     prefix="${crate:0:2}/${crate:2:2}"
     curl -sS -A "$USER_AGENT" "https://index.crates.io/${prefix}/${crate}" 2>/dev/null |
-        grep -q "\"vers\":\"${version}\""
+        grep -qF "\"vers\":\"${version}\""
 }
 
 # Classify a `cargo publish` result into an action: ok | skip | retry | fail.
