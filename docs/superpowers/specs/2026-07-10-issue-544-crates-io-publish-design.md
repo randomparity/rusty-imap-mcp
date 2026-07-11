@@ -189,16 +189,19 @@ silently dropped at publish.
   in depth beside `verify-tag`); the assertion is **skipped under `--dry-run`**
   so the dry-run runs on a normal `-dev` working branch (`main` lives at
   `X.Y.Z-dev`) — see Success Criterion #1.
-- `--dry-run`: runs `cargo publish --dry-run --locked -p <crate>` for the leaf
-  (`rimap-core`, fully build-verifiable) and
-  `cargo publish --dry-run --no-verify --locked -p <crate>` for dependents
-  (metadata/packaging validation without a registry-resolved build, which is
-  impossible pre-publish for unpublished deps). This catches missing
-  `description`/`license` and version-less deps. It does **not** validate
-  category slugs (dry-run is offline — that is the unit test's job) and does
-  **not** exercise a dependent's real verify build (see the self-dev-dep note in
-  Risks — the risk is instead removed at the source by making self dev-deps
-  path-only).
+- `--dry-run`: a **single workspace-wide** invocation
+  `cargo publish --dry-run --no-verify --locked --allow-dirty --workspace`
+  (empirically verified in-repo on cargo 1.94.0 to package all 8 crates). A
+  *per-crate* `--dry-run --no-verify -p <dependent>` does **not** work: cargo
+  resolves the dependent's unpublished siblings from the registry and fails
+  (`no matching package named 'rimap-config'`) — `--no-verify` skips the verify
+  build, not sibling resolution. The `--workspace` form resolves siblings
+  locally. `--allow-dirty` lets it run on a `-dev` working branch; `--no-verify`
+  keeps it fast (the full build is covered by `just check`/`just test`). This
+  validates packaging + manifest completeness + that no self-referential
+  dev-dep with a `version =` remains (it fails on one until the self-deps are
+  path-only). It does **not** validate category slugs (dry-run is offline — the
+  metadata guardrail script does that).
 - Real mode: `cargo publish -p <crate> --locked`, honoring
   `CARGO_REGISTRY_TOKEN` from the environment.
   - **Rate-limit handling.** A new-crate 429 (burst 5 exhausted) is caught: the
@@ -262,9 +265,11 @@ publish-crates:
 
 ## Success criteria (falsifiable)
 
-1. `just publish-dry-run` exits 0 locally **on a normal `-dev` branch** (the
-   `-dev` guard is skipped under `--dry-run`): all 8 crates package with complete
-   metadata and version-carrying regular deps; no missing `description`/`license`.
+1. `just publish-dry-run` (a single
+   `cargo publish --dry-run --no-verify --locked --allow-dirty --workspace`)
+   exits 0 locally **on a normal `-dev` branch** and prints "Packaged" for all 8
+   crates; the `-dev` guard is skipped under `--dry-run`. (Passes only after the
+   self dev-deps are path-only — verified in-repo.)
 2. `cargo deny check licenses` (`just deny`) is green with `rimap-content`
    declaring `(MIT OR Apache-2.0) AND Unicode-3.0` and **no** new `deny.toml`
    allow-list entry (`Unicode-3.0` is already allowed).

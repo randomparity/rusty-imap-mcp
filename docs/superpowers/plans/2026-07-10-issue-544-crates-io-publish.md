@@ -214,11 +214,20 @@ first paced local reservation (spec Decision 7).
   - **Real mode guard:** before the loop, assert the version contains no `-dev`
     (fail fast). **Skip this assertion under `--dry-run`** so it runs on a normal
     `-dev` branch.
-  - **Dry-run mode per crate:** `cargo publish --dry-run --locked -p rimap-core`
-    (full verify on the leaf) and
-    `cargo publish --dry-run --no-verify --locked -p <crate>` for the other
-    seven (metadata/packaging only — a registry-resolved verify build is
-    impossible pre-publish for unpublished deps).
+  - **Dry-run mode — one workspace-wide invocation, NOT per crate.** Empirically
+    verified on cargo 1.94.0 in-repo: a per-crate
+    `cargo publish --dry-run --no-verify -p <dependent>` **fails** for all seven
+    dependents (`no matching package named 'rimap-config' found / location
+    searched: crates.io index`) — `--no-verify` skips the verify *build* but not
+    sibling *resolution*, which looks up unpublished siblings in the registry. A
+    single `cargo publish --dry-run --no-verify --locked --allow-dirty
+    --workspace` resolves all siblings locally and packages all 8 (verified:
+    "Packaged" for core→server). `--allow-dirty` lets it run on a working branch
+    (dry-run is safe); `--no-verify` keeps it fast (the full build is already
+    covered by `just check`/`just test`). **This dry-run only passes after
+    Task 1's self-dep fix** — the same in-repo run fails on `rimap-content`'s
+    self-dev-dep (`required by package rimap-content`) until its `version =` is
+    dropped. Ordering: run `just publish-dry-run` after Task 1.
 - [ ] Implement `scripts/publish-crates.test.sh`: source the script's functions
   (guard the script's `main` behind a `${BASH_SOURCE[0]} == ${0}` check so
   sourcing does not execute it) and assert:
@@ -239,9 +248,10 @@ first paced local reservation (spec Decision 7).
 - `shellcheck` + `shfmt -i 4 -d` clean on both scripts (via `prek run`).
 - `just test-publish-script` exits 0, and the `publish-checks` `ci.yml` job runs
   it; `actionlint` + `zizmor` clean on `ci.yml`.
-- `just publish-dry-run` exits 0 **on the current `-dev` branch** (all 8 package
-  with complete metadata; no missing `description`/`license`; no version-less
-  regular deps).
+- `just publish-dry-run` (single `cargo publish --dry-run --no-verify --locked
+  --allow-dirty --workspace`) exits 0 **on the current `-dev` branch** and prints
+  "Packaged" for all 8 crates (core→server). This requires Task 1 complete
+  (self-deps path-only) — validated in-repo.
 - The script never calls the real `cargo publish` (no `--dry-run`) unless invoked
   without `--dry-run` **and** given a clean version — verify by reading, and by
   the function test.
