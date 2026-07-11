@@ -154,11 +154,12 @@ SHA into `corpus/` and runs with `--repo-root . --corpus-root corpus` (issue
 #550, spec `docs/superpowers/specs/2026-07-10-oracle-corpus-expansion-design.md`).
 Locally, `--corpus-root <dir>` (or `CORPUS_ROOT`) loads an external `.eml` tree
 under `corpus/…` ids alongside `--repo-root`; `--corpus-min-compared <N>` fails
-the run when fewer than `N` `corpus/` inputs compare nonempty. Wave 1 (#551) is
-ingested (454 inputs), so the nightly pins the wave-1 corpus SHA and sets
-`--corpus-min-compared 338` (`floor(0.9 × 376)`); recompute `N` in the same
+the run when fewer than `N` `corpus/` inputs compare nonempty. Waves 1 (#551,
+454 html5lib/template/synthetic inputs) and 2 (#554, +200 SpamAssassin/Nazario
+real-mail inputs) are ingested, so the nightly pins the wave-2 corpus SHA and
+sets `--corpus-min-compared 517` (`floor(0.9 × 575)`); recompute `N` in the same
 reviewed PR whenever a SHA bump materially shifts the comparison count. The
-restated keep/kill baseline is `docs/security/html-oracle-corpus-wave1-baseline.md`. Because the corpus repo is private, the checkout uses
+restated keep/kill baseline is `docs/security/html-oracle-corpus-wave2-baseline.md`. Because the corpus repo is private, the checkout uses
 the `CORPUS_READ_TOKEN` secret — an expired/revoked token or an unresolvable
 pinned SHA reddens the *whole* oracle nightly by design (fail-loud, not a silent
 degrade), so first triage on a red nightly is the corpus-checkout step, then the
