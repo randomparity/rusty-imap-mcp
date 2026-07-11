@@ -107,7 +107,8 @@ met without spawning the binary.
 fn run_args(argv: &[&str]) -> Args {
     match parse_args_from(argv.iter().map(|s| s.to_string()), None, None) {
         ParsedArgs::Run(a) => *a,
-        ParsedArgs::Help => panic!("expected Run"),
+        ParsedArgs::Help => panic!("expected Run, got Help"),
+        ParsedArgs::Error(e) => panic!("expected Run, got Error: {e}"),
     }
 }
 
@@ -162,8 +163,9 @@ fn unparseable_min_compared_is_an_error_not_a_silent_disable() {
 ```
 
 - [ ] **Step 2 — run, verify fail:**
-  `cargo test --manifest-path html-oracle/Cargo.toml --lib parses_ help_ corpus_`
-  Expected: FAIL (symbols undefined).
+  `cargo test --manifest-path html-oracle/Cargo.toml --lib` (run the whole lib
+  test set — the new `parse_args_from`/`USAGE`/`ParsedArgs` symbols are undefined,
+  so the `mod tests` module fails to compile; that is the expected red).
 
 - [ ] **Step 3 — implement.** Replace `Args`, `parse_args`, and add
   `ParsedArgs`/`parse_args_from`/`USAGE`:
@@ -625,6 +627,19 @@ health: text-token families (`stray-tag-boundary`, `entity-href`) must produce
 assertion is **inverted** (a live comparison/HARD means the guard regressed).
 Both checks are pure functions so unit tests cover them without the binary.
 
+> **Scoped out of this PR — "canary lost / family disappears entirely."** The
+> spec's canary check also wants a fully-*removed* family caught. That requires an
+> *expected-families* set to diff the present families against, which does not
+> exist until #551 populates the corpus and defines the baseline — and it directly
+> conflicts with the empty-corpus greenness requirement (an input-free corpus has
+> zero families present and must stay silent). So, exactly like the
+> `--corpus-min-compared` floor, **absent-family detection is deferred to #551**,
+> where the wave-1 baseline supplies the expected-families set (a const list or a
+> `corpus-allowlist.toml` field — a design choice for that issue). This PR asserts
+> only the health of families that *are* present. The failure messages here are
+> worded to claim only that (hardening regression / guard bypass), never
+> removed-input detection.
+
 **Interfaces produced:**
 - `const TEXT_TOKEN_FAMILIES: &[&str] = &["stray-tag-boundary", "entity-href"];`
 - `const BINARY_FAMILY: &str = "binary-part";`
@@ -712,8 +727,8 @@ fn check_canaries(records: &[CorpusRecord]) -> Vec<String> {
         let live = tagged.iter().filter(|r| r.kind == Kind::ComparedNonempty).count();
         if live == 0 {
             fails.push(format!(
-                "canary family '{family}' produced 0 live comparisons — comparison-layer \
-                 hardening regressed (its guard inputs went inert) or the canary was lost"
+                "canary family '{family}' has tagged inputs but produced 0 live comparisons — \
+                 comparison-layer hardening regressed (its guard inputs went inert)"
             ));
         }
     }
@@ -927,7 +942,11 @@ baseline; it lands in the wave-1 SHA-bump PR under #551).
   `empty_corpus_plumbing_proof_greens` locks it.
 - **Canary direction:** text families assert ≥1 `ComparedNonempty`; `binary-part`
   asserts *all tagged are `BinarySkip`* (inverted) — the one genuinely new
-  mechanism, unit-tested in `binary_part_canary_is_inverted`.
+  mechanism, unit-tested in `binary_part_canary_is_inverted`. Only *present*
+  families are asserted; **absent-family ("canary lost") detection is deferred to
+  #551** (it needs an expected-families baseline that doesn't exist yet and would
+  break empty-corpus greenness), and the failure messages claim only
+  present-family health, not removed-input detection.
 - **Non-empty assert deferred:** the pinned SHA `69d3165…` is the empty-but-valid
   corpus, so Task 6 ships the corpus **checkout only** — the non-empty guard lands
   in the #551 wave-1 SHA-bump PR against a populated pin. Shipping it now would
