@@ -154,7 +154,11 @@ decoded HTML string, redacting three PII patterns to fixed placeholder tokens
   inside a comment, and separating two unquoted attributes.
 
 Recorded as `scrub = ["text-nodes-redacted", "attr-values-redacted"]` — the two
-scopes the redaction actually touches. This activates the validator's advisory
+`SCRUB_STEPS` labels validate.py defines for redacted content. Comment content is
+also redacted, but `SCRUB_STEPS` has no `comments-redacted` value, so it is folded
+under these two labels (over-scrubbed relative to the label, never under); `notes`
+records that redaction spans text, attribute values, **and** comments so a future
+auditor is not misled by the label. This activates the validator's advisory
 PII scan (`scan_pii` skips `["none"]` inputs). Because the redaction and the scan
 share the whole decoded-source scope, a residual `9-pii` WARN is a real
 **literal-form** redactor miss (not expected markup noise) — but see the
@@ -228,8 +232,8 @@ Per input: `redistribution_basis = "research-corpus"` (not an SPDX `license`);
 `source`, `source_url`, `notes` (non-empty; `notes` records the filter, the
 scrub scope, and — for Nazario — the CC-BY-4.0 attribution); `wave = 2`; ISO
 `added`; `scrub = ["text-nodes-redacted", "attr-values-redacted"]` (the two
-`SCRUB_STEPS` scopes the whole-source redaction touches); `probes = []` (Wave-2
-inputs are not canaries).
+`SCRUB_STEPS` labels available; comment redaction is folded under them and spelled
+out in `notes`); `probes = []` (Wave-2 inputs are not canaries).
 
 **Canaries.** Criterion 8 is tree-wide and already satisfied by Wave 1's three
 families; Wave 2 adds none. Validation must still show all three families present
@@ -295,8 +299,11 @@ tests):
   only messages with a `text/html` part; iteration follows in-archive order.
 - Tree-wide dedup: a candidate whose fingerprint matches a Wave-1 input is
   dropped; a cross-source collision resolves to the fixed-order winner.
-- `build_wave2.py --check` determinism, including a **shuffle-invariance** test
-  (shuffling within-source candidate order leaves the written tree unchanged).
+- `build_wave2.py --check` determinism: a **regeneration byte-identity** test
+  (re-run from the cached pinned archives, assert zero diff) and an
+  order-*dependent* survivor assertion (two within-source messages sharing a
+  `structural_fingerprint` but differing in content-hash stem → the
+  archive-order-first one is the one written).
 
 Main repo: the oracle run over the combined corpus is the integration gate; the
 baseline note records the numbers. No Rust code changes are expected (workflow +
