@@ -36,9 +36,55 @@ struct InputReport {
     warnings: Vec<String>,
 }
 
+/// Per-input classification, returned by [`process_one`] so the `corpus/`-prefix
+/// counts and canary check derive from one source of truth. Orthogonal to the
+/// Match/Soft/Hard verdict, which stays in the global totals + report vecs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// `sanitize_html` errored before the binary guard was reached.
+    SanitizeSkip,
+    /// Skipped by `is_mostly_binary` (the guard fired).
+    BinarySkip,
+    /// The `lol_html` reference extractor errored.
+    RefError,
+    /// Reached the diff with an empty reference (no live comparison).
+    ComparedEmpty,
+    /// Reached the diff with a non-empty reference (a live comparison).
+    ComparedNonempty,
+}
+
+/// A `corpus/`-prefixed input's `probes` families paired with its outcome.
+struct CorpusRecord {
+    probes: Vec<String>,
+    kind: Kind,
+}
+
+/// `corpus/`-prefix counts, reported separately from the global totals so the
+/// in-repo baseline cannot mask an all-skipped corpus. Coverage denominator is
+/// `total − skipped − ref_error`.
+#[derive(Debug, Default, Serialize)]
+struct CorpusReport {
+    total: usize,
+    skipped: usize,
+    ref_error: usize,
+    compared_nonempty: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_compared: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    floor_breach: Option<String>,
+    canary_failures: Vec<String>,
+}
+
+/// Comparison-layer hardening families whose healthy state is a *live comparison*.
+const TEXT_TOKEN_FAMILIES: &[&str] = &["stray-tag-boundary", "entity-href"];
+/// Family whose healthy state is *inverted*: skipped by `is_mostly_binary`.
+const BINARY_FAMILY: &str = "binary-part";
+
 #[derive(Debug, Serialize)]
 struct Report {
     totals: Totals,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corpus: Option<CorpusReport>,
     hard_inputs: Vec<InputReport>,
     soft_inputs: Vec<InputReport>,
     stale_allowlist_inputs: Vec<String>,
@@ -48,20 +94,74 @@ struct Args {
     repo_root: PathBuf,
     report: PathBuf,
     epvme_dir: Option<PathBuf>,
+    corpus_root: Option<PathBuf>,
+    corpus_min_compared: Option<usize>,
     limit: Option<usize>,
 }
 
-fn parse_args() -> Args {
+enum ParsedArgs {
+    Run(Box<Args>),
+    Help,
+    Error(String),
+}
+
+const USAGE: &str = "\
+html-oracle — differential HTML→text sanitizer oracle
+
+USAGE:
+    html-oracle [OPTIONS]
+
+OPTIONS:
+    --repo-root <DIR>            Main-repo checkout: in-repo fuzz + injection seeds
+    --corpus-root <DIR>          External corpus checkout (rusty-imap-mcp-corpus);
+                                 loaded under `corpus/…` ids. Env: CORPUS_ROOT
+    --epvme-dir <DIR>            Local EPVME dataset tree. Env: EPVME_DIR
+    --corpus-min-compared <N>    Fail if fewer than N corpus/ inputs compare nonempty
+    --limit <N>                  Cap source .eml files per external tree
+    --report <FILE>              JSON report path (default: html-oracle/report.json)
+    -h, --help                   Print this help
+";
+
+fn parse_args() -> ParsedArgs {
+    parse_args_from(
+        std::env::args().skip(1),
+        std::env::var_os("EPVME_DIR").map(PathBuf::from),
+        std::env::var_os("CORPUS_ROOT").map(PathBuf::from),
+    )
+}
+
+fn parse_args_from<I: Iterator<Item = String>>(
+    iter: I,
+    epvme_env: Option<PathBuf>,
+    corpus_env: Option<PathBuf>,
+) -> ParsedArgs {
     let mut repo_root: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
-    let mut epvme_dir: Option<PathBuf> = std::env::var_os("EPVME_DIR").map(PathBuf::from);
+    let mut epvme_dir = epvme_env;
+    let mut corpus_root = corpus_env;
+    let mut corpus_min_compared: Option<usize> = None;
     let mut limit: Option<usize> = None;
-    let mut it = std::env::args().skip(1);
+    let mut it = iter;
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--help" | "-h" => return ParsedArgs::Help,
             "--repo-root" => repo_root = it.next().map(PathBuf::from),
             "--report" => report = it.next().map(PathBuf::from),
             "--epvme-dir" => epvme_dir = it.next().map(PathBuf::from),
+            "--corpus-root" => corpus_root = it.next().map(PathBuf::from),
+            "--corpus-min-compared" => match it.next() {
+                Some(v) => match v.parse() {
+                    Ok(n) => corpus_min_compared = Some(n),
+                    Err(_) => {
+                        return ParsedArgs::Error(format!(
+                            "--corpus-min-compared expects a non-negative integer, got {v:?}"
+                        ));
+                    }
+                },
+                None => {
+                    return ParsedArgs::Error("--corpus-min-compared requires a value".to_string());
+                }
+            },
             "--limit" => limit = it.next().and_then(|v| v.parse().ok()),
             _ => {}
         }
@@ -74,16 +174,18 @@ fn parse_args() -> Args {
     });
     let report =
         report.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("report.json"));
-    Args {
+    ParsedArgs::Run(Box::new(Args {
         repo_root,
         report,
         epvme_dir,
+        corpus_root,
+        corpus_min_compared,
         limit,
-    }
+    }))
 }
 
 /// True when a decoded body is mostly Unicode replacement characters (`U+FFFD`),
-/// the signature of a mis-decoded / binary part rather than real HTML text.
+/// the signature of a wrongly decoded or binary part rather than real HTML text.
 /// Legitimate non-Latin text decodes to real codepoints, not `U+FFFD`, so a low
 /// threshold does not exclude international content.
 fn is_mostly_binary(text: &str) -> bool {
@@ -102,16 +204,23 @@ struct Outcome {
     hard_inputs: Vec<InputReport>,
     soft_inputs: Vec<InputReport>,
     seen_ids: BTreeSet<String>,
+    corpus_records: Vec<CorpusRecord>,
 }
 
 /// Assemble the allowlist: the base `allowlist.toml` plus, only when the EPVME
 /// corpus is loaded, `epvme-allowlist.toml`. Merging the EPVME file only then
 /// keeps its `epvme/…` entries from showing as stale in the hermetic
 /// `--repo-root` run. Concatenated `[[allow]]` blocks parse as one array.
-fn assemble_allowlist(with_epvme: bool) -> Result<allowlist::Allowlist, String> {
+fn assemble_allowlist(with_epvme: bool, with_corpus: bool) -> Result<allowlist::Allowlist, String> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut text = std::fs::read_to_string(manifest.join("allowlist.toml")).unwrap_or_default();
     if with_epvme && let Ok(extra) = std::fs::read_to_string(manifest.join("epvme-allowlist.toml"))
+    {
+        text.push('\n');
+        text.push_str(&extra);
+    }
+    if with_corpus
+        && let Ok(extra) = std::fs::read_to_string(manifest.join("corpus-allowlist.toml"))
     {
         text.push('\n');
         text.push_str(&extra);
@@ -133,6 +242,16 @@ fn assemble_inputs(args: &Args) -> Result<Vec<corpus::CorpusInput>, String> {
         );
         inputs.append(&mut extra);
     }
+    if let Some(corpus_root) = &args.corpus_root {
+        let mut extra =
+            corpus::load_corpus_tree(corpus_root, args.limit).map_err(|e| e.to_string())?;
+        eprintln!(
+            "html-oracle: corpus {} html part(s) from {}",
+            extra.len(),
+            corpus_root.display()
+        );
+        inputs.append(&mut extra);
+    }
     Ok(inputs)
 }
 
@@ -141,16 +260,26 @@ fn run_inputs(inputs: &[corpus::CorpusInput], allow: &allowlist::Allowlist) -> O
     for input in inputs {
         out.totals.total += 1;
         out.seen_ids.insert(input.id.clone());
-        process_one(input, allow, &mut out);
+        let kind = process_one(input, allow, &mut out);
+        if input.id.starts_with("corpus/") {
+            out.corpus_records.push(CorpusRecord {
+                probes: input.probes.clone(),
+                kind,
+            });
+        }
     }
     out
 }
 
-fn process_one(input: &corpus::CorpusInput, allow: &allowlist::Allowlist, out: &mut Outcome) {
+fn process_one(
+    input: &corpus::CorpusInput,
+    allow: &allowlist::Allowlist,
+    out: &mut Outcome,
+) -> Kind {
     let Ok(prod) = rimap_content::test_support::sanitize_html(&input.raw, input.charset.as_deref())
     else {
         out.totals.skipped += 1;
-        return;
+        return Kind::SanitizeSkip;
     };
     let decoded = rimap_content::decode(&input.raw, input.charset.as_deref());
     if is_mostly_binary(&decoded) {
@@ -158,21 +287,107 @@ fn process_one(input: &corpus::CorpusInput, allow: &allowlist::Allowlist, out: &
         // two tokenizers shred byte-soup differently, so comparing it yields
         // noise, not sanitizer signal. Skip it.
         out.totals.skipped += 1;
-        return;
+        return Kind::BinarySkip;
     }
     let refx = match reference::extract_reference(&decoded) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("html-oracle: reference error on {}: {e}", input.id);
             out.totals.ref_error += 1;
-            return;
+            return Kind::RefError;
         }
     };
-    if !refx.text_tokens.is_empty() || !refx.href_ids.is_empty() {
+    let nonempty = !refx.text_tokens.is_empty() || !refx.href_ids.is_empty();
+    if nonempty {
         out.totals.compared_nonempty += 1;
     }
     let divergence = diff::classify(&prod, &refx, &allow.tokens_for(&input.id));
     record_verdict(input, &prod, divergence, out);
+    if nonempty {
+        Kind::ComparedNonempty
+    } else {
+        Kind::ComparedEmpty
+    }
+}
+
+fn corpus_report(records: &[CorpusRecord]) -> CorpusReport {
+    let mut report = CorpusReport {
+        total: records.len(),
+        ..CorpusReport::default()
+    };
+    for rec in records {
+        match rec.kind {
+            Kind::SanitizeSkip | Kind::BinarySkip => report.skipped += 1,
+            Kind::RefError => report.ref_error += 1,
+            Kind::ComparedNonempty => report.compared_nonempty += 1,
+            Kind::ComparedEmpty => {}
+        }
+    }
+    report
+}
+
+/// Fail when the corpus comparison count is below the `--corpus-min-compared`
+/// floor. A missing floor (`None`) means no check — the empty-corpus plumbing
+/// proof and the wave's first nightly run without a baseline.
+fn check_floor(compared_nonempty: usize, min: Option<usize>) -> Option<String> {
+    let min = min?;
+    if compared_nonempty < min {
+        Some(format!(
+            "corpus comparison floor breached: {compared_nonempty} < --corpus-min-compared {min}"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Assert direction-aware canary health over the `corpus/` records. Only
+/// *present* families are checked (an empty corpus asserts nothing, keeping the
+/// plumbing proof green); absent-family detection is deferred to the wave-1
+/// baseline (#551). Text-token families must produce ≥1 live comparison;
+/// `binary-part` is inverted — healthy only when skipped by `is_mostly_binary`.
+fn check_canaries(records: &[CorpusRecord]) -> Vec<String> {
+    let mut fails = Vec::new();
+    for family in TEXT_TOKEN_FAMILIES {
+        let tagged: Vec<&CorpusRecord> = records
+            .iter()
+            .filter(|r| r.probes.iter().any(|p| p == family))
+            .collect();
+        if tagged.is_empty() {
+            continue;
+        }
+        let live = tagged
+            .iter()
+            .filter(|r| r.kind == Kind::ComparedNonempty)
+            .count();
+        if live == 0 {
+            fails.push(format!(
+                "canary family '{family}' has tagged inputs but produced 0 live comparisons — \
+                 comparison-layer hardening regressed (its guard inputs went inert)"
+            ));
+        }
+    }
+    let bin: Vec<&CorpusRecord> = records
+        .iter()
+        .filter(|r| r.probes.iter().any(|p| p == BINARY_FAMILY))
+        .collect();
+    if !bin.is_empty() {
+        // Healthy iff the is_mostly_binary guard fired (BinarySkip). Any other
+        // outcome means the guard did NOT fire — either it regressed (input
+        // reached the comparison stage) or the input errored earlier in
+        // sanitize. The message names all three hypotheses so triage is not
+        // biased toward a false security-regression conclusion.
+        let via_guard = bin.iter().filter(|r| r.kind == Kind::BinarySkip).count();
+        if via_guard != bin.len() {
+            let off = bin.len() - via_guard;
+            fails.push(format!(
+                "binary-part canary unhealthy ({via_guard}/{} skipped via is_mostly_binary, \
+                 {off} did not): the is_mostly_binary guard regressed, this canary no longer \
+                 decodes to >10% U+FFFD, or it was skipped/errored by a different stage",
+                bin.len()
+            ));
+        }
+    }
+    fails
 }
 
 fn record_verdict(
@@ -232,17 +447,38 @@ fn print_summary(report: &Report) {
             report.totals.stale_allowlist_entries
         );
     }
+    if let Some(corpus) = &report.corpus {
+        eprintln!(
+            "html-oracle: corpus/ {} inputs, {} skipped, {} ref_error, {} compared",
+            corpus.total, corpus.skipped, corpus.ref_error, corpus.compared_nonempty,
+        );
+    }
 }
 
 fn exit_code(report: &Report, inert: bool) -> ExitCode {
+    let mut failed = false;
     if report.totals.hard > 0 {
         eprintln!(
             "html-oracle: FAIL — {} silent-drop (HARD) divergence(s)",
             report.totals.hard
         );
-        ExitCode::FAILURE
-    } else if inert {
+        failed = true;
+    }
+    if inert {
         eprintln!("html-oracle: FAIL — oracle inert (compared_nonempty == 0)");
+        failed = true;
+    }
+    if let Some(corpus) = &report.corpus {
+        if let Some(breach) = &corpus.floor_breach {
+            eprintln!("html-oracle: FAIL — {breach}");
+            failed = true;
+        }
+        for canary in &corpus.canary_failures {
+            eprintln!("html-oracle: FAIL — {canary}");
+            failed = true;
+        }
+    }
+    if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
@@ -250,8 +486,18 @@ fn exit_code(report: &Report, inert: bool) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args = parse_args();
-    let allow = match assemble_allowlist(args.epvme_dir.is_some()) {
+    let args = match parse_args() {
+        ParsedArgs::Run(a) => *a,
+        ParsedArgs::Help => {
+            eprint!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        ParsedArgs::Error(msg) => {
+            eprintln!("html-oracle: {msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let allow = match assemble_allowlist(args.epvme_dir.is_some(), args.corpus_root.is_some()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("html-oracle: invalid allowlist: {e}");
@@ -275,8 +521,17 @@ fn main() -> ExitCode {
     outcome.totals.stale_allowlist_entries = stale.len();
     let inert = outcome.totals.total > 0 && outcome.totals.compared_nonempty == 0;
 
+    let corpus = args.corpus_root.is_some().then(|| {
+        let mut corpus = corpus_report(&outcome.corpus_records);
+        corpus.min_compared = args.corpus_min_compared;
+        corpus.floor_breach = check_floor(corpus.compared_nonempty, args.corpus_min_compared);
+        corpus.canary_failures = check_canaries(&outcome.corpus_records);
+        corpus
+    });
+
     let report = Report {
         totals: outcome.totals,
+        corpus,
         hard_inputs: outcome.hard_inputs,
         soft_inputs: outcome.soft_inputs,
         stale_allowlist_inputs: stale,
@@ -293,6 +548,126 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_args(argv: &[&str]) -> Args {
+        match parse_args_from(argv.iter().map(|s| s.to_string()), None, None) {
+            ParsedArgs::Run(a) => *a,
+            ParsedArgs::Help => panic!("expected Run, got Help"),
+            ParsedArgs::Error(e) => panic!("expected Run, got Error: {e}"),
+        }
+    }
+
+    #[test]
+    fn parses_corpus_root_and_min_compared() {
+        let a = run_args(&["--corpus-root", "/c", "--corpus-min-compared", "42"]);
+        assert_eq!(a.corpus_root.as_deref(), Some(Path::new("/c")));
+        assert_eq!(a.corpus_min_compared, Some(42));
+    }
+
+    #[test]
+    fn corpus_root_defaults_from_env() {
+        let p = PathBuf::from("/from-env");
+        let parsed = parse_args_from(std::iter::empty(), None, Some(p.clone()));
+        let ParsedArgs::Run(a) = parsed else {
+            panic!("expected Run")
+        };
+        assert_eq!(a.corpus_root, Some(p));
+    }
+
+    #[test]
+    fn explicit_corpus_root_overrides_env() {
+        let parsed = parse_args_from(
+            ["--corpus-root", "/cli"].iter().map(|s| s.to_string()),
+            None,
+            Some(PathBuf::from("/env")),
+        );
+        let ParsedArgs::Run(a) = parsed else {
+            panic!("expected Run")
+        };
+        assert_eq!(a.corpus_root.as_deref(), Some(Path::new("/cli")));
+    }
+
+    #[test]
+    fn help_flag_yields_help_and_names_both_roots() {
+        for flag in ["--help", "-h"] {
+            let parsed = parse_args_from([flag].iter().map(|s| s.to_string()), None, None);
+            assert!(matches!(parsed, ParsedArgs::Help), "{flag}");
+        }
+        assert!(USAGE.contains("--repo-root"));
+        assert!(USAGE.contains("--corpus-root"));
+        assert!(USAGE.contains("--corpus-min-compared"));
+    }
+
+    #[test]
+    fn unparsable_min_compared_is_an_error_not_a_silent_disable() {
+        let parsed = parse_args_from(
+            ["--corpus-min-compared", "notanumber"]
+                .iter()
+                .map(|s| s.to_string()),
+            None,
+            None,
+        );
+        assert!(matches!(parsed, ParsedArgs::Error(_)));
+    }
+
+    fn rec(probes: &[&str], kind: Kind) -> CorpusRecord {
+        CorpusRecord {
+            probes: probes.iter().map(|s| s.to_string()).collect(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn floor_fails_only_below_min() {
+        assert!(check_floor(5, Some(10)).is_some());
+        assert!(check_floor(10, Some(10)).is_none());
+        assert!(check_floor(0, None).is_none());
+    }
+
+    #[test]
+    fn canaries_empty_corpus_is_silent() {
+        assert!(check_canaries(&[]).is_empty());
+    }
+
+    #[test]
+    fn text_family_needs_a_live_comparison() {
+        assert!(check_canaries(&[rec(&["stray-tag-boundary"], Kind::ComparedNonempty)]).is_empty());
+        let fails = check_canaries(&[rec(&["entity-href"], Kind::ComparedEmpty)]);
+        assert_eq!(fails.len(), 1);
+        assert!(fails[0].contains("entity-href"));
+    }
+
+    #[test]
+    fn binary_part_canary_is_inverted() {
+        assert!(check_canaries(&[rec(&["binary-part"], Kind::BinarySkip)]).is_empty());
+        let fails = check_canaries(&[rec(&["binary-part"], Kind::ComparedNonempty)]);
+        assert_eq!(fails.len(), 1);
+        assert!(fails[0].contains("is_mostly_binary"));
+        assert!(fails[0].contains("no longer decodes"));
+    }
+
+    #[test]
+    fn binary_part_canary_flags_non_guard_skip_without_misattribution() {
+        let fails = check_canaries(&[rec(&["binary-part"], Kind::SanitizeSkip)]);
+        assert_eq!(fails.len(), 1);
+        assert!(fails[0].contains("different stage"));
+    }
+
+    #[test]
+    fn corpus_report_tallies_kinds() {
+        let records = [
+            rec(&[], Kind::ComparedNonempty),
+            rec(&[], Kind::BinarySkip),
+            rec(&[], Kind::SanitizeSkip),
+            rec(&[], Kind::RefError),
+            rec(&[], Kind::ComparedEmpty),
+        ];
+        let report = corpus_report(&records);
+        assert_eq!(report.total, 5);
+        assert_eq!(report.skipped, 2);
+        assert_eq!(report.ref_error, 1);
+        assert_eq!(report.compared_nonempty, 1);
+    }
 
     #[test]
     fn is_mostly_binary_flags_replacement_soup_only() {
