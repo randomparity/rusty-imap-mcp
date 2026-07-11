@@ -103,8 +103,21 @@ then open the main-repo PR for review.**
 
 ## Acceptance criteria (issue #551)
 
-- [ ] Wave-1 inputs ingested + passing `validate.yml`, all three canary families
-      present.
-- [ ] First nightly over the pinned wave-1 corpus green;
-      `corpus-allowlist.toml` + `--corpus-min-compared N` populated from it.
-- [ ] Restated baseline note committed under `docs/security/`.
+- [x] Wave-1 inputs ingested + passing `validate.yml`, all three canary families
+      present. (454 inputs; corpus PR merged at SHA
+      `8387292061098d1299aa504cffb7be0a5bcb4dde`.)
+- [x] First nightly over the pinned wave-1 corpus green (0 HARD, 83.0 % coverage);
+      `corpus-allowlist.toml` (0 entries, triaged) + `--corpus-min-compared 338`
+      populated from it.
+- [x] Restated baseline note committed under `docs/security/`
+      (`html-oracle-corpus-wave1-baseline.md`).
+
+## Outcome (as merged)
+
+- Corpus repo PR #1 merged → pinned SHA `8387292061098d1299aa504cffb7be0a5bcb4dde`.
+- Curated to comparable inputs (operator decision): empty-reference and
+  non-comparable (foster-parenting/frameset/plaintext/NUL) html5lib cases
+  excluded at ingestion; all exclusions are benign reference-limitation
+  divergences, none a real sanitizer silent-drop.
+- Baseline: 454 inputs, 376 compared_nonempty, 453 comparable, **83.0 % coverage,
+  0 HARD, 0 allowlist entries** (bar 5), N=338. KEEP.
