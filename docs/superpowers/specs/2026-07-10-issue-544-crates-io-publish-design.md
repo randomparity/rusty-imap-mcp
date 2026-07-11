@@ -270,9 +270,12 @@ publish-crates:
    exits 0 locally **on a normal `-dev` branch** and prints "Packaged" for all 8
    crates; the `-dev` guard is skipped under `--dry-run`. (Passes only after the
    self dev-deps are path-only — verified in-repo.)
-2. `cargo deny check licenses` (`just deny`) is green with `rimap-content`
-   declaring `(MIT OR Apache-2.0) AND Unicode-3.0` and **no** new `deny.toml`
-   allow-list entry (`Unicode-3.0` is already allowed).
+2. `just deny` (advisories/bans/licenses/sources) is green with `rimap-content`
+   declaring `(MIT OR Apache-2.0) AND Unicode-3.0` and **no** new license
+   allow-list entry (`Unicode-3.0` is already allowed). One `[bans]` change is
+   required: `allow-wildcard-paths = true` (the path-only self dev-deps are
+   wildcard path deps, which `wildcards = "deny"` otherwise rejects; the
+   relaxation applies only to local path deps — discovered during build).
 2a. A unit test asserts every crate's `categories` are members of a pinned
    crates.io category-slug list (`cargo publish --dry-run` cannot, being offline).
 2b. `cargo package --list -p rimap-content` includes `data/NOTICE` and

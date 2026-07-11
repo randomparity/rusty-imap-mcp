@@ -88,7 +88,13 @@ publishable manifests.
   "Licensed under the Unicode License v3 (Unicode-DFS-2016)." to name only the
   correct identifier: "Licensed under the Unicode License v3 (SPDX:
   Unicode-3.0)." Keep the copyright line and the `license.txt` URL.
-- [ ] **Self dev-deps → path-only.** Remove the `version = "..."` key from the
+- [ ] **Self dev-deps → path-only.** *(Discovered during build: making these
+  path-only turns them into wildcard path deps, which cargo-deny's
+  `[bans] wildcards = "deny"` rejects. Add `allow-wildcard-paths = true` to
+  `deny.toml`'s `[bans]` — the sanctioned relaxation for workspace-internal path
+  deps, which resolve to a specific local crate and cannot pull arbitrary
+  registry versions. This is the one `deny.toml` change; the license allow-list
+  is still untouched.)* Remove the `version = "..."` key from the
   three self-referential dev-dependencies, leaving `path` (+ `features`):
   - `crates/rimap-content/Cargo.toml` — the `[dev-dependencies.rimap-content]`
     table (drop its `version`).
