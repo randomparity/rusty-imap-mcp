@@ -7,10 +7,12 @@ release is cut by pushing a `vX.Y.Z` git tag; the rest is automated by
 [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 See [ADR-0002](docs/ADR/0002-phased-bzr-release-parity-and-direct-publish.md)
-for the phased bzr-parity plan. Phase 1 (tarballs + Homebrew tap + bottles) and
+for the phased bzr-parity plan. Phase 1 (tarballs + Homebrew tap + bottles),
 Phase 2A (the manifest `-dev` version model,
-[ADR-0003](docs/ADR/0003-manifest-dev-version-model.md)) are implemented;
-crates.io publish and native packaging remain (see "Planned" below).
+[ADR-0003](docs/ADR/0003-manifest-dev-version-model.md)), and native packaging
+(deb/rpm + manpages + `install.sh`,
+[ADR-0006](docs/ADR/0006-native-packaging-build-topology.md)) are implemented.
+crates.io publish is the last remaining phase.
 
 ## Version-number convention
 
@@ -119,6 +121,9 @@ containing `-`.
 Pushing a `v*` tag triggers `release.yml`, which:
 
 - **`verify-tag`** — fails fast on tag/`Cargo.toml` drift or a malformed tag.
+- **`manpages`** — runs `cargo run -p xtask -- man` to generate roff manpages
+  from the clap CLI, guards that no test-support subcommand pages were emitted,
+  and shares them to every build leg via an artifact.
 - **build (×5 triples)** — `x86_64`/`aarch64`/`powerpc64le`/`s390x` Linux and
   `aarch64-apple-darwin`. The `x86_64`/`aarch64` Linux legs build
   `--features vendored-keyring` so their binaries static-link libdbus and carry
@@ -127,10 +132,19 @@ Pushing a `v*` tag triggers `release.yml`, which:
   `libdbus-1-3`.
 - **package** — each binary is wrapped into
   `rusty-imap-mcp-vX.Y.Z-<triple>.tar.gz` with `LICENSE-MIT`, `LICENSE-APACHE`,
-  `NOTICE`, and `README.md`.
-- **`release`** — generates `SHA256SUMS.txt`, attaches a build-provenance
-  attestation over the tarballs, and **publishes** the GitHub Release directly
-  (no draft; see ADR-0002).
+  `NOTICE`, `README.md`, and `share/man/man1/*.1`. Additionally, the vendored
+  `x86_64`/`aarch64` legs build `.deb` (`cargo-deb`) and `.rpm`
+  (`cargo-generate-rpm`) packages — amd64/arm64 only, with **no** libdbus
+  dependency (static-linked). A content assertion fails the job unless each
+  package carries the man pages, a `LICENSE`, and the README; the x86_64 leg
+  also install-tests the `.deb`/`.rpm` in minimal Debian/Fedora containers
+  (no `libdbus-1-3`/`dbus-libs` present) to prove the self-contained contract.
+  See [ADR-0006](docs/ADR/0006-native-packaging-build-topology.md).
+- **`release`** — stages `install.sh` with the release tag baked in, generates
+  `SHA256SUMS.txt` over **every** artifact (tarballs, `.deb`, `.rpm`,
+  `install.sh`), attaches a build-provenance attestation over the tarballs and
+  packages, attaches all of the above, and **publishes** the GitHub Release
+  directly (no draft; see ADR-0002).
 - **`homebrew`** — fetches the published tarball checksums, renders
   `homebrew/rusty-imap-mcp.rb.template`, and pushes `Formula/rusty-imap-mcp.rb`
   to the tap. Stable tags only.
@@ -149,24 +163,31 @@ Pushing a `v*` tag triggers `release.yml`, which:
   workspace to the next `-dev` (`cargo set-version --workspace`) and prepending
   `## [Unreleased]` to the CHANGELOG. See checklist step 6 for the CI-kickoff
   merge prerequisite.
+- **`installer-smoke`** — a downstream leaf (its failure does **not** un-publish
+  the release): downloads and runs the published `install.sh` pinned to the
+  release tag, then verifies `rusty-imap-mcp --version` matches `Cargo.toml`
+  independently of the installer's advisory exit code. Stable tags only.
 
 ## After tagging
 
 Watch the pipeline succeed in order:
-`verify-tag → build ×5 → release → {publish-crates, homebrew → bottles → bottles-merge}`
-(`publish-crates` and `homebrew` both fan out from `release`).
+`verify-tag → manpages → build ×5 → release → {publish-crates, installer-smoke, homebrew → bottles → bottles-merge}`
+(`publish-crates`, `installer-smoke`, and `homebrew` all fan out from `release`).
 
 Then verify the install on a supported platform:
 
 ```bash
 brew install randomparity/tap/rusty-imap-mcp
 rusty-imap-mcp --version
+man rusty-imap-mcp   # after a .deb/.rpm or Homebrew install
 ```
 
-For a Linux bottle, also confirm it runs in a clean container **without**
-`libdbus-1-3` installed (proves the vendored static libdbus).
+For a Linux bottle (or the `.deb`/`.rpm`), also confirm it runs in a clean
+container **without** `libdbus-1-3`/`dbus-libs` installed (proves the vendored
+static libdbus).
 
 ## Planned (later phases)
 
-- deb/rpm packaging, manpages, and `install.sh` / `install.ps1` installers —
-  [#545](https://github.com/randomparity/rusty-imap-mcp/issues/545).
+- crates.io publish of the 8 workspace crates —
+  [#544](https://github.com/randomparity/rusty-imap-mcp/issues/544) (see the
+  one-time setup above).

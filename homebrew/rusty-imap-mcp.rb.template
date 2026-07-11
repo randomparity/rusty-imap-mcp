@@ -34,6 +34,9 @@ class RustyImapMcp < Formula
       system "cargo", "install", "--locked", "--root", prefix, "--path", "crates/rimap-server"
     else
       bin.install "rusty-imap-mcp"
+      # Binary/bottle tarballs ship manpages under share/man/man1 (#545). The
+      # Intel-mac source build above has no generated pages; --help covers it.
+      man1.install Dir["share/man/man1/*.1"] if Dir.exist?("share/man/man1")
     end
   end
 
