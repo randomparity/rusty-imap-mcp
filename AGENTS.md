@@ -149,6 +149,18 @@ the report for triage. Being excluded, it never touches the PR gates
 on its own graph. Spec:
 `docs/superpowers/specs/2026-07-10-issue-529-differential-html-oracle-design.md`.
 
+The nightly also checks out the private `rusty-imap-mcp-corpus` repo at a pinned
+SHA into `corpus/` and runs with `--repo-root . --corpus-root corpus` (issue
+#550, spec `docs/superpowers/specs/2026-07-10-oracle-corpus-expansion-design.md`).
+Locally, `--corpus-root <dir>` (or `CORPUS_ROOT`) loads an external `.eml` tree
+under `corpus/…` ids alongside `--repo-root`; `--corpus-min-compared <N>` fails
+the run when fewer than `N` `corpus/` inputs compare nonempty (omitted until a
+wave-1 baseline exists). Because the corpus repo is private, the checkout uses
+the `CORPUS_READ_TOKEN` secret — an expired/revoked token or an unresolvable
+pinned SHA reddens the *whole* oracle nightly by design (fail-loud, not a silent
+degrade), so first triage on a red nightly is the corpus-checkout step, then the
+token, then the pin.
+
 ## Toolchain and MSRV
 
 - **Dev toolchain:** Rust 1.94.0, pinned in `rust-toolchain.toml`. Rustup
