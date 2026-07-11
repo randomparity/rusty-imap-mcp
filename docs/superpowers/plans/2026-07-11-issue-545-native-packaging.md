@@ -111,6 +111,7 @@ pub mod migrate_keyring;
 
 - [ ] **Step 6: Point `main.rs` at the library module** — in `crates/rimap-server/src/main.rs`:
   - Delete line 5 `mod cli;`.
+  - Change line 17 `use clap::{CommandFactory, FromArgMatches};` → `use clap::FromArgMatches;`. (After Step 6 the only `CommandFactory` user moves into `cli::command()`; leaving the import here trips `unused_imports` under `just lint`'s `-D warnings`.)
   - Change line 33 `use crate::cli::{AuditAction, Cli, Command};` → `use rimap_server::cli::{self, AuditAction, Cli, Command};`.
   - Replace `parse_cli` (lines 35-40) body's command construction so it reuses the shared builder:
 
@@ -332,6 +333,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/.." && pwd)"
 RUSTY_IMAP_MCP_SOURCED=1
 export RUSTY_IMAP_MCP_SOURCED
+# Fixtures hit missing file:// URLs on purpose; skip the production retry backoff
+# so the two exit-4 negative cases fail fast instead of spinning ~25s each.
+export RUSTY_IMAP_MCP_RETRY=0 RUSTY_IMAP_MCP_RETRY_DELAY=0
 # shellcheck source=install.sh
 . "$repo/install.sh"
 
@@ -472,6 +476,11 @@ map_target() {
     esac
 }
 
+# Retry knobs — overridable so the hermetic fixture tests (which hit missing
+# file:// URLs on purpose) don't spin through the full production backoff.
+RUSTY_IMAP_MCP_RETRY="${RUSTY_IMAP_MCP_RETRY:-5}"
+RUSTY_IMAP_MCP_RETRY_DELAY="${RUSTY_IMAP_MCP_RETRY_DELAY:-5}"
+
 http_get() { # url dest
     # --retry absorbs releases/download CDN propagation lag: installer-smoke runs
     # seconds after publish and the CDN can briefly 404/5xx a live asset (the
@@ -479,9 +488,11 @@ http_get() { # url dest
     # win for real users on flaky networks.
     if command -v curl >/dev/null 2>&1; then
         curl --fail --silent --show-error --location \
-            --retry 5 --retry-all-errors --retry-delay 5 "$1" -o "$2"
+            --retry "$RUSTY_IMAP_MCP_RETRY" --retry-all-errors \
+            --retry-delay "$RUSTY_IMAP_MCP_RETRY_DELAY" "$1" -o "$2"
     else
-        wget --quiet --tries=5 --waitretry=5 "$1" -O "$2"
+        wget --quiet --tries="$((RUSTY_IMAP_MCP_RETRY + 1))" \
+            --waitretry="$RUSTY_IMAP_MCP_RETRY_DELAY" "$1" -O "$2"
     fi
 }
 
