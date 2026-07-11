@@ -202,9 +202,13 @@ silently dropped at publish.
 - Real mode: `cargo publish -p <crate> --locked`, honoring
   `CARGO_REGISTRY_TOKEN` from the environment.
   - **Rate-limit handling.** A new-crate 429 (burst 5 exhausted) is caught: the
-    script parses the retry time from cargo's stderr and sleeps until then,
-    bounded by `MAX_RATE_WAIT`, then retries the same crate. This keeps the
-    script from aborting mid-chain and leaving a half-reserved namespace.
+    script parses the retry time from cargo's stderr. If it is within
+    `MAX_RATE_WAIT` (the per-wait cap, sized to cover the ~10-min refill), the
+    script sleeps until then and retries the same crate; if a single required
+    wait exceeds the cap, it exits non-zero with a clear "resume later" message
+    (the run is idempotently resumable — already-published crates are skipped).
+    This keeps the script from aborting *silently* mid-chain and never leaves a
+    half-reserved namespace without an actionable next step.
   - **Index-readiness poll.** After each successful publish, poll the sparse
     index for the exact version — `https://index.crates.io/<p>/<q>/<crate>`
     (path derived per cargo's index layout; for the 4+-char `rimap-*` names,
@@ -305,10 +309,13 @@ publish-crates:
   order minimizes cross-dependency failures; idempotent skip-by-version makes a
   same-tag re-run resume; a bug fix requires a new patch tag (normal crates.io
   practice). Documented in RELEASING.md.
-- **Index propagation lag between dependent publishes.** Mitigated by cargo's
-  built-in publish-wait, which blocks on the *sparse index* (the surface a
-  dependent's verify build resolves against). The web-API GET is used only for
-  the skip decision, not as an index-readiness signal.
+- **Index propagation lag between dependent publishes.** Authoritative
+  mitigation is the script's **sparse-index poll** (Decision 3 / Detailed
+  design): after each publish it blocks until the exact version appears at
+  `index.crates.io/ri/ma/<crate>` before the next crate. cargo's built-in
+  publish-wait is a secondary guard only (it warns rather than fails on
+  timeout). The web-API GET is used only for the skip decision, never as an
+  index-readiness signal.
 - **`cargo-semver-checks` false gate on first release.** No baseline ⇒ treated
   as new crates ⇒ passes. The gate only bites from release #2. (Not verifiable
   by the offline dry-run; asserted by reasoning about semver-checks' documented
