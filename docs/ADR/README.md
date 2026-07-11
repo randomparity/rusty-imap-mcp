@@ -20,3 +20,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0003](0003-manifest-dev-version-model.md) | Manifest `-dev` version model with automated post-release bump | Accepted |
 | [0004](0004-crates-io-publish-topology.md) | crates.io publish topology for the 8-crate workspace | Accepted |
 | [0005](0005-wave2-corpus-sourcing.md) | Wave-2 corpus sourcing — download-at-build pinned-by-hash + text-node scrub | Accepted |
+| [0006](0006-native-packaging-build-topology.md) | Native packaging build topology — xtask manpages, host-side deb/rpm, amd64+arm64 only | Accepted |
