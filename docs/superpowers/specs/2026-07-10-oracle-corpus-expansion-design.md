@@ -635,13 +635,15 @@ as a **rate**, recomputed and recorded after each wave's first nightly:
 
 ## Follow-up issues (filed after this spec is approved)
 
-- **A —** create `rusty-imap-mcp-corpus` (README, `meta.toml` format,
-  self-validation CI).
-- **B —** main-repo: `--corpus-root` flag on the oracle runner +
-  `corpus-allowlist.toml` + pinned-SHA corpus checkout in
-  `nightly-html-oracle.yml`.
-- **C —** wave-1 ingestion (html5lib-tests + Cerberus/MJML/Foundation templates
-  + deterministic synthetic mutations) + restated keep/kill baseline.
+- **A ([#549](https://github.com/randomparity/rusty-imap-mcp/issues/549)) —**
+  create `rusty-imap-mcp-corpus` (README, `meta.toml` format, self-validation
+  CI).
+- **B ([#550](https://github.com/randomparity/rusty-imap-mcp/issues/550)) —**
+  main-repo: `--corpus-root` flag on the oracle runner + `corpus-allowlist.toml`
+  + pinned-SHA corpus checkout in `nightly-html-oracle.yml`.
+- **C ([#551](https://github.com/randomparity/rusty-imap-mcp/issues/551)) —**
+  wave-1 ingestion (html5lib-tests + Cerberus/MJML/Foundation templates +
+  deterministic synthetic mutations) + restated keep/kill baseline.
 
 Implementation of each happens under its issue via `/work-issue`; this spec is
 the shared design they reference. Waves 2 and 3 get their own issues once wave
