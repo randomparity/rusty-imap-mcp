@@ -269,6 +269,10 @@ fn generate_man(out: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+// The workspace denies `clippy::unwrap_used`; tests opt out with an #[expect]
+// (matches crates/rimap-server/src/cli/mod.rs). Without this, `just lint`
+// (`--all-targets -D warnings`) fails on the test's .unwrap()s.
+#[expect(clippy::unwrap_used, reason = "tests")]
 #[path = "main_tests.rs"]
 mod tests;
 ```
@@ -279,7 +283,11 @@ mod tests;
 
 ```makefile
 # Generate roff manpages into man/man1/ (consumed by tarball/deb/rpm packaging).
-# Uses --no-default-features so test-support subcommands never leak into the pages.
+# The pages exclude test-support subcommands because xtask depends on rimap-server
+# with default-features = false (its `default = []`), so those #[cfg(feature =
+# "test-support")] subcommands are compiled out of the CLI entirely (they are also
+# #[command(hide = true)]). `--no-default-features` here is xtask-scoped defense
+# (xtask has no features today) and matches the release job's invocation exactly.
 man:
     cargo run -p xtask --no-default-features --release --locked -- man --out man/man1
 ```
@@ -357,6 +365,14 @@ echo "deadbeef  pkg.tar.gz" > "$fix/bad.txt"
 expect_exit "checksum mismatch -> 5" 5 verify_sha256 "$fix/bad.txt" pkg.tar.gz "$fix"
 
 # --- main end-to-end via file:// fixture -------------------------------------
+# The fixtures use file:// URLs; install.sh's http_get uses curl (which supports
+# file://) and falls back to wget (which does NOT). Skip the e2e block on a
+# curl-less host rather than report false exit-4 failures.
+if ! command -v curl >/dev/null 2>&1; then
+    echo "skip: curl not present; skipping file:// fixture tests"
+    [ "$failures" -eq 0 ] && { echo "pure-function tests passed"; exit 0; } || exit 1
+fi
+
 # Build a fixture release: a tarball whose inner binary prints a version.
 rel="$(mktemp -d)"; trap 'rm -rf "$fix" "$rel"' EXIT
 tag="v9.9.9"; triple="$(map_target "$(uname -s)" "$(uname -m)")"
@@ -366,13 +382,6 @@ printf '#!/bin/sh\necho "rusty-imap-mcp 9.9.9"\n' > "$rel/$tag/$stage/rusty-imap
 chmod +x "$rel/$tag/$stage/rusty-imap-mcp"
 ( cd "$rel/$tag" && tar czf "$stage.tar.gz" "$stage" && rm -rf "$stage" )
 ( cd "$rel/$tag" && { command -v sha256sum >/dev/null 2>&1 && sha256sum ./*.tar.gz || shasum -a 256 ./*.tar.gz; } > SHA256SUMS.txt )
-
-run_install() { # extra-env... ; installs into a fresh dir, echoes exit code
-    local dir; dir="$(mktemp -d)"
-    RUSTY_IMAP_MCP_BASE_URL="file://$rel" RUSTY_IMAP_MCP_VERSION="$tag" \
-        RUSTY_IMAP_MCP_INSTALL_DIR="$dir/bin" "$@" \
-        sh "$repo/install.sh"
-}
 
 # Happy path: install + advisory smoke succeeds.
 out_dir="$(mktemp -d)"
@@ -464,10 +473,15 @@ map_target() {
 }
 
 http_get() { # url dest
+    # --retry absorbs releases/download CDN propagation lag: installer-smoke runs
+    # seconds after publish and the CDN can briefly 404/5xx a live asset (the
+    # homebrew job in release.yml added the same for the same reason). Also a UX
+    # win for real users on flaky networks.
     if command -v curl >/dev/null 2>&1; then
-        curl --fail --silent --show-error --location "$1" -o "$2"
+        curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 5 "$1" -o "$2"
     else
-        wget --quiet "$1" -O "$2"
+        wget --quiet --tries=5 --waitretry=5 "$1" -O "$2"
     fi
 }
 
@@ -622,15 +636,21 @@ assets = [
     ["../../NOTICE", "usr/share/doc/rusty-imap-mcp/NOTICE", "644"],
 ]
 
-# NOTE — asset source path bases differ between the two tools (verified against
-# tool docs): cargo-deb resolves non-`target/` sources relative to THIS package
-# manifest dir (crates/rimap-server/), so the deb block above uses `../../` for
-# workspace-root files. cargo-generate-rpm resolves them relative to the CWD
-# (the workspace root, where `cargo generate-rpm -p crates/rimap-server` runs),
-# so the rpm block below uses NO `../../`. Both tools special-case the
-# `target/release/` binary prefix and rewrite it for `--target`. The Task-5 CI
-# `dpkg-deb --contents`/`rpm -qlp` assertion is the hard gate that catches any
-# path-base mistake before a release ships.
+# NOTE — asset source path bases differ between the two tools (source-verified,
+# not assumed):
+#  * cargo-deb resolves non-`target/` sources relative to THIS package manifest
+#    dir (crates/rimap-server/) — documented — so the deb block above uses
+#    `../../` for workspace-root files.
+#  * cargo-generate-rpm's `generate_expanded_path` (src/config/asset_info.rs)
+#    globs each non-`target/` source relative to the process CWD FIRST (the
+#    workspace root, where `cargo generate-rpm -p crates/rimap-server` runs),
+#    falling back to the package base; so the rpm block below uses NO `../../`.
+#  * Both tools special-case the `target/release/` binary prefix and rewrite it
+#    for `--target` (cargo-generate-rpm: `get_asset_rel_path` strips it and joins
+#    the target dir).
+# Task-5's `dpkg-deb --contents`/`rpm -qlp` assertion (extended to cover a
+# license + README, not just man pages) is the hard gate that still catches any
+# path-base slip before a release ships.
 [package.metadata.generate-rpm]
 summary = "Security-first MCP server for IMAP email access"
 # Disable rpm-build's automatic Requires (host ldd is wrong for a cross-built,
@@ -714,8 +734,10 @@ git commit -m "feat(packaging): add deb/rpm metadata (amd64/arm64, no libdbus de
 - [ ] **Step 1: Add the `manpages` job** — after the `verify-tag` job, insert:
 
 ```yaml
-  # Generate manpages once and share to every build leg. --no-default-features
-  # keeps test-support subcommands out of the shipped pages; the guard asserts it.
+  # Generate manpages once and share to every build leg. Test-support subcommands
+  # are absent because xtask's rimap-server dep sets default-features = false
+  # (cfg-gating them out); the guard step below is belt-and-suspenders that fails
+  # loudly if that ever regresses.
   manpages:
     name: Generate manpages
     needs: verify-tag
@@ -778,19 +800,28 @@ git commit -m "feat(packaging): add deb/rpm metadata (amd64/arm64, no libdbus de
           cargo generate-rpm -p crates/rimap-server --target x86_64-unknown-linux-gnu
           cp target/x86_64-unknown-linux-gnu/debian/*.deb .
           cp target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm .
-      - name: Assert man pages are in the packages
+      - name: Assert man pages, license, and README are in the packages
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+          # Require: top man page + >=1 subcommand page + a LICENSE + README.
+          # Catches an asset-source path-base slip that would otherwise silently
+          # ship a man-less or (compliance-critical) license-less package.
           for pkg in ./*.deb; do
-            dpkg-deb --contents "$pkg" | grep -q 'usr/share/man/man1/rusty-imap-mcp\.1' \
-              && dpkg-deb --contents "$pkg" | grep -Eq 'usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
-              || { echo "::error::$pkg missing man pages" >&2; exit 1; }
+            c="$(dpkg-deb --contents "$pkg")"
+            printf '%s' "$c" | grep -q 'usr/share/man/man1/rusty-imap-mcp\.1' \
+              && printf '%s' "$c" | grep -Eq 'usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
+              && printf '%s' "$c" | grep -q 'usr/share/doc/rusty-imap-mcp/LICENSE-MIT' \
+              && printf '%s' "$c" | grep -q 'usr/share/doc/rusty-imap-mcp/README.md' \
+              || { echo "::error::$pkg missing man/license/README asset" >&2; exit 1; }
           done
           for pkg in ./*.rpm; do
-            rpm -qlp "$pkg" | grep -q '/usr/share/man/man1/rusty-imap-mcp\.1' \
-              && rpm -qlp "$pkg" | grep -Eq '/usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
-              || { echo "::error::$pkg missing man pages" >&2; exit 1; }
+            c="$(rpm -qlp "$pkg")"
+            printf '%s' "$c" | grep -q '/usr/share/man/man1/rusty-imap-mcp\.1' \
+              && printf '%s' "$c" | grep -Eq '/usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
+              && printf '%s' "$c" | grep -q '/usr/share/licenses/rusty-imap-mcp/LICENSE-MIT' \
+              && printf '%s' "$c" | grep -q '/usr/share/doc/rusty-imap-mcp/README.md' \
+              || { echo "::error::$pkg missing man/license/README asset" >&2; exit 1; }
           done
       - name: Lint packages (warn-only)
         continue-on-error: true
