@@ -301,7 +301,7 @@ man:
 /man/
 ```
 
-- [ ] **Step 8: Smoke the recipe** — `just man && ls man/man1/`. Expected: `rusty-imap-mcp.1`, `rusty-imap-mcp-login.1`, `rusty-imap-mcp-audit.1`, `rusty-imap-mcp-migrate-keyring.1`, `rusty-imap-mcp-audit-merge.1` (nested), and **no** `rusty-imap-mcp-dump-tool-*.1`. Confirm the F1 guarantee empirically: `ls man/man1/ | rg dump-tool` prints nothing.
+- [ ] **Step 8: Smoke the recipe** — `just man && ls man/man1/`. (On Linux this compiles `rimap-server`, which needs `libdbus-1-dev` + `pkg-config` — already required to build the workspace and installed by `just setup`; macOS uses the Security framework, no dbus.) Expected: `rusty-imap-mcp.1`, `rusty-imap-mcp-login.1`, `rusty-imap-mcp-audit.1`, `rusty-imap-mcp-migrate-keyring.1`, `rusty-imap-mcp-audit-merge.1` (nested), and **no** `rusty-imap-mcp-dump-tool-*.1`. Confirm the F1 guarantee empirically: `ls man/man1/ | rg dump-tool` prints nothing.
 
 - [ ] **Step 9: Commit**
 
@@ -761,6 +761,12 @@ git commit -m "feat(packaging): add deb/rpm metadata (amd64/arm64, no libdbus de
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
+      # xtask compiles rimap-server, which links system libdbus via
+      # keyring -> dbus-secret-service on Linux (xtask does not enable
+      # vendored-keyring). Without this, the build fails with
+      # "Package 'dbus-1' was not found". Mirrors every compiling job in the repo.
+      - name: Install libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
