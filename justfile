@@ -340,6 +340,15 @@ publish-dry-run:
     #!/usr/bin/env bash
     ./scripts/publish-crates.sh --dry-run
 
+# Check the workspace public APIs against their last crates.io release for
+# accidental SemVer breakage (issue #544). Requires a network baseline and
+# `cargo-semver-checks` installed (`cargo install cargo-semver-checks --locked
+# --version 0.48.0`). No-ops on crates with no published baseline, so it is not
+# part of `ci`; the release workflow runs it as a publish gate.
+semver-checks:
+    #!/usr/bin/env bash
+    cargo semver-checks check-release --workspace
+
 # Full local-CI equivalent. If this passes, CI will pass.
 ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script
     typos
