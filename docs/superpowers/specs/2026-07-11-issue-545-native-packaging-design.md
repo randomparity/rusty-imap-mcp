@@ -1,7 +1,7 @@
 # Native Packaging: deb/rpm, Manpages, and Shell Installer (Phase 4) Design
 
 Date: 2026-07-11
-Status: Draft (pre adversarial review)
+Status: Reviewed (adversarial spec review — 4 findings addressed: feature-unification hazard, package-content assertion, installer security framing, installer-variant/smoke coverage)
 Issue: [#545](https://github.com/randomparity/rusty-imap-mcp/issues/545) — "Phase 2C: deb/rpm packages, manpages, and shell installer"
 ADR: [ADR-0006](../../ADR/0006-native-packaging-build-topology.md) — native packaging build topology; extends [ADR-0002](../../ADR/0002-phased-bzr-release-parity-and-direct-publish.md) Phase 4
 Reference: [`randomparity/bzr`](https://github.com/randomparity/bzr) — the same four subsystems, already shipped
@@ -35,11 +35,15 @@ topology) already shipped; this is the last deferred bzr-parity subsystem.
   - `rusty-imap-mcp-<version>-1.x86_64.rpm`, `…aarch64.rpm` (names per tool defaults)
   - `install.sh` (with the release version baked in as the default)
 - Every release tarball (all 5 arches) contains `share/man/man1/rusty-imap-mcp.1`
-  plus one page per subcommand (`rusty-imap-mcp-login.1`, `-audit.1`, etc.).
+  plus one page per subcommand (`rusty-imap-mcp-login.1`, `-audit.1`, etc.), and
+  the built amd64/arm64 `.deb`/`.rpm` **provably** contain
+  `usr/share/man/man1/rusty-imap-mcp.1` (asserted at release time — §4).
 - `curl -fsSL <raw install.sh URL> | sh` installs the latest stable release on
-  Linux (x86_64/aarch64/ppc64le/s390x) and macOS (aarch64), verifying the
-  download's checksum before extraction, and prints an actionable error on an
-  unsupported platform.
+  Linux (x86_64/aarch64/ppc64le/s390x) and macOS (aarch64), checking the
+  download's SHA-256 against `SHA256SUMS.txt` to detect corruption/truncation
+  **before** extraction (integrity, not authenticity — see "Security posture"),
+  and prints an actionable error (distinct exit code) on an unsupported platform
+  or when the latest-version lookup fails.
 - Installing the `.deb` on a minimal Debian image and the `.rpm` on a minimal
   Fedora image (neither carrying `libdbus-1-3` / `dbus-libs`) yields a working
   `rusty-imap-mcp --version` — proving the vendored static-libdbus contract.
@@ -137,18 +141,45 @@ anyhow = { workspace = true }
 Add `xtask` to the workspace `members`. `xtask -- man --out <dir>` calls
 `fs::create_dir_all`, then `clap_mangen::generate_to(rimap_server::cli::command(),
 &out)`, which recursively writes `rusty-imap-mcp.1` + one page per subcommand.
-Default `--out` is `man/man1`. Because `xtask` builds `rimap-server` with
-`default-features = false`, the test-support subcommands are absent from the
-generated pages.
+Default `--out` is `man/man1`.
 
-**`just man`** wraps `cargo run -p xtask --release --locked -- man --out man/man1`.
+**Feature-unification hazard (must not be ignored).** `rimap-server` carries a
+self dev-dependency that enables `test-support` unconditionally for its own tests
+(`crates/rimap-server/Cargo.toml`), and `just test`/`just ci` run
+`cargo nextest run --workspace`. Under such a run, `rimap-server`'s tests build
+with `test-support` ON. Whether Cargo shares that feature-unified `rimap-server`
+lib with `xtask`'s in-process `rimap_server::cli::command()` call is
+resolver-dependent and not something the spec should rely on. Two consequences:
+1. An in-process unit test that asserts "*no* `dump-tool-*` page exists" is
+   **fragile** — it can observe a `test-support`-ON CLI under `just ci` and fail
+   (or, worse, be reordered away and silently validate the wrong CLI).
+2. The pages that actually **ship** come from the release `manpages` job, which
+   builds `xtask` alone with `test-support` OFF — a *different* feature-set than a
+   `--workspace` test run sees. A green in-process test would not prove the
+   shipped pages are clean.
 
-**Tests (TDD-able logic):** `xtask` unit test generates into a `tempdir` and
-asserts (a) `rusty-imap-mcp.1` exists and is non-empty, (b) a page exists for
-each production subcommand (`rusty-imap-mcp-login.1`, `rusty-imap-mcp-audit.1`,
-`rusty-imap-mcp-migrate-keyring.1`), (c) **no** page exists for a test-support
-subcommand (`rusty-imap-mcp-dump-tool-catalog.1`), (d) the top page contains the
-`about` string. This is the failing-test-first anchor for the feature.
+Resolution (both required):
+- **Unit test asserts only robust positives** (feature-independent): (a)
+  `rusty-imap-mcp.1` exists and is non-empty; (b) a page exists for each
+  *always-present* production subcommand (`login`, `audit`, `migrate-keyring`);
+  (c) the top page contains the `about` string. It does **not** assert the
+  absence of a `test-support` page.
+- **The clean-page guarantee lives at the generating build**, not the unit test:
+  the release `manpages` job (and `just man`) run
+  `cargo run -p xtask --no-default-features …` and then a guard step **fails** if
+  any `rusty-imap-mcp-dump-tool-*.1` was emitted. This asserts the negative at the
+  exact build that produces the shipped pages, immune to workspace-test
+  unification. Before treating any of this as an anchor, confirm empirically that
+  `just ci` emits zero `dump-tool-*` pages.
+
+Both `just man` and the workflow use the **same** invocation
+(`cargo run -p xtask --no-default-features --release --locked -- man --out
+man/man1`) so local and CI generation cannot diverge.
+
+**`just man`** wraps that exact command.
+
+The unit test (robust positives above) is the failing-test-first TDD anchor for
+the feature; the `manpages`-job guard is the ship-gate for the negative.
 
 ### 2. Package metadata (`crates/rimap-server/Cargo.toml`)
 
@@ -200,8 +231,11 @@ compatible.
 ### 4. Release workflow wiring (`.github/workflows/release.yml`)
 
 - **New `manpages` job** (`needs: verify-tag`, `permissions: contents: read`):
-  checks out, installs stable Rust, `cargo run -p xtask --no-default-features
-  --release --locked -- man --out man/man1`, uploads `man/man1/*.1` as artifact
+  checks out, installs stable Rust, runs the shared invocation `cargo run -p
+  xtask --no-default-features --release --locked -- man --out man/man1`, then a
+  **guard step fails the job** if any `man/man1/rusty-imap-mcp-dump-tool-*.1`
+  exists (proves the shipped pages carry no test-support subcommand — the F1
+  negative asserted at the generating build). Uploads `man/man1/*.1` as artifact
   `rusty-imap-mcp-manpages` (`if-no-files-found: error`). All 5 build jobs gain
   `needs: [verify-tag, manpages]` and a "Download manpages" step.
 - **x86_64 leg:** add `--target x86_64-unknown-linux-gnu` to the `cargo auditable
@@ -210,18 +244,25 @@ compatible.
   staging: install `cargo-deb` + `cargo-generate-rpm` (via
   `taiki-e/install-action`, SHA-pinned), run `cargo deb --no-build --no-strip
   --target x86_64-unknown-linux-gnu` and `cargo generate-rpm --target
-  x86_64-unknown-linux-gnu`, copy the `.deb`/`.rpm` next to the tarball,
-  `lintian`/`rpmlint` (warn-only, `continue-on-error`), and a Debian/Fedora
-  container **install-test** asserting `rusty-imap-mcp --version`. Upload
-  `.deb`/`.rpm` alongside the tarball.
+  x86_64-unknown-linux-gnu`, copy the `.deb`/`.rpm` next to the tarball, then a
+  **package-content assertion** (F2): `dpkg-deb --contents *.deb` and `rpm -qlp
+  *.rpm` must each list `usr/share/man/man1/rusty-imap-mcp.1` **and** at least one
+  `rusty-imap-mcp-*.1` subcommand page — the step `grep`s and fails on a miss, so
+  a wrong download path, step-ordering slip, or zero-match asset glob cannot ship
+  a man-page-less package silently. Then `lintian`/`rpmlint` (warn-only,
+  `continue-on-error`) and a Debian/Fedora container **install-test** asserting
+  `rusty-imap-mcp --version`. Upload `.deb`/`.rpm` alongside the tarball.
 - **aarch64 leg:** add `--target aarch64-unknown-linux-gnu` to the in-container
   `cargo auditable build` so output lands at `target/aarch64-unknown-linux-gnu/
   release/`; `chown -R` `target/` back to the runner user (it is root-owned from
   the container). Update tarball staging path + add man page. Host-side (runner
   is x86_64): install `cargo-deb`/`cargo-generate-rpm`, run them with `--target
-  aarch64-unknown-linux-gnu`, copy artifacts, `lintian`/`rpmlint` warn-only.
-  **No** emulated install-test for arm64 (structural lint only; x86_64
-  install-test + static-link guarantee cover the dependency contract — ADR-0006).
+  aarch64-unknown-linux-gnu`, copy artifacts, run the **same package-content
+  assertion** as the x86_64 leg (`dpkg-deb --contents` / `rpm -qlp` are arch-
+  agnostic and run fine host-side), then `lintian`/`rpmlint` warn-only. **No**
+  emulated install-test for arm64 (structural lint + content assertion only;
+  x86_64 install-test + static-link guarantee cover the dependency contract —
+  ADR-0006).
 - **macOS / ppc64le / s390x legs:** unchanged except adding the man page to
   tarball staging (download-manpages step + copy).
 - **`release` job:** after downloading artifacts, stage `install.sh` with the tag
@@ -230,40 +271,81 @@ compatible.
   generation to hash **every** release file — tarballs, `.deb`, `.rpm`, and
   `install.sh` — so the installer's own integrity can be checked and packages get
   published checksums. Attach `install.sh` + `.deb` + `.rpm` to the release
-  (extend the `gh release create` asset globs). Keep the provenance attestation
-  covering tarballs + `SHA256SUMS.txt` (optionally extend to packages).
+  (extend the `gh release create` asset globs). Extend the provenance attestation
+  `subject-path` to cover the `.deb`/`.rpm` alongside the tarballs +
+  `SHA256SUMS.txt` (resolved decision — closes the Scorecard Signed-Releases gap
+  and gives the installer's `gh attestation verify` advice packages to verify).
   - **Compatibility guard:** `homebrew`'s `sum_for` greps `SHA256SUMS.txt` by
     exact tarball filename; adding `.deb`/`.rpm`/`install.sh` lines does not
     change the tarball lines it matches. Verified by keeping tarball filenames
     identical.
 - **New `installer-smoke` job** (`needs: release`, `runs-on: ubuntu-latest`,
-  `contents: read`): downloads `install.sh` + `SHA256SUMS.txt` from the published
-  release, verifies `install.sh`'s checksum against the manifest, runs it with
-  `RUSTY_IMAP_MCP_INSTALL_DIR` set, and asserts the installed
-  `rusty-imap-mcp --version` output contains the `Cargo.toml` version. Stable
-  tags only.
+  `contents: read`): checks out the repo (for the `Cargo.toml` version and the
+  **user-facing `install.sh`**), then exercises the path users actually run (F4).
+  It runs the **checked-out repo copy** of `install.sh` with
+  `RUSTY_IMAP_MCP_VERSION` **unset**, so `detect_target` + the latest-version API
+  resolve + download + checksum + install are all covered against the
+  just-published release — i.e. the marker-unset variant the README one-liner
+  fetches from raw. It asserts the installed `rusty-imap-mcp --version` output
+  contains the `Cargo.toml` version. (The release-asset copy differs only in its
+  baked default version, so testing the repo copy covers both; the version-pin
+  path is additionally unit-covered via `RUSTY_IMAP_MCP_VERSION` +
+  `RUSTY_IMAP_MCP_BASE_URL` overrides in a shell test.) Stable tags only.
 
 ### 5. `install.sh` (repo root)
 
 POSIX `sh` (`set -eu`), shellcheck/shfmt-clean. Adapted from bzr's installer:
 
-- Env knobs: `RUSTY_IMAP_MCP_VERSION` (default: latest stable via the GitHub
-  releases API; the release-staged copy bakes the tag as the default),
+- Env knobs: `RUSTY_IMAP_MCP_VERSION` (release tag to install),
   `RUSTY_IMAP_MCP_INSTALL_DIR` (default `$HOME/.local/bin`). Undocumented test
   overrides: `RUSTY_IMAP_MCP_BASE_URL` (release download base) and
   `RUSTY_IMAP_MCP_SKIP_SMOKE`.
+- **Two copies, one script (F4).** The single `install.sh` source lives at the
+  repo root. The README one-liner fetches the **raw repo copy** (marker unset →
+  resolves the latest stable tag via the GitHub releases API). The release job
+  additionally attaches a **release-asset copy** with the tag baked into the
+  marker default, for reproducible/pinned installs. They are the same code; only
+  the default version differs. The `installer-smoke` job tests the marker-unset
+  (raw) behavior — the file users run.
 - `detect_target` maps `uname -s`/`-m` to the 5 built triples; unsupported →
   exit 2 with fallbacks (`cargo install`, distro `.deb`/`.rpm`, Homebrew).
-- Downloads `rusty-imap-mcp-<tag>-<triple>.tar.gz` and `SHA256SUMS.txt`, verifies
-  the tarball's SHA-256 (`sha256sum -c` / `shasum -a 256 -c`), extracts, installs
-  the binary `0755` to the prefix, and (unless skipped) runs `--version` as a
-  smoke check. On smoke failure emits a libdbus hint scoped to the non-vendored
-  arches (ppc64le/s390x): install `libdbus-1-3`/`dbus-libs`, or use the
-  `.deb`/`.rpm`, or `cargo install`. Prints a PATH hint if the prefix is not on
-  `PATH`. Distinct non-zero exit codes per failure class (missing cmd, unsupported
-  platform, download, checksum, extract).
+- **Latest-version resolution failure is a first-class path (F4):** when
+  `RUSTY_IMAP_MCP_VERSION` is unset, the resolver calls the unauthenticated
+  releases API (subject to the 60-req/hr/IP limit — a real hazard behind shared
+  NAT/CI). API unreachable, HTTP non-2xx (incl. 403 rate-limit), or an
+  unparsable `tag_name` → **exit 4** with an actionable message that names the
+  reliable workaround: re-run with `RUSTY_IMAP_MCP_VERSION=vX.Y.Z`. This keeps the
+  "installs the latest stable" criterion falsifiable and gives shared-IP users a
+  deterministic path.
+- Downloads `rusty-imap-mcp-<tag>-<triple>.tar.gz` and `SHA256SUMS.txt`, checks
+  the tarball's SHA-256 (`sha256sum -c` / `shasum -a 256 -c`) **for corruption/
+  truncation** (see "Security posture" — integrity, not authenticity), extracts,
+  installs the binary `0755` to the prefix, and (unless skipped) runs `--version`
+  as a smoke check. On smoke failure emits a libdbus hint scoped to the
+  non-vendored arches (ppc64le/s390x): install `libdbus-1-3`/`dbus-libs`, or use
+  the `.deb`/`.rpm`, or `cargo install`. Prints a PATH hint if the prefix is not
+  on `PATH`. Distinct non-zero exit codes per failure class (3 = missing cmd, 2 =
+  unsupported platform, 4 = version-resolve/download, 5 = checksum, 6 = extract).
 - A marker line (`RUSTY_IMAP_MCP_VERSION="${RUSTY_IMAP_MCP_VERSION:-}"`) is what
   the release job rewrites to bake the tag; the version-pin comment documents it.
+  The rewrite step asserts the marker was found (else the release fails), so a
+  version-pinned asset can never be shipped silently unchanged.
+
+### Security posture (F3)
+
+The installer's SHA-256 check is **integrity, not authenticity**. `SHA256SUMS.txt`
+is fetched from the same GitHub release origin as the tarball and is **unsigned**,
+so it defends against a corrupted/truncated download and against a
+staging bug where `install.sh` and its recorded checksum disagree — **not**
+against an attacker who can tamper with the release assets or MITM the transport
+(TLS is the only authenticity control in that path). The advertised `curl … | sh`
+one-liner also executes the fetched script under implicit origin+TLS trust. This
+is a deliberate scope boundary for this phase: verifying the pipeline's existing
+build-provenance attestation (`gh attestation verify`) would add a `gh`/cosign
+runtime dependency to a minimal POSIX installer, which is out of scope here (and
+distinct from the distro-signing-key path ADR-0006 rejected). The README states
+this residual trust model plainly and points security-sensitive users at
+`gh attestation verify` on the downloaded tarball as the authenticity upgrade.
 
 ### 6. Documentation
 
@@ -272,7 +354,11 @@ POSIX `sh` (`set -eu`), shellcheck/shfmt-clean. Adapted from bzr's installer:
   does"; update the pipeline order diagram.
 - `README.md`: add an install section covering the one-line installer, the
   `.deb`/`.rpm` packages (with the "no libdbus needed on amd64/arm64" note), and
-  a pointer to `man rusty-imap-mcp`.
+  a pointer to `man rusty-imap-mcp`. State the installer's **residual trust
+  model** (integrity-not-authenticity — "Security posture") and the
+  `RUSTY_IMAP_MCP_VERSION=vX.Y.Z` pin as the reliable path when the latest-version
+  API is rate-limited, and point security-sensitive users at `gh attestation
+  verify` for authenticity.
 - Homebrew template: add `man1.install "..."` so a source/bottle install also
   places the man page (best-effort; does not gate the bottle).
 
@@ -295,6 +381,17 @@ POSIX `sh` (`set -eu`), shellcheck/shfmt-clean. Adapted from bzr's installer:
   that defaults to "latest" being shipped as a version-pinned asset silently.
 - **Unsupported platform in installer** → exit 2 with actionable alternatives,
   not a confusing tar error.
+- **Latest-version API unreachable / rate-limited (403) / unparsable** (F4) →
+  exit 4 naming the `RUSTY_IMAP_MCP_VERSION=vX.Y.Z` workaround, rather than
+  proceeding to build a download URL from an empty tag. The 60-req/hr/IP
+  unauthenticated limit is the expected trigger behind shared NAT/CI.
+- **Man page missing from a built package** (F2) → the `dpkg-deb --contents` /
+  `rpm -qlp` assertion greps for `rusty-imap-mcp.1` + a subcommand page and fails
+  the job; a zero-match asset glob or path slip cannot ship silently.
+- **`just ci` emits `dump-tool-*` pages** (F1) → the `manpages`-job guard fails
+  the release; the unit test deliberately does not depend on this (feature
+  unification makes an in-process negative assertion unreliable under
+  `--workspace`).
 - **Neither curl nor wget / neither sha256sum nor shasum present** → exit 3
   before any download.
 - **`SHA256SUMS.txt` now lists packages/installer** → homebrew job unaffected
@@ -302,13 +399,18 @@ POSIX `sh` (`set -eu`), shellcheck/shfmt-clean. Adapted from bzr's installer:
 
 ## Testing & verification
 
-- **Unit:** `xtask` manpage-generation test (see §1) — the TDD anchor. Runs in
-  `just test` / `just ci` on the host.
+- **Unit:** `xtask` manpage-generation test — robust positive assertions only
+  (§1): top page + always-present subcommand pages + `about` string. Runs in
+  `just test` / `just ci` on the host. The negative (no test-support page) is
+  enforced by the `manpages`-job guard, not this test (F1).
+- **Installer shell test:** a host-runnable test exercises the version-pin path
+  (`RUSTY_IMAP_MCP_VERSION` + `RUSTY_IMAP_MCP_BASE_URL` pointed at a local
+  fixture) and the unsupported-platform + missing-command exit codes, so installer
+  logic has a signal independent of a live release (F4).
 - **Static:** `shellcheck` + `shfmt` on `install.sh` (prek); `actionlint` +
-  `zizmor` on the workflow (prek + CI required check). `cargo deb`/`cargo
-  generate-rpm` config is validated implicitly by the release job; add a
-  `just`-runnable local packaging smoke is **out of scope** (requires the tools
-  installed) but the commands are documented.
+  `zizmor` on the workflow (prek + CI required check). A `just`-runnable local
+  packaging smoke is **out of scope** (requires the tools installed) but the
+  commands are documented.
 - **CI (release-time, not PR):** `lintian`/`rpmlint` warn-only; x86_64
   Debian+Fedora container install-tests; `installer-smoke` end-to-end against the
   published release.
@@ -327,10 +429,18 @@ POSIX `sh` (`set -eu`), shellcheck/shfmt-clean. Adapted from bzr's installer:
 - `man/man1/` is a generated directory; it is git-ignored (add to `.gitignore`)
   and never committed — regenerated each release and locally via `just man`.
 
-## Open questions (for spec review)
+## Resolved decisions
 
-- Should the build-provenance attestation cover the `.deb`/`.rpm` (Scorecard
-  Signed-Releases) as bzr does, or is tarball+SHA256SUMS coverage sufficient for
-  this phase? (Leaning: extend to packages; cheap and closes the gap.)
-- Confirm `cargo-deb` / `cargo-generate-rpm` current stable versions to pin in
-  `taiki-e/install-action` at implementation time (look up, do not assume).
+- **Build-provenance attestation covers `.deb`/`.rpm`** (not just tarballs) —
+  cheap, closes the Scorecard Signed-Releases gap, and gives the installer's
+  authenticity-upgrade advice (`gh attestation verify`) something to verify on
+  packages too.
+- **Installer security framing is integrity-not-authenticity** — the checksum
+  defends corruption/truncation, not tampering; the residual trust model is
+  documented in README and "Security posture" (F3).
+
+## Open questions (implementation-time lookups)
+
+- Pin `cargo-deb` / `cargo-generate-rpm` / `clap_mangen` to their current stable
+  versions in `taiki-e/install-action` and `[workspace.dependencies]` at
+  implementation time (look up, do not assume from memory — repo convention).
