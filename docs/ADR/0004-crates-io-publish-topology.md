@@ -66,9 +66,14 @@ Two supporting non-topology decisions:
 
 ## Consequences
 
-- The first stable tag with the `crates-io` environment configured publishes
-  all eight crates and thereby reserves the names. A bad publish cannot be
-  reverted — only yanked and superseded by a new patch version.
+- The eight names are reserved by their **first** publish. Because crates.io
+  limits new-crate creation to a burst of 5 then 1 every 10 minutes, publishing
+  8 new names cannot complete in one uninterrupted run — the first reservation
+  is therefore a deliberate, paced **local** run of `publish-crates.sh` (which
+  sleeps through the refill on a 429). Once the names exist, each subsequent
+  stable tag publishes new *versions* (burst 30) and completes in one CI run. A
+  bad publish cannot be reverted — only yanked and superseded by a new patch
+  version.
 - Re-running a tag is safe (idempotent skip); fixing a publish bug requires a
   new patch tag rather than overwriting a version.
 - The publish job depends on the ADR-0003 clean-version invariant: it must

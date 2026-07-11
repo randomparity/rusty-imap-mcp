@@ -67,6 +67,16 @@ driven release pipeline. Non-goal: deb/rpm/manpages/installers (issue #545).
   the `version =`** from all three self dev-deps, making them path-only — cargo
   drops path-only dev-deps from the published manifest entirely, eliminating the
   risk while keeping local `cargo test` working (see Risks).
+- **crates.io publish rate limits** (verified against `crates.io/docs/rate-limits`
+  and rust-lang/crates.io PR #6875): **publishing a brand-new crate name** is
+  limited to a **burst of 5, then 1 every 10 minutes**; **publishing a new
+  version of an existing crate** is a separate, far higher bucket (**burst 30,
+  1/min**). This is load-bearing for the first publish: publishing all **8 new
+  names** in one run deterministically 429s at crate #6 (`rimap-imap`). The
+  design consequence: the **first** publish (name reservation) is a deliberate,
+  paced action — see Decision 3 and the operational note — while every
+  **subsequent** release publishes new *versions* of now-existing crates (burst
+  30) and completes in one CI run.
 - **Release trigger:** `release.yml` runs on `push` of a `v*` tag. Jobs:
   `verify-tag → build ×5 → release → homebrew → bottles → bottles-merge`, plus
   `post-release-bump`. `homebrew`/`bottles*` are stable-only
@@ -91,16 +101,20 @@ These are recorded with alternatives in ADR-0004; summarized here.
    protection (already required by RELEASING.md) is the human control on what
    gets published.
 
-3. **Ordered, idempotent publish script.** `scripts/publish-crates.sh` walks
-   the topological order above. For each crate it checks whether the exact
-   current version is already on crates.io; if so it **skips** (idempotent /
-   resumable — re-running the same tag after a mid-run failure continues where
-   it stopped). Otherwise it runs `cargo publish -p <crate> --locked`. It relies
-   on cargo's built-in publish-wait (cargo ≥ 1.66 blocks until the crate is
-   available in the index before returning) so each dependent resolves its
-   just-published dependencies; a bounded index-availability poll is added as
-   defense in depth. The script supports a `--dry-run` mode for local
-   verification.
+3. **Ordered, idempotent, rate-limit-aware publish script.**
+   `scripts/publish-crates.sh` walks the topological order above. For each crate
+   it checks whether the exact current version is already on crates.io; if so it
+   **skips** (idempotent / resumable — re-running the same tag after a mid-run
+   failure continues where it stopped). Otherwise it runs
+   `cargo publish -p <crate> --locked`. On an HTTP 429 (rate limit) it parses the
+   "try again after" time from cargo's error, sleeps until then (bounded by a
+   `MAX_RATE_WAIT` cap), and retries the same crate — so even a fresh 8-new-crate
+   run eventually completes rather than aborting under `set -euo pipefail`. After
+   each publish it polls the **sparse index** (`index.crates.io`) for the exact
+   just-published version before proceeding to the next crate (cargo's own
+   publish-wait only *warns* on timeout, so this is the authoritative
+   readiness guard for the next dependent's verify build). The script supports a
+   `--dry-run` mode for local verification.
 
 4. **`cargo-semver-checks` gate.** The publish job runs
    `cargo semver-checks check-release --workspace` before the publish loop. On
@@ -124,12 +138,17 @@ These are recorded with alternatives in ADR-0004; summarized here.
    keep `rimap-smtp`'s. Leave `documentation` implicit — crates.io auto-links
    `docs.rs/<crate>` when the field is unset, so an explicit field is redundant.
 
-7. **Name reservation is out of scope for this PR's diff.** Reserving the eight
-   names is an irreversible external write and is handled as a discrete
-   operational step (with the maintainer's token), not committed code. This spec
-   and RELEASING.md document the step; the code changes make publishing
-   *possible*, and the first stable tag (or the deliberate reservation step)
-   performs it.
+7. **Name reservation is out of scope for this PR's diff, and is the deliberate
+   first publish.** Reserving the eight names is an irreversible external write,
+   handled as a discrete operational step (with the maintainer's token), not
+   committed code. It is best done **locally** by running
+   `scripts/publish-crates.sh` from a checkout at the release version: the
+   new-crate burst limit (5) is crossed on this first run, and a local run can
+   sleep through the ~10-min refill for crates #6–8 without burning CI minutes
+   (the same script's 429 handling applies in CI too, but a CI run would idle-
+   bill through the waits). After the eight names exist, every subsequent tagged
+   release publishes new *versions* (burst 30) and completes in one CI run.
+   RELEASING.md documents this; the code changes make publishing *possible*.
 
 ## Detailed design
 
@@ -181,14 +200,20 @@ silently dropped at publish.
   Risks — the risk is instead removed at the source by making self dev-deps
   path-only).
 - Real mode: `cargo publish -p <crate> --locked`, honoring
-  `CARGO_REGISTRY_TOKEN` from the environment. Ordering safety between dependent
-  publishes relies on **cargo's built-in publish-wait** (cargo ≥ 1.66 blocks
-  until the crate is resolvable from the *sparse index* — the surface a
-  dependent's verify build actually queries — before returning). The web-API
-  `GET .../crates/<crate>/<version>` is used **only** for the `already_published`
-  skip decision, not as an index-readiness signal (the web API and
-  `index.crates.io` propagate independently, so a web-API 200 does not prove the
-  sparse index is ready — cargo's own wait is the authoritative guard).
+  `CARGO_REGISTRY_TOKEN` from the environment.
+  - **Rate-limit handling.** A new-crate 429 (burst 5 exhausted) is caught: the
+    script parses the retry time from cargo's stderr and sleeps until then,
+    bounded by `MAX_RATE_WAIT`, then retries the same crate. This keeps the
+    script from aborting mid-chain and leaving a half-reserved namespace.
+  - **Index-readiness poll.** After each successful publish, poll the sparse
+    index for the exact version — `https://index.crates.io/<p>/<q>/<crate>`
+    (path derived per cargo's index layout; for the 4+-char `rimap-*` names,
+    `ri/ma/<crate>`) — until the version line appears or a bounded timeout
+    elapses, *then* proceed to the next crate. This is the authoritative guard;
+    cargo's built-in publish-wait only warns on timeout.
+  - The web-API `GET .../crates/<crate>/<version>` is used **only** for the
+    `already_published` skip decision, not as an index-readiness signal (the web
+    API and `index.crates.io` propagate independently).
 
 ### `release.yml` — `publish-crates` job
 
@@ -220,9 +245,12 @@ publish-crates:
 
 ### Docs
 
-- **RELEASING.md:** add crates.io to one-time setup (reserve names, add
-  `CARGO_REGISTRY_TOKEN` to the `crates-io` environment, optional reviewer),
-  add `publish-crates` to "What automation does", move crates.io out of
+- **RELEASING.md:** add crates.io to one-time setup — reserve names by running
+  `scripts/publish-crates.sh` locally at the release version (paced through the
+  new-crate burst limit), add `CARGO_REGISTRY_TOKEN` to the `crates-io`
+  environment (optional reviewer) — add `publish-crates` to "What automation
+  does" with a note that the *first* release's 8 new names exceed the burst
+  limit and should be reserved locally beforehand, and move crates.io out of
   "Planned (later phases)".
 - **CHANGELOG.md `[Unreleased]`:** record the pipeline addition.
 - **`justfile`:** `publish-dry-run` (runs the script's `--dry-run`) and
@@ -249,7 +277,13 @@ publish-crates:
    a SHA pin with a version comment.
 5. Re-running the script when a version is already published skips that crate
    (unit-tested via the `already_published` predicate against a mocked/real
-   crates.io response) rather than erroring.
+   crates.io response) rather than erroring. The first 8-new-name publish is
+   understood to span more than one burst (burst 5, then 1/10 min) and is run
+   locally/paced — it is *not* expected to complete in a single CI burst.
+5a. The script's 429 path parses a retry time and sleeps (bounded by
+   `MAX_RATE_WAIT`) instead of aborting — unit-tested against a synthesized
+   cargo 429 stderr sample (parse + bounded-sleep decision, with the actual
+   sleep stubbed).
 6. `just ci` is green on the branch.
 7. The `publish-crates` job is stable-only and `push`-only: a `-dev` or
    `workflow_dispatch` invocation never reaches `cargo publish` (asserted by the
