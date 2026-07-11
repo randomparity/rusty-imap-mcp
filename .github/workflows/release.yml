@@ -169,13 +169,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends lintian rpmlint
           lintian --no-tag-display-limit ./*.deb || true
           rpmlint ./*.rpm || true
+      # Digest-pinned throwaway install-test images (matches the digest-pinned
+      # build image; no floating tags). debian:stable / fedora:latest as of
+      # 2026-07-11; bump deliberately to test newer bases.
       - name: Install-test .deb (no libdbus present)
         run: |
-          docker run --rm -v "$PWD:/pkg" -w /pkg debian:stable bash -c \
+          docker run --rm -v "$PWD:/pkg" -w /pkg \
+            debian@sha256:9631e4628fccfb6f1ff9e27de2af0e82f61591c78d1584c778f92db9a541a3cc bash -c \
             'apt-get update && apt-get install -y ./*.deb && rusty-imap-mcp --version'
       - name: Install-test .rpm (no dbus-libs present)
         run: |
-          docker run --rm -v "$PWD:/pkg" -w /pkg fedora:latest bash -c \
+          docker run --rm -v "$PWD:/pkg" -w /pkg \
+            fedora@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898 bash -c \
             'dnf install -y ./*.rpm && rusty-imap-mcp --version'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
