@@ -132,43 +132,8 @@ jobs:
       - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
-      - name: Build .deb + .rpm
-        run: |
-          set -euo pipefail
-          cargo deb --no-build --no-strip -p rimap-server --target x86_64-unknown-linux-gnu
-          cargo generate-rpm -p crates/rimap-server --target x86_64-unknown-linux-gnu
-          cp target/x86_64-unknown-linux-gnu/debian/*.deb .
-          cp target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm .
-      - name: Assert man pages, license, and README are in the packages
-        run: |
-          set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
-          for pkg in ./*.deb; do
-            c="$(dpkg-deb --contents "$pkg")"
-            if ! { printf '%s' "$c" | grep -q 'usr/share/man/man1/rusty-imap-mcp\.1' \
-              && printf '%s' "$c" | grep -Eq 'usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
-              && printf '%s' "$c" | grep -q 'usr/share/doc/rusty-imap-mcp/LICENSE-MIT' \
-              && printf '%s' "$c" | grep -q 'usr/share/doc/rusty-imap-mcp/README.md'; }; then
-              echo "::error::$pkg missing man/license/README asset" >&2
-              exit 1
-            fi
-          done
-          for pkg in ./*.rpm; do
-            c="$(rpm -qlp "$pkg")"
-            if ! { printf '%s' "$c" | grep -q '/usr/share/man/man1/rusty-imap-mcp\.1' \
-              && printf '%s' "$c" | grep -Eq '/usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
-              && printf '%s' "$c" | grep -q '/usr/share/licenses/rusty-imap-mcp/LICENSE-MIT' \
-              && printf '%s' "$c" | grep -q '/usr/share/doc/rusty-imap-mcp/README.md'; }; then
-              echo "::error::$pkg missing man/license/README asset" >&2
-              exit 1
-            fi
-          done
-      - name: Lint packages (warn-only)
-        continue-on-error: true
-        run: |
-          sudo apt-get install -y --no-install-recommends lintian rpmlint
-          lintian --no-tag-display-limit ./*.deb || true
-          rpmlint ./*.rpm || true
+      - name: Build + verify packages
+        run: scripts/build-verify-packages.sh x86_64-unknown-linux-gnu
       # Digest-pinned throwaway install-test images (matches the digest-pinned
       # build image; no floating tags). debian:stable / fedora:latest as of
       # 2026-07-11; bump deliberately to test newer bases.
@@ -246,43 +211,8 @@ jobs:
       - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
-      - name: Build .deb + .rpm
-        run: |
-          set -euo pipefail
-          cargo deb --no-build --no-strip -p rimap-server --target aarch64-unknown-linux-gnu
-          cargo generate-rpm -p crates/rimap-server --target aarch64-unknown-linux-gnu
-          cp target/aarch64-unknown-linux-gnu/debian/*.deb .
-          cp target/aarch64-unknown-linux-gnu/generate-rpm/*.rpm .
-      - name: Assert man pages, license, and README are in the packages
-        run: |
-          set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
-          for pkg in ./*.deb; do
-            c="$(dpkg-deb --contents "$pkg")"
-            if ! { printf '%s' "$c" | grep -q 'usr/share/man/man1/rusty-imap-mcp\.1' \
-              && printf '%s' "$c" | grep -Eq 'usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
-              && printf '%s' "$c" | grep -q 'usr/share/doc/rusty-imap-mcp/LICENSE-MIT' \
-              && printf '%s' "$c" | grep -q 'usr/share/doc/rusty-imap-mcp/README.md'; }; then
-              echo "::error::$pkg missing man/license/README asset" >&2
-              exit 1
-            fi
-          done
-          for pkg in ./*.rpm; do
-            c="$(rpm -qlp "$pkg")"
-            if ! { printf '%s' "$c" | grep -q '/usr/share/man/man1/rusty-imap-mcp\.1' \
-              && printf '%s' "$c" | grep -Eq '/usr/share/man/man1/rusty-imap-mcp-[a-z-]+\.1' \
-              && printf '%s' "$c" | grep -q '/usr/share/licenses/rusty-imap-mcp/LICENSE-MIT' \
-              && printf '%s' "$c" | grep -q '/usr/share/doc/rusty-imap-mcp/README.md'; }; then
-              echo "::error::$pkg missing man/license/README asset" >&2
-              exit 1
-            fi
-          done
-      - name: Lint packages (warn-only)
-        continue-on-error: true
-        run: |
-          sudo apt-get install -y --no-install-recommends lintian rpmlint
-          lintian --no-tag-display-limit ./*.deb || true
-          rpmlint ./*.rpm || true
+      - name: Build + verify packages
+        run: scripts/build-verify-packages.sh aarch64-unknown-linux-gnu
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu
