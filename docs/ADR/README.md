@@ -18,3 +18,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0001](0001-smtp-real-socket-e2e-and-auth-taxonomy.md) | Real-socket SMTP e2e, `SmtpError::Auth`, and negative-reply classification | Accepted |
 | [0002](0002-phased-bzr-release-parity-and-direct-publish.md) | Phased bzr-parity release process and direct-publish releases | Accepted |
 | [0003](0003-manifest-dev-version-model.md) | Manifest `-dev` version model with automated post-release bump | Accepted |
+| [0004](0004-crates-io-publish-topology.md) | crates.io publish topology for the 8-crate workspace | Accepted |
