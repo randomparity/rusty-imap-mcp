@@ -26,32 +26,44 @@ The one genuine in-band blind spot is the multi-UID `search` path
 smaller page. The single-UID path already fails closed (`NotFound`) and
 `export_messages` already reconciles requested-vs-returned per UID.
 
+The `search` path can drop a requested UID for **three** reasons — a malformed
+(missing/zero) UID item, an **omitted** FETCH line, or a **wrong-UID
+substitution** — all of which lower `returned` below the requested page size and
+achieve the hiding manipulation. The operator `skipped_uids` counter sees only
+the first. The right signal is therefore the **page shortfall**
+(`page_requested − returned`), which subsumes all three, not the malformed-only
+count.
+
 ## Decision
 
-Surface the skip **in-band** as an additive **count**. Thread the existing skip
-counter out of the fetch path via a named `FetchOutcome { messages, uid_validity,
-skipped }` struct, and expose it as an always-present `SearchMeta.fetch_skipped:
-usize` on the `search` tool response. Fetch semantics are unchanged
-(skip-with-warning); the operator `warn!` is retained.
+Surface the drop **in-band** as an additive **count** on the `search` tool's
+`meta`: an always-present `SearchMeta.fetch_skipped: usize` defined as
+`page_requested − returned` (the page shortfall), computed in `rimap-server` at
+the reassembly layer where the loss actually occurs. Fetch semantics are
+unchanged (skip-with-warning); the operator `warn!` is retained.
 
 This is the agent-native choice: the agent can observe any outcome an operator
 can. It is additive (a new meta field), so behavioral risk is lowest and no
-conformant-server interaction changes.
+conformant-server interaction changes. Because the shortfall is derivable
+server-side from locals the handler already holds, **`rimap-imap` is not
+touched** — no change to `Connection::fetch` / `ops::fetch`.
 
 ## Consequences
 
-- The IMAP crate's `Connection::fetch` / `ops::fetch::fetch` return type changes
-  from a tuple to `FetchOutcome` — a cross-crate contract change touching four
-  call sites (all internal to this workspace).
 - The `search` tool schema gains `fetch_skipped`; `just regen-tool-schemas` must
   regenerate `search.schema.json` and the diff is committed (CI-gated).
+- `fetch_skipped == 0` is a trustworthy "page complete" signal: it accounts for
+  omitted and substituted UIDs, not just malformed ones. A non-zero value can
+  also arise from a benign expunge race between the SEARCH and the FETCH; the
+  agent's action ("treat the listing as partial") is the same regardless of cause.
 - Agents can branch on `fetch_skipped > 0` to treat a listing as incomplete
   (e.g. re-fetch, warn, or refuse a destructive follow-up). Older agents that
   ignore the field are unaffected (additive).
-- The truncation signal is authoritatively tested at the `rimap-imap` layer
-  (the adversarial fake), not on the server wire, because a conformant Dovecot
-  fixture cannot emit malformed UIDs and there is no adversarial-fake seam behind
-  the server binary. See the spec's "AC interpretation" note.
+- The mapping is unit-tested at the `rimap-server` layer via a pure
+  `build_search_meta` helper shared by both search paths. A full JSON-RPC-wire
+  assertion against the server binary is out of scope (a conformant Dovecot
+  fixture cannot produce a short page and there is no adversarial-fake seam behind
+  the binary); see the spec's "AC interpretation" note.
 
 ## Considered & rejected
 
