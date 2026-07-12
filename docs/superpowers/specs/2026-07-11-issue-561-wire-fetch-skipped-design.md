@@ -145,10 +145,30 @@ The test asserts the precise omitted-line semantics, not a weaker "something was
 dropped" bound. `total_matched` derives from the SEARCH result length
 (`ops/search.rs`, before any FETCH), so `== 3` is robust by construction.
 `returned = messages.len()` after reassembly, so `== 2` requires the FETCH reply
-lines for UIDs 1 and 3 to be **fully parseable** into `SearchResultEntry`
-(UID plus the envelope/flag items the search fetch requests) — precedent:
-`adversarial_imap.rs` scenario 3 already parses `* 3 FETCH (UID 5 FLAGS (\Seen))`
-into a `FetchedMessage`, so shaping complete lines for two UIDs is achievable.
+lines for UIDs 1 and 3 to be **fully parseable** into `SearchResultEntry`.
+
+**The item set is richer than any existing fake scenario hand-scripts.** The
+search page fetches `FetchSpec { envelope: true, flags: true, size: true, .. }`
+(`fetch_and_format_page`, `search.rs`), so each surviving reply line must carry
+`UID`, a well-formed `ENVELOPE` (RFC 3501 §7.4.2 parenthesized form:
+date, subject, from/sender/reply-to/to/cc/bcc address lists, in-reply-to,
+message-id), `FLAGS`, and `RFC822.SIZE`. Existing fake scenarios only ever
+hand-script a `FLAGS`-only line (`* 3 FETCH (UID 5 FLAGS (\Seen))`), which is
+strictly simpler; **there is no precedent for a hand-scripted `ENVELOPE`** in the
+fake. Shaping two faithful `ENVELOPE`-bearing lines is therefore an **explicit
+up-front task**, not an assumed one — a malformed parenthesization or a missing
+required item drops the entry and yields `returned == 1`. The exact bytes are
+calibrated during TDD (dump the client `UID FETCH` to confirm the requested
+items, then shape the reply against the RFC 3501 `ENVELOPE` grammar).
+
+**`page_requested == 3` is not accidental.** `fetch_skipped = page_requested −
+returned`, and `page_requested == 3` only if the binary fetches all three listed
+UIDs in one page. `limit` defaults to `MAX_LIMIT = 100` (`search.rs`) when the
+`search` arguments omit it, and `paginate_uids` takes `min(limit, matches)`, so
+with 3 matches and the default limit, `page_requested == 3`. The test therefore
+**must not pass `limit < 3`** in the `search` arguments (omitting `limit` is the
+safe default). A sub-3 limit would make `page_requested == 2`, `fetch_skipped ==
+0`, and the test would fail as a config mismatch, not a logic bug.
 
 There is **no weaker fallback**. If TDD cannot produce two fully-parseable lines
 (so `returned` lands at 1, not 2), that is a **blocker to escalate**, not a
@@ -180,10 +200,20 @@ Two concrete calibration risks the implementer must resolve, not assume:
   as a dropped connection or a 2s `REQUEST_TIMEOUT`, not as the fake's message.
   If calibration shows the search path issues such commands, extend
   `login_preamble`'s capability atoms and/or add matching `Expect`/`Reply` steps.
-- **Diagnosability.** The test **must** print `server.recorded()` on assertion
-  failure (an `eprintln!` under `#[expect(clippy::print_stderr, …)]`, as
-  `adversarial_imap.rs` does) so a mid-sequence divergence is legible instead of
-  appearing as a bare 2s timeout.
+- **Diagnosability on *every* failure path, not just assertion failure.** The
+  two calibration risks above surface *before* any `assert_eq!` on `meta` runs:
+  `Harness::request` **panics** (not returns `Err`) on a 2s timeout or a dropped
+  connection. A `recorded()` dump guarded only around the final assertion would
+  never fire on exactly those two most-likely failures. The test **must**
+  therefore print `server.recorded()` via a **drop guard** that dumps when
+  `std::thread::panicking()` is true — so it fires on the harness timeout-panic,
+  the fake's in-task `assert!` panic (surfaced as a dropped connection), and a
+  wrong-`meta` `assert_eq!` alike. `Harness::request` already appends the child's
+  captured stderr (the binary's `tracing` for connection/command errors) to its
+  panic message; the drop guard adds the client-command order the harness cannot
+  see. Both together make a mid-sequence divergence legible instead of a bare 2s
+  timeout. (`eprintln!` in the guard is under `#[expect(clippy::print_stderr, …)]`,
+  as `adversarial_imap.rs` does.)
 
 ### Connection budget vs `MAX_ACCEPTS`
 
