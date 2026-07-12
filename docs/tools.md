@@ -84,6 +84,7 @@ Find message UIDs in a folder by structured criteria (sender, subject, date, fla
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `fetch_skipped` | integer | Count of UIDs the server listed for this page (in its SEARCH answer) but did not return a usable message for in the FETCH answer: a missing/zero UID, an omitted FETCH line, a wrong-UID substitution, or a message expunged between the search and the fetch. `0` in the normal case. When non-zero, the page is incomplete (`returned` is smaller than the page the server was asked for). This is a SEARCH↔FETCH consistency check and a benign search-then-expunge-race signal — it does NOT detect a server that omits a UID from its SEARCH answer in the first place. Detection-only: recovery is a full re-search from offset 0, since `next_offset` steps over the dropped UIDs. |
 | `folder` | string | Folder that was searched. |
 | `next_offset` | integer or null | Offset to pass on the next call to fetch the following page in the same order (see `SearchInput`'s "Result ordering" section). Present only when `truncated` is `true`. |
 | `returned` | integer | Number of messages returned in this response. |
