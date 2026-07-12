@@ -12,12 +12,12 @@
 //! Because the fake is in-process (no container), this test runs on every
 //! PR — it does NOT gate on a container runtime.
 //!
-//! Flow: start the fake with a scripted login → EXAMINE → `UID SEARCH`
-//! (`* SEARCH 1 2 3`) → EXAMINE → `UID FETCH` (envelope lines for UIDs 1 and
-//! 3, none for UID 2); point the binary at `127.0.0.1:<fake.port()>` with
-//! `fake.pin()` as the pinned fingerprint; issue a `search` over the
-//! JSON-RPC wire; assert `meta.fetch_skipped == 1`, `meta.returned == 2`,
-//! and `meta.total_matched == 3`.
+//! Flow: start the fake with a scripted short-page dialog (it lists three UIDs
+//! in `UID SEARCH` but returns FETCH lines for only two — the exact IMAP
+//! sequence is in `short_page_script`); point the binary at
+//! `127.0.0.1:<fake.port()>` with `fake.pin()` as the pinned fingerprint; issue
+//! a `search` over the JSON-RPC wire; assert `meta.fetch_skipped == 1`,
+//! `meta.returned == 2`, and `meta.total_matched == 3`.
 
 #![expect(clippy::expect_used, reason = "integration tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]
@@ -29,8 +29,8 @@ use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use wire::Harness;
 use wire::schema::validator_for_tool_response;
+use wire::{Harness, assert_valid};
 
 /// Env var the keyring falls back to for the account password. The fake
 /// accepts any password (its `login_preamble` always replies `OK LOGIN
@@ -175,6 +175,7 @@ async fn call_tool(harness: &mut Harness, name: &str, bare: &'static str, args: 
         .request("tools/call", json!({ "name": name, "arguments": args }))
         .await;
     assert!(resp["error"].is_null(), "tool {name} failed: {resp}");
+    assert_valid(&resp["result"], "CallToolResult");
     let body = &resp["result"]["structuredContent"];
     let validator = validator_for_tool_response(bare);
     if !validator.is_valid(body) {
