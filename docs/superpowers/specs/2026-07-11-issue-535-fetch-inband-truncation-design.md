@@ -164,6 +164,29 @@ defensive; `returned` can never exceed `page_uids.len()` because the reassembly
 call it with `&page_uids` and `&messages` (borrowing before `messages` is moved
 into `SearchUntrusted`).
 
+**Precondition — `page_uids` must be duplicate-free.** The invariant
+"`fetch_skipped == 0` ⟺ the server answered every listed UID" holds only if no
+UID appears twice in `page_uids`: a duplicate would be answered once by a correct
+server, and the reassembly `HashMap::remove` returns the entry on the first
+occurrence and `None` on the second, inflating `fetch_skipped` against a
+consistent server. This holds today because both UID sources route through a
+deduped `HashSet` (`ops/search.rs` `sorted_uids`; the thread path guards its one
+extra push) and `paginate_uids` only slices. The precondition is stated on the
+helper so a future UID-sourcing change that drops dedup does not silently turn
+`fetch_skipped` into a false-positive generator.
+
+### Detection-only; recovery is a full re-search
+
+`fetch_skipped` is a **detection** signal, not a repair mechanism. The response
+carries a count, not the identities of the dropped UIDs (a deliberate non-goal —
+see below), and `next_offset` advances by the requested page size, not by
+`returned` (`paginate_uids` consumes `offset + page.len()`). A UID dropped on page
+N is therefore stepped over by page N+1 and is **not** reachable by continuing
+forward pagination. The only recovery is re-running the search from `offset 0`
+(and hoping the server is consistent on the retry). The field lets an agent
+*notice* a partial page and decide to warn, refuse a destructive follow-up, or
+re-search — it does not let it issue a targeted re-fetch of the missing UIDs.
+
 Then `just regen-tool-schemas` regenerates `search.schema.json`; the diff is
 committed. CI hard-gates a non-empty schema diff.
 
@@ -190,7 +213,8 @@ or fake IMAP server:
 1. **`build_search_meta` behavior (authoritative mapping test).** Drive the pure
    helper with a `page_uids` slice longer than the `messages` slice (e.g. 5 UIDs,
    3 messages) and assert `fetch_skipped == 2` and `returned == 3`; drive it with
-   equal lengths and assert `fetch_skipped == 0`. Because both `handle` and
+   equal lengths and assert `fetch_skipped == 0`. Both cases use distinct UIDs
+   (the helper's duplicate-free precondition). Because both `handle` and
    `handle_thread` construct `SearchMeta` **only** through this helper, and the
    helper computes the shortfall from the same slices the call sites pass, a
    regression in the arithmetic fails this test. This is a real behavioral
@@ -254,6 +278,10 @@ here.
 - Attributing the shortfall to a specific cause (malformed vs omitted vs
   substituted vs expunge race). The agent's actionable decision is "is this page
   complete?"; a single count answers it. Splitting causes is speculative (YAGNI).
+- Exposing the identities of the dropped UIDs (to enable a targeted re-fetch).
+  The signal is detection-only; recovery is a full re-search (see "Detection-only"
+  above). Surfacing the dropped set is a larger contract and possible follow-up,
+  not part of this change.
 
 ## Guardrails
 

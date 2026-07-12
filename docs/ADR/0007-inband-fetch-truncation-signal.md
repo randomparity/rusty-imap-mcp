@@ -64,9 +64,13 @@ touched** — no change to `Connection::fetch` / `ops::fetch`.
   non-zero value can also arise from a benign expunge race between the SEARCH and
   the FETCH; the agent's action ("treat the listing as partial") is the same
   regardless of cause.
-- Agents can branch on `fetch_skipped > 0` to treat a listing as incomplete
-  (e.g. re-fetch, warn, or refuse a destructive follow-up). Older agents that
-  ignore the field are unaffected (additive).
+- The signal is **detection-only**. Agents can branch on `fetch_skipped > 0` to
+  treat a listing as incomplete (warn, refuse a destructive follow-up, or retry).
+  It does **not** enable a *targeted* re-fetch: the response carries a count, not
+  the dropped UIDs, and `next_offset` advances by the requested page size, not by
+  `returned` — so a UID dropped on one page is stepped over by the next and is not
+  reachable via forward pagination. The only recovery is re-running the search
+  from offset 0. Older agents that ignore the field are unaffected (additive).
 - The mapping is unit-tested at the `rimap-server` layer via a pure
   `build_search_meta` helper shared by both search paths. A full JSON-RPC-wire
   assertion against the server binary is out of scope (a conformant Dovecot
