@@ -168,7 +168,11 @@ UIDs in one page. `limit` defaults to `MAX_LIMIT = 100` (`search.rs`) when the
 with 3 matches and the default limit, `page_requested == 3`. The test therefore
 **must not pass `limit < 3`** in the `search` arguments (omitting `limit` is the
 safe default). A sub-3 limit would make `page_requested == 2`, `fetch_skipped ==
-0`, and the test would fail as a config mismatch, not a logic bug.
+0`, and the test would fail as a config mismatch, not a logic bug. The same rule
+applies to `offset`, the other page-shaping knob (`paginate_uids(uids, offset,
+limit, …)`): the args **must omit `offset`** (or set it to `0`), since a non-zero
+offset drops a leading UID from the page and breaks the exact `returned == 2` /
+`fetch_skipped == 1` gate identically.
 
 There is **no weaker fallback**. If TDD cannot produce two fully-parseable lines
 (so `returned` lands at 1, not 2), that is a **blocker to escalate**, not a
