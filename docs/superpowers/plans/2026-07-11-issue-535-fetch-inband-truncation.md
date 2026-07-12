@@ -26,17 +26,24 @@ tool contract, `just` task runner, `cargo nextest`.
 - **No `#[allow(...)]`** — use `#[expect(...)]` with a `reason`.
 - **100-char line length**; absolute imports only; Google-style docstrings on public APIs (`rimap-server` has `#![deny(missing_docs)]`).
 - **Newtypes/structs over primitives; enums over bool flags** (already satisfied — `fetch_skipped` is a documented count, not a bool).
-- **Guardrail suite:** `just ci` = `fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-installer` (justfile:363). **`check-tools-doc` is in `just ci`** and fails on any `docs/tools.md` drift — adding a `SearchMeta` field drifts it, so `docs/tools.md` MUST be regenerated (Task 2). **zizmor, `check (macOS)`, and the tool-schema fixture drift gate run only in GitHub CI, not `just ci`** — so a missing schema-fixture commit passes local `just ci` but fails GitHub CI; guard it with an explicit local drift diff (Task 4). Run `just test-fast` in the inner loop; `just ci` before pushing.
+- **Guardrail suite:** `just ci` = `fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-installer` (justfile:363). Adding a `SearchMeta` field drifts **two** generated artifacts, both gated by `just ci`: the schema fixture (via the host lib test `every_tool_output_schema_matches_fixture` in `just test`) and `docs/tools.md` (via `check-tools-doc`). So the field and the regenerated artifacts MUST land in one commit (Task 1), or `just ci` reddens. **Only** zizmor and `check (macOS)` are GitHub-only (not in `just ci`); they run post-push. Run `just test-fast` in the inner loop; `just ci` before pushing.
 - **prek** runs on every commit; editing a `.rs` file triggers a full clippy recompile in the hook — allow a long commit timeout, and stage explicit paths only (never `git add -A`).
 
 ---
 
-### Task 1: Add `fetch_skipped` to `SearchMeta` via a shared `build_search_meta` helper
+### Task 1: Add `fetch_skipped` to `SearchMeta`, regenerate the tool contract, in one green commit
 
-Add the always-present count field and a pure helper that computes it from the
-`page_uids` and `messages` slices, then route both search paths (`handle` and
-`handle_thread`) through the helper so the field is populated identically and the
-counts cannot be transposed.
+Add the always-present count field, a pure `build_search_meta` helper that
+computes it from the `page_uids`/`messages` slices, route both search paths
+through the helper, **and** regenerate the two generated artifacts that derive
+from `SearchMeta` — all in a single commit. This must be one commit because a
+host-runnable lib test (`crates/rimap-server/src/mcp/tool_catalog.rs:765`
+`every_tool_output_schema_matches_fixture`, "covers all 24 without docker")
+asserts each tool's runtime schema equals its committed fixture: the moment the
+field is added, that test (and `docs/tools.md` via `check-tools-doc`) goes red
+until the fixture and doc are regenerated. Splitting the field and the regen into
+two commits ships a transiently-red tree and breaks the green-commit / `git
+bisect` contract.
 
 **Files:**
 - Modify: `crates/rimap-server/src/tools/retrieval/search.rs`
@@ -44,20 +51,23 @@ counts cannot be transposed.
   - `handle` (SearchMeta literal at ~303–312) and `handle_thread` (~363–372):
     replace the literal with a `build_search_meta(...)` call.
   - Add the free function `build_search_meta` near the handlers.
-  - `mod tests` (~888+): add helper tests; update the three existing
-    `SearchMeta { … }` literals (search_meta_serializes_uid_validity ~1422,
-    search_meta_omits_next_offset_when_absent ~1436,
+  - `mod tests` (~888+): add helper + schema-presence tests; update the three
+    existing `SearchMeta { … }` literals (search_meta_serializes_uid_validity
+    ~1422, search_meta_omits_next_offset_when_absent ~1436,
     search_meta_serializes_next_offset_when_present ~1453) to include
     `fetch_skipped: 0`.
-- Test: same file's `mod tests`.
+- Modify (generated): `crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json`
+- Modify (generated): `docs/tools.md` (search `meta` table — a `fetch_skipped` row)
+- Test: same file's `mod tests`, plus the existing fixture-parity lib test.
 
 **Interfaces:**
 - Produces:
   - `SearchMeta` gains `pub fetch_skipped: usize` (always serialized; no `skip_serializing_if`).
   - `fn build_search_meta(folder: String, total_matched: usize, page_uids: &[Uid], messages: &[SearchResultEntry], truncated: bool, next_offset: Option<u64>, uid_validity: Option<u32>) -> SearchMeta` — pure; `returned = messages.len()`, `fetch_skipped = page_uids.len().saturating_sub(returned)`. **Precondition:** `page_uids` must be duplicate-free (guaranteed today by the `HashSet`-sourced `sorted_uids` in `ops/search.rs`).
+  - `search.schema.json` `meta` object with a `fetch_skipped` integer property in `properties` and `required`; `docs/tools.md` search-meta table with a `fetch_skipped` row.
 - Consumes: existing local types `SearchMeta`, `SearchResultEntry`, and `rimap_imap::types::Uid` (already imported at the top of the file).
 
-- [ ] **Step 1: Write the failing helper tests**
+- [ ] **Step 1: Write the failing tests**
 
 Add to `mod tests` in `crates/rimap-server/src/tools/retrieval/search.rs`. A
 local `entry(uid)` builder keeps the test focused on the count. Reuse the
@@ -106,11 +116,23 @@ fn search_meta_serializes_fetch_skipped_always() {
     let v = serde_json::to_value(meta).unwrap();
     assert_eq!(v["fetch_skipped"], serde_json::json!(0));
 }
+
+#[test]
+fn search_meta_schema_exposes_fetch_skipped() {
+    // Guards the agent-visible contract against a future removal of the field
+    // (mirrors input_schema_uses_plain_language_not_posture_jargon).
+    let schema = serde_json::to_string(&schemars::schema_for!(SearchMeta))
+        .expect("SearchMeta schema serializes");
+    assert!(
+        schema.contains("fetch_skipped"),
+        "search meta schema must expose fetch_skipped so the agent sees partial pages",
+    );
+}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p rimap-server --lib tools::retrieval::search::tests::build_search_meta 2>&1 | tail -20`
+Run: `cargo test -p rimap-server --lib tools::retrieval::search::tests 2>&1 | tail -20`
 Expected: FAIL to compile — `build_search_meta` not found and `SearchMeta` has no field `fetch_skipped`.
 
 - [ ] **Step 3: Add the field to `SearchMeta`**
@@ -217,67 +239,10 @@ In each of `search_meta_serializes_uid_validity`,
 `search_meta_serializes_next_offset_when_present`, add `fetch_skipped: 0,` to the
 `SearchMeta { … }` literal so it compiles.
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [ ] **Step 8: Regenerate BOTH generated artifacts**
 
-Run: `cargo test -p rimap-server --lib tools::retrieval::search::tests 2>&1 | tail -20`
-Expected: PASS (new `build_search_meta_*` and `search_meta_serializes_fetch_skipped_always` tests green; the three edited literal tests still green).
-
-- [ ] **Step 9: Lint and format**
-
-Run: `just fmt && cargo clippy -p rimap-server --all-targets --all-features --locked -- -D warnings 2>&1 | tail -15`
-Expected: no warnings.
-
-- [ ] **Step 10: Commit**
-
-```bash
-git add crates/rimap-server/src/tools/retrieval/search.rs
-git commit -m "feat(535): add SearchMeta.fetch_skipped page-shortfall count"
-```
-
----
-
-### Task 2: Regenerate the schema fixture AND the tool doc; assert the field in the published contract
-
-`SearchMeta` feeds **two** generated artifacts: the schema fixture
-(`tests/fixtures/rimap-tool-schemas/search.schema.json`, gated by the GitHub
-`tool-schema-drift` job) and `docs/tools.md` (gated by `check-tools-doc`, which is
-**in `just ci`**). Both must be regenerated for a `SearchMeta` field addition, or
-`just ci` reddens on `check-tools-doc`. Also add a test that the published schema
-exposes `fetch_skipped`.
-
-**Files:**
-- Modify (generated): `crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json`
-- Modify (generated): `docs/tools.md` (search `meta` section — a `fetch_skipped` row).
-- Modify: `crates/rimap-server/src/tools/retrieval/search.rs` `mod tests` — add a schema-presence test.
-
-**Interfaces:**
-- Consumes: `SearchMeta` with `fetch_skipped` from Task 1.
-- Produces: `search.schema.json` containing `fetch_skipped` under the `meta`
-  object's `properties` and `required`; `docs/tools.md` search-meta table with a
-  `fetch_skipped` row.
-
-- [ ] **Step 1: Write the failing schema-presence test**
-
-Add to `mod tests` in `search.rs` (mirrors `input_schema_uses_plain_language_not_posture_jargon`):
-
-```rust
-#[test]
-fn search_meta_schema_exposes_fetch_skipped() {
-    let schema = serde_json::to_string(&schemars::schema_for!(SearchMeta))
-        .expect("SearchMeta schema serializes");
-    assert!(
-        schema.contains("fetch_skipped"),
-        "search meta schema must expose fetch_skipped so the agent sees partial pages",
-    );
-}
-```
-
-- [ ] **Step 2: Run it to confirm it passes on the runtime schema**
-
-Run: `cargo test -p rimap-server --lib search_meta_schema_exposes_fetch_skipped 2>&1 | tail -5`
-Expected: PASS — `schema_for!(SearchMeta)` already reflects the field added in Task 1. (This test guards against a future removal; it is green now by construction.)
-
-- [ ] **Step 3: Regenerate BOTH generated artifacts**
+`SearchMeta` feeds the schema fixture and `docs/tools.md`. Regenerate both so the
+tree is green:
 
 Run: `just regen-tool-schemas && just gen-tools-doc`
 Then confirm only the expected files changed and inspect the diffs:
@@ -293,28 +258,35 @@ Expected:
 If any OTHER schema file or any unrelated part of `docs/tools.md` changed, stop —
 an unintended struct change slipped in.
 
-- [ ] **Step 4: Run the schema-consuming tests + the tool-doc drift gate**
+- [ ] **Step 9: Run the FULL lib suite + the tool-doc gate to verify green**
 
-The `e2e_wire*` suites validate responses against these fixtures but silent-skip
-without a container runtime. Run the host-runnable layer plus the exact gate
-`just ci` uses for the doc:
+Run the whole `rimap-server` lib suite — not just the search tests — because the
+fixture-parity test `mcp::tool_catalog::tests::every_tool_output_schema_matches_fixture`
+lives outside the search module and must now match the regenerated fixture:
 
 Run: `cargo test -p rimap-server --lib 2>&1 | tail -15 && just check-tools-doc`
-Expected: tests PASS; `check-tools-doc` clean (no drift now that `docs/tools.md`
-is regenerated).
+Expected: PASS (new `build_search_meta_*` / `search_meta_serializes_fetch_skipped_always`
+/ `search_meta_schema_exposes_fetch_skipped` green; the three edited literal tests
+green; `every_tool_output_schema_matches_fixture` green against the regenerated
+fixture); `check-tools-doc` clean.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 10: Lint and format**
+
+Run: `just fmt && cargo clippy -p rimap-server --all-targets --all-features --locked -- -D warnings 2>&1 | tail -15`
+Expected: no warnings.
+
+- [ ] **Step 11: Commit (single green commit — code + regenerated artifacts together)**
 
 ```bash
 git add crates/rimap-server/src/tools/retrieval/search.rs \
         crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json \
         docs/tools.md
-git commit -m "feat(535): regen search schema + tools.md with fetch_skipped"
+git commit -m "feat(535): add SearchMeta.fetch_skipped page-shortfall count"
 ```
 
 ---
 
-### Task 3: Update the `ops/fetch.rs` policy comment and the #518 spec note
+### Task 2: Update the `ops/fetch.rs` policy comment and the #518 spec note
 
 Bring the two documented "accepted risk / invisible to the agent" notes in line
 with the new behavior. No code logic changes.
@@ -374,18 +346,20 @@ git commit -m "docs(535): update fetch skip policy note + #518 accepted-risk"
 
 ---
 
-### Task 4: Full guardrail suite + generated-artifact drift guard
+### Task 3: Full guardrail suite + generated-artifact drift guard
 
-- [ ] **Step 1: Confirm no generated-artifact drift (local proxy for the GitHub-only gates)**
+- [ ] **Step 1: Confirm no uncommitted generated-artifact drift**
 
-`just ci` does NOT include the tool-schema fixture drift gate or zizmor (both
-GitHub-only), so verify the generated artifacts are fully committed before relying
-on `just ci`:
+Fixture parity IS enforced locally (the `every_tool_output_schema_matches_fixture`
+lib test, run by `just test`/`just ci`) and `docs/tools.md` by `check-tools-doc`
+— both are in `just ci`. This step catches the narrower case of a regenerated but
+**uncommitted** artifact (the lib test compares the runtime schema to the on-disk
+fixture, so an uncommitted regen still passes the test while the tree is dirty):
 
 Run: `git diff --exit-code crates/rimap-server/tests/fixtures/rimap-tool-schemas/ docs/tools.md`
-Expected: exit 0, no output (both regenerated and committed in Task 2). A non-empty
-diff means a regen step was missed — re-run Task 2 Step 3 and commit before
-continuing.
+Expected: exit 0, no output (both regenerated and committed in Task 1). A non-empty
+diff means a regen was not committed — re-run Task 1 Steps 8–11 before continuing.
+(Note: zizmor and `check (macOS)` run only in GitHub CI after push.)
 
 - [ ] **Step 2: Run the full local-CI equivalent**
 
@@ -408,13 +382,13 @@ relevant scoped check, then `just ci` again.
 **Spec coverage:**
 - AC "decision recorded with rationale" → ADR-0007 + spec (already committed).
 - AC "signal reaches the tool result; schemas regenerated and committed; a test
-  asserts the signal" → Task 1 (field + helper + behavioral tests) + Task 2
-  (schema regen + schema-presence test).
-- AC "ops/fetch.rs policy comment and #518 spec note updated" → Task 3.
+  asserts the signal" → Task 1 (field + helper + behavioral tests + schema-presence
+  test + schema/doc regen, all in one green commit).
+- AC "ops/fetch.rs policy comment and #518 spec note updated" → Task 2.
 - Spec test 1 (build_search_meta behavior) → Task 1 Step 1.
-- Spec test 2 (schema exposes field) → Task 2 Step 1.
+- Spec test 2 (schema exposes field) → Task 1 Step 1 (`search_meta_schema_exposes_fetch_skipped`).
 - Spec test 3 (rimap-imap malformed-skip warn unchanged) → no edit needed;
-  verified green by Task 4 `just ci` (the adversarial test still runs).
+  verified green by Task 3 `just ci` (the adversarial test still runs).
 
 **Type consistency:** `build_search_meta` signature is identical in the
 Interfaces block, Task 1 Step 4, and both call sites (Steps 5–6). `fetch_skipped:
