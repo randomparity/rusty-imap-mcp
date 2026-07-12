@@ -62,6 +62,18 @@ impl Drop for DumpOnPanic<'_> {
 /// EXAMINE → `UID SEARCH` → EXAMINE → `UID FETCH` sequence. The `UID SEARCH`
 /// lists UIDs 1, 2, 3; the `UID FETCH` returns fully-parseable envelope
 /// lines for UIDs 1 and 3 only, omitting UID 2 — the page shortfall.
+///
+/// This one linear script assumes the binary drives the whole dialog on a
+/// **single reused connection**: the fake's accept-loop replays the entire
+/// script per accepted connection and serves connections sequentially, so a
+/// second concurrent connection would not be served until the first `serve()`
+/// returns. The assumption holds because the server caches one session per
+/// account (`with_session` reuses it across the boot `LIST` and the
+/// search/fetch ops) and both EXAMINE commands are re-issued because
+/// `select()` is unconditional. If a future change opens a second concurrent
+/// connection or elides the second select, this script diverges — the `DumpOnPanic`
+/// guard prints `recorded()` so the diverging client command is legible rather
+/// than surfacing only as the harness's 2s timeout.
 fn short_page_script() -> Vec<Step> {
     let mut steps = login_preamble("IMAP4rev1");
     steps.extend([
@@ -112,7 +124,7 @@ fn short_page_script() -> Vec<Step> {
 fn fetch_line(uid: u32, subject: &str, message_id: &str) -> Vec<u8> {
     format!(
         "* {uid} FETCH (UID {uid} FLAGS (\\Seen) RFC822.SIZE 42 ENVELOPE \
-         (\"Wed, 09 Jul 2026 12:00:00 +0000\" \"{subject}\" \
+         (\"Thu, 09 Jul 2026 12:00:00 +0000\" \"{subject}\" \
          ((\"A\" NIL \"a\" \"example.com\")) ((\"A\" NIL \"a\" \"example.com\")) \
          ((\"A\" NIL \"a\" \"example.com\")) ((\"B\" NIL \"b\" \"example.com\")) \
          NIL NIL NIL \"{message_id}\"))\r\n"
