@@ -109,7 +109,11 @@ together so the workspace never has a red intermediate.
    `support::tracing_capture::WarnCapture`); change
    `use support::fake_imap::{FakeImapServer, PanicResolver, Step, login_preamble};`
    to `use rimap_fake_imap::fake_imap::{FakeImapServer, PanicResolver, Step,
-   login_preamble};`.
+   login_preamble};`. **Also** update the stale reference in this file's **module
+   doc comment** (line 2, `` (`support::fake_imap`) ``) to
+   `` (`rimap_fake_imap::fake_imap`) `` — the acceptance grep below matches
+   comment text too, so leaving it stale makes the gate un-satisfiable while
+   compilation is green.
 9. `crates/rimap-imap/tests/expunge_folder_wide_gap.rs`: uses **only** the fake,
    so remove its `mod support;` line and change
    `use support::fake_imap::{FakeImapServer, Step, login_preamble};` to
@@ -204,9 +208,13 @@ weakening the assertion (spec §"no weaker fallback").
   "subject": "…" }`. **Omit `limit` and `offset`** (spec §"page_requested == 3 is
   not accidental" — default `limit = MAX_LIMIT = 100`, `offset = 0`, so
   `page_requested == 3`).
-- Extract `body = resp["result"]["structuredContent"]`, validate the envelope
-  against the MCP schema (`assert_valid` / `assert_envelope_valid`, as the other
-  wire tests do), and assert:
+- Issue the `tools/call` and extract the body by mirroring the `call_tool`
+  helper in `e2e_wire.rs` (`async fn call_tool(harness, name, args) -> Value`,
+  which sends `tools/call`, asserts the envelope, and returns
+  `resp["result"]["structuredContent"]`). That fn is private to `e2e_wire.rs`'s
+  binary, so define a local equivalent (or inline it) in this test rather than
+  importing it. Then validate the envelope against the MCP schema (`assert_valid`
+  / `assert_envelope_valid`, as the other wire tests do) and assert:
   - `body["meta"]["total_matched"] == 3`
   - `body["meta"]["returned"] == 2`
   - `body["meta"]["fetch_skipped"] == 1`
