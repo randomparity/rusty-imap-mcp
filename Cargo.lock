@@ -2657,6 +2657,7 @@ dependencies = [
  "rimap-config",
  "rimap-content",
  "rimap-core",
+ "rimap-fake-imap",
  "rimap-imap",
  "rimap-server",
  "rimap-smtp",
