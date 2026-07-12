@@ -257,6 +257,11 @@ breaks the whole-response anti-reuse guard, whereas a single absent per-item UID
 costs only that message). Surfacing the drop in-band to the agent is a possible
 follow-up, out of scope for this change.
 
+(Update: issue #535 closed the in-band gap for the `search` path — the tool's
+`meta.fetch_skipped` now reports the page shortfall, a SEARCH↔FETCH consistency
+signal; see `docs/ADR/0007-inband-fetch-truncation-signal.md`. SEARCH-level
+omission remains undetected residual risk.)
+
 Assert the warning fires using the repo's parallel-safe, thread-local capture
 wiring. The async form must use the **guard** API, not the closure API:
 `tracing::dispatcher::with_default(&d, f)` takes a *synchronous* `f: FnOnce()`

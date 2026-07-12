@@ -158,13 +158,14 @@ pub(crate) async fn fetch(
     // paths): a missing UIDVALIDITY breaks the anti-reuse guard for the whole
     // response, so it must fail closed, whereas a single item with an absent or
     // zero UID only costs that one message and is recoverable by skipping it.
-    // The aggregated `warn!` below is the operator-facing signal; the tool
-    // result the agent sees is intentionally unchanged (issue #518 specifies
-    // "skip-with-warning", and the fetch tool contract is a non-goal here).
-    // Consequence: a hostile server can make a folder appear to hold fewer
-    // messages by omitting/zeroing UIDs, visible only in the operator log — an
-    // accepted, documented risk; surfacing the drop in-band to the agent is a
-    // possible follow-up, not part of this change.
+    // The aggregated `warn!` below is the operator-facing signal. The per-item
+    // skip is now ALSO observable to the agent: the `search` tool reports a page
+    // shortfall (`SearchMeta.fetch_skipped = requested - returned`) that counts a
+    // skipped item along with any omitted/substituted UID (issue #535). The
+    // single-UID fetch path already fails closed (`NotFound`); `export_messages`
+    // reconciles per UID. So a hostile server that omits/zeroes UIDs is no longer
+    // invisible in-band on the search path (a server that omits UIDs from its
+    // SEARCH answer entirely remains undetectable here — see ADR-0007).
     let mut out = Vec::with_capacity(uids.len());
     let mut skipped_uids: u64 = 0;
     while let Some(msg) = stream.next().await {
