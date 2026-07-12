@@ -26,7 +26,7 @@ tool contract, `just` task runner, `cargo nextest`.
 - **No `#[allow(...)]`** — use `#[expect(...)]` with a `reason`.
 - **100-char line length**; absolute imports only; Google-style docstrings on public APIs (`rimap-server` has `#![deny(missing_docs)]`).
 - **Newtypes/structs over primitives; enums over bool flags** (already satisfied — `fetch_skipped` is a documented count, not a bool).
-- **Guardrail suite:** `just ci` (rustfmt, clippy `--all-features -D warnings`, check-macOS, test stable, test MSRV, cargo-deny, zizmor) plus the schema-regen diff gate. Run `just test-fast` in the inner loop; `just ci` before pushing.
+- **Guardrail suite:** `just ci` = `fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-installer` (justfile:363). **`check-tools-doc` is in `just ci`** and fails on any `docs/tools.md` drift — adding a `SearchMeta` field drifts it, so `docs/tools.md` MUST be regenerated (Task 2). **zizmor, `check (macOS)`, and the tool-schema fixture drift gate run only in GitHub CI, not `just ci`** — so a missing schema-fixture commit passes local `just ci` but fails GitHub CI; guard it with an explicit local drift diff (Task 4). Run `just test-fast` in the inner loop; `just ci` before pushing.
 - **prek** runs on every commit; editing a `.rs` file triggers a full clippy recompile in the hook — allow a long commit timeout, and stage explicit paths only (never `git add -A`).
 
 ---
@@ -236,20 +236,25 @@ git commit -m "feat(535): add SearchMeta.fetch_skipped page-shortfall count"
 
 ---
 
-### Task 2: Regenerate and commit the `search` tool schema; assert the field in the published contract
+### Task 2: Regenerate the schema fixture AND the tool doc; assert the field in the published contract
 
-The `search` schema fixture is CI-gated: a non-empty diff under
-`tests/fixtures/rimap-tool-schemas/` fails CI. Regenerate it and add a test that
-the published schema exposes `fetch_skipped`.
+`SearchMeta` feeds **two** generated artifacts: the schema fixture
+(`tests/fixtures/rimap-tool-schemas/search.schema.json`, gated by the GitHub
+`tool-schema-drift` job) and `docs/tools.md` (gated by `check-tools-doc`, which is
+**in `just ci`**). Both must be regenerated for a `SearchMeta` field addition, or
+`just ci` reddens on `check-tools-doc`. Also add a test that the published schema
+exposes `fetch_skipped`.
 
 **Files:**
 - Modify (generated): `crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json`
+- Modify (generated): `docs/tools.md` (search `meta` section — a `fetch_skipped` row).
 - Modify: `crates/rimap-server/src/tools/retrieval/search.rs` `mod tests` — add a schema-presence test.
 
 **Interfaces:**
 - Consumes: `SearchMeta` with `fetch_skipped` from Task 1.
 - Produces: `search.schema.json` containing `fetch_skipped` under the `meta`
-  object's `properties` and `required`.
+  object's `properties` and `required`; `docs/tools.md` search-meta table with a
+  `fetch_skipped` row.
 
 - [ ] **Step 1: Write the failing schema-presence test**
 
@@ -272,31 +277,39 @@ fn search_meta_schema_exposes_fetch_skipped() {
 Run: `cargo test -p rimap-server --lib search_meta_schema_exposes_fetch_skipped 2>&1 | tail -5`
 Expected: PASS — `schema_for!(SearchMeta)` already reflects the field added in Task 1. (This test guards against a future removal; it is green now by construction.)
 
-- [ ] **Step 3: Regenerate the fixture schema**
+- [ ] **Step 3: Regenerate BOTH generated artifacts**
 
-Run: `just regen-tool-schemas`
-Then confirm only the search schema changed and inspect the diff:
+Run: `just regen-tool-schemas && just gen-tools-doc`
+Then confirm only the expected files changed and inspect the diffs:
 
-Run: `git status --short crates/rimap-server/tests/fixtures/rimap-tool-schemas/ && git diff crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json | head -40`
-Expected: only `search.schema.json` is modified; the diff adds a `fetch_skipped`
-integer property (`"type": "integer", "format": "uint", "minimum": 0`) to the
-`meta` object's `properties` and to its `required` array. If any other schema
-changed, stop — that means an unintended struct change slipped in.
+Run: `git status --short crates/rimap-server/tests/fixtures/rimap-tool-schemas/ docs/tools.md && git diff crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json docs/tools.md | head -60`
+Expected:
+- only `search.schema.json` is modified under `rimap-tool-schemas/`; its diff adds
+  a `fetch_skipped` integer property (`"type": "integer", "format": "uint",
+  "minimum": 0`) to the `meta` object's `properties` and to its `required` array.
+- `docs/tools.md` gains one `fetch_skipped` row in the `search` tool's `meta`
+  table (near the existing `returned` / `total_matched` rows, ~line 89).
 
-- [ ] **Step 4: Run the schema-consuming wire tests (host-runnable subset)**
+If any OTHER schema file or any unrelated part of `docs/tools.md` changed, stop —
+an unintended struct change slipped in.
+
+- [ ] **Step 4: Run the schema-consuming tests + the tool-doc drift gate**
 
 The `e2e_wire*` suites validate responses against these fixtures but silent-skip
-without a container runtime. Run the schema/unit layer that does not need Docker:
+without a container runtime. Run the host-runnable layer plus the exact gate
+`just ci` uses for the doc:
 
-Run: `cargo test -p rimap-server --lib 2>&1 | tail -15`
-Expected: PASS.
+Run: `cargo test -p rimap-server --lib 2>&1 | tail -15 && just check-tools-doc`
+Expected: tests PASS; `check-tools-doc` clean (no drift now that `docs/tools.md`
+is regenerated).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/rimap-server/src/tools/retrieval/search.rs \
-        crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json
-git commit -m "feat(535): regen search schema with fetch_skipped; assert in contract"
+        crates/rimap-server/tests/fixtures/rimap-tool-schemas/search.schema.json \
+        docs/tools.md
+git commit -m "feat(535): regen search schema + tools.md with fetch_skipped"
 ```
 
 ---
@@ -361,16 +374,29 @@ git commit -m "docs(535): update fetch skip policy note + #518 accepted-risk"
 
 ---
 
-### Task 4: Full guardrail suite
+### Task 4: Full guardrail suite + generated-artifact drift guard
 
-- [ ] **Step 1: Run the full local-CI equivalent**
+- [ ] **Step 1: Confirm no generated-artifact drift (local proxy for the GitHub-only gates)**
+
+`just ci` does NOT include the tool-schema fixture drift gate or zizmor (both
+GitHub-only), so verify the generated artifacts are fully committed before relying
+on `just ci`:
+
+Run: `git diff --exit-code crates/rimap-server/tests/fixtures/rimap-tool-schemas/ docs/tools.md`
+Expected: exit 0, no output (both regenerated and committed in Task 2). A non-empty
+diff means a regen step was missed — re-run Task 2 Step 3 and commit before
+continuing.
+
+- [ ] **Step 2: Run the full local-CI equivalent**
 
 Run: `just ci 2>&1 | tail -30`
-Expected: all checks pass (rustfmt, clippy `--all-features -D warnings`,
-check-macOS, test stable, test MSRV, cargo-deny, zizmor), and the schema-regen
-diff gate is clean (fixture already committed in Task 2).
+Expected: all recipes pass — `fmt-check`, `lint` (clippy `-D warnings`), `test`,
+`test-msrv`, `deny`, `check-no-openssl`, `mcp-conformance-node`,
+`check-tools-doc`, `check-metadata`, `test-publish-script`, `test-installer`.
+(zizmor, `check (macOS)`, and `tool-schema-drift` run only in GitHub CI after
+push — see Global Constraints.)
 
-- [ ] **Step 2: If any check fails, fix and re-run**
+- [ ] **Step 3: If any check fails, fix and re-run**
 
 Address the specific failure; do not proceed with a red guardrail. Re-run the
 relevant scoped check, then `just ci` again.
