@@ -150,11 +150,18 @@ edited `use crate::certs` path, which is wrong for the old location.
 1. **Red / calibrate.** Write `crates/rimap-server/tests/e2e_wire_fetch_skipped.rs`
    with the harness plumbing and an *intentionally minimal* fake script
    (`login_preamble("IMAP4rev1")` only). Run it; it will fail/timeout. The
-   `recorded()` drop-guard (below) prints the exact client command sequence the
-   binary emits for a `search` call; extend the script step-by-step
-   (EXAMINE → UID SEARCH → UID FETCH) until the dialog matches. This is how the
-   exact bytes — whether `login_preamble`'s capability atoms need extending, the
-   precise `UID FETCH` command — are discovered (spec §"Fake-script sequence").
+   primary calibration guide is the **expected** sequence the spec derives from
+   `ops/search.rs`: EXAMINE → UID SEARCH → UID FETCH; extend the script one step
+   at a time toward it. `recorded()` (via the drop guard below) shows the client
+   commands the fake has **already matched** up to the current script length — it
+   does **not** show the *next*, unmatched command, because `serve()` returns
+   without reading past the last scripted `Step`. To capture that next command
+   verbatim during Red calibration, temporarily append a catch-all
+   `Step::Expect { verb: "ZZZ" }`: the `Expect` arm **records the client line
+   before** asserting the verb, so the real command lands in `recorded()` and the
+   drop guard prints it even though the bogus verb assertion then fails. Use this
+   to discover whether `login_preamble`'s capability atoms need extending and the
+   precise `UID FETCH` command (spec §"Fake-script sequence").
 2. **Green.** Shape the `UID SEARCH` reply as `* SEARCH 1 2 3` and the `UID
    FETCH` reply to return **fully-parseable** lines for UIDs 1 and 3 and **no
    line for UID 2**, then assert the exact gate.
@@ -228,12 +235,19 @@ weakening the assertion (spec §"no weaker fallback").
   manifests as the 2s timeout (distinct from a clean `meta` mismatch) — fix the
   script, don't raise `MAX_ACCEPTS` to mask it.
 
-**Test-runner note.** `just test-fast` excludes `binary(e2e_wire)` by substring,
-so `e2e_wire_fetch_skipped` is **intentionally not** run in the inner loop (it
-spawns the production binary — a heavy integration test, grouped with the other
-`e2e_wire*` tests). Verify it directly with
-`cargo nextest run -p rimap-server -E 'binary(e2e_wire_fetch_skipped)'`; it runs
-in full `just test` and CI (`just test` has no `-E` and no container gate).
+**Test-runner note.** nextest's `binary(NAME)` predicate is a **glob/exact**
+matcher (a bare name matches the whole binary name; `~` is the contains prefix),
+**not** substring — confirmed by `justfile:233` listing `binary(e2e_wire)` and
+`binary(e2e_wire_cancellation)` as *separate* terms, and by the other
+`e2e_wire_*` binaries (destructive, fault_injection, …) not being listed at all
+(they self-silent-skip without a container). So `binary(e2e_wire)` does **not**
+match `e2e_wire_fetch_skipped`, and this test is **not** excluded from
+`just test-fast`. That is the intended outcome: unlike the Dovecot-gated
+`e2e_wire`, this test is container-free and fast (one binary spawn + loopback
+TLS, like `mcp_wire_conformance`, which also runs in test-fast), so it runs in
+`just test-fast`, full `just test`, and CI. **No justfile edit is needed.** Verify
+directly with `cargo nextest run -p rimap-server -E
+'binary(e2e_wire_fetch_skipped)'`.
 
 **Acceptance criteria:**
 
