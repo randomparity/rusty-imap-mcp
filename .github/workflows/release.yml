@@ -47,8 +47,11 @@ jobs:
           ./scripts/check-release-version.sh "$TAG_REF"
           echo "version=${TAG_REF#v}" >> "$GITHUB_OUTPUT"
 
-  build-linux-x86_64:
-    name: build (x86_64-unknown-linux-gnu)
+  # Generate manpages once and share to every build leg. Test-support subcommands
+  # are absent because xtask's rimap-server dep sets default-features = false
+  # (cfg-gating them out); the guard step fails loudly if that ever regresses.
+  manpages:
+    name: Generate manpages
     needs: verify-tag
     runs-on: ubuntu-24.04
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
@@ -58,17 +61,61 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
+      # xtask compiles rimap-server, which links system libdbus via
+      # keyring -> dbus-secret-service on Linux (xtask does not enable
+      # vendored-keyring). Without this the build fails with
+      # "Package 'dbus-1' was not found". Mirrors every compiling job in the repo.
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
-      - name: Install cargo-auditable
-        run: cargo install cargo-auditable --locked --version 0.7.4
-      # vendored-keyring static-links libdbus so the tarball/bottle binary
-      # carries no runtime libdbus-1.so dependency (self-contained on hosts
-      # without libdbus-1-3).
-      - run: cargo auditable build --release --locked -p rimap-server --features vendored-keyring
+      - name: Generate manpages
+        run: cargo run -p xtask --no-default-features --release --locked -- man --out man/man1
+      - name: Guard — no test-support pages shipped
+        run: |
+          if ls man/man1/rusty-imap-mcp-dump-tool-*.1 >/dev/null 2>&1; then
+            echo "::error::test-support subcommand manpages were generated" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rusty-imap-mcp-manpages
+          path: man/man1/*.1
+          if-no-files-found: error
+
+  build-linux-x86_64:
+    name: build (x86_64-unknown-linux-gnu)
+    needs: [verify-tag, manpages]
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      # Build in a bookworm container (glibc 2.36) — the SAME baseline as the
+      # arm64 leg — so both packaged binaries share one declared glibc floor
+      # (deb `libc6 (>= 2.36)`, rpm `glibc >= 2.36`), and the package manager can
+      # gate compatibility instead of a runtime GLIBC_x.xx crash. Native amd64
+      # container: no QEMU. vendored-keyring static-links libdbus; --target pins
+      # the output under target/<triple>/release/ for cargo-deb/generate-rpm.
+      # rust:1.88.0-bookworm as of 2026-04-13
+      - name: Build in x86_64 (bookworm) container
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 \
+            bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked -p rimap-server --features vendored-keyring --target x86_64-unknown-linux-gnu"
+          # Container ran as root; host-side packaging runs as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" target
+      - name: Download manpages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: rusty-imap-mcp-manpages
+          path: man/man1
       - name: Package tarball
         env:
           TAG: ${{ github.ref_name }}
@@ -77,17 +124,40 @@ jobs:
           triple="x86_64-unknown-linux-gnu"
           stage="${BINARY_NAME}-${TAG}-${triple}"
           mkdir "$stage"
-          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp "target/${triple}/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
           cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          mkdir -p "$stage/share/man/man1"
+          cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+        with:
+          tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
+      - name: Build + verify packages
+        run: scripts/build-verify-packages.sh x86_64-unknown-linux-gnu
+      # Digest-pinned throwaway install-test images (matches the digest-pinned
+      # build image; no floating tags). debian:stable / fedora:latest as of
+      # 2026-07-11; bump deliberately to test newer bases.
+      - name: Install-test .deb (no libdbus present)
+        run: |
+          docker run --rm -v "$PWD:/pkg" -w /pkg \
+            debian@sha256:9631e4628fccfb6f1ff9e27de2af0e82f61591c78d1584c778f92db9a541a3cc bash -c \
+            'apt-get update && apt-get install -y ./*.deb && rusty-imap-mcp --version'
+      - name: Install-test .rpm (no dbus-libs present)
+        run: |
+          docker run --rm -v "$PWD:/pkg" -w /pkg \
+            fedora@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898 bash -c \
+            'dnf install -y ./*.rpm && rusty-imap-mcp --version'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+          path: |
+            ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            *.deb
+            *.rpm
 
   build-linux-aarch64:
     name: build (aarch64-unknown-linux-gnu)
-    needs: verify-tag
+    needs: [verify-tag, manpages]
     runs-on: ubuntu-24.04
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     permissions:
@@ -113,7 +183,15 @@ jobs:
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 \
-            bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked -p rimap-server --features vendored-keyring"
+            bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked -p rimap-server --features vendored-keyring --target aarch64-unknown-linux-gnu"
+          # The container ran as root and left target/ owned by root; host-side
+          # packaging (cargo-deb/cargo-generate-rpm) runs as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" target
+      - name: Download manpages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: rusty-imap-mcp-manpages
+          path: man/man1
       - name: Package tarball
         env:
           TAG: ${{ github.ref_name }}
@@ -122,17 +200,30 @@ jobs:
           triple="aarch64-unknown-linux-gnu"
           stage="${BINARY_NAME}-${TAG}-${triple}"
           mkdir "$stage"
-          cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
+          cp "target/${triple}/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
           cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          mkdir -p "$stage/share/man/man1"
+          cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
+      # Packages are built host-side (x86_64 runner) via --target; cargo-deb maps
+      # the triple to the arm64 Debian/RPM Architecture. No emulated install-test
+      # for arm64 (structural + content assertion only — ADR-0006).
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+        with:
+          tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
+      - name: Build + verify packages
+        run: scripts/build-verify-packages.sh aarch64-unknown-linux-gnu
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu
-          path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
+          path: |
+            ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
+            *.deb
+            *.rpm
 
   build-macos-aarch64:
     name: build (aarch64-apple-darwin)
-    needs: verify-tag
+    needs: [verify-tag, manpages]
     runs-on: macos-latest
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     permissions:
@@ -147,6 +238,11 @@ jobs:
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.4
       - run: cargo auditable build --release --locked
+      - name: Download manpages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: rusty-imap-mcp-manpages
+          path: man/man1
       - name: Package tarball
         env:
           TAG: ${{ github.ref_name }}
@@ -157,6 +253,8 @@ jobs:
           mkdir "$stage"
           cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
           cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          mkdir -p "$stage/share/man/man1"
+          cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -165,7 +263,7 @@ jobs:
 
   build-linux-ppc64le:
     name: build (powerpc64le-unknown-linux-gnu)
-    needs: verify-tag
+    needs: [verify-tag, manpages]
     runs-on: ubuntu-24.04
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     permissions:
@@ -187,6 +285,11 @@ jobs:
             bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked"
       # Not vendored: ppc64le has no Homebrew bottle path; this tarball retains
       # a dynamic libdbus link (documented in README as needing libdbus-1-3).
+      - name: Download manpages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: rusty-imap-mcp-manpages
+          path: man/man1
       - name: Package tarball
         env:
           TAG: ${{ github.ref_name }}
@@ -197,6 +300,8 @@ jobs:
           mkdir "$stage"
           cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
           cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          mkdir -p "$stage/share/man/man1"
+          cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -205,7 +310,7 @@ jobs:
 
   build-linux-s390x:
     name: build (s390x-unknown-linux-gnu)
-    needs: verify-tag
+    needs: [verify-tag, manpages]
     runs-on: ubuntu-24.04
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     permissions:
@@ -227,6 +332,11 @@ jobs:
             bash -c "apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && cargo install cargo-auditable --locked --version 0.7.4 && cargo auditable build --release --locked"
       # Not vendored: s390x has no Homebrew bottle path; this tarball retains a
       # dynamic libdbus link (documented in README as needing libdbus-1-3).
+      - name: Download manpages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: rusty-imap-mcp-manpages
+          path: man/man1
       - name: Package tarball
         env:
           TAG: ${{ github.ref_name }}
@@ -237,6 +347,8 @@ jobs:
           mkdir "$stage"
           cp "target/release/${BINARY_NAME}" "$stage/${BINARY_NAME}"
           cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          mkdir -p "$stage/share/man/man1"
+          cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -266,16 +378,45 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           path: artifacts
+          # Per-target artifacts only (tarballs + .deb + .rpm). Excludes the
+          # internal rusty-imap-mcp-manpages artifact so raw .1 files never land
+          # on the release page.
+          pattern: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-*
           merge-multiple: true
+      - name: Stage install.sh with version baked in
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # These are literal strings to find/insert in install.sh, not expanded here.
+          # shellcheck disable=SC2016
+          marker='RUSTY_IMAP_MCP_VERSION="${RUSTY_IMAP_MCP_VERSION:-}"'
+          # shellcheck disable=SC2016
+          replace='RUSTY_IMAP_MCP_VERSION="${RUSTY_IMAP_MCP_VERSION:-'"$TAG"'}"'
+          python3 - "$marker" "$replace" <<'PY'
+          import sys, pathlib
+          marker, replace = sys.argv[1], sys.argv[2]
+          src = pathlib.Path("install.sh").read_text()
+          out = src.replace(marker, replace, 1)
+          assert out != src, f"install.sh marker not found: {marker!r}"
+          pathlib.Path("artifacts/install.sh").write_text(out)
+          PY
+          chmod +x artifacts/install.sh
       - name: Generate SHA256 checksums
         run: |
+          set -euo pipefail
           cd artifacts
-          sha256sum ${{ env.BINARY_NAME }}-*.tar.gz > SHA256SUMS.txt
+          # Hash every release file (tarballs, .deb, .rpm, install.sh). Sorted,
+          # LF-only for reproducibility across re-runs of the same input set.
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' \
+            | sort | xargs -d '\n' sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-path: |
             artifacts/rusty-imap-mcp-*.tar.gz
+            artifacts/*.deb
+            artifacts/*.rpm
             artifacts/SHA256SUMS.txt
       - name: Extract release notes
         env:
@@ -305,6 +446,9 @@ jobs:
             --title "$TAG_NAME" \
             --notes-file RELEASE_NOTES.md \
             artifacts/${{ env.BINARY_NAME }}-*.tar.gz \
+            artifacts/*.deb \
+            artifacts/*.rpm \
+            artifacts/install.sh \
             artifacts/SHA256SUMS.txt
 
   # Publish the 8 workspace crates to crates.io in dependency order, after the
@@ -599,3 +743,57 @@ jobs:
             Automated post-release bump to `${{ steps.bump.outputs.next }}` after the `${{ github.ref_name }}` release (ADR-0003).
 
             **CI kick-off required before merge:** PRs opened by `GITHUB_TOKEN` do not trigger `pull_request` CI. Push an empty commit to this branch, or run `just ci` locally, to get a green signal. If the next release is a minor/major bump, edit the version on this PR first.
+
+  # Post-publish signal (not a gate): a downstream leaf whose failure does NOT
+  # un-publish the release. Pins the version so it never touches the rate-limited
+  # latest-version API from a shared runner IP. Verifies --version INDEPENDENTLY
+  # of install.sh's advisory (always-0) exit code.
+  installer-smoke:
+    name: Installer smoke
+    needs: release
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install via the user-facing install.sh and verify version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          export RUSTY_IMAP_MCP_INSTALL_DIR="$HOME/.local/bin"
+          export RUSTY_IMAP_MCP_VERSION="$TAG"   # pin: no live API call
+          sh ./install.sh
+          expected="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          got="$("$RUSTY_IMAP_MCP_INSTALL_DIR/rusty-imap-mcp" --version)"
+          echo "expected contains: $expected ; got: $got"
+          case "$got" in
+            *"$expected"*) echo "version OK" ;;
+            *) echo "::error::version mismatch: want *$expected* got $got" >&2; exit 1 ;;
+          esac
+      # Exercise the README "verifiable path" end-to-end: download the released,
+      # version-baked install.sh asset, verify it against SHA256SUMS.txt, then run
+      # it with NO version override so the baked-in default (not an env pin) drives
+      # the install. Covers the marker-substitution + baked default e2e.
+      - name: Verify + run the released install.sh asset (baked default)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          base="https://github.com/randomparity/rusty-imap-mcp/releases/download/${TAG}"
+          work="$(mktemp -d)"
+          cd "$work"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o install.sh "${base}/install.sh"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o SHA256SUMS.txt "${base}/SHA256SUMS.txt"
+          grep -E '  install\.sh$' SHA256SUMS.txt | sha256sum --check --strict -
+          export RUSTY_IMAP_MCP_INSTALL_DIR="$HOME/.local/bin-asset"
+          sh ./install.sh
+          got="$("$RUSTY_IMAP_MCP_INSTALL_DIR/rusty-imap-mcp" --version)"
+          case "$got" in
+            *"$expected"*) echo "baked-asset version OK" ;;
+            *) echo "::error::baked asset version mismatch: want *$expected* got $got" >&2; exit 1 ;;
+          esac

@@ -11,6 +11,8 @@
 #[doc(hidden)]
 pub mod boot;
 #[doc(hidden)]
+pub mod cli;
+#[doc(hidden)]
 pub mod mcp;
 #[doc(hidden)]
 pub mod tools;

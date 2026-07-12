@@ -8,19 +8,19 @@
 //!   - `login` — interactively store a credential in the keychain.
 //!   - `audit <action>` — audit log inspection utilities (see `AuditAction`).
 
-pub(crate) mod audit_merge;
-pub(crate) mod dry_run;
+pub mod audit_merge;
+pub mod dry_run;
 #[cfg(feature = "test-support")]
-pub(crate) mod dump_tool_catalog;
+pub mod dump_tool_catalog;
 #[cfg(feature = "test-support")]
-pub(crate) mod dump_tool_doc;
+pub mod dump_tool_doc;
 #[cfg(feature = "test-support")]
-pub(crate) mod dump_tool_schemas;
-pub(crate) mod migrate_keyring;
+pub mod dump_tool_schemas;
+pub mod migrate_keyring;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use rimap_core::account::DEFAULT_ACCOUNT_NAME;
 
 /// Top-level CLI.
@@ -52,6 +52,16 @@ pub struct Cli {
     /// Subcommand (optional; default is the MCP server loop — not yet implemented).
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// The fully-configured top-level [`clap::Command`], carrying the runtime
+/// version string.
+///
+/// Shared by the binary's argument parser (`main.rs`) and the `xtask` manpage
+/// generator so generated pages match the CLI users actually run.
+#[must_use]
+pub fn command() -> clap::Command {
+    <Cli as CommandFactory>::command().version(rimap_core::version::version())
 }
 
 /// Supported subcommands.
@@ -157,6 +167,20 @@ mod tests {
     use rimap_core::account::DEFAULT_ACCOUNT_NAME;
 
     use crate::cli::{Cli, Command};
+
+    #[test]
+    fn command_builder_exposes_production_subcommands() {
+        let cmd = crate::cli::command();
+        assert_eq!(cmd.get_name(), "rusty-imap-mcp");
+        assert!(cmd.get_version().is_some(), "version must be wired");
+        let subs: Vec<&str> = cmd.get_subcommands().map(clap::Command::get_name).collect();
+        for expected in ["login", "audit", "migrate-keyring"] {
+            assert!(
+                subs.contains(&expected),
+                "missing subcommand {expected}; got {subs:?}"
+            );
+        }
+    }
 
     #[test]
     fn parses_dry_run_with_config() {

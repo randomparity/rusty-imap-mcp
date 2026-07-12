@@ -12,9 +12,9 @@
 
 use std::io::Write;
 
+use crate::mcp::TOOL_DEFS;
 use rimap_core::posture::Posture;
 use rimap_core::tool::ToolName;
-use rimap_server::mcp::TOOL_DEFS;
 
 /// The least-capable base posture that allows `tool`, or `None` when no
 /// posture allows it. `export_messages` is deny-all at every posture and

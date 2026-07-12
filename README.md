@@ -211,6 +211,55 @@ The `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and
 `powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu` tarballs link
 libdbus dynamically and require a system `libdbus-1-3` at runtime.
 
+Each release also attaches native `.deb`/`.rpm` packages (amd64/arm64), an
+`install.sh` one-line installer, and manpages inside every tarball
+(`share/man/man1/`).
+
+### One-line installer
+
+Two paths, depending on how much you want to verify:
+
+- **Convenience** — resolves and installs the latest stable release:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/randomparity/rusty-imap-mcp/main/install.sh | sh
+  ```
+
+  This trusts GitHub's origin over TLS and the script it fetches; the piped
+  script is **not** independently checksum-verified. If the unauthenticated
+  GitHub API is rate-limited (common behind shared NAT/CI), pin a version:
+  `RUSTY_IMAP_MCP_VERSION=vX.Y.Z`. Override the target dir with
+  `RUSTY_IMAP_MCP_INSTALL_DIR` (default `$HOME/.local/bin`).
+
+- **Verifiable** — download the release-asset `install.sh`, check it against
+  `SHA256SUMS.txt`, then run it (pinned version, no API call — the file you
+  verify is the file you run).
+
+The installer's SHA-256 check is **integrity, not authenticity**:
+`SHA256SUMS.txt` comes from the same unsigned release origin, so it catches a
+corrupted download, not a tampered release. For authenticity, verify the
+[build provenance attestation](https://github.com/randomparity/rusty-imap-mcp/attestations)
+on the downloaded tarball or package with `gh attestation verify`.
+
+### Distribution packages (.deb / .rpm)
+
+Download the `.deb` (Debian/Ubuntu) or `.rpm` (Fedora/RHEL) for amd64 or arm64
+from the [releases page](https://github.com/randomparity/rusty-imap-mcp/releases)
+and install it:
+
+```bash
+sudo apt install ./rusty-imap-mcp_X.Y.Z-1_amd64.deb   # or: sudo dnf install ./rusty-imap-mcp-X.Y.Z-1.x86_64.rpm
+man rusty-imap-mcp
+```
+
+The packaged amd64/arm64 binary static-links libdbus, so **no** `libdbus-1-3` /
+`dbus-libs` runtime package is needed. Both packages are built against
+**glibc 2.36** (Debian 12+, Ubuntu 24.04+, Fedora 37+) and declare that floor,
+so `apt`/`dnf` refuse cleanly on older systems; there, use `cargo install
+rusty-imap-mcp --locked` or build from source instead. The `curl … | sh`
+installer places only the binary — its manpage ships inside the tarball under
+`share/man/man1/`, or run `rusty-imap-mcp --help`.
+
 ### Installing a prebuilt binary
 
 1. Download the tarball for your platform and `SHA256SUMS.txt` from the

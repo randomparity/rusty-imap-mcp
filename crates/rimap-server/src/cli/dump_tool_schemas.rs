@@ -27,7 +27,7 @@ pub fn dump_tool_schemas<W: Write>(writer: &mut W) -> std::io::Result<()> {
 }
 
 fn build_schemas() -> BTreeMap<&'static str, Value> {
-    use rimap_server::tools::{
+    use crate::tools::{
         admin::{
             accounts::{ListAccountsMeta, UseAccountMeta},
             list_folders::ListFoldersMeta,
@@ -102,7 +102,7 @@ where
     M: schemars::JsonSchema + serde::Serialize,
     U: schemars::JsonSchema + serde::Serialize,
 {
-    use rimap_server::mcp::response::{ToolResponse, envelope_schema};
+    use crate::mcp::response::{ToolResponse, envelope_schema};
     Value::Object(envelope_schema::<ToolResponse<M, U>>())
 }
 
