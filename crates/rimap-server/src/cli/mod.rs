@@ -27,11 +27,36 @@ use rimap_core::account::DEFAULT_ACCOUNT_NAME;
 #[derive(Debug, Parser)]
 #[command(
     name = "rusty-imap-mcp",
-    about = "Security-first MCP server for IMAP email access"
+    about = "Security-first MCP server for IMAP email access",
+    long_about = "rusty-imap-mcp is a security-first Model Context Protocol (MCP) server that \
+exposes an IMAP mailbox (Proton Mail via Proton Bridge, or any standard IMAP server such as \
+Dovecot, Cyrus, or Gmail with an app password) to an MCP client over stdio.\n\n\
+It treats every byte of email as untrusted adversarial input: message bodies, headers, and \
+attachment metadata are aggressively sanitized and structurally tagged, Unicode is normalized, \
+look-alike characters are flagged, and each tool is gated by a configurable authorization \
+posture (readonly, draft-safe, full, or destructive). Every action is recorded in an \
+append-only, exclusively-locked audit log.\n\n\
+Run with no subcommand to start the server loop, which speaks JSON-RPC over stdin and stdout; \
+all diagnostics go to stderr (stdout is reserved for the MCP transport). Configuration is \
+resolved from --config, then the RUSTY_IMAP_MCP_CONFIG environment variable, then the platform \
+default (~/.config/rusty-imap-mcp/config.toml on Linux). Log verbosity is controlled by \
+RIMAP_LOG or RUST_LOG (default: info). Store credentials with the 'login' subcommand before \
+first use.",
+    after_long_help = "EXAMPLES:\n  \
+Store an IMAP credential in the OS keychain (run once per account):\n    \
+rusty-imap-mcp login --host 127.0.0.1 --username alice@example.com\n\n  \
+Validate configuration and print the effective tool matrix, then exit:\n    \
+rusty-imap-mcp --dry-run\n\n  \
+Start the server against an explicit config with debug logging (as an MCP client\n  \
+would spawn it):\n    \
+RIMAP_LOG=debug rusty-imap-mcp --config ~/.config/rusty-imap-mcp/config.toml\n\n  \
+Inspect the audit log, filtering to one tool since a timestamp:\n    \
+rusty-imap-mcp audit merge ~/.local/state/rusty-imap-mcp/audit.jsonl --tool search \\\n      \
+--since 2026-01-01T00:00:00Z"
 )]
 pub struct Cli {
-    /// Path to the config file. Overrides `RUSTY_IMAP_MCP_CONFIG` and the
-    /// platform default.
+    /// Path to the config file. Overrides the `RUSTY_IMAP_MCP_CONFIG`
+    /// environment variable and the platform default.
     #[arg(long, value_name = "PATH", env = "RUSTY_IMAP_MCP_CONFIG")]
     pub config: Option<PathBuf>,
 
@@ -49,7 +74,7 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub allow_empty_accounts: bool,
 
-    /// Subcommand (optional; default is the MCP server loop — not yet implemented).
+    /// Subcommand (optional; with none, the default is the MCP server loop).
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -68,22 +93,41 @@ pub fn command() -> clap::Command {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Interactively store IMAP credentials in the OS keychain.
+    #[command(
+        long_about = "Prompt for an IMAP password and store it in the operating system's keychain \
+(Keychain on macOS, Secret Service / libsecret on Linux) so the server can authenticate without \
+the secret ever being written to the config file or process arguments.\n\n\
+Run this once per account before starting the server. The credential is keyed by \
+account/username@host, so re-running it for the same triple overwrites the stored password.",
+        after_long_help = "EXAMPLES:\n  \
+Store the password for the default account against a local Proton Bridge:\n    \
+rusty-imap-mcp login --host 127.0.0.1 --username alice@example.com\n\n  \
+Store a credential for a named account from the config:\n    \
+rusty-imap-mcp login --account work --host imap.example.com --username alice"
+    )]
     Login {
-        /// Account name from config. Defaults to `default`, matching the
+        /// Account name from config. Defaults to "default", matching the
         /// synthetic account used for legacy single-account configs.
         #[arg(long, default_value_t = String::from(DEFAULT_ACCOUNT_NAME))]
         account: String,
-        /// IMAP host (e.g. `127.0.0.1` for Proton Bridge).
+        /// IMAP host (for example 127.0.0.1 for Proton Bridge).
         #[arg(long)]
         host: String,
-        /// IMAP username (e.g. `alice@example.com`).
+        /// IMAP username (for example alice@example.com).
         #[arg(long)]
         username: String,
     },
-    /// Migrate a credential from the legacy keyring key format
-    /// (`<username>@<host>`) to the new namespaced format
-    /// (`<account-id>/<username>@<host>`). Run once per account after
-    /// upgrading across #77.
+    /// Migrate a stored credential to the namespaced keyring key format.
+    #[command(
+        long_about = "Move a stored credential from the legacy keyring key format \
+(username@host) to the account-scoped format (account-id/username@host).\n\n\
+Multi-account support made the account id part of the keyring key, so a credential stored by an \
+older single-account build is not found under the new scheme. Run this once per account after \
+upgrading to re-key the existing secret; it is a no-op if the credential is already namespaced.",
+        after_long_help = "EXAMPLES:\n  \
+Re-key the 'work' account's stored credential:\n    \
+rusty-imap-mcp migrate-keyring --account work --host imap.example.com --username alice"
+    )]
     MigrateKeyring {
         /// Account name from config.
         #[arg(long)]
@@ -96,6 +140,10 @@ pub enum Command {
         username: String,
     },
     /// Audit log inspection utilities.
+    #[command(
+        long_about = "Inspect the append-only audit log the server writes for every action. \
+See the 'merge' subcommand to stream and filter records."
+    )]
     Audit {
         /// Audit subcommand.
         #[command(subcommand)]
@@ -134,6 +182,19 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum AuditAction {
     /// Stream the active (or rotated) audit file as filtered JSONL on stdout.
+    #[command(
+        long_about = "Read an append-only audit file and write its records as line-delimited \
+JSON to stdout, applying the given filters. Filters combine with AND; omitting all of them \
+streams the whole file.\n\n\
+Output is intended for piping into jq or another JSONL tool. Note that redirecting stdout to a \
+file uses the shell's umask, which is typically world-readable — set 'umask 077' in the same \
+command, or pipe through 'install -m 0600', to keep the dump private.",
+        after_long_help = "EXAMPLES:\n  \
+Show every record for the 'search' tool since a timestamp:\n    \
+rusty-imap-mcp audit merge audit.jsonl --tool search --since 2026-01-01T00:00:00Z\n\n  \
+Write a private dump of one account's records:\n    \
+umask 077 && rusty-imap-mcp audit merge audit.jsonl --account work > dump.jsonl"
+    )]
     Merge {
         /// Path to an audit file.
         #[arg(value_name = "PATH")]
@@ -144,16 +205,16 @@ pub enum AuditAction {
         /// Only include records at or before this RFC 3339 timestamp.
         #[arg(long)]
         until: Option<String>,
-        /// Only include records whose `tool` field matches this string.
+        /// Only include records whose tool field matches this string.
         #[arg(long)]
         tool: Option<String>,
-        /// Only include records whose `kind` field matches this string.
+        /// Only include records whose kind field matches this string.
         #[arg(long)]
         kind: Option<String>,
         /// Only include records whose `process_id` matches this ULID.
         #[arg(long)]
         process: Option<String>,
-        /// Only include records whose `account` field matches this name.
+        /// Only include records whose account field matches this name.
         #[arg(long)]
         account: Option<String>,
     },
