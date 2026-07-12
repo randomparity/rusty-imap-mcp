@@ -7,6 +7,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/publish-crates.sh
+# shellcheck disable=SC1091  # sourced file not followed when linted in isolation
 source "${here}/publish-crates.sh"
 
 failures=0
@@ -100,7 +101,9 @@ order = os.environ["CRATES"].split()
 meta = json.loads(
     subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
 )
-members = {p["name"] for p in meta["packages"]}
+# Exclude publish=false members (cargo metadata reports `publish: []`), e.g. the
+# `xtask` build-helper crate, which is never published and so is not in CRATES.
+members = {p["name"] for p in meta["packages"] if p.get("publish") != []}
 # Publish ordering depends on normal + build deps only (dev-deps are not in the
 # published dependency graph); exclude self-edges (the path-only self dev-deps).
 edges = {
