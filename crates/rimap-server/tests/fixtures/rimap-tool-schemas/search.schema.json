@@ -3,6 +3,12 @@
     "SearchMeta": {
       "description": "Trusted metadata for a `search` response.",
       "properties": {
+        "fetch_skipped": {
+          "description": "Count of UIDs the server listed for this page (in its SEARCH answer)\nbut did not return a usable message for in the FETCH answer: a\nmissing/zero UID, an omitted FETCH line, a wrong-UID substitution, or a\nmessage expunged between the search and the fetch. `0` in the normal\ncase. When non-zero, the page is incomplete (`returned` is smaller than\nthe page the server was asked for). This is a SEARCH\u2194FETCH consistency\ncheck and a benign search-then-expunge-race signal \u2014 it does NOT detect\na server that omits a UID from its SEARCH answer in the first place.\nDetection-only: recovery is a full re-search from offset 0, since\n`next_offset` steps over the dropped UIDs.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "folder": {
           "description": "Folder that was searched.",
           "type": "string"
@@ -46,7 +52,8 @@
         "folder",
         "total_matched",
         "returned",
-        "truncated"
+        "truncated",
+        "fetch_skipped"
       ],
       "type": "object"
     },

@@ -255,6 +255,17 @@ pub struct SearchMeta {
     /// `expected_uidvalidity`. `None` if the server omitted it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid_validity: Option<u32>,
+    /// Count of UIDs the server listed for this page (in its SEARCH answer)
+    /// but did not return a usable message for in the FETCH answer: a
+    /// missing/zero UID, an omitted FETCH line, a wrong-UID substitution, or a
+    /// message expunged between the search and the fetch. `0` in the normal
+    /// case. When non-zero, the page is incomplete (`returned` is smaller than
+    /// the page the server was asked for). This is a SEARCH↔FETCH consistency
+    /// check and a benign search-then-expunge-race signal — it does NOT detect
+    /// a server that omits a UID from its SEARCH answer in the first place.
+    /// Detection-only: recovery is a full re-search from offset 0, since
+    /// `next_offset` steps over the dropped UIDs.
+    pub fetch_skipped: usize,
 }
 
 /// Untrusted payload for a `search` response.
@@ -300,16 +311,18 @@ pub async fn handle(
     let preview_warnings =
         attach_body_previews(account, &input.folder, uid_validity, &mut messages, &input).await;
 
-    Ok(ToolResponse::meta_only(SearchMeta {
-        folder: input.folder,
+    let meta = build_search_meta(
+        input.folder,
         total_matched,
-        returned: messages.len(),
+        &page_uids,
+        &messages,
         truncated,
         next_offset,
         uid_validity,
-    })
-    .with_untrusted(SearchUntrusted { messages })
-    .with_warnings(preview_warnings))
+    );
+    Ok(ToolResponse::meta_only(meta)
+        .with_untrusted(SearchUntrusted { messages })
+        .with_warnings(preview_warnings))
 }
 
 /// `thread_of_uid` path (option (c) of #410): return the conversation
@@ -360,16 +373,18 @@ async fn handle_thread(
     let preview_warnings =
         attach_body_previews(account, &input.folder, uid_validity, &mut messages, &input).await;
 
-    Ok(ToolResponse::meta_only(SearchMeta {
-        folder: input.folder,
+    let meta = build_search_meta(
+        input.folder,
         total_matched,
-        returned: messages.len(),
+        &page_uids,
+        &messages,
         truncated,
         next_offset,
         uid_validity,
-    })
-    .with_untrusted(SearchUntrusted { messages })
-    .with_warnings(preview_warnings))
+    );
+    Ok(ToolResponse::meta_only(meta)
+        .with_untrusted(SearchUntrusted { messages })
+        .with_warnings(preview_warnings))
 }
 
 /// Fetch `target`'s raw body and extract its own `Message-ID` plus the
@@ -464,6 +479,40 @@ fn cap_ancestor_ids(ids: Vec<String>) -> Vec<String> {
 /// Fetch envelope/flags/size for `page_uids` and format each as a
 /// `SearchResultEntry`, in `page_uids`' order (not the FETCH response
 /// order — see the comment on the `fetch` call for why).
+/// Build a `SearchMeta`, computing the page shortfall from the request and
+/// response slices so the two load-bearing counts cannot be transposed at a
+/// call site.
+///
+/// `returned` is `messages.len()`; `fetch_skipped` is
+/// `page_uids.len() - returned` — the number of UIDs the server listed for this
+/// page but did not return a usable message for.
+///
+/// # Preconditions
+///
+/// `page_uids` must be duplicate-free (guaranteed today: SEARCH and thread UIDs
+/// are sourced from a deduped `HashSet` via `ops::search`'s `sorted_uids`). A
+/// duplicate would inflate `fetch_skipped` against a consistent server.
+fn build_search_meta(
+    folder: String,
+    total_matched: usize,
+    page_uids: &[Uid],
+    messages: &[SearchResultEntry],
+    truncated: bool,
+    next_offset: Option<u64>,
+    uid_validity: Option<u32>,
+) -> SearchMeta {
+    let returned = messages.len();
+    SearchMeta {
+        folder,
+        total_matched,
+        returned,
+        truncated,
+        next_offset,
+        uid_validity,
+        fetch_skipped: page_uids.len().saturating_sub(returned),
+    }
+}
+
 async fn fetch_and_format_page(
     account: &AccountState,
     folder: &str,
@@ -1426,6 +1475,7 @@ mod tests {
             truncated: false,
             next_offset: None,
             uid_validity: Some(12345),
+            fetch_skipped: 0,
         };
         let v = serde_json::to_value(meta).unwrap();
         assert_eq!(v["uid_validity"], serde_json::json!(12345));
@@ -1440,6 +1490,7 @@ mod tests {
             truncated: false,
             next_offset: None,
             uid_validity: None,
+            fetch_skipped: 0,
         };
         let v = serde_json::to_value(meta).unwrap();
         assert!(
@@ -1457,6 +1508,7 @@ mod tests {
             truncated: true,
             next_offset: Some(100),
             uid_validity: None,
+            fetch_skipped: 0,
         };
         let v = serde_json::to_value(meta).unwrap();
         assert_eq!(v["next_offset"], serde_json::json!(100));
@@ -1464,6 +1516,59 @@ mod tests {
 
     fn uids(range: std::ops::RangeInclusive<u32>) -> Vec<rimap_imap::types::Uid> {
         range.map(uid).collect()
+    }
+
+    fn entry(uid: u32) -> SearchResultEntry {
+        SearchResultEntry {
+            uid,
+            size: None,
+            flags: None,
+            subject: None,
+            date: None,
+            from: Vec::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            message_id: None,
+            body_preview: None,
+            body_preview_truncated: None,
+        }
+    }
+
+    #[test]
+    fn build_search_meta_counts_page_shortfall() {
+        let page = uids(1..=5);
+        let messages: Vec<SearchResultEntry> = (1..=3).map(entry).collect();
+        let meta = build_search_meta("INBOX".to_string(), 42, &page, &messages, false, None, None);
+        assert_eq!(meta.returned, 3);
+        assert_eq!(meta.fetch_skipped, 2);
+    }
+
+    #[test]
+    fn build_search_meta_zero_when_page_complete() {
+        let page = uids(1..=3);
+        let messages: Vec<SearchResultEntry> = (1..=3).map(entry).collect();
+        let meta = build_search_meta("INBOX".to_string(), 3, &page, &messages, false, None, None);
+        assert_eq!(meta.returned, 3);
+        assert_eq!(meta.fetch_skipped, 0);
+    }
+
+    #[test]
+    fn search_meta_serializes_fetch_skipped_always() {
+        let page = uids(1..=4);
+        let messages: Vec<SearchResultEntry> = (1..=4).map(entry).collect();
+        let meta = build_search_meta("INBOX".to_string(), 4, &page, &messages, false, None, None);
+        let v = serde_json::to_value(meta).unwrap();
+        assert_eq!(v["fetch_skipped"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn search_meta_schema_exposes_fetch_skipped() {
+        let schema = serde_json::to_string(&schemars::schema_for!(SearchMeta))
+            .expect("SearchMeta schema serializes");
+        assert!(
+            schema.contains("fetch_skipped"),
+            "search meta schema must expose fetch_skipped so the agent sees partial pages",
+        );
     }
 
     #[test]
