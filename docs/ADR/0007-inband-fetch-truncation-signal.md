@@ -15,10 +15,12 @@ returns fewer `FetchedMessage`s than requested. #518 / PR #534 scoped this to
 `tracing::warn!(folder, skipped_uids, …)` for operators, but throws the count
 away — `Connection::fetch` returns only `(Vec<FetchedMessage>, Option<u32>)`.
 
-Under the threat model (the IMAP server is a potential adversary), a hostile or
-MITM'd server can omit/zero UIDs to make a folder appear to hold fewer messages
-than it does. Today that manipulation is visible only in the operator log; the
-MCP agent — the party that acts on the result — sees a silently shorter list.
+This is a server whose FETCH answer is **inconsistent with its own SEARCH
+answer**: it listed a UID, then corrupted or dropped it in the FETCH response.
+Today that inconsistency is visible only in the operator log; the MCP agent — the
+party that acts on the result — sees a silently shorter list. (A server that lies
+at the SEARCH layer, omitting a UID from the SEARCH answer entirely, is a
+different and undetectable-at-this-layer vector — see Consequences.)
 
 The one genuine in-band blind spot is the multi-UID `search` path
 (`fetch_and_format_page`): it fetches a whole page in one `FETCH` and reports
@@ -52,10 +54,16 @@ touched** — no change to `Connection::fetch` / `ops::fetch`.
 
 - The `search` tool schema gains `fetch_skipped`; `just regen-tool-schemas` must
   regenerate `search.schema.json` and the diff is committed (CI-gated).
-- `fetch_skipped == 0` is a trustworthy "page complete" signal: it accounts for
-  omitted and substituted UIDs, not just malformed ones. A non-zero value can
-  also arise from a benign expunge race between the SEARCH and the FETCH; the
-  agent's action ("treat the listing as partial") is the same regardless of cause.
+- `fetch_skipped == 0` means "the server returned a usable message for every UID
+  it listed for this page" — a SEARCH↔FETCH consistency check that accounts for
+  omitted and substituted UIDs, not just malformed ones. It is **not** an
+  anti-truncation guarantee: a server that omits a UID from its SEARCH answer
+  hides that message with `fetch_skipped == 0`, because the UID never enters the
+  page. That SEARCH-level omission is undetectable without an independent count
+  (`STATUS MESSAGES`, etc.) and is recorded as residual risk in the spec. A
+  non-zero value can also arise from a benign expunge race between the SEARCH and
+  the FETCH; the agent's action ("treat the listing as partial") is the same
+  regardless of cause.
 - Agents can branch on `fetch_skipped > 0` to treat a listing as incomplete
   (e.g. re-fetch, warn, or refuse a destructive follow-up). Older agents that
   ignore the field are unaffected (additive).

@@ -19,10 +19,23 @@ tool consumer. Worse, that malformed-UID skip is only **one** of the ways the
 even threading the operator counter out would leave a hole. The agent sees a
 shorter list with no marker that items were dropped.
 
-Under the project threat model (the IMAP server is a potential adversary), a
-compromised or MITM'd server can therefore make a folder appear to hold fewer
-messages than it does — hiding a message from a summary or from a subsequent
-select-and-act decision — with the operator log as the only trace.
+This is the specific gap #518 / PR #534 deferred: the malformed-UID skip is a
+server whose FETCH answer is **inconsistent with its own SEARCH answer** (it
+listed a UID, then corrupted or dropped it in the FETCH response), and today the
+agent cannot see that inconsistency.
+
+**What this signal does and does not defend against.** `fetch_skipped` detects a
+SEARCH↔FETCH inconsistency (plus the benign expunge race below). It does **not**
+detect a server that lies at the SEARCH layer: a hostile server hiding a message
+simply omits its UID from the `UID SEARCH` response, so the UID never enters the
+page and `fetch_skipped` stays `0`. Detecting SEARCH-level omission would require
+an independent count to cross-check against (e.g. `STATUS MESSAGES`) and is out of
+scope. So `fetch_skipped == 0` means "the server returned a usable message for
+every UID it listed for this page," **not** "the folder was not truncated." This
+signal's value is catching inconsistent/buggy servers and the benign
+search-then-expunge race — a robustness and honesty improvement, not an
+anti-adversarial completeness guarantee. SEARCH-level omission is recorded as
+residual risk below.
 
 ### Where messages are actually dropped on the search path
 
@@ -91,9 +104,11 @@ recorded in ADR-0007.
 the reassembly layer where the loss actually occurs. A **count**, not a boolean:
 it preserves magnitude, and — unlike a `bool` — does not collide with
 `SearchMeta`'s existing pagination `truncated` field. Defining it as the shortfall
-(rather than the malformed-only `skipped_uids`) makes `fetch_skipped == 0` a
-trustworthy "this page is complete" signal that also covers omitted lines and
-wrong-UID substitution.
+(rather than the malformed-only `skipped_uids`) makes `fetch_skipped == 0` mean
+"the server returned a usable message for every UID it listed for this page,"
+covering malformed items, omitted lines, and wrong-UID substitution in one number.
+As noted in the Problem section, this is a SEARCH↔FETCH consistency check, not a
+defense against SEARCH-level omission.
 
 **Notably, this requires no change to `rimap-imap`.** The shortfall is derivable
 entirely in `rimap-server` from data the handler already holds (`page_uids.len()`
@@ -107,13 +122,14 @@ type is unchanged and the operator `warn!` stays as-is.
 Add an **always-present** field to `SearchMeta`:
 
 ```rust
-/// Count of messages requested for this page that the server did not return a
-/// usable message for: a missing/zero UID, an omitted FETCH line, a wrong-UID
-/// substitution, or a message expunged between the search and the fetch. `0`
-/// in the normal case. When non-zero, the page is incomplete — `returned` is
-/// smaller than the page the server was asked for — and the agent should treat
-/// the listing as partial (possible malformed or hostile server; see the
-/// account resource's threat notes).
+/// Count of UIDs the server listed for this page (in its SEARCH answer) but
+/// did not return a usable message for in the FETCH answer: a missing/zero
+/// UID, an omitted FETCH line, a wrong-UID substitution, or a message expunged
+/// between the search and the fetch. `0` in the normal case. When non-zero, the
+/// page is incomplete — `returned` is smaller than the page the server was
+/// asked for. This flags a server whose FETCH answer is inconsistent with its
+/// own SEARCH answer (or a benign search-then-expunge race); it does NOT detect
+/// a server that omits a message from the SEARCH answer in the first place.
 pub fetch_skipped: usize,
 ```
 
@@ -124,24 +140,29 @@ can rely on the field existing and check `fetch_skipped == 0`.
 Both `handle` and `handle_thread` build `SearchMeta` from the same locals
 (`page_uids`, `messages`, `total_matched`, `truncated`, `next_offset`,
 `uid_validity`). Extract that construction into one **pure helper** so both paths
-share it and it is directly unit-testable:
+share it and it is directly unit-testable. The helper takes the `page_uids` and
+`messages` **slices** — not two adjacent `usize` counts — so the load-bearing
+`page_requested`/`returned` values cannot be transposed at a call site or with
+`total_matched`; passing the wrong local fails to typecheck:
 
 ```rust
 fn build_search_meta(
     folder: String,
     total_matched: usize,
-    page_requested: usize,     // page_uids.len()
-    returned: usize,           // messages.len()
+    page_uids: &[Uid],
+    messages: &[SearchResultEntry],
     truncated: bool,
     next_offset: Option<u64>,
     uid_validity: Option<u32>,
 ) -> SearchMeta
 ```
 
-`fetch_skipped = page_requested.saturating_sub(returned)` (saturating is
-defensive; `returned` can never exceed `page_requested` because the reassembly
+Inside: `returned = messages.len()`,
+`fetch_skipped = page_uids.len().saturating_sub(returned)` (saturating is
+defensive; `returned` can never exceed `page_uids.len()` because the reassembly
 `filter_map` only ever removes from `page_uids`). `handle` and `handle_thread`
-pass `page_uids.len()` and `messages.len()`.
+call it with `&page_uids` and `&messages` (borrowing before `messages` is moved
+into `SearchUntrusted`).
 
 Then `just regen-tool-schemas` regenerates `search.schema.json`; the diff is
 committed. CI hard-gates a non-empty schema diff.
@@ -167,13 +188,14 @@ locals, which makes the headline behavior directly unit-testable without a live
 or fake IMAP server:
 
 1. **`build_search_meta` behavior (authoritative mapping test).** Drive the pure
-   helper with `page_requested > returned` (e.g. requested 5, returned 3) and
-   assert `fetch_skipped == 2` and `returned == 3`; drive it with
-   `page_requested == returned` and assert `fetch_skipped == 0`. Because both
-   `handle` and `handle_thread` construct `SearchMeta` **only** through this
-   helper, a regression that fails to propagate the shortfall fails this test.
-   This is a real behavioral assertion, not a serde tautology — no hand-built
-   `SearchMeta`.
+   helper with a `page_uids` slice longer than the `messages` slice (e.g. 5 UIDs,
+   3 messages) and assert `fetch_skipped == 2` and `returned == 3`; drive it with
+   equal lengths and assert `fetch_skipped == 0`. Because both `handle` and
+   `handle_thread` construct `SearchMeta` **only** through this helper, and the
+   helper computes the shortfall from the same slices the call sites pass, a
+   regression in the arithmetic fails this test. This is a real behavioral
+   assertion over the real slice types, not a serde tautology and not a
+   transposable-`usize` shim.
 2. **Signal reaches the tool contract.** A schema test asserting the published
    `search` schema contains `fetch_skipped` (mirrors the existing
    `input_schema_uses_plain_language_not_posture_jargon` test), so the field is
@@ -184,6 +206,15 @@ or fake IMAP server:
    `warn!` fires. `ops::fetch` is unchanged, so this test needs no edit; it is
    listed here to confirm the malformed → dropped-from-`fetched` link the
    shortfall relies on remains covered.
+
+**What is and isn't covered.** Tests 1–2 pin the arithmetic and the contract. The
+remaining wiring — that `handle`/`handle_thread` pass the *correct* slices — is
+type-guarded (slices, not transposable counts) and exercised on the happy path by
+the existing `search` e2e against Dovecot, where a conformant server returns a
+message for every requested UID and `fetch_skipped` must therefore serialize as
+`0`. The one residual not directly asserted is a call site passing a wrong but
+same-typed slice; the slice-typed signature makes that a low-risk error, and the
+spec does not claim more coverage than this.
 
 ### AC interpretation (flagged)
 
@@ -200,8 +231,19 @@ mapping is exercised by a non-tautological unit test. If true server-wire covera
 is later wanted, it is tracked as a follow-up issue rather than silently claimed
 here.
 
+## Residual risk
+
+- **SEARCH-level omission is undetected.** A hostile server that omits a UID from
+  its `UID SEARCH` answer hides that message with `fetch_skipped == 0`; this
+  signal only cross-checks the FETCH answer against the SEARCH answer. Detecting
+  SEARCH-level omission needs an independent count (`STATUS MESSAGES`, a prior
+  known count, etc.) to compare against and is out of scope. Agents must not read
+  `fetch_skipped == 0` as "the folder was not truncated."
+
 ## Out of scope / non-goals
 
+- Cross-checking the SEARCH answer against an independent message count (see
+  residual risk).
 - Fail-closed handling of missing/zero UIDs (ADR-0007 rejected alternative).
 - Any change to `rimap-imap` (`Connection::fetch` / `ops::fetch`), or to
   `fetch_message`, `export_messages`, `download_attachment`, or `list_*` — they
