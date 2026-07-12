@@ -1,0 +1,22 @@
+[package]
+name = "rimap-fake-imap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "In-process scriptable adversarial IMAP fake for rusty-imap-mcp tests"
+
+[lints]
+workspace = true
+
+[dependencies]
+rimap-core = { path = "../rimap-core", version = "0.1.1-dev" }
+rimap-imap = { path = "../rimap-imap", version = "0.1.1-dev" }
+secrecy = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }

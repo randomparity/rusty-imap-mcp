@@ -127,6 +127,9 @@ base64 = { workspace = true }
 proptest = { workspace = true }
 # Blocking HTTP client for the Mailpit retrieval API (e2e_smtp_real.rs).
 ureq = { workspace = true }
+# Shared scriptable adversarial IMAP fake (ADR-0008): drives the production
+# binary against a scripted short-page FETCH for the fetch_skipped wire test.
+rimap-fake-imap = { path = "../rimap-fake-imap" }
 
 # --- Native packaging (issue #545, ADR-0006). amd64/arm64 only; the packaged
 # binary static-links libdbus (vendored-keyring), so no libdbus runtime dep.

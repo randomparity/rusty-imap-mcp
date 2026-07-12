@@ -1,7 +1,11 @@
 //! Self-signed leaf for the in-process fake. The client pins its
 //! fingerprint, so the `PinningVerifier` (which ignores hostname/chain)
 //! accepts it while a system-trust client would reject it.
-#![expect(clippy::unwrap_used, reason = "tests")]
+#![expect(
+    clippy::unwrap_used,
+    clippy::missing_panics_doc,
+    reason = "in-process test fake: unwrap/panic on cert-gen failure is a test-infra failure"
+)]
 
 use rimap_core::TlsFingerprint;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};

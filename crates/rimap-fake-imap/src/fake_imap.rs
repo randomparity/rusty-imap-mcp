@@ -2,7 +2,11 @@
 //! `Vec<Step>` per accepted connection (accept-loop) so a client's transparent
 //! read-only reconnect re-observes the same dialog. Drives the real
 //! `Connection`.
-#![expect(clippy::unwrap_used, reason = "tests")]
+#![expect(
+    clippy::unwrap_used,
+    clippy::missing_panics_doc,
+    reason = "in-process test fake: unwrap/panic on bind, lock-poison, or scripting errors are test-infra failures"
+)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,7 +23,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use crate::support::certs::{self, SelfSigned};
+use crate::certs::{self, SelfSigned};
 
 /// Bounded number of connections the accept-loop serves — a read-only retry
 /// needs at most 2; the cap prevents a storming client.

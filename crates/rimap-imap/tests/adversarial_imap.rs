@@ -1,5 +1,5 @@
 //! Adversarial IMAP scenarios driven against the in-process fake
-//! (`support::fake_imap`). Scenario 1 (folder-wide EXPUNGE) lives in
+//! (`rimap_fake_imap::fake_imap`). Scenario 1 (folder-wide EXPUNGE) lives in
 //! `expunge_folder_wide_gap.rs`; scenarios 2–4 live here.
 //!
 //! Fake, no container runtime — runs on every PR.
@@ -20,9 +20,9 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rimap_fake_imap::fake_imap::{FakeImapServer, PanicResolver, Step, login_preamble};
 use rimap_imap::error::{AuthFailure, ImapError};
 use rimap_imap::types::{FetchSpec, Uid};
-use support::fake_imap::{FakeImapServer, PanicResolver, Step, login_preamble};
 use support::tracing_capture::WarnCapture;
 
 /// Smoke/calibration: a real login + LIST through the fake proves the TLS
