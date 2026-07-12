@@ -10,8 +10,10 @@
 //! Paths covered (all in `rimap-imap/src/connection/login.rs`):
 //!   1. LOGIN tagged `NO` → `AuthFailure::LoginRejected`.
 //!   2. Implicit-TLS greeting `BYE` → `AuthFailure::ServerRejected`.
-//!   3. Post-login `CAPABILITY` probe error → warn + non-atomic
-//!      COPY/STORE/EXPUNGE move fallback (observable in `recorded()`).
+//!   3. Post-login `CAPABILITY` probe answered `BAD` (empty capability set) →
+//!      `(has_move, has_uidplus)` recorded as `(false, false)` → non-atomic
+//!      COPY/STORE/EXPUNGE move fallback on a subsequently-issued move
+//!      (observable in `recorded()`).
 //!
 //! Fake, no container runtime — runs on every PR.
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
@@ -107,14 +109,28 @@ async fn bye_greeting_surfaces_server_rejected() {
 }
 
 #[tokio::test]
-async fn post_login_capability_probe_error_forces_move_fallback() {
+async fn post_login_capability_probe_failure_forces_move_fallback() {
     // The pre-login CAPABILITY advertises MOVE and UIDPLUS, but the *post-login*
-    // probe (`session.capabilities()`) is answered `BAD`. `imap_login` warns and
-    // assumes `(false, false)`, so a subsequent move takes the non-atomic
-    // COPY + STORE \Deleted + folder-wide EXPUNGE fallback — even though the
-    // server advertised MOVE pre-login. This distinguishes the trigger (probe
-    // error) from `expunge_folder_wide_gap.rs`, which reaches the same fallback
-    // via a capability-ABSENT *success* reply.
+    // probe (`session.capabilities()`) is answered `BAD` with no untagged
+    // `* CAPABILITY` line, so it yields an empty capability set. `imap_login`
+    // therefore records `(has_move=false, has_uidplus=false)`, and a later move
+    // takes the non-atomic COPY + STORE \Deleted + folder-wide EXPUNGE fallback
+    // — even though the server advertised MOVE/UIDPLUS pre-login.
+    //
+    // Why the connection is WARMED first (with `list_folders`) before the move:
+    // `Connection::move_messages` snapshots `has_move_capability()` /
+    // `has_uidplus_capability()` *before* it establishes the session (see
+    // `connection/dispatch.rs`). On a cold connection those atomics still hold
+    // their construction-time `false`, so a move issued as the very first
+    // operation would take the fallback *regardless of the probe result* — a
+    // vacuous assertion. Warming the connection first runs the post-login probe
+    // and populates the atomics from the server's actual reply, so the move
+    // below genuinely depends on the probe outcome: with a MOVE/UIDPLUS-
+    // advertising probe the atomics would be `true` and the move would issue
+    // `UID MOVE` instead, diverging from the scripted fallback dialog.
+    //
+    // (`expunge_folder_wide_gap.rs` issues its move as the first op and so does
+    // not exercise the post-login probe result; this test does.)
     let steps = vec![
         Step::Send(b"* OK fake ready\r\n".to_vec()),
         Step::Expect { verb: "CAPABILITY" },
@@ -126,16 +142,25 @@ async fn post_login_capability_probe_error_forces_move_fallback() {
         Step::Reply {
             text: "OK LOGIN completed",
         },
-        // Post-login CAPABILITY probe fails — no untagged `* CAPABILITY` line,
-        // just a tagged BAD. `session.capabilities()` returns Err; the code
-        // falls back to (has_move=false, has_uidplus=false).
+        // Post-login CAPABILITY probe: a tagged `BAD` with no untagged
+        // `* CAPABILITY` line. async-imap's capability parser stops on the
+        // tagged completion without inspecting its status, so the probe yields
+        // an empty capability set — MOVE and UIDPLUS are both absent.
         Step::Expect { verb: "CAPABILITY" },
         Step::Reply {
             text: "BAD capability temporarily unavailable",
         },
-        // move_messages fallback dialog (identical to the no-caps fallback):
-        // SELECT source (read-write) → UID COPY → STATUS dest → UID STORE
-        // \Deleted → folder-wide EXPUNGE (NOT `UID EXPUNGE`).
+        // Warm-up: the boot-style `LIST` that establishes the session and runs
+        // the probe above, so the capability atomics are populated before the
+        // move snapshots them.
+        Step::Expect { verb: "LIST" },
+        Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
+        Step::Reply {
+            text: "OK LIST completed",
+        },
+        // move_messages fallback dialog: SELECT source (read-write) → UID COPY →
+        // STATUS dest → UID STORE \Deleted → folder-wide EXPUNGE (NOT
+        // `UID EXPUNGE`).
         Step::Expect { verb: "SELECT" },
         Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
         Step::Reply {
@@ -165,15 +190,19 @@ async fn post_login_capability_probe_error_forces_move_fallback() {
 
     let conn = server.connection("user@example.com");
 
-    // The failed probe leaves both capabilities off despite the pre-login
-    // advertisement — the post-login probe is the only source of truth.
+    // Warm the connection so the post-login probe runs and the atomics reflect
+    // its (empty) result.
+    conn.list_folders("*").await.expect("warm-up list");
+
+    // The probe yielded no capabilities despite the pre-login advertisement —
+    // the post-login probe is the only source of truth for MOVE/UIDPLUS.
     assert!(
         !conn.has_move_capability(),
-        "a failed post-login CAPABILITY probe must leave MOVE off",
+        "an empty post-login CAPABILITY probe must leave MOVE off",
     );
     assert!(
         !conn.has_uidplus_capability(),
-        "a failed post-login CAPABILITY probe must leave UIDPLUS off",
+        "an empty post-login CAPABILITY probe must leave UIDPLUS off",
     );
 
     let uid = Uid::from(NonZeroU32::new(5).unwrap());
@@ -184,11 +213,11 @@ async fn post_login_capability_probe_error_forces_move_fallback() {
 
     assert!(
         outcome.used_fallback,
-        "a failed capability probe must force the non-atomic fallback",
+        "an empty capability probe must force the non-atomic fallback",
     );
     assert!(
         outcome.folder_wide_expunge,
-        "no UIDPLUS (probe failed) means a folder-wide EXPUNGE",
+        "no UIDPLUS (empty probe) means a folder-wide EXPUNGE",
     );
 
     let dialog = server.recorded().join("\n").to_ascii_uppercase();
