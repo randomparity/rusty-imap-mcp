@@ -130,27 +130,74 @@ crates/rimap-fake-imap/
      always replies `OK LOGIN completed`).
   4. `initialize` → `notifications/initialized` → `use_account("readonly")` →
      `readonly.search` with `{ folder: "INBOX", <a key that maps to UID SEARCH> }`.
-  5. Assert `structuredContent.meta.fetch_skipped >= 1`,
+  5. Assert all three of `structuredContent.meta.fetch_skipped == 1`,
      `meta.returned == 2`, and `meta.total_matched == 3` (server listed 3 UIDs,
-     returned 2 usable messages).
+     returned 2 usable messages, exactly one — UID 2 — dropped). These three
+     equalities are the **hard merge gate**, not aspirations; see
+     "Merge gate is exact" below.
 - Gating: **no container runtime** — the fake binds a loopback socket in-process,
   so this test always runs on PR CI (unlike the Dovecot-gated `e2e_wire*` suite).
   It must not import the Dovecot harness.
 
-### Fake-script exactness (calibration during TDD)
+### Merge gate is exact (`returned == 2`, `total_matched == 3`, `fetch_skipped == 1`)
 
-The byte-exact `UID FETCH` reply for UIDs 1 and 3 must carry enough for
-`format_search_result` to build a `SearchResultEntry` (UID plus the envelope/flag
-items the search fetch requests) so those two survive reassembly and only UID 2
-is the shortfall. The precise item set is discovered during TDD the same way the
-existing scenarios were: run the test, dump `server.recorded()` to read the exact
-client `UID FETCH` command, and shape the reply to match. This spec does not pin
-the byte-exact reply because the search fetch spec is the authority; the test's
-assertions (`returned == 2`, `fetch_skipped >= 1`) are what is contractually
-required. If shaping a fully-parseable line for 1 and 3 proves fiddly, the
-fallback still satisfies the AC: the assertion `fetch_skipped >= 1` holds as long
-as fewer than 3 usable messages come back, and `returned == 2` is the precise
-form we aim for.
+The test asserts the precise omitted-line semantics, not a weaker "something was
+dropped" bound. `total_matched` derives from the SEARCH result length
+(`ops/search.rs`, before any FETCH), so `== 3` is robust by construction.
+`returned = messages.len()` after reassembly, so `== 2` requires the FETCH reply
+lines for UIDs 1 and 3 to be **fully parseable** into `SearchResultEntry`
+(UID plus the envelope/flag items the search fetch requests) — precedent:
+`adversarial_imap.rs` scenario 3 already parses `* 3 FETCH (UID 5 FLAGS (\Seen))`
+into a `FetchedMessage`, so shaping complete lines for two UIDs is achievable.
+
+There is **no weaker fallback**. If TDD cannot produce two fully-parseable lines
+(so `returned` lands at 1, not 2), that is a **blocker to escalate**, not a
+license to relax the assertion to `fetch_skipped >= 1`. A green test must mean
+"the server listed 3, returned exactly 2, and the one gap surfaced as
+`fetch_skipped == 1`" — one defined outcome, fully falsifiable.
+
+### Fake-script sequence: expected, confirmed by calibration
+
+The scripted sequence — `login_preamble("IMAP4rev1")` → `EXAMINE` →
+`UID SEARCH` (`* SEARCH 1 2 3`) → `UID FETCH` (lines for 1 and 3, none for 2) — is
+the **expected** dialog derived from the read-only search path
+(`ops/search.rs`: read-only `EXAMINE`, then `uid_search`, then the page FETCH).
+It is **not yet demonstrated against the fake** as a single sequence: existing
+scenarios cover `EXAMINE`+`UID FETCH` (no intervening SEARCH) and read-write
+`SELECT`+`UID SEARCH` separately, never the read-only three-command chain this
+test needs. So the exact dialog is a **TDD discovery task**, confirmed the way the
+existing scenarios were: run the test, dump `server.recorded()`, and match the
+reply to the actual client commands.
+
+Two concrete calibration risks the implementer must resolve, not assume:
+
+- **Capability-gated commands.** `Step::Expect { verb }` is strictly linear and
+  reads a client line only at `Expect` steps; any unanticipated command the
+  binary emits under a minimal `IMAP4rev1`-only capability set (a folder-probing
+  `LIST`/`STATUS`, `NAMESPACE`/`ID`/`ENABLE`, or a capability re-probe) lands on
+  the wrong `Expect` and trips the fake's in-task `assert!`. That panic runs on
+  the fake's spawned (never-awaited) accept task, so it surfaces to the test only
+  as a dropped connection or a 2s `REQUEST_TIMEOUT`, not as the fake's message.
+  If calibration shows the search path issues such commands, extend
+  `login_preamble`'s capability atoms and/or add matching `Expect`/`Reply` steps.
+- **Diagnosability.** The test **must** print `server.recorded()` on assertion
+  failure (an `eprintln!` under `#[expect(clippy::print_stderr, …)]`, as
+  `adversarial_imap.rs` does) so a mid-sequence divergence is legible instead of
+  appearing as a bare 2s timeout.
+
+### Connection budget vs `MAX_ACCEPTS`
+
+The fake serves at most `MAX_ACCEPTS = 4` connections, replaying the full script
+per accept. The read-only search path is expected to use **one** connection (a
+transparent read-only reconnect on `ConnectionLost` would add at most one more —
+still ≤ 2, comfortably under 4). If calibration reveals the pooled binary opens
+more (e.g. a reconnect storm from a miscalibrated FETCH reply that drops the
+stream mid-literal), the accept loop returns after the 4th accept and subsequent
+requests hang to the 2s `REQUEST_TIMEOUT` rather than failing usefully — that
+timeout signature (distinct from a clean `fetch_skipped` mismatch) is the tell
+that the budget, not the arithmetic, is the problem. Raising `MAX_ACCEPTS` is the
+remedy if a legitimate pooled sequence needs it; do not paper over a reconnect
+storm by raising it.
 
 ## Testing
 
