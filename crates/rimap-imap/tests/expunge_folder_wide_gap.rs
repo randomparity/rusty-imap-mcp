@@ -4,6 +4,17 @@
 //! asserts both `used_fallback` and `folder_wide_expunge`, plus that a plain
 //! `EXPUNGE` (not `UID EXPUNGE`) reached the wire.
 //!
+//! The connection is WARMED with `list_folders` before the move. Otherwise the
+//! move would be the connection's first op, and `Connection::move_messages`
+//! snapshots `has_move_capability()` / `has_uidplus_capability()` *before* it
+//! establishes the session (see `connection/dispatch.rs`). On a cold connection
+//! those atomics still hold their construction-time `false`, so the fallback
+//! would be taken regardless of what the server advertised — a vacuous
+//! assertion. Warming first runs the post-login CAPABILITY probe (scripted in
+//! `login_preamble`, advertising only `IMAP4rev1`), populating the atomics from
+//! the server's actual reply so the move below genuinely depends on the absence
+//! of MOVE/UIDPLUS.
+//!
 //! Fake, no container runtime — runs on every PR. Replaces the former
 //! ignored placeholder that marked this gap.
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
@@ -19,6 +30,14 @@ async fn no_move_no_uidplus_uses_folder_wide_expunge() {
     // fallback runs.
     let mut steps = login_preamble("IMAP4rev1");
     steps.extend([
+        // Warm-up: the boot-style LIST that establishes the session and runs
+        // the post-login CAPABILITY probe (scripted in the preamble), so the
+        // capability atomics are populated before the move snapshots them.
+        Step::Expect { verb: "LIST" },
+        Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
+        Step::Reply {
+            text: "OK LIST completed",
+        },
         // move_messages: SELECT source (read-write; select(...,false)).
         Step::Expect { verb: "SELECT" },
         Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
@@ -52,6 +71,20 @@ async fn no_move_no_uidplus_uses_folder_wide_expunge() {
     let server = FakeImapServer::start(steps).await;
 
     let conn = server.connection("user@example.com");
+
+    // Warm the connection so the post-login probe runs and the capability
+    // atomics reflect the server's advertisement (neither MOVE nor UIDPLUS)
+    // before move_messages snapshots them.
+    conn.list_folders("*").await.expect("warm-up list");
+    assert!(
+        !conn.has_move_capability(),
+        "IMAP4rev1-only probe must leave MOVE off",
+    );
+    assert!(
+        !conn.has_uidplus_capability(),
+        "IMAP4rev1-only probe must leave UIDPLUS off",
+    );
+
     let uid = Uid::from(NonZeroU32::new(5).unwrap());
     let outcome = conn
         .move_messages("INBOX", "Archive", &[uid], None)
