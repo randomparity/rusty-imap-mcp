@@ -18,6 +18,13 @@ fn generates_top_and_production_subcommand_pages() {
         top_body.contains("MCP server for IMAP email access"),
         "top page missing the CLI 'about' text",
     );
+    // Descriptive DESCRIPTION (long_about) and an EXAMPLES block (after_long_help)
+    // — guards against the pages degrading back to a one-line about.
+    assert!(
+        top_body.contains("Model Context Protocol"),
+        "top page DESCRIPTION is not the rich long_about",
+    );
+    assert!(top_body.contains("EXAMPLES:"), "top page missing EXAMPLES");
 
     // Always-present production subcommands (feature-independent — the negative
     // 'no dump-tool page' guarantee lives in the release manpages-job guard, not
@@ -29,5 +36,16 @@ fn generates_top_and_production_subcommand_pages() {
         "rusty-imap-mcp-migrate-keyring.1",
     ] {
         assert!(dir.path().join(page).is_file(), "missing page {page}");
+    }
+    // Every example-bearing subcommand page carries its own EXAMPLES block
+    // (after_long_help), so a dropped long_about/after_long_help on any of them
+    // fails CI, not just the top page.
+    for page in [
+        "rusty-imap-mcp-login.1",
+        "rusty-imap-mcp-migrate-keyring.1",
+        "rusty-imap-mcp-audit-merge.1",
+    ] {
+        let body = fs::read_to_string(dir.path().join(page)).unwrap();
+        assert!(body.contains("EXAMPLES:"), "{page} missing EXAMPLES");
     }
 }
