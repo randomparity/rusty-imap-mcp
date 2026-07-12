@@ -205,10 +205,10 @@ mod fixture_smoke_tests {
         // response that exercises a non-empty nested array AND a
         // security_warnings entry.
         //
-        // SearchMeta requires: folder, total_matched, returned, truncated.
-        // SearchUntrusted requires: messages (array of SearchResultEntry).
-        // SearchResultEntry requires: uid (from/to are optional —
-        // omitted when the parsed message had no headers).
+        // SearchMeta requires: folder, total_matched, returned, truncated,
+        // fetch_skipped. SearchUntrusted requires: messages (array of
+        // SearchResultEntry). SearchResultEntry requires: uid (from/to are
+        // optional — omitted when the parsed message had no headers).
         let search = validator_for_tool_response("search");
         let payload = serde_json::json!({
             "meta": {
@@ -216,6 +216,7 @@ mod fixture_smoke_tests {
                 "folder": "INBOX",
                 "returned": 1u64,
                 "truncated": false,
+                "fetch_skipped": 0u64,
             },
             "untrusted": {
                 "messages": [
@@ -253,6 +254,7 @@ mod fixture_smoke_tests {
                 "folder": "INBOX",
                 "returned": 1u64,
                 "truncated": false,
+                "fetch_skipped": 0u64,
             },
             "untrusted": {
                 "messages": [
