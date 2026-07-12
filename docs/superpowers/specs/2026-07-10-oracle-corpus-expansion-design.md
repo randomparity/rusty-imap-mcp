@@ -185,8 +185,7 @@ rusty-imap-mcp-corpus/
 │   │   └── <stem>.meta.toml
 │   ├── templates/
 │   └── synthetic/
-├── wave2/                       # added later
-└── wave3/                       # added later
+└── wave2/                       # added later (wave3 investigated + dropped — see Component 4)
 ```
 
 - **One `.eml` + one sibling `<stem>.meta.toml` per input.** The `.eml` is a
@@ -217,7 +216,7 @@ notes           = "tokenizer test: adoption-agency stray </font></a>"
 license         = "MIT"                    # SPDX id, for code-licensed sources
 license_url     = "https://github.com/html5lib/html5lib-tests/blob/master/LICENSE"
 # ...OR, for third-party real mail that carries no grantable code license
-# (research corpora, consented personal mail — waves 2/3):
+# (research corpora — wave 2; the `consent` basis went unused after wave 3 was dropped):
 # redistribution_basis = "research-corpus"  # research-corpus | consent | synthetic
 # redistribution_note  = "SpamAssassin public corpus, redistributable per its terms"
 
@@ -340,8 +339,9 @@ both READMEs so a change to one is mirrored.
 code change on that flip is auth in the *main* repo's nightly (Component 3):
 while private the corpus checkout needs a read-scoped token (fine-grained PAT or
 a GitHub App / deploy key) as a secret; going public drops the token for a plain
-`actions/checkout`. Flipping visibility also raises the stakes on the wave-3
-PII scrub (publishing a curated phishing/malware sample set) — see Threat model.
+`actions/checkout`. Flipping visibility still raises the stakes on the corpus's
+PII surface (publishing a curated phishing/malware sample set) — see Threat model.
+(This was originally framed around Wave 3's personal mail, now dropped.)
 
 ### Component 2 — `--corpus-root` runner flag (follow-up issue B, main repo)
 
@@ -481,12 +481,25 @@ allowed bases and per-source redistribution vetting are settled in this wave's
 own issue, and anything that can't be cleared is dropped, not force-added.
 **Deferred to its own issue after wave 1's baseline is stable.**
 
-**Wave 3 — scrubbed personal mail.** Real Gmail, last because it carries the
-most PII risk. Scrubbing rewrites **only text nodes and attribute values**,
-never structure (per `meta.toml.scrub`), so the tokenizer shape — the thing the
-oracle probes — is preserved while identifiers are removed. **Deferred to its
-own issue; gated on the wave-3 PII-scrub tooling and a repo-visibility
-decision.**
+**Wave 3 — scrubbed personal mail. Investigated 2026-07-11 and dropped.** The
+premise was that real Gmail would add structural diversity worth the PII risk. A
+read-only probe of a 2.5 GB personal mbox (15,082 messages) tested that premise
+before building any scrub tooling: it deduped by the same criterion-6 structural
+fingerprint (9,469 unique skeletons, only 4 already in the 654-input corpus),
+then ran each representative through the **actual html-oracle**. Result: **0
+HARD**, 3,824 SOFT (5,842 match), at 97.5% comparability. The SOFT set is ~100%
+the systematic marketing-mail trio — `HtmlHiddenContentDetected` (99.9%),
+`HtmlRemoteImageStripped` (99%), `HtmlStyleStripped` (96%) — all *explained*
+drops already covered by Waves 1+2, not new signal. The apparent skeleton
+diversity was document-permutation noise (whole-document tag/attr-name sequences
+vary per message); under the real engines it collapses to no new divergence.
+Benign personal correspondence is structurally the wrong source for HARD
+divergences — those come from adversarial tokenizer-confusion tricks, which is
+why Wave 2 targeted spam/phishing. **Maximal PII risk, ~zero marginal oracle
+signal → closed; not reopened as personal mail.** If a Wave 3 is ever wanted,
+the data points to improving the reference sanitizer's html5lib
+tree-construction coverage or a fresh *adversarial* source, not real mail. (No
+GitHub issue was opened for this wave.)
 
 Each wave is a separate ingestion PR to the corpus repo, followed by a main-repo
 PR bumping the pinned SHA.
@@ -560,22 +573,23 @@ as a **rate**, recomputed and recorded after each wave's first nightly:
   cannot change what the main repo's CI executes until a human bumps the SHA in
   a reviewed PR. The corpus repo's own self-validation CI is a second gate on
   what lands there.
-- **PII leakage (wave 3, and any wave-2 real mail).** Mitigated by: text/attr-only
-  scrubbing recorded in `meta.toml.scrub`, the advisory PII-heuristic scan in
-  self-validation, and staging wave 3 last behind dedicated scrub tooling. The
-  residual risk is a scrub miss; the heuristic scan and human review of each
-  ingestion PR are the backstop.
+- **PII leakage (wave-2 real mail; wave 3 dropped).** With personal-mail Wave 3
+  closed (Component 4), the residual PII surface is Wave 2's public corpora.
+  Mitigated by: node-scoped scrubbing recorded in `meta.toml.scrub`, the advisory
+  PII-heuristic scan in self-validation, and human review of each ingestion PR.
+  The residual risk is a scrub miss; the heuristic scan and that review are the
+  backstop.
 - **Repo visibility — start private, option to open later (decided).** The
-  corpus aggregates adversarial / phishing HTML and (wave 3) scrubbed personal
-  mail. Public hosting would publish a curated malware/phishing sample set
+  corpus aggregates adversarial / phishing HTML (Wave 3's scrubbed personal mail
+  was dropped). Public hosting would publish a curated malware/phishing sample set
   (AV/abuse/GitHub-TOS considerations) and raise the stakes on any scrub miss, so
   the repo **starts private**: it contains those samples and costs a read-scoped
   token in the nightly (Component 3), and its Actions minutes draw from the
   account quota (which is why `validate.yml` is kept to a single lean job). The
   path to public is preserved and cheap — dropping the checkout token is the only
-  auth change — but is gated on the wave-3 scrub review being trustworthy enough
-  to publish, so any public flip is its own reviewed decision, not an
-  afterthought.
+  auth change — but any public flip is its own reviewed decision (now weighing
+  only the adversarial/phishing samples, since Wave 3's personal mail was
+  dropped), not an afterthought.
 - **License contamination.** `cargo-deny` covers Rust dependencies, not data
   files. The corpus repo's SPDX-allowlist validation is the sole license gate;
   anything unclearable is dropped at ingestion, not force-added.
