@@ -22,3 +22,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0005](0005-wave2-corpus-sourcing.md) | Wave-2 corpus sourcing — download-at-build pinned-by-hash + text-node scrub | Accepted |
 | [0006](0006-native-packaging-build-topology.md) | Native packaging build topology — xtask manpages, host-side deb/rpm, amd64+arm64 only | Accepted |
 | [0007](0007-inband-fetch-truncation-signal.md) | In-band partial-result signal for skipped FETCH items | Accepted |
+| [0008](0008-shared-fake-imap-test-support-crate.md) | Shared fake-IMAP test-support crate for cross-crate wire tests | Accepted |
