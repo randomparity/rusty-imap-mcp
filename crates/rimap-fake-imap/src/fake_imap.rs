@@ -171,20 +171,45 @@ impl FakeImapServer {
         resolver: Arc<dyn CredentialResolver>,
         command_timeout: Duration,
     ) -> Connection {
-        let cfg = ConnectionConfig {
+        let cfg = self.connection_config(username, Some(self.pin), command_timeout);
+        Connection::new(cfg, Arc::new(NoopAudit), resolver)
+    }
+
+    /// Build a `Connection` pinned to `wrong_pin` (which the caller
+    /// guarantees differs from [`FakeImapServer::pin`]) to exercise the
+    /// live TLS pin-mismatch rejection path. The rustls handshake fails
+    /// before any IMAP command is issued, so credential resolution is never
+    /// reached — a [`PanicResolver`] bakes that invariant in. A 1s command
+    /// timeout is a backstop only; the connect fails at the handshake first.
+    #[must_use]
+    pub fn connection_wrong_pin(&self, username: &str, wrong_pin: TlsFingerprint) -> Connection {
+        let cfg = self.connection_config(username, Some(wrong_pin), Duration::from_secs(1));
+        Connection::new(cfg, Arc::new(NoopAudit), Arc::new(PanicResolver))
+    }
+
+    /// Assemble a `ConnectionConfig` targeting this fake's loopback port.
+    /// `pinned_fingerprint` is the only field callers vary — the correct
+    /// [`FakeImapServer::pin`] for the success paths, or a deliberately
+    /// wrong fingerprint for the mismatch path.
+    fn connection_config(
+        &self,
+        username: &str,
+        pinned_fingerprint: Option<TlsFingerprint>,
+        command_timeout: Duration,
+    ) -> ConnectionConfig {
+        ConnectionConfig {
             account: None,
             account_id: AccountId::default_account(),
             host: "127.0.0.1".to_string(),
             port: self.port,
             encryption: ImapEncryption::Tls,
             username: username.to_string(),
-            pinned_fingerprint: Some(self.pin),
+            pinned_fingerprint,
             connect_timeout: Duration::from_secs(5),
             command_timeout,
             max_fetch_body_bytes: 1024 * 1024,
             max_append_bytes: 1024 * 1024,
-        };
-        Connection::new(cfg, Arc::new(NoopAudit), resolver)
+        }
     }
 }
 

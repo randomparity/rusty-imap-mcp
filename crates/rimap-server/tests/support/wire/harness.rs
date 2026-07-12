@@ -162,6 +162,15 @@ fn force_use_for_dead_code_link() {
     // Method used by mcp_wire_conformance and e2e_wire, not by
     // mcp_wire_negative.
     let _ = Harness::shutdown_and_wait;
+    // JSON-RPC session drivers used by every wire binary that reaches the
+    // serve loop, but NOT by e2e_wire_tls_pin_mismatch — a pin mismatch fails
+    // the boot closed, so that binary spawns the child and reaps its exit
+    // status without ever sending `initialize` or a request.
+    let _ = Harness::request;
+    let _ = Harness::request_within;
+    let _ = Harness::notify;
+    let _ = Harness::initialize_handshake;
+    let _ = Harness::send_initialized;
     // Constant used by mcp_wire_conformance / e2e_wire, not by mcp_wire_negative.
     let _ = PINNED_PROTOCOL_VERSION;
 }
