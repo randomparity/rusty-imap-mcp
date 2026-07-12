@@ -8,7 +8,9 @@
 
 ## Guardrails (run for every task's verification)
 
-- Fast inner loop: `just check`, `just test-fast`.
+- Fast inner loop: `just check`, `just test-fast`. Both are `--workspace
+  --all-targets`, so they only pass on a green *whole* workspace — see the
+  green-tree note below.
 - Per-crate test: `cargo nextest run -p <crate>` (or `cargo test -p <crate>` if
   a test isn't nextest-visible).
 - Full gate before push: `just ci` (rustfmt, clippy
@@ -20,16 +22,24 @@
   commits trigger a full clippy recompile in prek — use a generous commit
   timeout.
 
-Tasks are ordered; each is independently committable and leaves the tree green.
+**Green-tree invariant.** Each of the three tasks below is a single commit that
+leaves `cargo check --workspace --all-targets` green. The crate creation and the
+`rimap-imap` import repoint are deliberately **one atomic task/commit** (Task 1):
+moving the fake out without repointing the importers would leave `rimap-imap`'s
+tests referencing deleted modules, so `just check`/`just test-fast` (both
+`--workspace`) would fail on that intermediate. Do not split Task 1 across
+commits.
 
 ---
 
-## Task 1 — Create `crates/rimap-fake-imap` and move the fake into it
+## Task 1 — Create `crates/rimap-fake-imap` AND repoint `rimap-imap` tests (one atomic commit)
 
-**Where it fits:** Foundation for AC 1 (the fake reachable cross-crate). Per
-ADR-0008, a `publish = false` workspace crate holding the fake + its cert helper.
+**Where it fits:** AC 1 — the fake reachable cross-crate *and* the existing
+`rimap-imap` fake tests still green. Per ADR-0008, a `publish = false` workspace
+crate holding the fake + its cert helper. Crate move and importer repoint land
+together so the workspace never has a red intermediate.
 
-**Steps:**
+### 1a. Create the crate
 
 1. Create `crates/rimap-fake-imap/Cargo.toml`:
    ```toml
@@ -78,75 +88,56 @@ ADR-0008, a `publish = false` workspace crate holding the fake + its cert helper
    workspace lints). Keep `certs.rs`'s `#![expect(...)]` and its `#[cfg(test)] mod
    tests`.
 5. Add `"crates/rimap-fake-imap"` to `[workspace] members` in the root
-   `Cargo.toml` (place it after `crates/rimap-server` or alphabetically near the
-   other crates; ordering is cosmetic).
+   `Cargo.toml`.
 
-**Acceptance criteria (reviewer-checkable):**
+### 1b. Repoint `rimap-imap` tests (same commit)
 
-- `cargo build -p rimap-fake-imap` compiles clean.
-- `cargo test -p rimap-fake-imap` runs and passes the moved `certs` unit test
-  (`pin_matches_leaf_der_and_is_fresh_each_call`).
-- `cargo clippy -p rimap-fake-imap --all-targets -- -D warnings` clean (no
-  `#[allow]`, no unfulfilled `#[expect]`).
-- The two source files are byte-identical to the originals except the one
-  `use crate::certs` line.
-
-**Note — dev-dep cycle:** at this point `rimap-imap`'s tests won't compile
-(the deleted `support::fake_imap`); that is repaired in Task 2. Verify Task 1 in
-isolation with `-p rimap-fake-imap`, which does not build `rimap-imap`'s tests.
-
-**Rollback:** delete the crate dir + the workspace-members line; `git mv` the two
-files back.
-
----
-
-## Task 2 — Repoint `rimap-imap` fake-based tests to the new crate
-
-**Where it fits:** AC 1 — existing fake-based tests still pass through the new
-path. Proves the move is behavior-preserving.
-
-**Steps:**
-
-1. `crates/rimap-imap/Cargo.toml` `[dev-dependencies]`: add
+6. `crates/rimap-imap/Cargo.toml` `[dev-dependencies]`: add
    `rimap-fake-imap = { path = "../rimap-fake-imap" }` (path-only — `publish =
    false` crate has no published version; `deny.toml` sets
-   `allow-wildcard-paths = true`). Leave `rcgen`, `tokio-rustls`, `rustls` in
-   `rimap-imap`'s dev-deps only if other `rimap-imap` tests still use them
-   directly; if the fake was their sole consumer, remove the now-unused ones (run
-   `just check` / clippy to confirm none are orphaned or newly-unused —
-   `unused_crate_dependencies` is not on by default, so verify by grepping the
-   remaining `tests/` for `rcgen`/`tokio_rustls`/`rustls` direct use, and drop
-   any that no longer appear to keep the manifest honest).
-2. `crates/rimap-imap/tests/support/mod.rs`: remove `pub mod certs;` and
+   `allow-wildcard-paths = true`). Then check whether `rcgen`, `tokio-rustls`,
+   `rustls` are still used directly by any remaining `rimap-imap` test
+   (`rg -w "rcgen|tokio_rustls|rustls" crates/rimap-imap/tests`); drop from
+   `rimap-imap`'s dev-deps only those that no longer appear (keep the manifest
+   honest). `rustls`/`tokio-rustls` are also normal deps of `rimap-imap`, so
+   only the `[dev-dependencies]` duplicates are in question.
+7. `crates/rimap-imap/tests/support/mod.rs`: remove `pub mod certs;` and
    `pub mod fake_imap;`, leaving only `pub mod tracing_capture;`. Keep the
-   file-level `#![allow(dead_code)]` and its explanatory comment (tracing_capture
-   is still a per-binary include).
-3. `crates/rimap-imap/tests/adversarial_imap.rs`: keep `mod support;` (still uses
+   file-level `#![allow(dead_code)]` and its comment (tracing_capture is still a
+   per-binary include).
+8. `crates/rimap-imap/tests/adversarial_imap.rs`: keep `mod support;` (still uses
    `support::tracing_capture::WarnCapture`); change
    `use support::fake_imap::{FakeImapServer, PanicResolver, Step, login_preamble};`
    to `use rimap_fake_imap::fake_imap::{FakeImapServer, PanicResolver, Step,
    login_preamble};`.
-4. `crates/rimap-imap/tests/expunge_folder_wide_gap.rs`: it uses **only** the
-   fake (no `tracing_capture`), so remove its `mod support;` line and change
+9. `crates/rimap-imap/tests/expunge_folder_wide_gap.rs`: uses **only** the fake,
+   so remove its `mod support;` line and change
    `use support::fake_imap::{FakeImapServer, Step, login_preamble};` to
    `use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};`.
-5. Confirm no other `rimap-imap` test references `support::fake_imap` /
-   `support::certs` (`rg "support::(fake_imap|certs)" crates/rimap-imap/tests`).
+10. Confirm no other `rimap-imap` test references the moved modules
+    (`rg "support::(fake_imap|certs)" crates/rimap-imap` → empty).
 
-**Acceptance criteria:**
+**Acceptance criteria (reviewer-checkable):**
 
-- `cargo nextest run -p rimap-imap` passes, including
-  `adversarial_imap::*` and `expunge_folder_wide_gap::*`, with **no behavior
-  change** (same assertions, same pass).
-- `cargo clippy -p rimap-imap --all-targets --all-features -- -D warnings` clean.
-- `rg "support::(fake_imap|certs)" crates/rimap-imap` returns nothing.
+- `cargo check --workspace --all-targets` green (no red intermediate).
+- `cargo test -p rimap-fake-imap` passes the moved `certs` unit test
+  (`pin_matches_leaf_der_and_is_fresh_each_call`).
+- `cargo nextest run -p rimap-imap` passes `adversarial_imap::*` and
+  `expunge_folder_wide_gap::*` unchanged in behavior.
+- `cargo clippy -p rimap-fake-imap -p rimap-imap --all-targets --all-features --
+  -D warnings` clean (no `#[allow]`, no unfulfilled `#[expect]`).
+- The two moved files are byte-identical to the originals except the one
+  `use crate::certs` line.
+- `rg "support::(fake_imap|certs)" crates/rimap-imap` empty.
 
-**Rollback:** revert the Cargo.toml + test import edits; restore
-`support/mod.rs`.
+**Rollback:** `git revert` (or reset) the single commit — this undoes the move,
+the import edit, the manifest edits, and the workspace-members line together. A
+bare `git mv` back is **insufficient**: it would restore the files carrying the
+edited `use crate::certs` path, which is wrong for the old location.
 
 ---
 
-## Task 3 — Add the wire test in `rimap-server` (TDD)
+## Task 2 — Add the wire test in `rimap-server` (TDD)
 
 **Where it fits:** the headline AC — a host-runnable JSON-RPC-wire assertion of
 `meta.fetch_skipped` on a scripted short page.
@@ -158,18 +149,34 @@ path. Proves the move is behavior-preserving.
 
 1. **Red / calibrate.** Write `crates/rimap-server/tests/e2e_wire_fetch_skipped.rs`
    with the harness plumbing and an *intentionally minimal* fake script
-   (`login_preamble("IMAP4rev1")` only). Run it; it will fail/timeout. Use the
-   `recorded()` drop-guard (below) to read the exact client command sequence the
-   binary emits for a `search` call, then extend the script step-by-step
+   (`login_preamble("IMAP4rev1")` only). Run it; it will fail/timeout. The
+   `recorded()` drop-guard (below) prints the exact client command sequence the
+   binary emits for a `search` call; extend the script step-by-step
    (EXAMINE → UID SEARCH → UID FETCH) until the dialog matches. This is how the
-   exact bytes — including whether `login_preamble`'s capability atoms need
-   extending and the precise `UID FETCH` item order — are discovered. See spec
-   §"Fake-script sequence: expected, confirmed by calibration".
+   exact bytes — whether `login_preamble`'s capability atoms need extending, the
+   precise `UID FETCH` command — are discovered (spec §"Fake-script sequence").
 2. **Green.** Shape the `UID SEARCH` reply as `* SEARCH 1 2 3` and the `UID
-   FETCH` reply to return **fully-parseable** lines for UIDs 1 and 3
-   (each carrying `UID`, a well-formed RFC 3501 `ENVELOPE`, `FLAGS`, and
-   `RFC822.SIZE` — the `FetchSpec { envelope, flags, size }` the page fetch
-   requests) and **no line for UID 2**. Assert the exact gate.
+   FETCH` reply to return **fully-parseable** lines for UIDs 1 and 3 and **no
+   line for UID 2**, then assert the exact gate.
+
+**Concrete FETCH reply template (starting point for the two surviving UIDs).**
+The page fetch requests `FetchSpec { envelope: true, flags: true, size: true }`,
+so each surviving line must carry `UID`, `FLAGS`, `RFC822.SIZE`, and a well-formed
+RFC 3501 §7.4.2 `ENVELOPE`. Item order within the parens is irrelevant to the
+parser. A minimal valid `ENVELOPE` uses explicit `NIL`s for the optional address
+lists and a single-address `from`/`sender`/`reply-to`/`to`:
+```text
+* 1 FETCH (UID 1 FLAGS (\Seen) RFC822.SIZE 42 ENVELOPE ("Wed, 09 Jul 2026 12:00:00 +0000" "hello one" (("A" NIL "a" "example.com")) (("A" NIL "a" "example.com")) (("A" NIL "a" "example.com")) (("B" NIL "b" "example.com")) NIL NIL NIL "<msg1@example.com>"))\r\n
+* 3 FETCH (UID 3 FLAGS (\Seen) RFC822.SIZE 42 ENVELOPE ("Wed, 09 Jul 2026 12:00:00 +0000" "hello three" (("A" NIL "a" "example.com")) (("A" NIL "a" "example.com")) (("A" NIL "a" "example.com")) (("B" NIL "b" "example.com")) NIL NIL NIL "<msg3@example.com>"))\r\n
+```
+(The `ENVELOPE` tuple is: date, subject, from, sender, reply-to, to, cc, bcc,
+in-reply-to, message-id — here cc/bcc/in-reply-to are `NIL`.) The sequence
+numbers (`* 1`, `* 3`) can be any distinct values; the load-bearing part is the
+`UID` item. **No line for UID 2** — that omission is the shortfall. Send each
+line via `Step::Send(b"…".to_vec())`, then `Step::Reply { text: "OK FETCH
+completed" }`. Calibrate against the actual client command; if the parser rejects
+a line (dropping it to `returned == 1`), fix the `ENVELOPE` form rather than
+weakening the assertion (spec §"no weaker fallback").
 
 **Test shape (concrete):**
 
@@ -180,28 +187,28 @@ path. Proves the move is behavior-preserving.
   `[attachments]` sections under a tempdir. Model on the single-account block in
   `crates/rimap-server/tests/support/wire/config.rs::build_dovecot_full_config`
   (inline the TOML in the test or add a `build_fake_config` helper).
-- Pull the wire harness in the same way the other `e2e_wire*` tests do
+- Pull the wire harness the way the other `e2e_wire*` tests do
   (`#[path = "support/wire/mod.rs"] mod wire;` or via `support::wire`); spawn with
   `Harness::spawn_with_config(&config_path, tempdir, &[("RUSTY_IMAP_MCP_PASSWORD",
   "fake-password")])`. The fake accepts any password (`login_preamble` always
   replies `OK LOGIN completed`).
 - Flow: `initialize_handshake()` → `send_initialized()` →
-  `use_account("readonly")` → `readonly.search` with `{ "folder": "INBOX", "<a
-  key that maps to UID SEARCH, e.g. subject>": "…" }`. **Omit `limit` and
-  `offset`** (spec §"page_requested == 3 is not accidental" — default
-  `limit = MAX_LIMIT = 100`, `offset = 0`, so `page_requested == 3`).
-- Extract `body = resp["result"]["structuredContent"]` and assert, via a helper
-  that also validates the envelope against the MCP schema (`assert_valid` /
-  `assert_envelope_valid`, as the other wire tests do):
+  `use_account("readonly")` → `readonly.search` with `{ "folder": "INBOX",
+  "subject": "…" }`. **Omit `limit` and `offset`** (spec §"page_requested == 3 is
+  not accidental" — default `limit = MAX_LIMIT = 100`, `offset = 0`, so
+  `page_requested == 3`).
+- Extract `body = resp["result"]["structuredContent"]`, validate the envelope
+  against the MCP schema (`assert_valid` / `assert_envelope_valid`, as the other
+  wire tests do), and assert:
   - `body["meta"]["total_matched"] == 3`
   - `body["meta"]["returned"] == 2`
   - `body["meta"]["fetch_skipped"] == 1`
-- **Diagnosability drop guard (required).** Add a guard bound before the search
-  call that, on `Drop`, prints `server.recorded()` **iff**
-  `std::thread::panicking()` — so it fires on the harness timeout-panic, the
-  fake's in-task `assert!` (surfaced as a dropped connection / 2s timeout), and a
-  wrong-`meta` `assert_eq!` alike. `eprintln!` under
-  `#[expect(clippy::print_stderr, reason = "test diagnostic")]`. Sketch:
+- **Diagnosability drop guard (required).** Bind a guard before the search call
+  that, on `Drop`, prints `server.recorded()` **iff** `std::thread::panicking()`
+  — so it fires on the harness timeout-panic, the fake's in-task `assert!`
+  (surfaced as a dropped connection / 2s timeout), and a wrong-`meta` `assert_eq!`
+  alike (`Harness::request` *panics* on timeout, so an assertion-only guard would
+  miss the two most-likely failures). Sketch:
   ```rust
   struct DumpOnPanic<'a>(&'a FakeImapServer);
   impl Drop for DumpOnPanic<'_> {
@@ -214,24 +221,29 @@ path. Proves the move is behavior-preserving.
   }
   ```
 - Gating: **no container runtime**. The fake binds a loopback socket in-process,
-  so the test runs on every PR. Do **not** import the Dovecot harness or gate on
-  `RIMAP_REQUIRE_DOCKER`.
-- Connection budget: expect **one** fake connection (spec §"Connection budget vs
-  MAX_ACCEPTS"; `MAX_ACCEPTS = 4` gives headroom). If calibration reveals a
-  reconnect storm exhausting the budget (manifests as the 2s timeout, distinct
-  from a clean `meta` mismatch), fix the script — do not paper over it by raising
-  `MAX_ACCEPTS`.
+  so the test runs on every PR under `just test`/CI. Do **not** import the
+  Dovecot harness or gate on `RIMAP_REQUIRE_DOCKER`.
+- Connection budget: expect **one** fake connection (`MAX_ACCEPTS = 4` headroom;
+  a read-only reconnect adds ≤ 1). A reconnect storm exhausting the budget
+  manifests as the 2s timeout (distinct from a clean `meta` mismatch) — fix the
+  script, don't raise `MAX_ACCEPTS` to mask it.
+
+**Test-runner note.** `just test-fast` excludes `binary(e2e_wire)` by substring,
+so `e2e_wire_fetch_skipped` is **intentionally not** run in the inner loop (it
+spawns the production binary — a heavy integration test, grouped with the other
+`e2e_wire*` tests). Verify it directly with
+`cargo nextest run -p rimap-server -E 'binary(e2e_wire_fetch_skipped)'`; it runs
+in full `just test` and CI (`just test` has no `-E` and no container gate).
 
 **Acceptance criteria:**
 
 - `cargo nextest run -p rimap-server -E 'binary(e2e_wire_fetch_skipped)'`
   passes with the three exact equalities, **with no container runtime present**
-  (the whole point — it must not silent-skip).
-- The test fails loudly (not hangs opaquely) if the script is miscalibrated: on
-  any panic the drop guard prints the recorded dialog.
+  (it must not silent-skip).
+- The test fails loudly (drop guard prints the recorded dialog) if miscalibrated.
 - If two fully-parseable `ENVELOPE` lines prove infeasible so `returned` lands at
-  1 (not 2), **stop and escalate** — do not relax the assertion to
-  `fetch_skipped >= 1` (spec §"no weaker fallback").
+  1, **stop and escalate** — do not relax to `fetch_skipped >= 1` (spec §"no
+  weaker fallback").
 - `cargo clippy -p rimap-server --all-targets --all-features -- -D warnings`
   clean.
 
@@ -239,7 +251,7 @@ path. Proves the move is behavior-preserving.
 
 ---
 
-## Task 4 — Full guardrail sweep + schema-regen gate
+## Task 3 — Full guardrail sweep + schema-regen gate
 
 **Where it fits:** AC 3 — `just ci` stays green.
 
@@ -249,14 +261,13 @@ path. Proves the move is behavior-preserving.
    `crates/rimap-server/tests/fixtures/rimap-tool-schemas/` (no `*Meta`/
    `*Untrusted` struct changed, so nothing should regenerate).
 2. `just ci` green end to end. Watch specifically:
-   - `cargo-deny`: the new `publish = false` crate must not trip advisories /
-     bans / sources / license (it adds no external dep; run `just deny`).
+   - `cargo-deny` (`just deny`): the new `publish = false` crate must not trip
+     advisories / bans / sources / license (it adds no external dep).
    - MSRV (`just test-msrv`, 1.88.0): the crate + tests must build on MSRV.
    - clippy `--all-features`: the fake crate compiles under the full workspace
      lint set with no bare `#[allow]`.
-3. Verify the fuzz subcrate's `Cargo.lock` parity is untouched (this change does
-   not alter the parser stack, so no realignment needed — confirm `git status`
-   shows no `crates/rimap-server/fuzz/Cargo.lock` churn).
+3. Verify no `crates/rimap-server/fuzz/Cargo.lock` churn (`git status`) — this
+   change does not alter the parser stack, so no fuzz-lockfile realignment.
 
 **Acceptance criteria:**
 
