@@ -8,12 +8,10 @@
 //! ignored placeholder that marked this gap.
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
-mod support;
-
 use core::num::NonZeroU32;
 
+use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
 use rimap_imap::types::Uid;
-use support::fake_imap::{FakeImapServer, Step, login_preamble};
 
 #[tokio::test]
 async fn no_move_no_uidplus_uses_folder_wide_expunge() {
