@@ -476,9 +476,6 @@ fn cap_ancestor_ids(ids: Vec<String>) -> Vec<String> {
     deduped.split_off(start)
 }
 
-/// Fetch envelope/flags/size for `page_uids` and format each as a
-/// `SearchResultEntry`, in `page_uids`' order (not the FETCH response
-/// order — see the comment on the `fetch` call for why).
 /// Build a `SearchMeta`, computing the page shortfall from the request and
 /// response slices so the two load-bearing counts cannot be transposed at a
 /// call site.
@@ -513,6 +510,9 @@ fn build_search_meta(
     }
 }
 
+/// Fetch envelope/flags/size for `page_uids` and format each as a
+/// `SearchResultEntry`, in `page_uids`' order (not the FETCH response
+/// order — see the comment on the `fetch` call for why).
 async fn fetch_and_format_page(
     account: &AccountState,
     folder: &str,
