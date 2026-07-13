@@ -1,7 +1,9 @@
-//! In-process TLS-terminating scriptable IMAP fake. Replays an ordered
-//! `Vec<Step>` per accepted connection (accept-loop) so a client's transparent
-//! read-only reconnect re-observes the same dialog. Drives the real
-//! `Connection`.
+//! In-process TLS-terminating scriptable IMAP fake. Serves an ordered
+//! `Vec<Step>` per accepted connection (accept-loop). `start` replays one
+//! shared script for every connection so a client's transparent read-only
+//! reconnect re-observes the same dialog; `start_sequence` serves a *distinct*
+//! script per connection for asymmetric reconnect scenarios (fail, fail,
+//! succeed). Drives the real `Connection`.
 #![expect(
     clippy::unwrap_used,
     clippy::missing_panics_doc,
@@ -26,7 +28,8 @@ use tokio_rustls::TlsAcceptor;
 use crate::certs::{self, SelfSigned};
 
 /// Bounded number of connections the accept-loop serves — a read-only retry
-/// needs at most 2; the cap prevents a storming client.
+/// needs at most 2, and the longest scripted sequence (fail, fail, succeed)
+/// needs 3; the cap prevents a storming client.
 const MAX_ACCEPTS: usize = 4;
 
 /// Fixed password the static resolver returns.
@@ -94,7 +97,27 @@ impl Drop for FakeImapServer {
 
 impl FakeImapServer {
     /// Bind `127.0.0.1:0`, spawn the accept-loop, and return once listening.
+    /// The single `script` is replayed for every accepted connection — the
+    /// len-1 case of [`FakeImapServer::start_sequence`].
     pub async fn start(script: Vec<Step>) -> FakeImapServer {
+        Self::start_sequence(vec![script]).await
+    }
+
+    /// Bind `127.0.0.1:0` and spawn an accept-loop that serves a *distinct*
+    /// script per connection: the i-th accepted connection is served
+    /// `scripts[i]`, and every connection past the last script replays the
+    /// final one (so `start_sequence(vec![script])` is exactly
+    /// [`FakeImapServer::start`]). This expresses asymmetric reconnect
+    /// scenarios — e.g. fail, fail, then succeed across three connections —
+    /// that a single replayed script cannot.
+    ///
+    /// # Panics
+    /// Panics if `scripts` is empty (there is no script to serve).
+    pub async fn start_sequence(scripts: Vec<Vec<Step>>) -> FakeImapServer {
+        assert!(
+            !scripts.is_empty(),
+            "start_sequence requires at least one script",
+        );
         let SelfSigned { chain, key, pin } = certs::self_signed();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ServerConfig::builder_with_provider(provider)
@@ -108,10 +131,11 @@ impl FakeImapServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let recorded = Arc::new(Mutex::new(Vec::new()));
-        let script = Arc::new(script);
+        let scripts = Arc::new(scripts);
         let rec_task = Arc::clone(&recorded);
 
         let task = tokio::spawn(async move {
+            let mut served = 0usize;
             for _ in 0..MAX_ACCEPTS {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
@@ -119,7 +143,11 @@ impl FakeImapServer {
                 let Ok(tls) = acceptor.accept(stream).await else {
                     continue;
                 };
-                let _ = serve(tls, &script, &rec_task).await;
+                let script = scripts
+                    .get(served)
+                    .unwrap_or_else(|| scripts.last().unwrap());
+                served += 1;
+                let _ = serve(tls, script, &rec_task).await;
             }
         });
 
@@ -299,5 +327,81 @@ struct NoopAudit;
 impl AuthEventSink for NoopAudit {
     fn emit_auth(&self, _event: AuthEvent) -> Result<(), AuthSinkError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FakeImapServer, Step, login_preamble};
+
+    /// A connection the server refuses at LOGIN with a tagged `NO`, so the
+    /// client's first operation fails and it issues nothing further. Models a
+    /// "failing" connection in a reconnect sequence.
+    fn failing_login() -> Vec<Step> {
+        vec![
+            Step::Send(b"* OK fake ready\r\n".to_vec()),
+            Step::Expect { verb: "CAPABILITY" },
+            Step::Send(b"* CAPABILITY IMAP4rev1\r\n".to_vec()),
+            Step::Reply {
+                text: "OK CAPABILITY completed",
+            },
+            Step::Expect { verb: "LOGIN" },
+            Step::Reply {
+                text: "NO [AUTHENTICATIONFAILED] invalid credentials",
+            },
+        ]
+    }
+
+    /// A connection that logs in and answers `LIST` successfully. Models a
+    /// "healthy" connection.
+    fn healthy_list() -> Vec<Step> {
+        let mut steps = login_preamble("IMAP4rev1");
+        steps.extend([
+            Step::Expect { verb: "LIST" },
+            Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
+            Step::Reply {
+                text: "OK LIST completed",
+            },
+        ]);
+        steps
+    }
+
+    /// AC proof: a sequence-scripted fake serves fail, fail, succeed across
+    /// three independent connections. Each fresh `Connection` opens exactly one
+    /// socket (a refused LOGIN does not reconnect), so connection *i* is served
+    /// `scripts[i]`. Non-vacuous by construction: were one script replayed for
+    /// every connection, the third `list_folders` could not succeed while the
+    /// first two fail — no single script satisfies both.
+    #[tokio::test]
+    async fn start_sequence_serves_distinct_script_per_connection() {
+        let server =
+            FakeImapServer::start_sequence(vec![failing_login(), failing_login(), healthy_list()])
+                .await;
+
+        for attempt in 0..2 {
+            let conn = server.connection("user@example.com");
+            assert!(
+                conn.list_folders("*").await.is_err(),
+                "connection {attempt} was scripted to refuse LOGIN, so its first operation must fail",
+            );
+        }
+
+        let conn = server.connection("user@example.com");
+        assert!(
+            conn.list_folders("*").await.is_ok(),
+            "the third connection is scripted healthy and must succeed — proof it was served a distinct script from the first two",
+        );
+
+        // The global ordered recording still attributes every connection's
+        // commands: three connections means three LOGINs.
+        let logins = server
+            .recorded()
+            .iter()
+            .filter(|line| line.to_ascii_uppercase().contains("LOGIN"))
+            .count();
+        assert_eq!(
+            logins, 3,
+            "each of the three connections must issue its own LOGIN",
+        );
     }
 }
