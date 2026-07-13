@@ -134,9 +134,15 @@ pub(crate) async fn select(
 ) -> Result<SelectedFolder, ImapError> {
     validate_server_folder_name(folder)?;
     let mailbox = if read_only {
-        session.examine(folder).await.map_err(map_err)?
+        session
+            .examine(folder)
+            .await
+            .map_err(|e| map_select_err(e, folder))?
     } else {
-        session.select(folder).await.map_err(map_err)?
+        session
+            .select(folder)
+            .await
+            .map_err(|e| map_select_err(e, folder))?
     };
     Ok(SelectedFolder {
         name: folder.to_string(),
@@ -146,6 +152,28 @@ pub(crate) async fn select(
         uid_next: mailbox.uid_next,
         read_only,
     })
+}
+
+/// Classify a `SELECT` / `EXAMINE` error, narrowing the mailbox-not-found
+/// case out of the generic protocol bucket.
+///
+/// A tagged `NO` on `SELECT` / `EXAMINE` means the mailbox does not exist or
+/// cannot be accessed (RFC 3501 §6.3.1 / §6.3.2) — a client / input error, not
+/// a malformed-server fault — so it becomes [`ImapError::FolderNotFound`]
+/// (`ERR_NOT_FOUND`), giving the agent an actionable "check the folder name"
+/// affordance. Every other error, including connection-lost, defers to
+/// [`map_err`] so its classification is unchanged: `NO` is the only case
+/// redirected here. `async-imap` surfaces a tagged `NO` as the distinct
+/// `Error::No` variant, so this never intercepts a connection-lost or `BAD`
+/// response.
+fn map_select_err(err: async_imap::error::Error, folder: &str) -> ImapError {
+    if matches!(err, async_imap::error::Error::No(_)) {
+        ImapError::FolderNotFound {
+            name: folder.to_string(),
+        }
+    } else {
+        map_err(err)
+    }
 }
 
 fn build_status_items(items: StatusItems) -> String {
@@ -355,6 +383,42 @@ mod tests {
         // forever. Assert the unit variant is classified as
         // `ImapError::ConnectionLost` so the caller drops and reconnects.
         let mapped = map_err(async_imap::error::Error::ConnectionLost);
+        assert!(matches!(mapped, ImapError::ConnectionLost));
+    }
+
+    #[test]
+    fn map_select_err_routes_no_to_folder_not_found() {
+        // A tagged NO on SELECT/EXAMINE means "no such mailbox" — the pinned
+        // decision (#569) maps it to FolderNotFound (ERR_NOT_FOUND), NOT the
+        // generic Protocol/ERR_IMAP_PROTOCOL bucket.
+        let mapped = map_select_err(
+            async_imap::error::Error::No("Mailbox doesn't exist".to_string()),
+            "Missing",
+        );
+        match mapped {
+            ImapError::FolderNotFound { name } => assert_eq!(name, "Missing"),
+            #[expect(clippy::panic, reason = "intentional test assertion failure path")]
+            other => panic!("expected FolderNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_select_err_routes_bad_to_protocol() {
+        // Scope guard: only tagged NO becomes FolderNotFound. A BAD response
+        // on the same path stays Protocol (ERR_IMAP_PROTOCOL), unchanged.
+        let mapped = map_select_err(async_imap::error::Error::Bad("BAD".to_string()), "Missing");
+        assert!(matches!(mapped, ImapError::Protocol(_)));
+    }
+
+    #[test]
+    fn map_select_err_routes_connection_lost_to_connection_lost() {
+        // Non-vacuity: a torn-down connection during SELECT/EXAMINE must still
+        // classify as ConnectionLost (so the caller drops and reconnects), not
+        // get swallowed as FolderNotFound.
+        let mapped = map_select_err(async_imap::error::Error::ConnectionLost, "Missing");
+        assert!(matches!(mapped, ImapError::ConnectionLost));
+        let io = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+        let mapped = map_select_err(async_imap::error::Error::Io(io), "Missing");
         assert!(matches!(mapped, ImapError::ConnectionLost));
     }
 
