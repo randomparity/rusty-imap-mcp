@@ -50,6 +50,18 @@ pub enum ImapError {
     /// Underlying `async-imap` protocol error.
     #[error("IMAP protocol error: {0}")]
     Protocol(#[source] async_imap::error::Error),
+    /// A `SELECT` / `EXAMINE` was answered with a tagged `NO` because the
+    /// mailbox does not exist or cannot be accessed (RFC 3501 §6.3.1 /
+    /// §6.3.2). Distinct from [`Self::Protocol`]: this is a client / input
+    /// error (wrong folder name), not a malformed-server fault, so it maps
+    /// to the `NotFound` family (`ERR_NOT_FOUND`) — the same code as the
+    /// sibling "no such UID" case — giving the agent an actionable
+    /// "check the folder name" affordance rather than "protocol error".
+    #[error("mailbox does not exist: {name}")]
+    FolderNotFound {
+        /// The mailbox name the caller tried to `SELECT` / `EXAMINE`.
+        name: String,
+    },
     /// TCP half-open: detected dead connection during a command.
     #[error("connection torn down mid-command")]
     ConnectionLost,
@@ -205,6 +217,7 @@ impl ImapError {
             Self::Auth { .. } => ErrorCode::Auth,
             Self::SizeLimit { .. } => ErrorCode::AttachmentTooLarge,
             Self::Protocol(_) => ErrorCode::ImapProtocol,
+            Self::FolderNotFound { .. } => ErrorCode::NotFound,
             Self::InvalidInput { .. } | Self::BatchTooLarge { .. } => ErrorCode::InvalidInput,
             Self::UidValidityChanged { .. } | Self::UidValidityUnavailable { .. } => {
                 ErrorCode::UidValidityChanged
@@ -358,6 +371,41 @@ mod tests {
             #[expect(clippy::panic, reason = "intentional test assertion failure path")]
             other => panic!("expected RimapError::UidValidityChanged, got {other:?}",),
         }
+    }
+
+    #[test]
+    fn folder_not_found_maps_to_not_found_code() {
+        use rimap_core::ErrorCode;
+        let err = ImapError::FolderNotFound {
+            name: "Missing".to_string(),
+        };
+        assert_eq!(err.code(), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn folder_not_found_routes_through_generic_imap_arm_as_not_found() {
+        use rimap_core::{ErrorCode, RimapError};
+
+        let imap_err = ImapError::FolderNotFound {
+            name: "Missing".to_string(),
+        };
+        let rimap_err: RimapError = imap_err.into();
+        // FolderNotFound has no typed recovery payload, so it flows through
+        // the generic `Imap` arm — same client-visible NotFound code, no
+        // dedicated variant.
+        match rimap_err {
+            RimapError::Imap { code, .. } => assert_eq!(code, ErrorCode::NotFound),
+            #[expect(clippy::panic, reason = "intentional test assertion failure path")]
+            other => panic!("expected RimapError::Imap {{ code: NotFound }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn folder_not_found_display_includes_name() {
+        let err = ImapError::FolderNotFound {
+            name: "[Gmail]/Nope".to_string(),
+        };
+        assert!(format!("{err}").contains("[Gmail]/Nope"));
     }
 
     #[test]

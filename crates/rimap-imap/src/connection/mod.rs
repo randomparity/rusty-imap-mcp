@@ -403,6 +403,12 @@ mod tests {
                 "ERR_IMAP_PROTOCOL",
             ),
             (
+                ImapError::FolderNotFound {
+                    name: "Missing".to_string(),
+                },
+                "ERR_NOT_FOUND",
+            ),
+            (
                 ImapError::InvalidInput {
                     field: "f",
                     reason: "r",
