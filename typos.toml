@@ -2,6 +2,11 @@
 extend-ignore-re = [
     # Allow hex blobs used in doc examples
     "[0-9a-f]{32,}",
+    # Deliberate "emial" typo used as an example in scripts/check-publishable-metadata.sh
+    # (illustrating an unknown crates.io category slug). Scope the ignore to that exact
+    # usage so genuine "emial" typos elsewhere are still caught. Literal (single-quoted)
+    # TOML string so the embedded quotes and `\.` pass through to the regex unescaped.
+    'e\.g\. "emial"',
 ]
 
 [default.extend-words]
@@ -14,12 +19,21 @@ caf = "caf"
 CNA = "CNA"
 # STRIDE table uses bold-letter notation (**I**nformation). Typos sees "nformation" as a fragment.
 nformation = "nformation"
+# Common technical prefix in hyphenated prose (mis-decoded, mis-signal, mis-upstreamed,
+# mis-count, mis-set, mis-ordered). Typos flags the bare "mis" fragment.
+mis = "mis"
+# Valid English variant of "unparsable"; used in doc comments ("skipping unparseable lines").
+unparseable = "unparseable"
 
 [default.extend-identifiers]
 # IMAP SELECT command, pluralized in prose ("SELECTs"). Typos's camelCase
 # splitter treats the trailing lowercase "s" as a new word boundary and
 # flags the remaining "SELEC" fragment as a typo of "SELECT".
 SELECTs = "SELECTs"
+# IMAP DELETE command, pluralized in prose ("DELETEs"). Same all-caps-plural
+# splitter trap as SELECTs: the trailing lowercase "s" splits off, leaving the
+# "DELET" fragment flagged as a typo of "DELETE".
+DELETEs = "DELETEs"
 
 [files]
 extend-exclude = [
