@@ -90,7 +90,8 @@ pub struct Recorder { exchanges: Vec<Value> }
 
 impl Recorder {
     /// Drive one request through the harness, record request+response, return
-    /// the response for optional in-test assertions.
+    /// the response so the flow's mandatory non-vacuity assertions can run on it
+    /// (see Testing §Non-vacuity).
     pub async fn call(&mut self, h: &mut Harness, method: &str, params: Value) -> Value;
 
     /// Render the recorded exchanges to a stable, normalized snapshot string.
@@ -108,8 +109,23 @@ the id column is stable by construction and needs no masking. It calls
 pushes `{ "request": {method, params}, "response": <result-or-error> }`.
 
 `render` serializes the exchanges with `serde_json::to_string_pretty`, wrapped in
-`>>> request N` / `<<< response N` header lines for diff readability, then applies
-`normalize`.
+`>>> request N` / `<<< response N` header lines for diff readability, then
+**strips `\r`** (so a CRLF-terminated MIME body line in a fetched message renders
+LF-only — see "Cross-platform stability" below) and applies `normalize`.
+
+**Serialization-order invariant.** The snapshot pins the *server binary's*
+serialized output, so it is stable only if every collection the server renders
+into the response serializes in a fixed order run-to-run. `serde_json` emits
+struct fields in declaration order and its object `Map` is order-stable, but a
+`HashMap`/`HashSet` anywhere in the response path (capabilities, the `tools/list`
+catalog, a `meta` map, a `security_warnings` collection) would randomize key/element
+order per process and flake the snapshot — the classic `insta` failure. This spec
+requires: (a) confirming during TDD that those surfaces serialize from ordered
+containers (`Vec` / `BTreeMap` / `IndexMap`), and (b) if any hash-ordered container
+is found, adding a canonicalizing sort in `render` (parse to `serde_json::Value`,
+which orders object keys, before rendering) rather than masking. Calibration runs
+each flow test **5×** locally before committing the `.snap`, so hash-order flake
+surfaces pre-commit, not on a later CI run.
 
 The module lives under `support/wire/` (not the shared `rimap-fake-imap` crate) —
 it is `rimap-server`-test-specific and depends on `Harness`. It follows the
@@ -119,14 +135,27 @@ in a sibling binary (see `harness.rs`).
 ### 3. The `normalize` helper — exactly what it masks, and why
 
 Because the fake is byte-deterministic, the mask list is short and each entry has
-a justification (an un-justified mask hides the very drift we want to catch):
+a justification (an un-justified mask hides the very drift we want to catch). The
+first calibration step is to **establish which of these values actually appear in
+the MCP transcript at all** — the IMAP `host:port` and the tempdir are
+server-internal config that may never surface in a happy-path tool response. A
+mask for a value that never appears is dead weight and is dropped; a mask is added
+only for a value TDD shows in the rendered transcript.
 
-| Masked → placeholder | Why it varies | Risk if unmasked |
+| Masked → placeholder | Why it varies | Anchoring / risk if unmasked |
 |---|---|---|
-| `127.0.0.1:<port>` and bare `:<port>` → `<HOST:PORT>` | fake binds `:0` (ephemeral) | flaky every run |
-| tempdir path prefix → `<TMPDIR>` | `TempDir` randomizes | flaky every run |
+| the full `127.0.0.1:<port>` token → `<HOST:PORT>` | fake binds `:0` (ephemeral) | **only if it appears** (e.g. connection-error meta). Anchor to the whole `host:port` string — **never** a bare `:<digits>` regex, which would rewrite envelope/body clock times like `10:30:00`. |
+| tempdir path prefix → `<TMPDIR>` | `TempDir` randomizes | **only if it appears** (e.g. an attachment save path). Must match both macOS (`/var/folders/…`, `$TMPDIR`) and Linux (`/tmp/…`) forms. |
 | `serverInfo.version` value → `<VERSION>` | bumps every release | churns on version bump, not on drift |
-| any generated `Date:`/RFC-2822 timestamp in a `create_draft` echo → `<DATE>` | server stamps "now" if it echoes a generated date | flaky every run — **confirmed during TDD**; masked only if the response actually carries one |
+| every server-generated field in the `create_draft` / `APPEND` response — `Date:`, `Message-ID`, MIME `boundary`, any UUID/nonce, generated save-path | server stamps "now" / random per call | flaky every run. **The full set is enumerated during TDD, not assumed to be `Date` alone.** Prefer pinning at the source (a seeded clock/RNG if the config exposes one) over adding masks; mask only what genuinely cannot be pinned. Each mask erodes faithfulness. |
+
+**Collision window.** The ephemeral port is random in the 32768–60999 range and
+could, on some runs, equal a scripted `RFC822.SIZE` or `UID` — masking a
+deterministic value on those runs only. Because every scripted numeric in the
+fixtures is author-chosen, they are all kept **well below 32768** (small UIDs like
+1–3, small sizes like 42/512), eliminating the window by construction. The
+`host:port` mask (if needed at all) is additionally anchored to the full token, so
+it cannot match a bare number.
 
 Everything else is deterministic and **left visible on purpose**: tool
 descriptions, `server_instructions`, `security_warnings` text, `meta` fields,
@@ -134,9 +163,20 @@ sanitized body text, scripted UIDs/sizes/envelope dates. Those are the payload
 the snapshot exists to guard.
 
 `normalize` is applied as an ordered list of `(Regex, &str)` replacements and is
-unit-tested directly (feed a string with a port + temp path, assert the
-placeholders) so the helper itself is a checkable unit, not just an implicit part
-of a big snapshot — satisfying AC 2 with its own falsifiable test.
+unit-tested directly with **both a positive and a negative case**: feed a string
+containing a `host:port`, a temp path, and a version and assert the placeholders;
+**and** feed a string containing an envelope clock time (`10:30:00`) and a small
+scripted size and assert they are left **untouched**. This makes the helper a
+checkable unit whose over-masking is falsifiable, not just an implicit part of a
+big snapshot — satisfying AC 2 with its own tests.
+
+**Cross-platform stability.** One committed `.snap` per flow is shared across the
+`check (macOS)` lane and the Linux `test` lanes, so the golden must be identical on
+both. Two hazards are handled: (1) `render` strips `\r` before snapshotting, so
+CRLF-terminated MIME body lines never embed a `\r` in the `.snap`; and (2) a
+`.gitattributes` entry pins `*.snap` to `text eol=lf` so `core.autocrlf` cannot
+rewrite committed goldens. Any surviving path mask must cover both OS temp-dir
+forms and is unit-tested for each.
 
 ### 4. Fixtures and flows
 
@@ -221,7 +261,8 @@ existing schema-regen note) and a header doc-comment in each flow test:
   don't accept.
 - `insta` is already a dev-dependency (`rimap-content`, `rimap-config`,
   `rimap-server`); no new dependency. `.snap` files live under
-  `crates/rimap-server/tests/snapshots/` and are committed.
+  `crates/rimap-server/tests/snapshots/` and are committed, with a
+  `.gitattributes` entry pinning `*.snap` to `text eol=lf`.
 
 ## Testing
 
@@ -231,10 +272,23 @@ existing schema-regen note) and a header doc-comment in each flow test:
 - **`normalize` unit test**: feeds a raw string containing a port, a temp path,
   and a version and asserts the placeholders — the normalization helper is
   falsifiable on its own (AC 2).
-- **Non-vacuity**: the snapshots contain the real `security_warnings` and `meta`
-  text; reverting a warning string or dropping a `meta` field changes the `.snap`
-  and fails CI. A snapshot that renders empty/degenerate (e.g. all calls errored)
-  is a calibration failure to escalate, not a pass.
+- **Non-vacuity is enforced in-test, not by review.** Before rendering the
+  snapshot, each flow test asserts the transcript is non-degenerate, so a subtly
+  empty golden fails *loudly at run time* rather than being silently accepted into
+  a green-forever `.snap`. The hard assertions:
+  - No `tools/call` in the flow returned `isError: true` **unless that error is
+    the pinned subject of the call** (none of the triage/cleanup happy-path calls
+    are). A tool that errored because its dialog was miscalibrated must fail the
+    test, not be snapshotted as the "expected" output.
+  - The **hostile** `fetch_message` response carries a **non-empty
+    `security_warnings`** and the `untrusted` marker — the whole reason the hostile
+    fixture is in the flow. If the sanitizer path wasn't reached (e.g. the fixture
+    bytes didn't parse), this fires before the snapshot is written.
+  - `tools/list` advertised a **non-empty** tool catalog for the flow's posture.
+
+  `Recorder::call` returns the response precisely so these assertions can run on
+  it; they are mandatory, not "optional." Only after they pass is `render()` +
+  `assert_snapshot!` reached.
 - **`just ci` green**, including the schema-regen gate (no `*Meta`/`*Untrusted`
   struct change here → empty diff expected).
 
