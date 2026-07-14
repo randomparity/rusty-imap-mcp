@@ -226,6 +226,14 @@ impl DovecotHarness {
     /// connections. Used by fault-injection tests that need the server's
     /// next IMAP connect to be refused (`ERR_CONNECTION_LOST`). `Drop`
     /// still runs `compose down -v`, which cleans up a stopped project.
+    ///
+    /// `compose stop` returns once the container process exits, but the
+    /// published host-port proxy can keep accepting TCP for a brief window
+    /// afterward. A connect landing in that window completes at TCP level and
+    /// then fails mid-TLS-handshake, surfacing as `ERR_TLS` instead of the
+    /// `ERR_CONNECTION_LOST` a refused connect yields — the intermittent
+    /// mismatch the fault-injection test hit. Block until the port actually
+    /// refuses connections so the caller's next connect is deterministic.
     pub fn stop(&self) {
         let status = Command::new(runtime())
             .arg("compose")
@@ -236,6 +244,14 @@ impl DovecotHarness {
             .status()
             .expect("compose stop spawn failed");
         assert!(status.success(), "compose stop failed");
+
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.port));
+        assert!(
+            wait_until_port_refused(addr, Duration::from_secs(15)),
+            "host port {} still accepting connections 15s after `compose stop`; \
+             the next connect would race a mid-handshake ERR_TLS",
+            self.port,
+        );
     }
 
     pub fn fingerprint(&self) -> &TlsFingerprint {
@@ -287,6 +303,25 @@ fn wait_for_ready(
 impl Drop for DovecotHarness {
     fn drop(&mut self) {
         compose_down(&self.project, &self.compose_dir);
+    }
+}
+
+/// Poll `addr` until a TCP connect is refused (the listener is fully torn
+/// down) or `deadline` elapses. Returns `true` once connections are refused,
+/// `false` if the deadline passed while the port was still accepting. Used by
+/// [`DovecotHarness::stop`] to wait out the host-port proxy's post-stop
+/// acceptance window so the caller's next connect deterministically refuses
+/// rather than failing mid-TLS-handshake.
+fn wait_until_port_refused(addr: std::net::SocketAddr, deadline: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+            return true;
+        }
+        if start.elapsed() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -375,4 +410,44 @@ fn force_use_for_dead_code_link(h: &DovecotHarness) {
     h.delete_mailbox("");
     let _ = DovecotHarness::create_mailbox;
     let _ = DovecotHarness::stop;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{SocketAddr, TcpListener};
+    use std::time::Duration;
+
+    use super::wait_until_port_refused;
+
+    /// Once the listener is dropped the port refuses connects, so the poll
+    /// returns `true` well within the deadline — the case `stop` relies on.
+    #[test]
+    fn wait_until_port_refused_returns_true_after_listener_drops() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr: SocketAddr = listener.local_addr().expect("read local addr");
+        drop(listener);
+        assert!(
+            wait_until_port_refused(addr, Duration::from_secs(2)),
+            "a closed port must be detected as refused",
+        );
+    }
+
+    /// While a listener is still bound the port keeps accepting, so the poll
+    /// exhausts the deadline and returns `false` rather than looping forever —
+    /// the bound that keeps `stop`'s assertion from hanging.
+    #[test]
+    fn wait_until_port_refused_returns_false_while_listener_accepts() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr: SocketAddr = listener.local_addr().expect("read local addr");
+        assert!(
+            !wait_until_port_refused(addr, Duration::from_millis(300)),
+            "a still-listening port must time out as not-refused",
+        );
+        // Drain the connections the poll left in the accept backlog so the test
+        // leaves no half-open loopback sockets behind (nextest flags those as
+        // "leaky").
+        listener.set_nonblocking(true).expect("set nonblocking");
+        while listener.accept().is_ok() {}
+        drop(listener);
+    }
 }
