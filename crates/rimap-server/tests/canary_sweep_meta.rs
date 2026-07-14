@@ -6,8 +6,6 @@
 // clippy::panic). Declaring expect_used/panic here would be unfulfilled → error.
 #![expect(clippy::unwrap_used, reason = "test")]
 
-use std::path::Path;
-
 use tempfile::TempDir;
 
 #[path = "support/canary.rs"]
@@ -134,8 +132,6 @@ fn login_frame_predicate_matches_command_position_only() {
 
 #[test]
 fn dovecot_sentinel_is_colon_free() {
-    let p: &Path = Path::new(".");
-    let _ = p;
     assert!(
         !canary::DOVECOT_CANARY_PASSWORD.contains(':'),
         "sentinel must be a valid passwd-file password",

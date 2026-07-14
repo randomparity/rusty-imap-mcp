@@ -50,7 +50,9 @@ pub struct ScanReport {
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
+    if needle.is_empty() {
+        // `windows(0)` panics; a needle longer than the haystack yields an empty
+        // iterator from `windows`, so no explicit length guard is needed.
         return None;
     }
     haystack.windows(needle.len()).position(|w| w == needle)
