@@ -40,9 +40,10 @@
 //! Meta-test for the canary sweep (issue #528, AC2). Proves the sweep detects a
 //! deliberately-seeded leak and stays clean on a leak-free tree. Host-runnable,
 //! no container, PR-blocking.
+// Only `unwrap_used` is expected: this file uses `.unwrap()` but no `.expect()`
+// and no literal `panic!` (assert!/assert_eq!/#[should_panic] do NOT trigger
+// clippy::panic). Declaring expect_used/panic here would be unfulfilled → error.
 #![expect(clippy::unwrap_used, reason = "test")]
-#![expect(clippy::expect_used, reason = "test")]
-#![expect(clippy::panic, reason = "test")]
 
 use std::path::Path;
 
@@ -146,7 +147,10 @@ Expected: FAIL — `canary.rs` does not exist / unresolved module.
 //! Each suite injects a canary password and, at teardown, asserts it appears in
 //! no artifact the run produced. See
 //! `docs/superpowers/specs/2026-07-14-issue-528-secret-leak-canary-design.md`.
-#![expect(clippy::expect_used, reason = "integration tests")]
+// NOTE: declare ONLY lints this file actually triggers — an unfulfilled
+// `#[expect]` is itself an error under `-D warnings`. This module uses `panic!`
+// (in `assert_absent`) but no `.expect()` and no `.unwrap()`, so only
+// `clippy::panic` is expected.
 #![expect(clippy::panic, reason = "test assertions render diagnostics")]
 
 use std::path::Path;
@@ -499,8 +503,12 @@ Expected: clean (or run `just fmt`).
 
 - [ ] **Step 5: Verify Dovecot still authenticates.** If a container runtime is present, force the Dovecot suites to run:
 
-Run: `RIMAP_REQUIRE_DOCKER=1 cargo nextest run -p rimap-server -E 'binary(e2e_wire)' 2>&1 | tail -30`
-Expected: PASS — the login round-trips against the renamed passwd-file. If no runtime is available locally, run `cargo nextest run -p rimap-server -E 'binary(e2e_wire)'` (silent-skip) and note that CI's Dovecot lane verifies login; do not proceed to Task 6 until a Dovecot run has gone green somewhere (locally or on the PR).
+Run both crates that authenticate against the renamed passwd-file — `rimap-server`'s wire e2e AND `rimap-imap`'s own Dovecot integration tests (which consume `container.rs::password()` and the same `users` file):
+```
+RIMAP_REQUIRE_DOCKER=1 cargo nextest run -p rimap-server -E 'binary(e2e_wire)' 2>&1 | tail -30
+RIMAP_REQUIRE_DOCKER=1 cargo nextest run -p rimap-imap 2>&1 | tail -30
+```
+Expected: PASS — login round-trips against the renamed passwd-file in both crates. If no runtime is available locally, run without `RIMAP_REQUIRE_DOCKER` (silent-skip) and rely on CI's Dovecot lane; do not proceed to Task 6 until a Dovecot run has gone green somewhere (locally or on the PR). A rename typo shows up here as a login failure.
 
 - [ ] **Step 6: Commit**
 
@@ -551,7 +559,7 @@ Suites (all backed by `FakeImapServer`, all inject `"fake-password"` today, all 
    ```
    If a suite already ends by dropping the harness without `shutdown_and_wait`, add the `shutdown_and_wait` call so the reap-and-flush barrier holds before the sweep (see §4.4 of the spec). The fake `server` variable is already in scope in each (it is the `FakeImapServer::start(...)` local, sometimes wrapped in `DumpOnPanic`).
 
-- [ ] **Step 1: Wire `e2e_wire_fetch_skipped.rs` first** (it has one authenticating test, `search_reports_fetch_skipped_on_short_page_over_wire`). Apply edits 1–3. Note `PASSWORD_ENV_VAR` is already imported.
+- [ ] **Step 1: Wire `e2e_wire_fetch_skipped.rs` first** (it has one authenticating test, `search_reports_fetch_skipped_on_short_page_over_wire`). Apply edits 1–3. `PASSWORD_ENV_VAR` is a file-local `const PASSWORD_ENV_VAR: &str = "RUSTY_IMAP_MCP_PASSWORD";` in the fake suites (imported from `rimap_config` in the Dovecot suites) — either form already resolves, no import change needed.
 
 - [ ] **Step 2: Run it**
 
@@ -581,53 +589,34 @@ git commit -m "test(server): sweep canary in fake login-frame e2e suites (#528)"
 
 ---
 
-### Task 5: Wire the fake hygiene suite `e2e_wire_tls_pin_mismatch` + add `Harness::artifact_root`
+### Task 5: Wire the fake hygiene suite `e2e_wire_tls_pin_mismatch`
 
-This suite fails the TLS pin **before** LOGIN, so `recorded()` is empty and there is no positive control. It does not call `shutdown_and_wait` (it reaps the boot-failed child directly), so it needs an accessor for the tempdir root, read only after the child exit status is collected.
+This suite fails the TLS pin **before** LOGIN, so `recorded()` is empty and there is no positive control — absence-only. It **already** calls `shutdown_and_wait` (`let (status, tempdir) = harness.shutdown_and_wait().await;` at ~line 127 and reads `tempdir.path()` for audit/stderr assertions), so no new accessor is needed: sweep the tempdir it already returns.
 
 **Files:**
-- Modify: `crates/rimap-server/tests/support/wire/harness.rs`
 - Modify: `crates/rimap-server/tests/e2e_wire_tls_pin_mismatch.rs`
 
-- [ ] **Step 1: Add `artifact_root` to `Harness`** (next to `audit_path`, same `#[expect]` for the underscore binding):
-
-```rust
-/// Root of this harness's tempdir — the directory holding the audit log,
-/// stderr log, config, and downloads. Read only after the child has been
-/// reaped (exit status collected) so all stderr/audit has flushed.
-#[expect(
-    clippy::used_underscore_binding,
-    reason = "the leading underscore on `_tempdir` flags it as a drop guard; this \
-              accessor exposes its path on purpose for the canary sweep"
-)]
-pub fn artifact_root(&self) -> std::path::PathBuf {
-    self._tempdir.path().to_path_buf()
-}
-```
-
-Add `let _ = Harness::artifact_root;` to the existing `force_use_for_dead_code_link` in that file.
-
-- [ ] **Step 2: Wire the suite.** Add `#[path = "support/canary.rs"] mod canary;`. In the test, bind `let password = canary::fresh_canary();`, inject it (replace `"fake-password"`). After the child's exit status is collected (the suite already reaps it), sweep:
+- [ ] **Step 1: Wire the suite.** Add `#[path = "support/canary.rs"] mod canary;`. Bind `let password = canary::fresh_canary();` and inject it (replace `"fake-password"`). Capture `let recorded = server.recorded();` before `shutdown_and_wait`. After the existing audit/stderr assertions on the returned `tempdir`, add:
    ```rust
-   canary::assert_absent(&password, &[harness.artifact_root().as_path()], &recorded);
+   canary::assert_absent(&password, &[tempdir.path()], &recorded);
    ```
-   where `recorded` is `server.recorded()` (empty of the canary — no LOGIN sent). Do **not** call `assert_login_frame_only` here.
+   `recorded` is empty of the canary (no LOGIN sent). Do **not** call `assert_login_frame_only` here.
 
-- [ ] **Step 3: Run**
+- [ ] **Step 2: Run**
 
 Run: `cargo nextest run -p rimap-server -E 'binary(e2e_wire_tls_pin_mismatch)'`
 Expected: PASS.
 
-- [ ] **Step 4: Lint**
+- [ ] **Step 3: Lint**
 
 Run: `cargo clippy -p rimap-server --tests --all-features --locked -- -D warnings 2>&1 | tail -20`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add crates/rimap-server/tests/support/wire/harness.rs crates/rimap-server/tests/e2e_wire_tls_pin_mismatch.rs
-git commit -m "test(server): sweep canary in tls-pin-mismatch suite + artifact_root (#528)"
+git add crates/rimap-server/tests/e2e_wire_tls_pin_mismatch.rs
+git commit -m "test(server): sweep canary in tls-pin-mismatch suite (#528)"
 ```
 
 ---
@@ -685,9 +674,14 @@ Suites: `e2e_wire_fault_injection`, `e2e_wire_tool_advertisement`, `e2e_wire_mul
 **Per-suite edits (same as Task 6 but absence-only):**
 1. Add `#[path = "support/canary.rs"] mod canary;`.
 2. Use `canary::DOVECOT_CANARY_PASSWORD` in place of the local `DOVECOT_PASSWORD`.
-3. In every harness-spawning `#[tokio::test]`, sweep the tempdir after the child is reaped:
-   - if the test uses `shutdown_and_wait`: `let (_status, tempdir) = ...; canary::assert_absent(canary::DOVECOT_CANARY_PASSWORD, &[tempdir.path()], &[]);`
-   - if it reaps without `shutdown_and_wait`: `canary::assert_absent(canary::DOVECOT_CANARY_PASSWORD, &[harness.artifact_root().as_path()], &[]);` after the exit status is collected.
+3. In every harness-spawning `#[tokio::test]`, sweep the tempdir after the child is reaped via the `TempDir` that `shutdown_and_wait` returns:
+   ```rust
+   let (_status, tempdir) = harness.shutdown_and_wait().await;
+   canary::assert_absent(canary::DOVECOT_CANARY_PASSWORD, &[tempdir.path()], &[]);
+   ```
+   Suites that currently just drop the harness (`_cancellation`) need `shutdown_and_wait` added to obtain the tempdir. Every wire suite already reaps via `shutdown_and_wait` or `kill_on_drop`; there is no direct-`child.wait` path, so no `artifact_root` accessor is needed.
+
+**`_cancellation` caution:** `shutdown_and_wait` carries a `.expect("clean exit within timeout")` (5 s `SHUTDOWN_TIMEOUT`). The cancellation scenario cancels an in-flight *request*, not the session, so closing stdin still yields a clean EOF-driven exit — but complete the cancellation exchange in the test body **before** calling `shutdown_and_wait`. If the child does not exit cleanly, the added teardown would flake; in that case sweep by capturing the audit/stderr paths before the final drop instead of adding `shutdown_and_wait`.
 
 **During build, confirm the disposition (per spec §4.7):** if any of these suites in fact reliably completes a LOGIN and asserts a successful tool call, it may be promoted to `tool-success` — but absence-only is always safe here, so promotion is optional. Do not add a positive control you cannot guarantee.
 
@@ -735,8 +729,9 @@ Structural enforcement that every `e2e_wire*.rs` references the sweep, and that 
 //! sweep, and per file its `assert_absent` count is >= its harness-spawn count
 //! so no single test can spawn a harness without sweeping. Source-text check;
 //! host-runnable, no container.
+// Only `unwrap_used` is expected — this file uses `.unwrap()` and `assert!`
+// (which is not clippy::panic). A `panic` expectation here would be unfulfilled.
 #![expect(clippy::unwrap_used, reason = "test")]
-#![expect(clippy::panic, reason = "test")]
 
 use std::path::PathBuf;
 
@@ -831,6 +826,6 @@ Expected: green. Container suites silent-skip if no runtime; run them explicitly
 
 ## Self-Review notes
 
-- **Spec coverage:** module (Task 1–2) ↔ spec §4.1; sentinel rename (Task 3) ↔ §4.2; per-disposition wiring (Tasks 4–7) ↔ §4.7 table; AC1 enforcement (Task 8) ↔ §4.6; AC2 (Task 1–2 meta-test) ↔ §4.5; triage (Task 9) ↔ §5 real-leak risk. `artifact_root` (Task 5) ↔ §4.4 boot-closed barrier.
+- **Spec coverage:** module (Task 1–2) ↔ spec §4.1; sentinel rename (Task 3) ↔ §4.2; per-disposition wiring (Tasks 4–7) ↔ §4.7 table; AC1 enforcement (Task 8) ↔ §4.6; AC2 (Task 1–2 meta-test) ↔ §4.5; triage (Task 9) ↔ §5 real-leak risk. The §4.4 reap-and-flush barrier is satisfied everywhere by `shutdown_and_wait` (which returns the `TempDir`); no separate accessor is needed since no wire suite reaps the child directly.
 - **Green between tasks:** Task 3 renames all literals together (no half-renamed login); the module has `force_use_for_dead_code_link` so any binary can include it without dead-code warnings; each wiring task adds `mod canary` and uses its items in the same commit.
 - **Type consistency:** `scan` returns `ScanReport { hits, errors }` everywhere; `assert_absent(canary, roots, extra)` and `assert_login_frame_only(canary, recorded)` signatures are used identically in the meta-tests and every suite.

@@ -325,13 +325,13 @@ let (_status, tempdir) = harness.shutdown_and_wait().await;
 canary::assert_absent(&canary::DOVECOT_CANARY_PASSWORD, &[tempdir.path()], &[]);
 ```
 
-For suites that reap the child **without** `shutdown_and_wait` (e.g.
-`_tls_pin_mismatch`, which fails boot closed), the sweep reads the tempdir root
-via a `Harness::artifact_root()` accessor — but **only after** the same barrier:
-the child's exit status has been collected and its stdio closed. `artifact_root`
-must not be read while the child may still be writing, or a late-written leak is
-missed (a silent false negative). The plan specifies collecting the exit status
-first for those suites.
+This barrier holds for every wire suite: each already ends by either
+`shutdown_and_wait` (which returns the `TempDir` after the reap) or
+`kill_on_drop`. Suites that currently only drop the harness gain a
+`shutdown_and_wait` call so the sweep has the reaped tempdir. No suite reaps the
+child via a bare `child.wait()` without returning its tempdir, so no separate
+`artifact_root()` accessor is needed. (Even `_tls_pin_mismatch`, which fails the
+TLS pin at boot, already calls `shutdown_and_wait` and reads `tempdir.path()`.)
 
 An explicit call (rather than a `Drop` guard) is chosen deliberately: asserting
 inside `Drop` during unwind risks a double-panic abort, and `Drop` ordering
