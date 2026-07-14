@@ -163,12 +163,21 @@ sanitized body text, scripted UIDs/sizes/envelope dates. Those are the payload
 the snapshot exists to guard.
 
 `normalize` is applied as an ordered list of `(Regex, &str)` replacements and is
-unit-tested directly with **both a positive and a negative case**: feed a string
-containing a `host:port`, a temp path, and a version and assert the placeholders;
-**and** feed a string containing an envelope clock time (`10:30:00`) and a small
-scripted size and assert they are left **untouched**. This makes the helper a
-checkable unit whose over-masking is falsifiable, not just an implicit part of a
-big snapshot — satisfying AC 2 with its own tests.
+unit-tested directly with **both a positive and a negative case for every mask**:
+feed a string containing a `host:port`, a temp path, and a version and assert the
+placeholders; **and** feed a string containing values that are same-shaped-but-
+legitimate and assert they are left **untouched**. The negative case is not
+limited to the safe masks — it must specifically cover the *greediest* entries,
+the `create_draft`/`APPEND` generated-field masks (`Message-ID`, MIME `boundary`,
+`any UUID/nonce`, generated `Date`), since an over-broad boundary/Message-ID regex
+is far likelier to over-match than an anchored `host:port` token and could
+silently rewrite a scripted envelope value, a `security_warnings` substring, or
+sanitized body text — the cardinal faithfulness sin. Concretely: an envelope
+clock time (`10:30:00`), a small scripted size/UID, a `security_warnings` string,
+and a scripted value resembling a Message-ID/boundary fragment must all survive
+`normalize` unchanged. **Every mask added during TDD ships with its own negative
+assertion, not just a positive one.** This makes the helper a checkable unit whose
+over-masking is falsifiable — satisfying AC 2 with its own tests.
 
 **Cross-platform stability.** One committed `.snap` per flow is shared across the
 `check (macOS)` lane and the Linux `test` lanes, so the golden must be identical on
@@ -191,11 +200,22 @@ fake (`host = 127.0.0.1`, `port = fake.port()`, `encryption = "tls"`,
 - **Cleanup** needs `move_message`, `delete_message`, `expunge` (destructive) →
   **`posture = "destructive"`**.
 
-**Hostile fixture.** Reuse one existing injection-corpus `.eml` (e.g.
-`html-only-hidden-instructions` or `prompt-injection-plaintext`) as the hostile
-`fetch_message` body, so the pinned `security_warnings` correspond to a known,
-already-covered attack class. The fake emits its raw bytes as the `UID FETCH
-BODY[]` literal. The clean message is a small hand-authored RFC 822 body.
+**Hostile fixture — a dedicated, transcript-owned copy.** The hostile
+`fetch_message` body is a **byte-frozen `.eml` committed under the transcript test
+tree** (e.g. `crates/rimap-server/tests/fixtures/transcript/hostile.eml`),
+seeded from a known attack class (modeled on an injection-corpus case such as
+`html-only-hidden-instructions`). It is **not** read live from the
+injection-corpus tree. Rationale: the injection corpus is an independently
+maintained, actively evolving asset (wave-1/wave-2 ingestion, PII-scrub passes,
+download-at-build regeneration); if the triage snapshot read a corpus file
+directly, a corpus-side byte change would churn the triage `.snap` in a PR
+unrelated to the agent surface, and a maintainer following the `cargo insta
+review` convention could blind-accept that diff — swallowing a genuine
+`security_warnings`/sanitizer regression riding alongside the corpus edit. Owning
+a frozen copy makes the golden depend only on files the transcript tests control,
+so any `.snap` diff is attributable to a sanitizer or output-shape change. The
+fake emits the fixture's raw bytes as the `UID FETCH BODY[]` literal. The clean
+message is likewise a small hand-authored RFC 822 body committed alongside it.
 
 **Expected IMAP dialogs (TDD-calibrated).** The fake's `Step::Expect { verb }` is
 strictly linear, so each tool's client command sequence must be scripted exactly.
@@ -280,10 +300,25 @@ existing schema-regen note) and a header doc-comment in each flow test:
     the pinned subject of the call** (none of the triage/cleanup happy-path calls
     are). A tool that errored because its dialog was miscalibrated must fail the
     test, not be snapshotted as the "expected" output.
+  - The **`initialize`** response's `instructions` / `server_instructions` string
+    is present and non-empty — the spec's #1 drift target (§Problem, §Design 1).
+    A regression that empties or strips that string produces no `isError`, never
+    touches the hostile path, and leaves the catalog intact, so without this
+    explicit check it would sail through the other assertions and be accepted as
+    "the new golden." The assertion floors its length and requires it to still
+    contain a stable posture-guidance substring, so a silent gutting of the
+    primary defensive surface fails loudly.
   - The **hostile** `fetch_message` response carries a **non-empty
     `security_warnings`** and the `untrusted` marker — the whole reason the hostile
     fixture is in the flow. If the sanitizer path wasn't reached (e.g. the fixture
     bytes didn't parse), this fires before the snapshot is written.
+  - The **`search`** response (triage step 2, cleanup step 1) returned a
+    **non-empty result set whose UIDs match the ones later steps consume**. Later
+    tools (`fetch_message`, `mark_read`, `move_message`) act on UIDs authored in
+    the test, and the fake serves its scripted `UID FETCH` reply regardless of what
+    the preceding `UID SEARCH` returned — so a desynced or empty SEARCH would still
+    yield a full-looking snapshot narrating hits that never happened. This ties the
+    snapshot's story to reality.
   - `tools/list` advertised a **non-empty** tool catalog for the flow's posture.
 
   `Recorder::call` returns the response precisely so these assertions can run on
