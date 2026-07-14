@@ -14,6 +14,9 @@
 #[path = "support/wire/mod.rs"]
 mod wire;
 
+#[path = "support/canary.rs"]
+mod canary;
+
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -189,16 +192,11 @@ forward = "deny"
     )
 }
 
-async fn spawn_unhandshaken(server: &FakeImapServer, tempdir: TempDir) -> Harness {
+async fn spawn_unhandshaken(server: &FakeImapServer, tempdir: TempDir, password: &str) -> Harness {
     let config_path = tempdir.path().join("config.toml");
     let config = fake_config(server.port(), &server.pin().to_hex(), &tempdir);
     std::fs::write(&config_path, config).expect("write config");
-    Harness::spawn_with_config(
-        &config_path,
-        tempdir,
-        &[(PASSWORD_ENV_VAR, "fake-password")],
-    )
-    .await
+    Harness::spawn_with_config(&config_path, tempdir, &[(PASSWORD_ENV_VAR, password)]).await
 }
 
 /// Mandatory non-vacuity checks (spec Testing §Non-vacuity), factored out to keep
@@ -271,10 +269,11 @@ fn assert_non_vacuity(
 async fn cleanup_transcript() {
     let server = FakeImapServer::start(cleanup_script()).await;
     let _dump = DumpOnPanic(&server);
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
 
     let mut rec = Recorder::new();
-    let mut harness = spawn_unhandshaken(&server, tempdir).await;
+    let mut harness = spawn_unhandshaken(&server, tempdir, &password).await;
 
     let init = rec
         .call(
@@ -332,8 +331,11 @@ async fn cleanup_transcript() {
 
     assert_non_vacuity(&init, &tools, &search, &mv, &del, &expunge);
 
-    let (status, _tempdir) = harness.shutdown_and_wait().await;
+    let recorded = server.recorded();
+    let (status, tempdir) = harness.shutdown_and_wait().await;
     assert!(status.success(), "clean shutdown expected; got {status:?}");
+    canary::assert_login_frame_only(&password, &recorded);
+    canary::assert_absent(&password, &[tempdir.path()], &[]);
 
     insta::assert_snapshot!("cleanup", rec.render());
 }

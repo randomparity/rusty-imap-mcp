@@ -43,6 +43,9 @@
 #[path = "support/wire/mod.rs"]
 mod wire;
 
+#[path = "support/canary.rs"]
+mod canary;
+
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -208,17 +211,13 @@ export_messages = "allow"
 
 /// Spawn the binary against `server`, complete the MCP handshake, and select
 /// the single account. Returns the live harness ready for a tool call.
-async fn spawn_ready(server: &FakeImapServer, tempdir: TempDir) -> Harness {
+async fn spawn_ready(server: &FakeImapServer, tempdir: TempDir, password: &str) -> Harness {
     let config_path = tempdir.path().join("config.toml");
     let config = fake_config(server.port(), &server.pin().to_hex(), &tempdir);
     std::fs::write(&config_path, config).expect("write config");
 
-    let mut harness = Harness::spawn_with_config(
-        &config_path,
-        tempdir,
-        &[(PASSWORD_ENV_VAR, "fake-password")],
-    )
-    .await;
+    let mut harness =
+        Harness::spawn_with_config(&config_path, tempdir, &[(PASSWORD_ENV_VAR, password)]).await;
 
     harness.initialize_handshake().await;
     harness.send_initialized().await;
@@ -270,8 +269,9 @@ fn assert_uidvalidity_error(resp: &Value) -> Value {
 async fn mark_read_changed_uidvalidity_over_wire() {
     let server = FakeImapServer::start(mark_read_changed_script()).await;
     let _dump = DumpOnPanic(&server);
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
-    let mut harness = spawn_ready(&server, tempdir).await;
+    let mut harness = spawn_ready(&server, tempdir, &password).await;
 
     let resp = harness
         .request(
@@ -298,6 +298,11 @@ async fn mark_read_changed_uidvalidity_over_wire() {
         Some(u64::from(CHANGED_VALIDITY)),
         "changed case must echo the folder's observed value; got {resp}",
     );
+
+    let recorded = server.recorded();
+    let (_status, tempdir) = harness.shutdown_and_wait().await;
+    canary::assert_login_frame_only(&password, &recorded);
+    canary::assert_absent(&password, &[tempdir.path()], &[]);
 }
 
 /// Read tool, changed case: `export_messages` whose folder reports a different
@@ -307,8 +312,9 @@ async fn mark_read_changed_uidvalidity_over_wire() {
 async fn export_changed_uidvalidity_over_wire() {
     let server = FakeImapServer::start(export_changed_script()).await;
     let _dump = DumpOnPanic(&server);
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
-    let mut harness = spawn_ready(&server, tempdir).await;
+    let mut harness = spawn_ready(&server, tempdir, &password).await;
 
     let resp = harness
         .request(
@@ -335,6 +341,11 @@ async fn export_changed_uidvalidity_over_wire() {
         Some(u64::from(CHANGED_VALIDITY)),
         "changed case must echo the folder's observed value; got {resp}",
     );
+
+    let recorded = server.recorded();
+    let (_status, tempdir) = harness.shutdown_and_wait().await;
+    canary::assert_login_frame_only(&password, &recorded);
+    canary::assert_absent(&password, &[tempdir.path()], &[]);
 }
 
 /// Read tool, omitted case: `export_messages` whose body-fetch SELECT omits the
@@ -347,8 +358,9 @@ async fn export_changed_uidvalidity_over_wire() {
 async fn export_omitted_uidvalidity_over_wire() {
     let server = FakeImapServer::start(export_omitted_script()).await;
     let _dump = DumpOnPanic(&server);
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
-    let mut harness = spawn_ready(&server, tempdir).await;
+    let mut harness = spawn_ready(&server, tempdir, &password).await;
 
     let resp = harness
         .request(
@@ -378,4 +390,9 @@ async fn export_omitted_uidvalidity_over_wire() {
         sc.get("folder").is_none_or(Value::is_null),
         "omitted case must NOT carry a typed `folder`; got {resp}",
     );
+
+    let recorded = server.recorded();
+    let (_status, tempdir) = harness.shutdown_and_wait().await;
+    canary::assert_login_frame_only(&password, &recorded);
+    canary::assert_absent(&password, &[tempdir.path()], &[]);
 }
