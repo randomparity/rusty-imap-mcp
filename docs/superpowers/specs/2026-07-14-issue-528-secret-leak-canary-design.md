@@ -382,6 +382,19 @@ inspection-dependent:
 - Glob `${CARGO_MANIFEST_DIR}/tests/e2e_wire*.rs`.
 - Assert **every** matched file's text references the `canary` sweep (contains
   `canary::assert_absent` or `canary::assert_login_frame_only`).
+- **Per-file count check.** Wire suites are multi-`#[tokio::test]` (e.g.
+  `_chaos` has 5, `e2e_wire` 3, `_uidvalidity` 3, `_fault_injection` 3), and each
+  test spawns its own harness + `TempDir`, so a file-level reference is not
+  enough: a file where only one of N authenticating tests sweeps would pass a
+  bare reference check while N−1 tests go unswept. So, per file, assert
+  `count(sweep call-sites) >= count(harness spawns)`, where a harness spawn is a
+  `Harness::spawn` / `spawn_with_config` occurrence and a sweep call-site is an
+  `assert_absent` / `assert_login_frame_only` occurrence. A suite that factors
+  spawn+sweep into a shared helper (one of each, called by many tests) satisfies
+  this; a suite that inlines a spawn in a new test without a matching sweep fails
+  it. This is a source-text heuristic, not a type-level guarantee — see the
+  rejected alternative below — but it converts the common "forgot the sweep in one
+  test fn" regression from reviewer-caught to CI-caught.
 
 The glob itself is the source of truth — no hand-maintained allowlist. A new
 `e2e_wire*` suite is auto-included by the glob and fails the test until it wires
@@ -391,6 +404,18 @@ on-disk suites, reintroducing the very gap this test closes.) The check is
 source-text only, so it runs regardless of container availability (it also covers
 the nightly `_chaos` suite's source). The meta-test files themselves
 (`canary_*_meta.rs`) are not `e2e_wire*` and are not globbed.
+
+**Rejected: a `#[must_use]` teardown guard for compile-time per-test
+enforcement.** Having `shutdown_and_wait` / `artifact_root` return a `#[must_use]`
+guard consumed only by a `.sweep(canary)` method would make omission a
+per-test compile-time signal rather than a source-text count. Rejected for this
+issue: it threads the canary through `shutdown_and_wait`'s signature at every
+caller (including the non-`e2e_wire` conformance binaries that share the
+`Harness`), and `unused_must_use` is a rustc warn-lint whose promotion to a hard
+error is not guaranteed across the toolchains CI runs — so the "guarantee" could
+silently degrade to a warning. The count check delivers most of the benefit
+without the cross-binary signature churn. The guard remains a clean future
+upgrade if the per-test gap ever bites in practice.
 
 ### 4.7 Per-suite disposition
 
@@ -422,14 +447,19 @@ not the server process. So the teardown shape in §4.4 transcribes to every row.
 For the `hygiene-only` Dovecot rows the plan will confirm during build whether the
 suite in fact completes a LOGIN; if a row turns out to reliably authenticate, it
 is promoted to `tool-success` by pointing at its specific success assertion. The
-table is the checklist the build works through, one suite per task.
+table is the checklist the build works through, one suite per task — and each
+task wires the sweep into **every** harness-spawning `#[tokio::test]` in that
+file, not just once per file (several files have 2–5 such tests; §4.6's per-file
+count check enforces this).
 
 ## 5. Risks & mitigations
 
 - **A suite that authenticates but a sweep is forgotten, or a new wire suite
   skips the sweep.** Mitigation: the `canary_coverage_meta.rs` enumeration test
-  (§4.6) fails PR CI when any `e2e_wire*.rs` source lacks a sweep reference or is
-  missing from the allowlist. Structural, not inspection-dependent.
+  (§4.6) fails PR CI when any `e2e_wire*.rs` source lacks a sweep reference, and —
+  per file — when its sweep call-site count is below its harness-spawn count, so
+  a single unswept test fn inside a multi-test file also reddens CI. Structural at
+  file granularity, extended toward per-test by the count check.
 - **Vacuous green: a run passes without authenticating.** An absence-only check
   reports success on a run that never reached the post-LOGIN surface. Mitigation:
   every suite carries an explicit positive-control disposition (§4.2, §4.7) —
