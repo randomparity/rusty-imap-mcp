@@ -125,6 +125,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", 
 tempfile = { workspace = true }
 base64 = { workspace = true }
 proptest = { workspace = true }
+# Golden agent-transcript snapshots (issue #524): pins the JSON-RPC transcript
+# an agent sees across a scripted session against the in-process fake.
+insta = { workspace = true }
 # Blocking HTTP client for the Mailpit retrieval API (e2e_smtp_real.rs).
 ureq = { workspace = true }
 # Shared scriptable adversarial IMAP fake (ADR-0008): drives the production
