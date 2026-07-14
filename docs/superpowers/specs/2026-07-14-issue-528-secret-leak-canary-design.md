@@ -26,7 +26,10 @@ credential is absent.
 ## 2. Goal & non-goals
 
 **Goal.** Give every wire-driven e2e suite a post-run sweep that fails the test
-if the harness's password appears in any artifact that run produced.
+if the harness's password appears *verbatim* in any artifact that run
+produced — except the one place it legitimately must (the IMAP LOGIN frame),
+which the sweep instead uses as a positive control that authentication actually
+happened (§4.3, §4.4).
 
 **In scope:**
 
@@ -53,6 +56,15 @@ if the harness's password appears in any artifact that run produced.
 - Changing production redaction behavior. This work only *observes*; it adds no
   new redaction code path. Any leak it finds is a bug fixed separately.
 - New runtime or dev dependencies. The helper is pure `std`.
+- **Detecting encoded or transformed leaks.** The sweep is a raw-byte substring
+  search for the canary's *verbatim* form. A leak that is base64-encoded (e.g. a
+  SASL/`AUTHENTICATE` blob), percent-encoded, compressed, or otherwise
+  transformed before being written evades it. This is an accepted boundary, not
+  an implied guarantee — the credential travels through the codebase in its
+  literal form on every path this project exercises (env var → `SecretString` →
+  plaintext `LOGIN`), so the verbatim scan covers the realistic leak surface.
+  The canary's charset (ASCII letters, digits, `-`) contains nothing JSON string
+  escaping would distort, so a verbatim leak into audit JSONL is still caught.
 
 ## 3. Acceptance criteria (from the issue)
 
@@ -63,8 +75,10 @@ Restated as falsifiable checks:
 
 - **AC1:** every `e2e_wire*` integration-test binary that spawns a harness calls
   the sweep after the harness run, passing the exact password string it
-  injected. Verified by inspection + the fact that removing a sweep call leaves
-  a suite that no longer references `canary::assert_absent`.
+  injected. Made **falsifiable and PR-blocking** by an enumeration meta-test
+  (§4.6): it globs the `e2e_wire*.rs` sources and asserts each references the
+  `canary` sweep, matching a checked-in allowlist — a new wire suite or a
+  dropped sweep call reddens CI rather than depending on a reviewer noticing.
 - **AC2:** `crates/rimap-server/tests/canary_sweep_meta.rs` seeds the canary into
   a scratch artifact and asserts `canary::scan(...)` returns a non-empty hit
   list; and asserts a clean tree returns an empty list. Host-runnable, no
@@ -108,10 +122,30 @@ pub struct CanaryHit {
 /// canary. No panics — this is what makes the sweep self-testable.
 pub fn scan(canary: &str, roots: &[&Path], extra: &[String]) -> Vec<CanaryHit>;
 
-/// Assert the canary is absent from every artifact; panic listing all hits
-/// otherwise. Thin wrapper over `scan`.
+/// Assert the canary is absent from every file artifact; panic listing all
+/// hits otherwise. Thin wrapper over `scan`. Used for the tempdir file walk
+/// (which never legitimately contains the credential).
 pub fn assert_absent(canary: &str, roots: &[&Path], extra: &[String]);
+
+/// Positive + negative control over the fake's recorded client dialog.
+/// The credential legitimately appears exactly once, in the plaintext
+/// `LOGIN` line (`recorded()` captures the raw client frame post-TLS). So a
+/// blanket `assert_absent` over `recorded()` would always fire. Instead:
+///   - **positive control**: assert at least one recorded frame is a `LOGIN`
+///     line containing the canary — proof the run authenticated and the
+///     credential reached the wire, closing the vacuous-pass gap (§4.2);
+///   - **negative control**: assert no *non-`LOGIN`* recorded frame contains
+///     the canary — a copy of the credential anywhere else in the dialog is a
+///     leak.
+/// Panics on either violation. For suites that deliberately never reach LOGIN
+/// (`_tls_pin_mismatch`), do not call this — use `assert_absent(canary, &[],
+/// &recorded)` (recorded is empty of the canary because no LOGIN was sent).
+pub fn assert_login_frame_only(canary: &str, recorded: &[String]);
 ```
+
+**Byte search, verbatim only.** `scan` matches the canary's literal bytes;
+encoded/transformed representations are out of scope (§2 non-goals). The
+"never appears" guarantee is therefore "never appears **verbatim**."
 
 Design points:
 
@@ -129,7 +163,9 @@ Design points:
   `audit.jsonl` (and rotated siblings), stderr log, `config.toml`, and
   `downloads/` under one `TempDir`. Passing that single root to `scan` sweeps
   audit + stderr + exported `.eml` + any other file the run wrote. The fake's
-  `recorded()` client frames are passed as `extra`.
+  `recorded()` client frames are **not** swept with `assert_absent` (they
+  legitimately contain the LOGIN password); they go through
+  `assert_login_frame_only` instead (§4.3).
 - **Symlink safety.** The walk does **not** follow symlinks (a symlink out of
   the tempdir could pull unrelated host files into the scan and either false-
   positive or hang); it scans regular files only.
@@ -138,16 +174,36 @@ Design points:
 
 The password a harness feeds the server is only a *meaningful* leak probe if the
 run actually authenticates and exercises the post-LOGIN surface (FETCH bodies,
-audit `tool_start`/`tool_end`, tracing spans). Two backends, two strategies:
+audit `tool_start`/`tool_end`, tracing spans). An absence-only assertion would
+otherwise **pass vacuously** on a run that fails to boot, fails LOGIN, or injects
+an empty/wrong password — green while testing nothing. Every authenticating suite
+therefore carries a **positive control** that authentication occurred, so that
+"clean" can never mean "never ran":
+
+- **Fake-backed suites**: `assert_login_frame_only` requires the canary to appear
+  in a recorded `LOGIN` frame (§4.3) — direct proof the credential reached the
+  wire.
+- **Dovecot-backed suites**: the fake's wire is not visible, but each Dovecot
+  suite's test body already asserts **successful tool responses**, which are
+  unreachable without a successful LOGIN. Those existing assertions are the
+  positive control; the canary sweep adds only the absence check.
+
+Two backends, two canary strategies:
 
 - **Fake-backed / env-fed suites** (`e2e_wire_fetch_skipped`,
   `_folder_not_found`, `_transcript_cleanup`, `_transcript_triage`,
   `_uidvalidity`, `_tls_pin_mismatch`, `_login_rejected`): the fake accepts any
   LOGIN, so each run injects a **fresh per-run canary** from `fresh_canary()`,
-  replacing the current hardcoded `"fake-password"` literal. `_login_rejected`
-  deliberately sends a rejected password — that rejected string is still the
-  credential-under-test, so the suite sweeps for exactly the (fresh) value it
-  injected.
+  replacing the current hardcoded `"fake-password"` literal. Each suite sweeps
+  for exactly the (fresh) value it injected. Two boundary cases:
+  - `_login_rejected` deliberately sends a password the fake rejects, but the
+    `LOGIN` frame still reaches the wire and is recorded, so
+    `assert_login_frame_only` applies (the rejected string is the
+    credential-under-test; its positive control is "reached the wire").
+  - `_tls_pin_mismatch` fails the TLS pin **before** any `LOGIN` is sent, so
+    `recorded()` is empty. It has no positive control by design; it uses plain
+    `assert_absent(canary, &[tempdir], &recorded)` (the empty/short dialog must
+    still be canary-free), and its purpose is documented as hygiene-only.
 
 - **Dovecot-backed suites**: Dovecot validates LOGIN against the static
   passwd-file `crates/rimap-imap/tests/integration/dovecot/users`
@@ -186,29 +242,58 @@ points than today, where every suite re-declares the literal.
 | stderr / tracing | The harness stderr log file under the tempdir root — recursive walk. |
 | Exported `.eml` | Files under `downloads/` under the tempdir root — recursive walk. |
 | Panic messages | The child's panics are written to its stderr log (swept above); the harness's own panic diagnostics embed `captured_stderr()`, also from that file. So panic output ⊆ the stderr sweep. |
-| Wire frames (both directions) | The password's only on-wire appearance is the **client→server IMAP LOGIN**. For fake suites that is captured by `recorded()` (passed as `extra`). Server→client fake bytes are test-scripted and never carry the secret; MCP stdio frames never carry the IMAP password. For **Dovecot** suites the IMAP wire is TLS-encrypted and not interceptable at the harness — a plaintext leak there would instead surface in stderr/audit, which are swept. |
+| Wire frames (both directions) | The password's only *legitimate* on-wire appearance is the **client→server IMAP `LOGIN`**, captured verbatim by the fake's `recorded()`. Blanket-sweeping `recorded()` would therefore always fire, so it is checked with `assert_login_frame_only` (§4.1): the canary must appear in a `LOGIN` frame (positive control that auth happened) and in **no other** recorded frame (negative control — a copy elsewhere in the dialog is a leak). Server→client fake bytes are test-scripted and never carry the secret; MCP stdio frames never carry the IMAP password. For **Dovecot** suites the IMAP wire is TLS-encrypted and not interceptable at the harness — a plaintext leak there would instead surface in stderr/audit, which are swept, and the positive control is the suite's existing successful-tool-call assertions (§4.2). |
 
 ### 4.4 Teardown wiring
 
 Rust integration-test binaries have no shared teardown hook, so "teardown" is an
 explicit call at the end of each test, mirroring the issue's "one helper, called
-from the same teardown as C1." The call is placed **after
-`shutdown_and_wait`** returns the `TempDir` (child has exited and flushed all
-stderr/audit), so the sweep reads final on-disk state:
+from the same teardown as C1." The sweep must read **final on-disk state**, so it
+runs only after the child has been **reaped (exit status collected) and its
+stdio pipes closed** — that barrier is what guarantees all buffered stderr/audit
+has flushed. `shutdown_and_wait` provides exactly that barrier and returns the
+`TempDir`:
 
 ```rust
+// Fake-backed, authenticating suite:
+let recorded = server.recorded();                       // capture before drop
 let (_status, tempdir) = harness.shutdown_and_wait().await;
-canary::assert_absent(&password, &[tempdir.path()], &recorded_frames);
+canary::assert_login_frame_only(&password, &recorded);  // wire: positive+negative
+canary::assert_absent(&password, &[tempdir.path()], &[]); // files: absence only
+
+// Dovecot-backed suite (no recorded() wire visibility):
+let (_status, tempdir) = harness.shutdown_and_wait().await;
+canary::assert_absent(&canary::DOVECOT_CANARY_PASSWORD, &[tempdir.path()], &[]);
 ```
 
-For suites that reap the child without `shutdown_and_wait` (e.g.
+For suites that reap the child **without** `shutdown_and_wait` (e.g.
 `_tls_pin_mismatch`, which fails boot closed), the sweep reads the tempdir root
-after the child has exited via a `Harness::artifact_root()` accessor.
+via a `Harness::artifact_root()` accessor — but **only after** the same barrier:
+the child's exit status has been collected and its stdio closed. `artifact_root`
+must not be read while the child may still be writing, or a late-written leak is
+missed (a silent false negative). The plan specifies collecting the exit status
+first for those suites.
 
 An explicit call (rather than a `Drop` guard) is chosen deliberately: asserting
 inside `Drop` during unwind risks a double-panic abort, and `Drop` ordering
 against the `TempDir` guard is fragile. The explicit call is predictable and
 matches how these tests already end.
+
+### 4.6 AC1 enforcement: sweep-presence meta-test
+
+`crates/rimap-server/tests/canary_coverage_meta.rs`, host-runnable and
+PR-blocking, makes "sweep active in all wire suites" falsifiable rather than
+inspection-dependent:
+
+- Glob `${CARGO_MANIFEST_DIR}/tests/e2e_wire*.rs`.
+- Assert every matched file's text references the `canary` sweep (contains
+  `canary::assert_absent` or `canary::assert_login_frame_only`).
+- Assert the matched set equals a checked-in allowlist constant, so **adding** a
+  new `e2e_wire*` suite fails the test until the author both wires the sweep and
+  extends the allowlist — closing the "new suite silently skips the sweep" gap.
+
+This is structural enforcement without a shared teardown hook: a dropped sweep
+call or an un-swept new suite reddens CI.
 
 ### 4.5 Negative meta-test (AC2)
 
@@ -222,16 +307,31 @@ matches how these tests already end.
   files that do *not* contain the canary; assert `scan` returns empty.
 - **`assert_absent_panics_on_a_leak`**: `#[should_panic]`, proving the asserting
   wrapper bites.
+- **`login_frame_only_accepts_canary_in_login`**: recorded frames where the
+  canary appears only in a `LOGIN` line → passes (positive + negative control
+  both hold).
+- **`login_frame_only_rejects_canary_outside_login`**: `#[should_panic]`, canary
+  in a non-`LOGIN` recorded frame → fires (negative control bites).
+- **`login_frame_only_rejects_missing_login`**: `#[should_panic]`, recorded
+  frames with no canary-bearing `LOGIN` line → fires (positive control bites,
+  catching a vacuous non-authenticating run).
 
 This satisfies "a test that logs the credential on purpose is caught" as a
-committed, always-run test rather than a throwaway scratch branch.
+committed, always-run test rather than a throwaway scratch branch, and proves
+both controls of `assert_login_frame_only`.
 
 ## 5. Risks & mitigations
 
-- **A suite that authenticates but a sweep is forgotten.** Mitigation: the plan
-  enumerates every wire suite; review checks each references
-  `canary::assert_absent`. No structural enforcement is possible across
-  independent test binaries.
+- **A suite that authenticates but a sweep is forgotten, or a new wire suite
+  skips the sweep.** Mitigation: the `canary_coverage_meta.rs` enumeration test
+  (§4.6) fails PR CI when any `e2e_wire*.rs` source lacks a sweep reference or is
+  missing from the allowlist. Structural, not inspection-dependent.
+- **Vacuous green: a run passes without authenticating.** An absence-only check
+  reports success on a run that never reached the post-LOGIN surface. Mitigation:
+  every authenticating suite carries a positive control (§4.2) — the
+  `assert_login_frame_only` LOGIN-frame requirement for fake suites, the existing
+  successful-tool-call assertions for Dovecot suites. Deliberately
+  non-authenticating suites (`_tls_pin_mismatch`) are documented as hygiene-only.
 - **False positives from coincidental substrings.** Mitigated by the
   `RIMAP-CANARY-` prefix and high-entropy tail; the canary is never legitimately
   written anywhere.
