@@ -76,9 +76,9 @@ Restated as falsifiable checks:
 - **AC1:** every `e2e_wire*` integration-test binary that spawns a harness
   references the `canary` sweep after the harness run. Made **falsifiable and
   PR-blocking** by an enumeration meta-test (§4.6): it globs the `e2e_wire*.rs`
-  sources and asserts each references the sweep, matching a checked-in allowlist
-  — a new wire suite or a dropped sweep call reddens CI rather than depending on
-  a reviewer noticing. The enumeration is a source-text check; it enforces
+  sources and asserts each references the sweep — a new wire suite (auto-included
+  by the glob) or a dropped sweep call reddens CI rather than depending on a
+  reviewer noticing. The enumeration is a source-text check; it enforces
   *presence*, not that the swept value equals the injected one. Value-identity is
   instead guaranteed by convention (§4.4): each suite binds its canary **once**
   to a local (`let password = fresh_canary();` or the `DOVECOT_CANARY_PASSWORD`
@@ -220,13 +220,30 @@ an empty/wrong password — green while testing nothing. Every authenticating su
 therefore carries a **positive control** that authentication occurred, so that
 "clean" can never mean "never ran":
 
-- **Fake-backed suites**: `assert_login_frame_only` requires the canary to appear
-  in a recorded `LOGIN` frame (§4.3) — direct proof the credential reached the
-  wire.
-- **Dovecot-backed suites**: the fake's wire is not visible, but each Dovecot
-  suite's test body already asserts **successful tool responses**, which are
-  unreachable without a successful LOGIN. Those existing assertions are the
-  positive control; the canary sweep adds only the absence check.
+A positive control is **not** universally available, so each suite is assigned
+one of three dispositions (the full per-suite assignment is the table in §4.7):
+
+- **`login-frame`** — fake authenticating suites: `assert_login_frame_only`
+  requires the canary in a recorded `LOGIN` frame (§4.3), direct proof the
+  credential reached the wire.
+- **`tool-success`** — happy-path Dovecot suites whose test body already asserts
+  a **successful authenticated tool response** (e.g. a `search`/`fetch_message`
+  that returns results). That success is unreachable without a completed LOGIN,
+  so it is the positive control; the sweep adds the absence check.
+- **`hygiene-only`** — suites that *deliberately fail before or during LOGIN*, or
+  that never open an authenticated IMAP session at all. This is an honest,
+  explicit class, not an oversight. It covers `_tls_pin_mismatch` (fails the pin
+  pre-LOGIN); the failure-path suites `_chaos` and `_fault_injection` (which
+  assert `ERR_*` outcomes and inject faults that may preempt LOGIN — a per-
+  scenario positive control would be brittle); the advertisement suites
+  `_tool_advertisement` / `_multi_account_advertisement` (exercise `list_tools` /
+  `use_account`, which need no live IMAP session); and `_cancellation` (race-
+  dependent, may not reach a completed authenticated call). For these the sweep
+  is **absence-only** over the run's artifacts — still valuable (it catches a
+  credential leaking from env/config into stderr/audit, or from an error path),
+  but it does **not** assert authentication happened. The redaction path is
+  positively exercised by the `login-frame` and `tool-success` suites; the
+  `hygiene-only` suites add breadth, not the post-LOGIN positive control.
 
 Two backends, two canary strategies:
 
@@ -321,22 +338,6 @@ inside `Drop` during unwind risks a double-panic abort, and `Drop` ordering
 against the `TempDir` guard is fragile. The explicit call is predictable and
 matches how these tests already end.
 
-### 4.6 AC1 enforcement: sweep-presence meta-test
-
-`crates/rimap-server/tests/canary_coverage_meta.rs`, host-runnable and
-PR-blocking, makes "sweep active in all wire suites" falsifiable rather than
-inspection-dependent:
-
-- Glob `${CARGO_MANIFEST_DIR}/tests/e2e_wire*.rs`.
-- Assert every matched file's text references the `canary` sweep (contains
-  `canary::assert_absent` or `canary::assert_login_frame_only`).
-- Assert the matched set equals a checked-in allowlist constant, so **adding** a
-  new `e2e_wire*` suite fails the test until the author both wires the sweep and
-  extends the allowlist — closing the "new suite silently skips the sweep" gap.
-
-This is structural enforcement without a shared teardown hook: a dropped sweep
-call or an un-swept new suite reddens CI.
-
 ### 4.5 Negative meta-test (AC2)
 
 `crates/rimap-server/tests/canary_sweep_meta.rs`, host-runnable and PR-blocking:
@@ -372,6 +373,57 @@ This satisfies "a test that logs the credential on purpose is caught" as a
 committed, always-run test rather than a throwaway scratch branch, and proves
 both controls of `assert_login_frame_only`.
 
+### 4.6 AC1 enforcement: sweep-presence meta-test
+
+`crates/rimap-server/tests/canary_coverage_meta.rs`, host-runnable and
+PR-blocking, makes "sweep active in all wire suites" falsifiable rather than
+inspection-dependent:
+
+- Glob `${CARGO_MANIFEST_DIR}/tests/e2e_wire*.rs`.
+- Assert **every** matched file's text references the `canary` sweep (contains
+  `canary::assert_absent` or `canary::assert_login_frame_only`).
+
+The glob itself is the source of truth — no hand-maintained allowlist. A new
+`e2e_wire*` suite is auto-included by the glob and fails the test until it wires
+a sweep; a dropped sweep call reddens CI. (An allowlist was considered and
+rejected: a checked-in constant is a second list that can silently drift from the
+on-disk suites, reintroducing the very gap this test closes.) The check is
+source-text only, so it runs regardless of container availability (it also covers
+the nightly `_chaos` suite's source). The meta-test files themselves
+(`canary_*_meta.rs`) are not `e2e_wire*` and are not globbed.
+
+### 4.7 Per-suite disposition
+
+All 15 `e2e_wire*.rs` suites, each backend, the canary value it injects, the
+harness that owns its artifact `TempDir`, the sweep entry point, and its
+positive-control disposition (§4.2). The server binary is always driven by the
+wire `Harness` (which owns the tempdir and `shutdown_and_wait`) — including
+`_chaos`, where `ChaosHarness` supplies only the Toxiproxy+Dovecot network infra,
+not the server process. So the teardown shape in §4.4 transcribes to every row.
+
+| Suite | Backend | Canary | Sweep entry | Positive control |
+|---|---|---|---|---|
+| `e2e_wire` | Dovecot | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `tool-success` |
+| `e2e_wire_destructive` | Dovecot | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `tool-success` |
+| `e2e_wire_folder_management` | Dovecot | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `tool-success` |
+| `e2e_wire_fetch_skipped` | fake | `fresh_canary()` | `assert_login_frame_only` + `assert_absent` | `login-frame` |
+| `e2e_wire_folder_not_found` | fake | `fresh_canary()` | `assert_login_frame_only` + `assert_absent` | `login-frame` |
+| `e2e_wire_transcript_cleanup` | fake | `fresh_canary()` | `assert_login_frame_only` + `assert_absent` | `login-frame` |
+| `e2e_wire_transcript_triage` | fake | `fresh_canary()` | `assert_login_frame_only` + `assert_absent` | `login-frame` |
+| `e2e_wire_uidvalidity` | fake | `fresh_canary()` | `assert_login_frame_only` + `assert_absent` | `login-frame` |
+| `e2e_wire_login_rejected` | fake | `fresh_canary()` | `assert_login_frame_only` + `assert_absent` | `login-frame` (rejected LOGIN still reaches the wire) |
+| `e2e_wire_tls_pin_mismatch` | fake | `fresh_canary()` | `assert_absent` (recorded empty) | `hygiene-only` (pre-LOGIN pin fail) |
+| `e2e_wire_chaos` (nightly) | Dovecot+Toxiproxy | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `hygiene-only` (fault may preempt LOGIN; asserts `ERR_*`) |
+| `e2e_wire_fault_injection` | Dovecot | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `hygiene-only` (asserts `ERR_CONNECTION_LOST`) |
+| `e2e_wire_tool_advertisement` | Dovecot | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `hygiene-only` (`list_tools`; no live IMAP session) |
+| `e2e_wire_multi_account_advertisement` | Dovecot | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `hygiene-only` (`use_account` advertisement) |
+| `e2e_wire_cancellation` | Dovecot | `DOVECOT_CANARY_PASSWORD` | `assert_absent` | `hygiene-only` (race-dependent) |
+
+For the `hygiene-only` Dovecot rows the plan will confirm during build whether the
+suite in fact completes a LOGIN; if a row turns out to reliably authenticate, it
+is promoted to `tool-success` by pointing at its specific success assertion. The
+table is the checklist the build works through, one suite per task.
+
 ## 5. Risks & mitigations
 
 - **A suite that authenticates but a sweep is forgotten, or a new wire suite
@@ -380,10 +432,15 @@ both controls of `assert_login_frame_only`.
   missing from the allowlist. Structural, not inspection-dependent.
 - **Vacuous green: a run passes without authenticating.** An absence-only check
   reports success on a run that never reached the post-LOGIN surface. Mitigation:
-  every authenticating suite carries a positive control (§4.2) — the
-  `assert_login_frame_only` LOGIN-frame requirement for fake suites, the existing
-  successful-tool-call assertions for Dovecot suites. Deliberately
-  non-authenticating suites (`_tls_pin_mismatch`) are documented as hygiene-only.
+  every suite carries an explicit positive-control disposition (§4.2, §4.7) —
+  `login-frame` (fake authenticating suites), `tool-success` (happy-path Dovecot
+  suites), or an *acknowledged* `hygiene-only` for suites that deliberately fail
+  before/during LOGIN or open no IMAP session (`_tls_pin_mismatch`, `_chaos`,
+  `_fault_injection`, the advertisement suites, `_cancellation`). The redaction
+  path is positively exercised by the `login-frame` and `tool-success` suites;
+  `hygiene-only` suites add artifact breadth, and the spec does not claim they
+  prove authentication. This is the failure mode the per-suite table exists to
+  prevent silently generalizing away.
 - **False positives from coincidental substrings.** Mitigated by the
   `RIMAP-CANARY-` prefix and high-entropy tail; the canary is never legitimately
   written anywhere.
