@@ -73,12 +73,19 @@ happened (§4.3, §4.4).
 
 Restated as falsifiable checks:
 
-- **AC1:** every `e2e_wire*` integration-test binary that spawns a harness calls
-  the sweep after the harness run, passing the exact password string it
-  injected. Made **falsifiable and PR-blocking** by an enumeration meta-test
-  (§4.6): it globs the `e2e_wire*.rs` sources and asserts each references the
-  `canary` sweep, matching a checked-in allowlist — a new wire suite or a
-  dropped sweep call reddens CI rather than depending on a reviewer noticing.
+- **AC1:** every `e2e_wire*` integration-test binary that spawns a harness
+  references the `canary` sweep after the harness run. Made **falsifiable and
+  PR-blocking** by an enumeration meta-test (§4.6): it globs the `e2e_wire*.rs`
+  sources and asserts each references the sweep, matching a checked-in allowlist
+  — a new wire suite or a dropped sweep call reddens CI rather than depending on
+  a reviewer noticing. The enumeration is a source-text check; it enforces
+  *presence*, not that the swept value equals the injected one. Value-identity is
+  instead guaranteed by convention (§4.4): each suite binds its canary **once**
+  to a local (`let password = fresh_canary();` or the `DOVECOT_CANARY_PASSWORD`
+  constant) and uses that same binding for both the spawn env and the sweep call,
+  so a mismatch is not expressible. For fake suites the LOGIN-frame positive
+  control is an independent backstop — sweeping a value other than the injected
+  one fails the positive control, because `recorded()` holds the real credential.
 - **AC2:** `crates/rimap-server/tests/canary_sweep_meta.rs` seeds the canary into
   a scratch artifact and asserts `canary::scan(...)` returns a non-empty hit
   list; and asserts a clean tree returns an empty list. Host-runnable, no
@@ -117,14 +124,26 @@ pub struct CanaryHit {
     pub excerpt: String,
 }
 
-/// Pure detection: recursively read every file under each root as *bytes*,
-/// plus each in-memory `extra` string, and return every occurrence of the
-/// canary. No panics — this is what makes the sweep self-testable.
-pub fn scan(canary: &str, roots: &[&Path], extra: &[String]) -> Vec<CanaryHit>;
+/// Outcome of a scan: places the canary appeared, AND artifacts that could not
+/// be read. Both are surfaced — a detector that "could not look" must never be
+/// reported as clean.
+pub struct ScanReport {
+    pub hits: Vec<CanaryHit>,
+    /// Paths whose traversal or read failed (permissions, transient I/O, a path
+    /// that raced with harness cleanup), each with the error rendered.
+    pub errors: Vec<String>,
+}
 
-/// Assert the canary is absent from every file artifact; panic listing all
-/// hits otherwise. Thin wrapper over `scan`. Used for the tempdir file walk
-/// (which never legitimately contains the credential).
+/// Pure detection: recursively read every file under each root as *bytes*,
+/// plus each in-memory `extra` string. Returns every canary occurrence AND
+/// every unreadable artifact. Does not panic — that self-testability is why the
+/// meta-test can inspect both vectors directly.
+pub fn scan(canary: &str, roots: &[&Path], extra: &[String]) -> ScanReport;
+
+/// Assert the canary is absent from every file artifact AND that every artifact
+/// was actually readable; panic listing all hits and all read errors otherwise.
+/// Thin wrapper over `scan`. An unreadable root/file is a hard failure, not a
+/// silent skip, so "clean" always means "looked and found nothing".
 pub fn assert_absent(canary: &str, roots: &[&Path], extra: &[String]);
 
 /// Positive + negative control over the fake's recorded client dialog.
@@ -138,10 +157,31 @@ pub fn assert_absent(canary: &str, roots: &[&Path], extra: &[String]);
 ///     the canary — a copy of the credential anywhere else in the dialog is a
 ///     leak.
 /// Panics on either violation. For suites that deliberately never reach LOGIN
-/// (`_tls_pin_mismatch`), do not call this — use `assert_absent(canary, &[],
-/// &recorded)` (recorded is empty of the canary because no LOGIN was sent).
+/// (`_tls_pin_mismatch`), do not call this — use
+/// `assert_absent(canary, &[artifact_root], &recorded)`, which still sweeps the
+/// tempdir files and treats `recorded` as an ordinary (canary-free) extra
+/// because no LOGIN was sent.
 pub fn assert_login_frame_only(canary: &str, recorded: &[String]);
 ```
+
+**LOGIN-frame predicate.** A recorded frame is a `LOGIN` frame iff, after
+trimming the leading tag (first whitespace-delimited token), the next token
+upper-cased equals `LOGIN`. This matches the IMAP *command position*, so a
+`SEARCH`/`APPEND`/`SELECT` frame whose argument merely contains the substring
+`LOGIN` is correctly classified as non-`LOGIN` (and a canary leak inside it is
+caught by the negative control). The predicate is a small pure function with its
+own meta-test case (§4.5).
+
+**Same-frame / inline-password dependency.** `assert_login_frame_only` assumes
+the canary and the `LOGIN` keyword land in the *same* recorded frame. That holds
+here because (a) `recorded()` captures one client command per `read_line`, and
+(b) async-imap emits LOGIN inline as `<tag> LOGIN <user> <password>\r\n`
+(`quote!`-wrapped args on one line), not as an IMAP literal continuation. The
+canary charset (§4.1, ASCII letters/digits/`-`) contains no CR, LF, quote, or
+`{` that would force `quote!` into a literal-continuation form, so the password
+stays inline. If a future canary charset or auth mechanism (SASL/`AUTHENTICATE`)
+broke this, the positive control would fail loudly (LOGIN frame lacks the
+canary) rather than silently pass — a safe failure direction.
 
 **Byte search, verbatim only.** `scan` matches the canary's literal bytes;
 encoded/transformed representations are out of scope (§2 non-goals). The
@@ -202,8 +242,10 @@ Two backends, two canary strategies:
     credential-under-test; its positive control is "reached the wire").
   - `_tls_pin_mismatch` fails the TLS pin **before** any `LOGIN` is sent, so
     `recorded()` is empty. It has no positive control by design; it uses plain
-    `assert_absent(canary, &[tempdir], &recorded)` (the empty/short dialog must
-    still be canary-free), and its purpose is documented as hygiene-only.
+    `assert_absent(canary, &[artifact_root], &recorded)` — still sweeping the
+    tempdir files (the failed-boot path may write stderr/config) with the empty
+    dialog as a canary-free extra — and its purpose is documented as
+    hygiene-only.
 
 - **Dovecot-backed suites**: Dovecot validates LOGIN against the static
   passwd-file `crates/rimap-imap/tests/integration/dovecot/users`
@@ -300,11 +342,17 @@ call or an un-swept new suite reddens CI.
 `crates/rimap-server/tests/canary_sweep_meta.rs`, host-runnable and PR-blocking:
 
 - **`scan_flags_a_seeded_file_leak`**: write a file containing the canary into a
-  scratch tempdir; assert `scan` returns ≥1 hit whose `source` is that file.
+  scratch tempdir; assert `scan` returns `hits` with ≥1 whose `source` is that
+  file, and empty `errors`.
 - **`scan_flags_an_extra_string_leak`**: pass a `recorded`-style string
   containing the canary as `extra`; assert a hit.
 - **`scan_is_clean_on_a_leak_free_tree`**: a tempdir with audit/stderr/eml-shaped
-  files that do *not* contain the canary; assert `scan` returns empty.
+  files that do *not* contain the canary; assert `scan` returns empty `hits` and
+  empty `errors`.
+- **`scan_reports_unreadable_artifact`**: seed a file the walk cannot read (e.g.
+  `chmod 000` on a supported host, or a broken path) and assert it appears in
+  `errors` — never silently treated as clean. `assert_absent` over that root
+  panics (a companion `#[should_panic]` case).
 - **`assert_absent_panics_on_a_leak`**: `#[should_panic]`, proving the asserting
   wrapper bites.
 - **`login_frame_only_accepts_canary_in_login`**: recorded frames where the
@@ -315,6 +363,10 @@ call or an un-swept new suite reddens CI.
 - **`login_frame_only_rejects_missing_login`**: `#[should_panic]`, recorded
   frames with no canary-bearing `LOGIN` line → fires (positive control bites,
   catching a vacuous non-authenticating run).
+- **`login_frame_predicate_matches_command_position_only`**: a
+  `SEARCH SUBJECT "LOGIN"` frame carrying the canary is classified **non**-`LOGIN`
+  (command position is `SEARCH`), so the negative control flags it → pins the
+  predicate against substring misclassification (finding from spec review).
 
 This satisfies "a test that logs the credential on purpose is caught" as a
 committed, always-run test rather than a throwaway scratch branch, and proves
