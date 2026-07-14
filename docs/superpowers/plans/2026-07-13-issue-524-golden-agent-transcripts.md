@@ -60,7 +60,7 @@
   - `struct Recorder` with `Recorder::new() -> Recorder`, `async fn call(&mut self, h: &mut Harness, method: &str, params: Value) -> Value`, `fn render(&self) -> String`.
   - `fn normalize(raw: &str) -> String` (pure, no regex).
 
-This task is self-contained and **independently tested**: a dedicated integration binary (`transcript_normalize.rs`) `#[path]`-includes the wire module and runs the `normalize` unit tests, so Task 1's red/green loop runs for real before commit — an integration-test submodule alone never compiles until a binary includes it (the trap the prior plan draft fell into). Masks start with `version` (always in `initialize.serverInfo`); port/tempdir/draft-field masks are added in Task 4/5 only when calibration shows them, **each with its positive+negative test added to `transcript_normalize.rs`.**
+This task is self-contained and **independently tested**: a dedicated integration binary (`transcript_normalize.rs`) `#[path]`-includes the wire module and runs the `normalize` unit tests, so Task 1's red/green loop runs for real before commit — an integration-test submodule alone never compiles until a binary includes it (the trap the prior plan draft fell into). `normalize` masks the `version` **string** field (always in `initialize.serverInfo`); additional **string-valued** masks (draft `Message-ID`/`Date`/`boundary`) are added in Task 4/5 only when calibration shows them, by **chaining another `mask_json_string_field(...)` call** in `normalize` — each with its positive+negative test added to `transcript_normalize.rs`. `mask_json_string_field` masks JSON *string* values only; a numeric port or a path substring is out of its scope (and per spec §normalization those config-side values almost certainly never surface in a happy-path transcript — see Task 4 Step 5).
 
 - [ ] **Step 1: Add the `insta` dev-dependency**
 
@@ -115,6 +115,16 @@ fn leaves_security_warning_text_untouched() {
     let raw = r#""security_warnings": ["hidden-instructions detected"]"#;
     assert_eq!(normalize(raw), raw, "warning text is the guarded payload");
 }
+
+#[test]
+fn version_value_with_escaped_quote_is_fully_replaced() {
+    // Guards the escaped-quote scan: the close-quote search must skip \" so the
+    // whole value is masked, not truncated at the inner escaped quote.
+    let raw = r#""version": "1.0\"weird""#;
+    let out = normalize(raw);
+    assert!(out.contains(r#""version": "<VERSION>""#), "got: {out}");
+    assert!(!out.contains("weird"), "value tail leaked past escaped quote: {out}");
+}
 ```
 
 - [ ] **Step 3: Run to verify it fails to compile (`transcript`/`normalize` undefined)**
@@ -149,7 +159,14 @@ pub fn normalize(raw: &str) -> String {
 
 /// Replace the quoted value of every `"<field>": "<value>"` occurrence with
 /// `"<field>": "<placeholder>"`. Anchored to the `"field":` token, so it cannot
-/// match a bare number or a clock time.
+/// match a bare number or a clock time. The closing-quote scan skips
+/// backslash-escaped quotes, so a value containing an escaped `\"` is not
+/// truncated mid-value.
+///
+/// Scope: masks JSON **string** values only — a numeric or object value at the
+/// field is copied through unchanged. Intended for stable identifier/timestamp
+/// strings (`version`, `Message-ID`, `Date`, `boundary`) whose whole value is
+/// replaced. Do not use it to mask a *substring* of a free-text field.
 fn mask_json_string_field(raw: &str, field: &str, placeholder: &str) -> String {
     let needle = format!("\"{field}\":");
     let mut out = String::with_capacity(raw.len());
@@ -166,7 +183,21 @@ fn mask_json_string_field(raw: &str, field: &str, placeholder: &str) -> String {
             rest = &rest[copy_to..];
             continue;
         };
-        let Some(close) = inner.find('"') else {
+        // Find the closing quote, skipping any backslash-escaped quote.
+        let mut close = None;
+        let bytes = inner.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2, // skip the escaped char (e.g. \" or \\)
+                b'"' => {
+                    close = Some(i);
+                    break;
+                }
+                _ => i += 1,
+            }
+        }
+        let Some(close) = close else {
             out.push_str(rest);
             return out;
         };
@@ -600,7 +631,9 @@ The response-shape paths (`instructions`, `structuredContent.untrusted`, `securi
 
 - [ ] **Step 5: Add masks the calibration reveals**
 
-If the rendered transcript (inspect the pending `.snap` under `.snap.new`) contains the fake port, a temp path, or `create_draft` generated fields (Message-ID, boundary, Date), add each mask to `MASKS` in `transcript.rs` **with its positive+negative unit test** (Task 1's tests module). Re-run Task 1's unit tests. Keep scripted numerics < 32768 so the port mask (if added) cannot collide.
+If the rendered transcript (inspect the pending `.snap` under `.snap.new`) contains `create_draft` generated **string** fields (`Message-ID`, `boundary`, `Date`), mask each by **chaining another `mask_json_string_field(raw, "<field>", "<PLACEHOLDER>")` call** inside `normalize`, and add its positive+negative case to `transcript_normalize.rs`. Re-run `cargo nextest run -p rimap-server -E 'binary(transcript_normalize)'`.
+
+If instead a **numeric** value leaks — the fake port (spec §normalization says this is unlikely, as `host:port` is server-internal config that rarely surfaces in a happy-path response) — `mask_json_string_field` **cannot** mask it (it skips non-string values by design). Do not force it: keep scripted UIDs/sizes < 32768 so a leaked port cannot collide with a scripted numeric, and if a numeric port genuinely appears, add a **separate** full-token-anchored numeric helper (e.g. mask the exact `format!("{}", server.port())` occurrence) with its own positive+negative test rather than overloading the string helper. A leaked **temp path** is likewise out of `mask_json_string_field`'s scope and would need its own path-substring helper — but confirm it actually appears first (it usually does not).
 
 - [ ] **Step 6: Accept the snapshot and re-run**
 
