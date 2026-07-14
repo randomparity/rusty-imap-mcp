@@ -104,7 +104,8 @@ fn build_test_connection(account_name: &str, audit: &AuditWriter) -> Connection 
         max_fetch_body_bytes: 1024,
         max_append_bytes: 1024,
     };
-    let store: Arc<dyn CredentialStore> = Arc::new(StaticCreds("testpass".into()));
+    let store: Arc<dyn CredentialStore> =
+        Arc::new(StaticCreds("RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2".into()));
     let creds: Arc<dyn rimap_core::CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
         store,
         FallbackMode::KeyringThenEnv,

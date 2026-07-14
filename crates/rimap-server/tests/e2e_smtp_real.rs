@@ -120,7 +120,8 @@ fn build_server_real(
         username: ACCOUNT_USERNAME.into(),
         command_timeout_seconds: 30,
     };
-    let smtp = rimap_smtp::SmtpClient::new(&smtp_cfg, "testpass").expect("smtp client");
+    let smtp = rimap_smtp::SmtpClient::new(&smtp_cfg, "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2")
+        .expect("smtp client");
 
     let id = account_cfg.id.clone();
     let state = rimap_server::boot::registry::AccountState {
@@ -189,7 +190,8 @@ fn test_connection(harness: &DovecotHarness, audit: &AuditWriter) -> Connection 
         max_fetch_body_bytes: 5_242_880,
         max_append_bytes: 10_485_760,
     };
-    let store: Arc<dyn CredentialStore> = Arc::new(StaticCreds("testpass".into()));
+    let store: Arc<dyn CredentialStore> =
+        Arc::new(StaticCreds("RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2".into()));
     let creds: Arc<dyn rimap_core::CredentialResolver> =
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
             store,

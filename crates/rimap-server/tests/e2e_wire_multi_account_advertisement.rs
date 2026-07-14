@@ -60,7 +60,7 @@ fn force_use_for_dead_code_link() {
     let _ = DovecotHarness::delete_mailbox;
 }
 
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multi_account_reveals_tools_only_after_use_account() {

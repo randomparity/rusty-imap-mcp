@@ -40,7 +40,7 @@ use chaos::{ChaosHarness, ChaosSkip, audit};
 use wire::{Harness, assert_valid};
 
 /// Dovecot's seeded test password (matches `e2e_wire.rs`).
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
 
 /// A `max_fetch_body_bytes` comfortably above any fixture (25 MiB).
 const ROOMY_FETCH: u64 = 26_214_400;

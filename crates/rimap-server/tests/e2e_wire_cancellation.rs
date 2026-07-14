@@ -51,7 +51,7 @@ fn force_use_for_dead_code_link() {
 }
 
 /// Dovecot's seeded test password. Matches `e2e_wire.rs`.
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
 
 /// Hold the spawned `Harness` together with the `DovecotHarness` that
 /// owns the underlying container. Dropping the latter tears the

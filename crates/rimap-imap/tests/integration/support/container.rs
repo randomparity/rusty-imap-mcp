@@ -155,9 +155,12 @@ impl DovecotHarness {
         "rimap-test"
     }
 
+    // Must match crates/rimap-imap/tests/integration/dovecot/users (source of
+    // truth) and canary::DOVECOT_CANARY_PASSWORD (#528). High-entropy sentinel so
+    // the canary sweep detects a leak without coincidental substring false hits.
     #[must_use]
     pub fn password() -> &'static str {
-        "testpass"
+        "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2"
     }
 
     /// Run an arbitrary command inside the running dovecot container.

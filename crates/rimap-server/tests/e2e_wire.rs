@@ -66,7 +66,7 @@ fn force_use_for_dead_code_link() {
 /// Dovecot's seeded test password. Matches the value injected via the
 /// docker-compose fixture; see `e2e.rs` `StaticCreds` for the in-process
 /// equivalent.
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
 
 /// In-process credential store for the seed connection. Returns
 /// `DOVECOT_PASSWORD` unconditionally.

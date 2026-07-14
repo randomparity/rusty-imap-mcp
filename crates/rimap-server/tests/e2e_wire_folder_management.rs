@@ -66,7 +66,7 @@ fn force_use_for_dead_code_link() {
 }
 
 /// Dovecot's seeded test password. Matches `e2e_wire.rs`.
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
 
 /// Folder created in step 1 of the round-trip. Not protected and not
 /// expunge-allowlisted, so it can be created but not directly deleted.
