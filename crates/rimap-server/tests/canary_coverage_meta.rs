@@ -48,29 +48,33 @@ fn every_wire_suite_references_the_sweep() {
 }
 
 #[test]
-fn each_test_sweeps_once() {
-    // Per-test coverage floor: every `#[tokio::test]` in a wire suite drives a
-    // harness and must sweep once. Require `assert_absent` count >= the number of
-    // `#[tokio::test]` fns. The `#[tokio::test]` denominator is per-test — unlike
-    // a raw spawn count it does NOT collapse when several tests spawn through a
-    // shared helper (cancellation=2 tests/1 spawn, uidvalidity=3/1, chaos=5/1),
-    // and unlike a `shutdown_and_wait` count it is not inflated by comments.
-    // `assert_absent` is called exactly once per swept test in every backend, so
-    // this is an exact 1:1 (fake suites also call `assert_login_frame_only`,
-    // which is intentionally NOT counted to keep the ratio exact).
+fn each_test_body_sweeps() {
+    // Per-test-BODY enforcement of the AC1 promise: no harness-driving test
+    // spawns without sweeping. Partition each file on the `#[tokio::test]`
+    // attribute and assert every test region calls a sweep. A whole-file count
+    // (`assert_absent` >= `#[tokio::test]`) would pass if one test swept twice
+    // while another skipped it — an aggregate that can rot green as suites are
+    // copied. Partitioning closes that: each region must carry its own sweep.
+    // The `#[tokio::test]` boundary is per-test and does not collapse under
+    // shared spawn helpers. `split("#[tokio::test")` yields the module preamble
+    // as element 0 (skipped), then one region per test up to the next attribute.
     let mut offenders = Vec::new();
     for (name, text) in wire_suite_sources() {
-        let tests = text.matches("#[tokio::test").count();
-        let sweeps = text.matches("assert_absent").count();
-        if sweeps < tests {
-            offenders.push(format!(
-                "{name}: {sweeps} assert_absent < {tests} #[tokio::test]"
-            ));
+        for region in text.split("#[tokio::test").skip(1) {
+            let sweeps = region.contains("canary::assert_absent")
+                || region.contains("canary::assert_login_frame_only");
+            if !sweeps {
+                let sig = region
+                    .lines()
+                    .find(|l| l.contains("async fn"))
+                    .map_or("<unknown fn>", str::trim);
+                offenders.push(format!("{name}: {sig}"));
+            }
         }
     }
     assert!(
         offenders.is_empty(),
-        "a harness-driving test lacks a canary sweep in:\n{}",
+        "these harness-driving tests do not call a canary sweep:\n{}",
         offenders.join("\n"),
     );
 }
