@@ -28,6 +28,8 @@ use std::time::Duration;
 
 // Each integration-test binary imports only its needed support submodules
 // directly to avoid cross-binary dead-code warnings.
+#[path = "support/canary.rs"]
+mod canary;
 #[path = "support/dovecot/mod.rs"]
 mod dovecot;
 #[path = "support/wire/mod.rs"]
@@ -60,7 +62,7 @@ fn force_use_for_dead_code_link() {
     let _ = DovecotHarness::delete_mailbox;
 }
 
-const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
+const DOVECOT_PASSWORD: &str = canary::DOVECOT_CANARY_PASSWORD;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multi_account_reveals_tools_only_after_use_account() {
@@ -140,8 +142,9 @@ async fn multi_account_reveals_tools_only_after_use_account() {
         "non-selected account's tools must stay hidden; got {after:?}",
     );
 
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 }
 
 /// Walk the `tools/list` cursor pagination to completion, returning every

@@ -28,6 +28,8 @@
 
 // Each integration-test binary imports only its needed support
 // submodules directly to avoid cross-binary dead-code warnings.
+#[path = "support/canary.rs"]
+mod canary;
 #[path = "support/dovecot/mod.rs"]
 mod dovecot;
 #[path = "support/wire/mod.rs"]
@@ -67,7 +69,7 @@ fn force_use_for_dead_code_link() {
 }
 
 /// Dovecot's seeded test password. Matches `e2e_wire.rs`.
-const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
+const DOVECOT_PASSWORD: &str = canary::DOVECOT_CANARY_PASSWORD;
 
 /// A `max_fetch_body_bytes` cap smaller than the seeded multipart
 /// message (headers + body + base64 attachment run to a few hundred
@@ -267,8 +269,9 @@ async fn wire_fault_attachment_too_large() {
         "AttachmentTooLarge must surface the configured cap as limit; got {resp}",
     );
 
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 }
 
 /// A stale `expected_uidvalidity` on `mark_read` surfaces
@@ -339,8 +342,9 @@ async fn wire_fault_uid_validity_changed() {
         "guard must echo the folder's real UIDVALIDITY; got {resp}",
     );
 
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 }
 
 /// A dead server surfaces `ERR_CONNECTION_LOST`. The container is stopped
@@ -377,8 +381,9 @@ async fn wire_fault_connection_lost() {
 
     assert_error_code(&resp, "ERR_CONNECTION_LOST");
 
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 }
 
 /// Seed the INBOX with the shared multipart-with-attachment fixture via a

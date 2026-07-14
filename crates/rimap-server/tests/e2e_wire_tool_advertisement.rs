@@ -35,6 +35,8 @@ use std::time::Duration;
 
 // Each integration-test binary imports only its needed support submodules
 // directly to avoid cross-binary dead-code warnings.
+#[path = "support/canary.rs"]
+mod canary;
 #[path = "support/dovecot/mod.rs"]
 mod dovecot;
 #[path = "support/wire/mod.rs"]
@@ -69,7 +71,7 @@ fn force_use_for_dead_code_link() {
 }
 
 /// Dovecot's seeded test password. Matches `e2e_wire.rs`.
-const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
+const DOVECOT_PASSWORD: &str = canary::DOVECOT_CANARY_PASSWORD;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_posture_advertises_its_exact_tool_set() {
@@ -124,11 +126,12 @@ async fn assert_posture_advertises_exact(posture: Posture, fingerprint_hex: &str
         advertised.difference(&expected).collect::<Vec<_>>(),
     );
 
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(
         status.success(),
         "binary exited non-zero for posture {posture}: {status:?}",
     );
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 }
 
 /// The account name for a posture's single-account config. Deliberately
