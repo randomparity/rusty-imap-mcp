@@ -303,6 +303,24 @@ points than today, where every suite re-declares the literal.
 | Panic messages | The child's panics are written to its stderr log (swept above); the harness's own panic diagnostics embed `captured_stderr()`, also from that file. So panic output ⊆ the stderr sweep. |
 | Wire frames (both directions) | The password's only *legitimate* on-wire appearance is the **client→server IMAP `LOGIN`**, captured verbatim by the fake's `recorded()`. Blanket-sweeping `recorded()` would therefore always fire, so it is checked with `assert_login_frame_only` (§4.1): the canary must appear in a `LOGIN` frame (positive control that auth happened) and in **no other** recorded frame (negative control — a copy elsewhere in the dialog is a leak). Server→client fake bytes are test-scripted and never carry the secret; MCP stdio frames never carry the IMAP password. For **Dovecot** suites the IMAP wire is TLS-encrypted and not interceptable at the harness — a plaintext leak there would instead surface in stderr/audit, which are swept, and the positive control is the suite's existing successful-tool-call assertions (§4.2). |
 
+**The server's stdout MCP response channel is a deliberate boundary, not a gap.**
+The `assert_absent` byte-walk covers on-disk artifacts (audit/stderr/`.eml`/config)
+and `assert_login_frame_only` covers the IMAP client dialog; neither reads the
+child's **stdout** (the JSON-RPC responses the agent consumes), which the harness
+drains in-memory and never persists to a swept file. This channel is instead
+guarded by the **golden-transcript suites** (`e2e_wire_transcript_{triage,cleanup}`,
+#524): they snapshot the full rendered stdout dialog, and because those suites now
+inject a *per-run* `fresh_canary()`, a credential echoed into any tool result or
+error would appear in the rendered transcript and break the committed `.snap` on
+every run — a hard, PR-blocking failure. So the highest-value response channel is
+covered by an existing layered guard; the byte-sweep intentionally does not
+duplicate it (threading the captured stdout buffer into every non-transcript
+harness was considered and rejected as a harness-API change disproportionate to a
+channel that already fails loud under the transcript snapshots). MCP tool
+responses carry sanitized *email* content, not the account credential; a
+credential there would be a redaction bug, and that bug reddens the transcript
+snapshots.
+
 ### 4.4 Teardown wiring
 
 Rust integration-test binaries have no shared teardown hook, so "teardown" is an

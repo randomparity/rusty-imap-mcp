@@ -82,6 +82,17 @@ and plumbing that env through both crates' Dovecot harnesses.
   swept against large audit/stderr/`.eml` artifacts it risks coincidental
   substring hits (false positives). Rejected: the `RIMAP-CANARY-` prefix + high-
   entropy tail is what makes any hit a guaranteed true leak.
+- **Sweep the server's stdout MCP response channel in every suite.** The
+  child's stdout (the JSON-RPC responses the agent reads) is drained in-memory by
+  the harness and never persisted, so the file-walk does not see it. Threading a
+  captured-stdout buffer into `assert_absent` for every non-transcript harness was
+  rejected as a harness-API change disproportionate to the risk: that channel is
+  already guarded by the golden-transcript suites (#524), which snapshot the
+  rendered stdout dialog and now inject a per-run `fresh_canary()` — so a
+  credential echoed into a tool result/error breaks the committed `.snap` on every
+  run. MCP responses carry sanitized email content, not the account credential;
+  the credential appearing there is a redaction bug that reddens those snapshots.
+  Documented as an explicit boundary in spec §4.3, not an implicit gap.
 - **Wire the sweep into the in-process suites too** (`e2e.rs`,
   `server_capabilities.rs`, `e2e_smtp*.rs`). They produce no harness-owned
   artifact files (tracing goes to cargo's captured stdout), so there is nothing
