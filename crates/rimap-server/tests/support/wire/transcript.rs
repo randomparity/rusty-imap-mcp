@@ -12,25 +12,52 @@ use super::harness::Harness;
 /// a positive AND a negative unit test in `tests/transcript_normalize.rs`. Masks
 /// are added only for values TDD confirms appear in the rendered transcript.
 ///
-/// Implemented with plain string ops (no `regex` dependency). The only mask
-/// required up front is the `serverInfo.version` value, anchored to the JSON
-/// `"version": "…"` field so it never touches envelope/body text.
+/// Implemented with plain string ops (no `regex` dependency). Two masks:
+/// - `serverInfo.version` — always masked (churns every release, not on drift).
+/// - `message_id` — masked ONLY when the value is a server-*generated* draft
+///   Message-ID (`create_draft` stamps `<pid>.<nanos>@<host>`, which varies per
+///   run). Deterministic fixture message-ids (`clean-0001@example.com`) are the
+///   guarded payload and are left intact — see [`is_generated_message_id`].
 #[must_use]
 pub fn normalize(raw: &str) -> String {
-    mask_json_string_field(raw, "version", "<VERSION>")
+    let out = mask_json_string_field_if(raw, "version", "<VERSION>", |_| true);
+    mask_json_string_field_if(
+        &out,
+        "message_id",
+        "<GENERATED-MESSAGE-ID>",
+        is_generated_message_id,
+    )
+}
+
+/// True for a server-generated draft Message-ID: local-part (before `@`, angle
+/// brackets stripped) is entirely digits and dots with at least one dot — the
+/// `<pid>.<nanos>` timestamp shape `create_draft` emits. Fixture ids like
+/// `clean-0001@example.com` (letters/hyphen) and `<x@example.com>` are NOT
+/// generated, so they survive normalization.
+fn is_generated_message_id(value: &str) -> bool {
+    let trimmed = value.trim_start_matches('<').trim_end_matches('>');
+    let local = trimmed.split('@').next().unwrap_or("");
+    !local.is_empty()
+        && local.contains('.')
+        && local.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 /// Replace the quoted value of every `"<field>": "<value>"` occurrence with
-/// `"<field>": "<placeholder>"`. Anchored to the `"field":` token, so it cannot
-/// match a bare number or a clock time. The closing-quote scan skips
-/// backslash-escaped quotes, so a value containing an escaped `\"` is not
-/// truncated mid-value.
+/// `"<field>": "<placeholder>"` when `should_mask(value)` is true. Anchored to
+/// the `"field":` token, so it cannot match a bare number or a clock time. The
+/// closing-quote scan skips backslash-escaped quotes, so a value containing an
+/// escaped `\"` is not truncated mid-value.
 ///
 /// Scope: masks JSON **string** values only — a numeric or object value at the
-/// field is copied through unchanged. Intended for stable identifier/timestamp
-/// strings (`version`, `Message-ID`, `Date`, `boundary`) whose whole value is
-/// replaced. Do not use it to mask a *substring* of a free-text field.
-fn mask_json_string_field(raw: &str, field: &str, placeholder: &str) -> String {
+/// field is copied through unchanged. Intended for whole-value replacement of
+/// stable identifier/timestamp strings. Do not use it to mask a *substring* of a
+/// free-text field.
+fn mask_json_string_field_if(
+    raw: &str,
+    field: &str,
+    placeholder: &str,
+    should_mask: impl Fn(&str) -> bool,
+) -> String {
     let needle = format!("\"{field}\":");
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
@@ -64,17 +91,69 @@ fn mask_json_string_field(raw: &str, field: &str, placeholder: &str) -> String {
             out.push_str(rest);
             return out;
         };
-        out.push_str(&rest[..pos + needle.len()]);
-        out.push_str(&" ".repeat(ws_len));
-        out.push('"');
-        out.push_str(placeholder);
-        out.push('"');
-        // Advance past the closing quote of the original value.
-        let consumed = pos + needle.len() + ws_len + 1 /* open quote */ + close + 1 /* close quote */;
+        let consumed =
+            pos + needle.len() + ws_len + 1 /* open quote */ + close + 1 /* close quote */;
+        if should_mask(&inner[..close]) {
+            out.push_str(&rest[..pos + needle.len()]);
+            out.push_str(&" ".repeat(ws_len));
+            out.push('"');
+            out.push_str(placeholder);
+            out.push('"');
+        } else {
+            out.push_str(&rest[..consumed]);
+        }
         rest = &rest[consumed..];
     }
     out.push_str(rest);
     out
+}
+
+/// Reduce a JSON-RPC response to the agent-facing payload the transcript pins.
+///
+/// Errors record their `error` object. Successes record `result`, with two
+/// noise-reducing projections:
+///
+/// - **`tools/list`**: each advertised tool's `inputSchema`/`outputSchema` is
+///   dropped, because those schemas are already pinned byte-for-byte by the
+///   dedicated schema-drift gate (`just regen-tool-schemas` +
+///   `tests/fixtures/rimap-tool-schemas/`). Re-pinning them here would add
+///   thousands of lines that churn on any unrelated tool-schema edit — noise that
+///   buries the surface #524 actually guards: the agent-facing prose (`name`,
+///   `title`, `description`, `annotations`).
+/// - **`tools/call`**: when the result carries `structuredContent`, the
+///   `content` array is dropped. `content[0].text` is a byte-identical JSON
+///   stringification of `structuredContent` (the MCP dual representation), so
+///   pinning `structuredContent` already guards every field; keeping both would
+///   double the snapshot and force every volatile value to be masked twice (once
+///   escaped, once not). `isError` is preserved.
+pub fn record_response(method: &str, resp: &Value) -> Value {
+    if resp.get("error").is_some_and(|e| !e.is_null()) {
+        return json!({ "error": resp["error"].clone() });
+    }
+    let result = &resp["result"];
+    if method == "tools/list"
+        && let Some(tools) = result["tools"].as_array()
+    {
+        let projected: Vec<Value> = tools
+            .iter()
+            .map(|tool| {
+                let mut tool = tool.clone();
+                if let Some(obj) = tool.as_object_mut() {
+                    obj.remove("inputSchema");
+                    obj.remove("outputSchema");
+                }
+                tool
+            })
+            .collect();
+        return json!({ "result": { "tools": projected } });
+    }
+    if !result["structuredContent"].is_null() {
+        return json!({ "result": {
+            "isError": result["isError"].clone(),
+            "structuredContent": result["structuredContent"].clone(),
+        }});
+    }
+    json!({ "result": result.clone() })
 }
 
 /// Captures request→response exchanges for a golden transcript.
@@ -99,15 +178,10 @@ impl Recorder {
         let display_id = self.next_display_id;
         self.next_display_id += 1;
         let resp = h.request(method, params.clone()).await;
-        let recorded = if resp.get("error").is_some_and(|e| !e.is_null()) {
-            json!({ "error": resp["error"].clone() })
-        } else {
-            json!({ "result": resp["result"].clone() })
-        };
         self.exchanges.push(json!({
             "id": display_id,
             "request": { "method": method, "params": params },
-            "response": recorded,
+            "response": record_response(method, &resp),
         }));
         resp
     }

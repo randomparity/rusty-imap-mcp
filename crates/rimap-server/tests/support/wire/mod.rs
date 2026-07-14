@@ -41,4 +41,5 @@ fn force_use_of_re_exports() {
     let _ = transcript::Recorder::render;
     let _ = <transcript::Recorder as Default>::default;
     let _ = transcript::normalize as fn(&str) -> String;
+    let _ = transcript::record_response as fn(&str, &serde_json::Value) -> serde_json::Value;
 }
