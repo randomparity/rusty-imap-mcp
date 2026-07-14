@@ -6,7 +6,7 @@
 
 **Architecture:** Test-only. A new `transcript` support module wraps `Harness` calls into a `Recorder` that captures ordered request→response exchanges and renders them (CR-stripped, normalized) for snapshotting. Two host-runnable wire tests script full "day in the life" sessions (triage, cleanup) against `rimap-fake-imap`, assert non-vacuity, then snapshot. **No production code changes.**
 
-**Tech Stack:** Rust (edition 2024), `tokio`, `insta` (existing dev-dep), `serde_json`, `regex` (existing dep), `rimap-fake-imap` (existing test crate, ADR-0008), the `rimap-server` wire `Harness`.
+**Tech Stack:** Rust (edition 2024), `tokio`, `insta` (workspace dep, added to `rimap-server` dev-deps in Task 1), `serde_json`, `rimap-fake-imap` (existing test crate, ADR-0008), the `rimap-server` wire `Harness`. **No `regex` — `normalize` is plain string ops.**
 
 **Spec:** `docs/superpowers/specs/2026-07-13-issue-524-golden-agent-transcripts-design.md`
 **ADR:** `docs/ADR/0009-golden-agent-transcript-snapshots.md`
@@ -20,7 +20,7 @@
 - **Zero warnings:** `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` clean. No `#[allow]` — use `#[expect(..., reason = "...")]`. Integration tests may `#![expect(clippy::expect_used, reason = "integration tests")]` / `#![expect(clippy::panic, reason = "test diagnostics")]` at file top, matching sibling `e2e_wire_*.rs`.
 - **100-char lines.** Absolute imports only.
 - **Snapshots** live under `crates/rimap-server/tests/snapshots/`, committed, pinned to LF via `.gitattributes`.
-- **`insta` is already a dev-dep of `rimap-server`** — do not add it. Confirm with `rg 'insta' crates/rimap-server/Cargo.toml`.
+- **`insta` is a workspace dep but NOT yet a `rimap-server` dev-dep** — Task 1 adds `insta = { workspace = true }` to `crates/rimap-server/[dev-dependencies]`. Confirm current absence with `grep -nw insta crates/rimap-server/Cargo.toml` (empty) and presence in root with `grep -nw insta Cargo.toml` (`insta = { version = "1.47", features = ["json"] }`). **`normalize` uses plain string ops — no `regex` dependency** (`regex` is not a workspace dep; adding it would need a cargo-deny review and is unnecessary for the one version mask).
 - **Commits:** conventional-commit prefix, imperative ≤72-char subject, `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` trailer. Stage explicit paths; never `git add -A`. `.rs` commits trigger a full clippy recompile in prek — use a generous commit timeout (≥300s).
 
 ## Guardrails (run for every task's verification)
@@ -32,8 +32,10 @@
 
 ## File Structure
 
-- **Create** `crates/rimap-server/tests/support/wire/transcript.rs` — `Recorder` + `normalize` + unit tests. One responsibility: capture and render a normalized transcript.
-- **Modify** `crates/rimap-server/tests/support/wire/mod.rs` — add `pub mod transcript;` and the per-binary use-link.
+- **Create** `crates/rimap-server/tests/support/wire/transcript.rs` — `Recorder` + `normalize`. One responsibility: capture and render a normalized transcript.
+- **Create** `crates/rimap-server/tests/transcript_normalize.rs` — dedicated binary running the `normalize` unit tests (so Task 1 is independently testable).
+- **Modify** `crates/rimap-server/tests/support/wire/mod.rs` — add `pub mod transcript;` and extend the `force_use_of_re_exports` link.
+- **Modify** `crates/rimap-server/Cargo.toml` — add `insta = { workspace = true }` to `[dev-dependencies]`.
 - **Create** `crates/rimap-server/tests/fixtures/transcript/hostile.eml` — frozen adversarial message bytes (transcript-owned, decoupled from the injection corpus).
 - **Create** `crates/rimap-server/tests/fixtures/transcript/clean.eml` — small hand-authored clean RFC 822 message (optional inline `const` alternative — see Task 4).
 - **Create** `crates/rimap-server/tests/e2e_wire_transcript_triage.rs` — triage flow + snapshot.
@@ -44,101 +46,140 @@
 
 ---
 
-## Task 1: Transcript `Recorder` + `normalize` helper (with unit tests)
+## Task 1: `insta` dev-dep + Transcript `Recorder`/`normalize` (independently tested)
 
 **Files:**
+- Modify: `crates/rimap-server/Cargo.toml` (add `insta` dev-dep)
 - Create: `crates/rimap-server/tests/support/wire/transcript.rs`
 - Modify: `crates/rimap-server/tests/support/wire/mod.rs`
+- Create: `crates/rimap-server/tests/transcript_normalize.rs` (dedicated unit-test binary)
 
 **Interfaces:**
 - Consumes: `super::harness::Harness` (`Harness::request(&mut self, method: &str, params: Value) -> Value`).
 - Produces:
-  - `struct Recorder { exchanges: Vec<serde_json::Value> }` with `Recorder::new() -> Recorder`, `async fn call(&mut self, h: &mut Harness, method: &str, params: Value) -> Value`, `fn render(&self) -> String`.
-  - `fn normalize(raw: &str) -> String` (pure).
+  - `struct Recorder` with `Recorder::new() -> Recorder`, `async fn call(&mut self, h: &mut Harness, method: &str, params: Value) -> Value`, `fn render(&self) -> String`.
+  - `fn normalize(raw: &str) -> String` (pure, no regex).
 
-This task ships the recorder and the normalizer with their own unit tests. It has **no dependency on the flow scripts**, so it is reviewable and testable alone. The `normalize` masks are the ones the spec's TDD calibration confirms appear in the transcript; start with `version` (always present in `initialize.serverInfo`) and add port/tempdir/draft-field masks only in Task 4/5 when calibration shows them — **each new mask lands with its positive+negative unit test in this file.**
+This task is self-contained and **independently tested**: a dedicated integration binary (`transcript_normalize.rs`) `#[path]`-includes the wire module and runs the `normalize` unit tests, so Task 1's red/green loop runs for real before commit — an integration-test submodule alone never compiles until a binary includes it (the trap the prior plan draft fell into). Masks start with `version` (always in `initialize.serverInfo`); port/tempdir/draft-field masks are added in Task 4/5 only when calibration shows them, **each with its positive+negative test added to `transcript_normalize.rs`.**
 
-- [ ] **Step 1: Write the failing unit tests for `normalize`**
+- [ ] **Step 1: Add the `insta` dev-dependency**
 
-Add to `crates/rimap-server/tests/support/wire/transcript.rs` (new file). Put tests in a `#[cfg(test)] mod tests` at the bottom. These are pure-function tests — no async, no harness.
+Edit `crates/rimap-server/Cargo.toml`, adding to the existing `[dev-dependencies]` section:
+
+```toml
+insta = { workspace = true }
+```
+
+(Root workspace already declares `insta = { version = "1.47", features = ["json"] }`; this pulls it in for `rimap-server` tests with no new external crate.)
+
+- [ ] **Step 2: Write the failing `normalize` unit-test binary**
+
+Create `crates/rimap-server/tests/transcript_normalize.rs` — a real test binary so the tests compile and run:
 
 ```rust
-#[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
-mod tests {
-    use super::normalize;
+//! Unit tests for the transcript `normalize` helper. A dedicated binary so the
+//! pure-function tests run without needing a full wire session. Includes the
+//! wire support tree because `transcript.rs` lives under it.
 
-    #[test]
-    fn masks_server_version() {
-        let raw = r#""version": "0.1.1-dev""#;
-        let out = normalize(raw);
-        assert!(out.contains(r#""version": "<VERSION>""#), "got: {out}");
-        assert!(!out.contains("0.1.1-dev"), "version leaked: {out}");
-    }
+#![expect(clippy::expect_used, reason = "integration tests")]
+#![expect(clippy::panic, reason = "test diagnostics")]
 
-    #[test]
-    fn leaves_envelope_clock_time_untouched() {
-        // The greediest risk: a bare `:<digits>` mask would eat this.
-        let raw = "Date: Wed, 01 Jan 2020 10:30:00 +0000";
-        assert_eq!(normalize(raw), raw, "clock time must survive normalize");
-    }
+#[path = "support/wire/mod.rs"]
+mod wire;
 
-    #[test]
-    fn leaves_small_scripted_numbers_untouched() {
-        let raw = r#""uid": 2, "size": 42, "total_matched": 3"#;
-        assert_eq!(normalize(raw), raw, "scripted numerics must survive");
-    }
+use wire::transcript::normalize;
 
-    #[test]
-    fn leaves_security_warning_text_untouched() {
-        let raw = r#""security_warnings": ["hidden-instructions detected"]"#;
-        assert_eq!(normalize(raw), raw, "warning text is the guarded payload");
-    }
+#[test]
+fn masks_server_version() {
+    let raw = r#""version": "0.1.1-dev""#;
+    let out = normalize(raw);
+    assert!(out.contains(r#""version": "<VERSION>""#), "got: {out}");
+    assert!(!out.contains("0.1.1-dev"), "version leaked: {out}");
+}
+
+#[test]
+fn leaves_envelope_clock_time_untouched() {
+    // The greediest risk: a naive `:<digits>` mask would eat this.
+    let raw = "Date: Wed, 01 Jan 2020 10:30:00 +0000";
+    assert_eq!(normalize(raw), raw, "clock time must survive normalize");
+}
+
+#[test]
+fn leaves_small_scripted_numbers_untouched() {
+    let raw = r#""uid": 2, "size": 42, "total_matched": 3"#;
+    assert_eq!(normalize(raw), raw, "scripted numerics must survive");
+}
+
+#[test]
+fn leaves_security_warning_text_untouched() {
+    let raw = r#""security_warnings": ["hidden-instructions detected"]"#;
+    assert_eq!(normalize(raw), raw, "warning text is the guarded payload");
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail (compile error — `normalize` undefined)**
+- [ ] **Step 3: Run to verify it fails to compile (`transcript`/`normalize` undefined)**
 
-Run: `cargo nextest run -p rimap-server -E 'binary(e2e_wire_transcript_triage)' 2>&1 | head` — will not compile yet; alternatively the module isn't wired. Instead, temporarily verify via a throwaway: the module is only compiled when a test binary includes it, so proceed to Step 3 and let Task 4's binary exercise it. **To get an immediate red**, wire `mod.rs` first (Step 3a) and add a stub binary is overkill; instead rely on `cargo check -p rimap-server --tests` after Step 3 to confirm the tests compile and the assertions fail on a stub `normalize` that returns its input unchanged (the `masks_server_version` test fails).
+Run: `cargo nextest run -p rimap-server -E 'binary(transcript_normalize)' 2>&1 | tail -20`
+Expected: compile error — `wire::transcript` / `normalize` not found (module not written yet).
 
-- [ ] **Step 3: Write `Recorder` + `normalize`**
+- [ ] **Step 4: Write `Recorder` + `normalize` (plain string, no regex)**
 
-Write the full module `crates/rimap-server/tests/support/wire/transcript.rs`:
+Create `crates/rimap-server/tests/support/wire/transcript.rs`:
 
 ```rust
 //! Records the ordered request→response exchanges of a wire session and renders
 //! them as a normalized, CR-stripped string for `insta` snapshotting. See
 //! `docs/superpowers/specs/2026-07-13-issue-524-golden-agent-transcripts-design.md`.
 
-use std::sync::LazyLock;
-
-use regex::Regex;
 use serde_json::{Value, json};
 
 use super::harness::Harness;
 
-/// Ordered `(Regex, replacement)` masks. Each entry corresponds to a spec
-/// normalization-table row and MUST ship with a positive AND a negative unit
-/// test (see the tests module). Masks are added only for values TDD confirms
-/// appear in the rendered transcript.
-static MASKS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    vec![
-        // serverInfo.version — churns every release, not on drift. Anchored to
-        // the JSON `"version": "…"` field so it cannot touch body text.
-        (
-            Regex::new(r#""version":\s*"[^"]*""#).expect("valid version regex"),
-            r#""version": "<VERSION>""#,
-        ),
-    ]
-});
-
-/// Replace run-varying substrings with stable placeholders. Pure; unit-tested
-/// with a positive and negative case per mask.
+/// Replace run-varying substrings with stable placeholders. Pure; each mask has
+/// a positive AND a negative unit test in `tests/transcript_normalize.rs`. Masks
+/// are added only for values TDD confirms appear in the rendered transcript.
+///
+/// Implemented with plain string ops (no `regex` dependency). The only mask
+/// required up front is the `serverInfo.version` value, anchored to the JSON
+/// `"version": "…"` field so it never touches envelope/body text.
+#[must_use]
 pub fn normalize(raw: &str) -> String {
-    let mut out = raw.to_string();
-    for (re, repl) in MASKS.iter() {
-        out = re.replace_all(&out, *repl).into_owned();
+    mask_json_string_field(raw, "version", "<VERSION>")
+}
+
+/// Replace the quoted value of every `"<field>": "<value>"` occurrence with
+/// `"<field>": "<placeholder>"`. Anchored to the `"field":` token, so it cannot
+/// match a bare number or a clock time.
+fn mask_json_string_field(raw: &str, field: &str, placeholder: &str) -> String {
+    let needle = format!("\"{field}\":");
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(pos) = rest.find(&needle) {
+        let after = &rest[pos + needle.len()..];
+        // Skip whitespace, require an opening quote, find the closing quote.
+        let trimmed = after.trim_start();
+        let ws_len = after.len() - trimmed.len();
+        let Some(inner) = trimmed.strip_prefix('"') else {
+            // Not a string value (e.g. numeric) — copy through and continue.
+            let copy_to = pos + needle.len();
+            out.push_str(&rest[..copy_to]);
+            rest = &rest[copy_to..];
+            continue;
+        };
+        let Some(close) = inner.find('"') else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..pos + needle.len()]);
+        out.push_str(&" ".repeat(ws_len));
+        out.push('"');
+        out.push_str(placeholder);
+        out.push('"');
+        // Advance past the closing quote of the original value.
+        let consumed = pos + needle.len() + ws_len + 1 /* open quote */ + close + 1 /* close quote */;
+        rest = &rest[consumed..];
     }
+    out.push_str(rest);
     out
 }
 
@@ -196,31 +237,45 @@ impl Default for Recorder {
 ```
 
 Notes for the implementer:
-- `regex` and `serde_json` are already workspace deps; confirm `regex` is available to `rimap-server` tests (`rg 'regex' crates/rimap-server/Cargo.toml` — if absent from dev-deps, add `regex = { workspace = true }` under `[dev-dependencies]` in that task's commit, and note it — this is a dev-dep, not a runtime dep, so it does not violate "no production changes").
-- `LazyLock` is stable since Rust 1.80 → MSRV-1.88-safe.
-- The `.expect(...)` on regex compile is in a `LazyLock` init closure (not a `Result` fn) and matches the test-support convention; if clippy flags `expect_used`, add `#![expect(clippy::expect_used, reason = "test-support: regex literals are compile-time constant")]` at the top of this file (it is a test module, compiled only under `--tests`).
+- No `regex` — `mask_json_string_field` is plain `str::find`. `serde_json` is already available to these tests.
+- If clippy flags `unwrap_used`/`expect_used` on `to_string_pretty().unwrap_or_default()` — it uses `unwrap_or_default`, no unwrap. `as_u64().unwrap_or(0)` likewise. No panic paths.
+- Preserving whitespace with `" ".repeat(ws_len)` keeps `serde_json`'s pretty spacing (`"version": "…"`) byte-identical after masking, so the anchor test `masks_server_version` matches exactly.
 
-- [ ] **Step 3a: Wire the module**
+- [ ] **Step 4a: Wire the module + force-use link**
 
-Modify `crates/rimap-server/tests/support/wire/mod.rs`: add `pub mod transcript;` after `pub mod schema;`, and add to `force_use_of_re_exports` (or a sibling link fn) references so per-binary dead-code stays clean:
+Modify `crates/rimap-server/tests/support/wire/mod.rs`:
+1. Add `pub mod transcript;` after `pub mod schema;`.
+2. Extend `force_use_of_re_exports` (the existing `#[expect(dead_code, …)]` fn) to reference the transcript items, matching the documented pattern for `harness`/`schema` — pub-visibility does NOT suppress per-binary dead-code in this integration-test setup (that fn exists precisely because it doesn't):
 
 ```rust
-pub mod transcript;
+// Inside force_use_of_re_exports():
+let _ = transcript::Recorder::new;
+let _ = transcript::normalize as fn(&str) -> String;
+let _ = <transcript::Recorder as Default>::default;
+// call/render are exercised by the flow binaries; reference them to mark used
+// in binaries (mcp_wire_conformance, transcript_normalize) that don't call them:
+let _ = transcript::Recorder::render;
 ```
 
-Because `transcript` items are used by the two new flow binaries but not by `mcp_wire_conformance.rs`, add a use-link. The simplest: re-export nothing at `mod.rs` top level and let each flow binary `use wire::transcript::{Recorder, normalize};` directly from the sub-module (mirroring how `e2e_wire.rs` imports sub-modules directly, per the `mod.rs` doc-comment). **Prefer direct sub-module imports** to avoid touching the fragile `force_use_*` link. Verify no `dead_code`/`unused` warning arises in `mcp_wire_conformance` (which includes `support/wire/mod.rs`): since `transcript` is a `pub mod` with `pub` items, library-style visibility suppresses dead-code — confirm with `just check`.
+`Recorder::call` is an `async fn`; reference it via `let _ = transcript::Recorder::call;`. Confirm each item name compiles.
 
-- [ ] **Step 4: Run unit tests to verify they pass**
+- [ ] **Step 5: Run the unit tests — verify they pass**
 
-Run: `cargo nextest run -p rimap-server -E 'binary(e2e_wire_transcript_triage)'` will not exist yet. Instead run the module's tests via any binary that includes it once Task 4 exists. **For this task's isolated verification**, temporarily add the include to an existing throwaway or run `cargo test -p rimap-server --tests transcript 2>&1 | tail`. Expected: the four `normalize` tests pass. (If no binary yet includes the module, this task's tests are exercised in Task 4; note that dependency in the commit message.)
+Run: `cargo nextest run -p rimap-server -E 'binary(transcript_normalize)'`
+Expected: 4 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Verify zero warnings across the whole workspace (not just `just check`)**
+
+Run: `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings 2>&1 | tail -20`
+Expected: clean. This is the real gate for the per-binary dead-code link — `just check` alone does not run clippy. If a binary (e.g. `mcp_wire_conformance`) warns on an unused transcript item, extend the force-use link until clean.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/rimap-server/tests/support/wire/transcript.rs \
-        crates/rimap-server/tests/support/wire/mod.rs
-# if a dev-dep was needed:
-# git add crates/rimap-server/Cargo.toml Cargo.lock
+git add crates/rimap-server/Cargo.toml Cargo.lock \
+        crates/rimap-server/tests/support/wire/transcript.rs \
+        crates/rimap-server/tests/support/wire/mod.rs \
+        crates/rimap-server/tests/transcript_normalize.rs
 git commit -m "test(server): add transcript recorder + normalize helper (#524)"
 ```
 
@@ -344,7 +399,7 @@ git commit -m "test(server): add transcript-owned hostile + clean fixtures (#524
 **Interfaces:**
 - Consumes: `wire::transcript::{Recorder}` (Task 1), `wire::harness::Harness`, `wire::schema::assert_valid`, `rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble}`, the fixtures (Task 3).
 
-This is the headline snapshot. It is where the `normalize` masks and the IMAP dialog are **calibrated via TDD** using the `DumpOnPanic` drop guard. Model the scaffolding (config, `spawn_ready`, `DumpOnPanic`, `PASSWORD_ENV_VAR`) on `e2e_wire_uidvalidity.rs`.
+This is the headline snapshot. It is where the `normalize` masks and the IMAP dialog are **calibrated via TDD** using the `DumpOnPanic` drop guard. Model the scaffolding (config, `spawn_unhandshaken`, `DumpOnPanic`, `PASSWORD_ENV_VAR`) on `e2e_wire_uidvalidity.rs`.
 
 - [ ] **Step 1: Write the flow test skeleton (expected to fail — dialog uncalibrated)**
 
@@ -437,16 +492,15 @@ posture = "draft-safe"
     )
 }
 
-async fn spawn_ready(server: &FakeImapServer, tempdir: TempDir) -> Harness {
+/// Spawn the binary against `server` WITHOUT doing the MCP handshake, so the
+/// `Recorder` can capture the `initialize` exchange itself (that response — with
+/// its `server_instructions` — is the transcript's first entry). Returns the
+/// live pre-handshake harness.
+async fn spawn_unhandshaken(server: &FakeImapServer, tempdir: TempDir) -> Harness {
     let config_path = tempdir.path().join("config.toml");
     let config = fake_config(server.port(), &server.pin().to_hex(), &tempdir);
     std::fs::write(&config_path, config).expect("write config");
-    let mut harness =
-        Harness::spawn_with_config(&config_path, tempdir, &[(PASSWORD_ENV_VAR, "fake-password")])
-            .await;
-    harness.initialize_handshake().await;
-    harness.send_initialized().await;
-    harness
+    Harness::spawn_with_config(&config_path, tempdir, &[(PASSWORD_ENV_VAR, "fake-password")]).await
 }
 
 #[tokio::test]
@@ -455,17 +509,11 @@ async fn triage_transcript() {
     let _dump = DumpOnPanic(&server);
     let tempdir = TempDir::new().expect("tempdir");
 
-    // Record initialize + tools/list from a *fresh* harness so the transcript
-    // opens with what the agent reads first. Use a Recorder that also captures
-    // the handshake: call initialize via the recorder rather than the helper.
+    // Record initialize + tools/list from a fresh harness so the transcript opens
+    // with what the agent reads first. initialize is driven through the Recorder
+    // (not initialize_handshake) so its response lands in the snapshot.
     let mut rec = Recorder::new();
-    let mut harness =
-        Harness::spawn_with_config(&{
-            let cp = tempdir.path().join("config.toml");
-            std::fs::write(&cp, fake_config(server.port(), &server.pin().to_hex(), &tempdir))
-                .expect("write config");
-            cp
-        }, tempdir, &[(PASSWORD_ENV_VAR, "fake-password")]).await;
+    let mut harness = spawn_unhandshaken(&server, tempdir).await;
 
     let init = rec.call(&mut harness, "initialize", json!({
         "protocolVersion": wire::PINNED_PROTOCOL_VERSION,
@@ -584,7 +632,7 @@ git commit -m "test(server): golden triage agent transcript over wire (#524)"
 **Interfaces:**
 - Consumes: same as Task 4, plus `destructive` posture.
 
-Second headline snapshot (satisfies AC "≥2 snapshots"). Reuses the Task 4 scaffolding pattern (`Recorder`, `DumpOnPanic`, `spawn_ready`); the differences are the posture (`destructive`) and the dialog (`search → move_message → delete_message → expunge`).
+Second headline snapshot (satisfies AC "≥2 snapshots"). Reuses the Task 4 scaffolding pattern (`Recorder`, `DumpOnPanic`, `spawn_unhandshaken`); the differences are the posture (`destructive`) and the dialog (`search → move_message → delete_message → expunge`).
 
 - [ ] **Step 1: Write the cleanup skeleton (fails — uncalibrated)**
 
