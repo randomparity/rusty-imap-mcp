@@ -279,8 +279,11 @@ existing schema-regen note) and a header doc-comment in each flow test:
   `cargo insta review` (or `cargo insta accept`) and commit the updated `.snap`.
 - A snapshot diff that is **not** an intended change is a drift bug — investigate,
   don't accept.
-- `insta` is already a dev-dependency (`rimap-content`, `rimap-config`,
-  `rimap-server`); no new dependency. `.snap` files live under
+- `insta` is a **workspace dependency** already used by `rimap-content` and
+  `rimap-config`; `rimap-server` picks it up with a one-line
+  `insta = { workspace = true }` under `[dev-dependencies]` (no new external
+  crate enters the graph). `normalize` uses **plain string operations, not a new
+  `regex` dependency**. `.snap` files live under
   `crates/rimap-server/tests/snapshots/` and are committed, with a
   `.gitattributes` entry pinning `*.snap` to `text eol=lf`.
 
