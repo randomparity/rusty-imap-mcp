@@ -387,20 +387,22 @@ inspection-dependent:
   test spawns its own harness + `TempDir`, so a file-level reference is not
   enough: a file where only one of N authenticating tests sweeps would pass a
   bare reference check while N−1 tests go unswept. So, per file, assert
-  `count(assert_absent) >= count(harness spawns)`, where a harness spawn is a
-  `Harness::spawn` / `spawn_with_config` occurrence. **`assert_absent` alone is
-  the denominator** because every swept test calls it exactly once, in *every*
-  backend (fake authenticating: `assert_login_frame_only` + `assert_absent`;
+  `count(assert_absent) >= count("#[tokio::test]")`. The denominator is the
+  **per-test attribute count**, chosen deliberately: a raw harness-spawn count
+  collapses to 1 for suites that spawn through a shared helper (`_cancellation`
+  2 tests / 1 spawn, `_uidvalidity` 3 / 1, `_chaos` 5 / 1), and a
+  `shutdown_and_wait` count is inflated by comments — `#[tokio::test]` is exactly
+  one per harness-driving test in every wire suite. **`assert_absent` alone is the
+  numerator** because every swept test calls it exactly once, in *every* backend
+  (fake authenticating: `assert_login_frame_only` + `assert_absent`;
   `_tls_pin_mismatch`: `assert_absent`; Dovecot: `assert_absent`) — so the check
-  is an exact 1:1 with no per-backend slack. Counting `assert_login_frame_only`
-  too would give the six fake suites a 2:1 ratio that masks a forgotten sweep in
-  another test in the same file, defeating the check for exactly the multi-test
-  files it protects. A suite that factors spawn+sweep into a shared helper (one
-  spawn, one `assert_absent`, called by many tests) satisfies this; a suite that
-  inlines a spawn in a new test without a matching `assert_absent` fails it. This
-  is a source-text heuristic, not a type-level guarantee — see the rejected
-  alternative below — but it converts the common "forgot the sweep in one test
-  fn" regression from reviewer-caught to CI-caught.
+  is an exact 1:1. Counting `assert_login_frame_only` too would give the six fake
+  suites a 2:1 ratio that masks a forgotten sweep in another test in the same
+  file. A new `#[tokio::test]` that spawns a harness without an `assert_absent`
+  drops the count below the test count and reddens CI. This is a source-text
+  heuristic, not a type-level guarantee — see the rejected alternative below —
+  but it converts the common "forgot the sweep in one test fn" regression, even
+  in helper-based multi-test files, from reviewer-caught to CI-caught.
 
 The glob itself is the source of truth — no hand-maintained allowlist. A new
 `e2e_wire*` suite is auto-included by the glob and fails the test until it wires
@@ -463,9 +465,10 @@ count check enforces this).
 - **A suite that authenticates but a sweep is forgotten, or a new wire suite
   skips the sweep.** Mitigation: the `canary_coverage_meta.rs` enumeration test
   (§4.6) fails PR CI when any `e2e_wire*.rs` source lacks a sweep reference, and —
-  per file — when its `assert_absent` count is below its harness-spawn count, so
-  a single unswept test fn inside a multi-test file also reddens CI. Structural at
-  file granularity, extended toward per-test by the exact 1:1 count check.
+  per file — when its `assert_absent` count is below its `#[tokio::test]` count,
+  so a single unswept test fn inside a multi-test file also reddens CI (the
+  per-test denominator does not collapse under shared spawn helpers). Structural
+  at file granularity, extended toward per-test by the exact 1:1 count check.
 - **Vacuous green: a run passes without authenticating.** An absence-only check
   reports success on a run that never reached the post-LOGIN surface. Mitigation:
   every suite carries an explicit positive-control disposition (§4.2, §4.7) —

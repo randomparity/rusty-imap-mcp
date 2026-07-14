@@ -687,7 +687,7 @@ Suites: `e2e_wire_fault_injection`, `e2e_wire_tool_advertisement`, `e2e_wire_mul
 
 - [ ] **Step 1: Wire `e2e_wire_fault_injection.rs`, `e2e_wire_tool_advertisement.rs`, `e2e_wire_multi_account_advertisement.rs`, `e2e_wire_cancellation.rs`.** Sweep every harness-spawning test.
 
-- [ ] **Step 2: Wire `e2e_wire_chaos.rs`** — has 5 tests (or a shared spawn+teardown helper). If spawning is factored into a helper, sweep in the same helper so the per-file `assert_absent >= spawn` count balances; otherwise sweep per test.
+- [ ] **Step 2: Wire `e2e_wire_chaos.rs`** — 5 `#[tokio::test]`s, already 5 `shutdown_and_wait` (one per test body). The sweep must live in the test body (it needs that test's returned `TempDir`), so add `assert_absent` after each of the 5 `shutdown_and_wait` sites — it cannot go in the shared spawn helper (the harness is driven by the test body between spawn and teardown). The coverage floor (§Task 8) requires 5 `assert_absent` for the 5 `#[tokio::test]`s.
 
 - [ ] **Step 3: Run the non-chaos four (with runtime if present)**
 
@@ -717,7 +717,7 @@ git commit -m "test(server): sweep canary in Dovecot/chaos hygiene suites (#528)
 
 ### Task 8: AC1 coverage meta-test — `canary_coverage_meta.rs`
 
-Structural enforcement that every `e2e_wire*.rs` references the sweep, and that per file `count(assert_absent) >= count(harness spawns)` (so a single unswept test in a multi-test file also fails). Runs last, when all suites are wired.
+Structural enforcement that every `e2e_wire*.rs` references the sweep, and that per file `count(assert_absent) >= count("#[tokio::test]")` (so a single unswept test in a multi-test file also fails). The `#[tokio::test]` denominator is per-test and does not collapse under shared spawn helpers. Runs last, when all suites are wired.
 
 **Files:**
 - Create: `crates/rimap-server/tests/canary_coverage_meta.rs`
@@ -772,19 +772,27 @@ fn every_wire_suite_references_the_sweep() {
 }
 
 #[test]
-fn each_suite_sweeps_at_least_once_per_harness_spawn() {
+fn each_test_sweeps_once() {
+    // Per-test coverage floor: every `#[tokio::test]` in a wire suite drives a
+    // harness and must sweep once. Require `assert_absent` count >= the number of
+    // `#[tokio::test]` fns. The `#[tokio::test]` denominator is per-test — unlike
+    // a raw spawn count it does NOT collapse when several tests spawn through a
+    // shared helper (cancellation=2 tests/1 spawn, uidvalidity=3/1, chaos=5/1),
+    // and unlike a `shutdown_and_wait` count it is not inflated by comments.
+    // `assert_absent` is called exactly once per swept test in every backend, so
+    // this is an exact 1:1 (fake suites also call `assert_login_frame_only`,
+    // which is intentionally NOT counted to keep the ratio exact).
     let mut offenders = Vec::new();
     for (name, text) in wire_suite_sources() {
-        let spawns =
-            text.matches("spawn_with_config(").count() + text.matches("Harness::spawn(").count();
+        let tests = text.matches("#[tokio::test").count();
         let sweeps = text.matches("assert_absent").count();
-        if sweeps < spawns {
-            offenders.push(format!("{name}: {sweeps} assert_absent < {spawns} harness spawns"));
+        if sweeps < tests {
+            offenders.push(format!("{name}: {sweeps} assert_absent < {tests} #[tokio::test]"));
         }
     }
     assert!(
         offenders.is_empty(),
-        "a harness is spawned without a matching canary sweep in:\n{}",
+        "a harness-driving test lacks a canary sweep in:\n{}",
         offenders.join("\n"),
     );
 }
@@ -793,7 +801,7 @@ fn each_suite_sweeps_at_least_once_per_harness_spawn() {
 - [ ] **Step 2: Run it**
 
 Run: `cargo nextest run -p rimap-server -E 'binary(canary_coverage_meta)'`
-Expected: PASS. If `each_suite_sweeps_at_least_once_per_harness_spawn` fails, the named suite has an unswept harness spawn — go back and add the sweep to that test (this is the check doing its job).
+Expected: PASS. If `each_test_sweeps_once` fails, the named suite has a `#[tokio::test]` without a matching `assert_absent` — go back and add the sweep to that test (this is the check doing its job).
 
 - [ ] **Step 3: Lint + commit**
 
