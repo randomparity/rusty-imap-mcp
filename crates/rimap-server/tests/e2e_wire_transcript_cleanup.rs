@@ -15,7 +15,7 @@
 mod wire;
 
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use wire::transcript::Recorder;
@@ -118,24 +118,28 @@ fn cleanup_script() -> Vec<Step> {
             text: "OK MOVE completed",
         },
     ]);
-    // expunge(INBOX): EXAMINE + UID SEARCH DELETED + SELECT (read-write) + EXPUNGE.
+    // expunge(Archive): EXAMINE + UID SEARCH DELETED + SELECT (read-write) +
+    // EXPUNGE. The SEARCH reports one `\Deleted` UID and the EXPUNGE reply carries
+    // one `* <seq> EXPUNGE` so the destructive golden demonstrates a real erase
+    // (`expunged_count: 1`), not a vacuous no-op.
     steps.extend([
         Step::Expect { verb: "EXAMINE" },
-        Step::Send(select_body(0, 1)),
+        Step::Send(select_body(1, 1)),
         Step::Reply {
             text: "OK [READ-ONLY] EXAMINE completed",
         },
         Step::Expect { verb: "UID SEARCH" },
-        Step::Send(b"* SEARCH\r\n".to_vec()),
+        Step::Send(b"* SEARCH 3\r\n".to_vec()),
         Step::Reply {
             text: "OK SEARCH completed",
         },
         Step::Expect { verb: "SELECT" },
-        Step::Send(select_body(0, 1)),
+        Step::Send(select_body(1, 1)),
         Step::Reply {
             text: "OK [READ-WRITE] SELECT completed",
         },
         Step::Expect { verb: "EXPUNGE" },
+        Step::Send(b"* 1 EXPUNGE\r\n".to_vec()),
         Step::Reply {
             text: "OK EXPUNGE completed",
         },
@@ -197,6 +201,72 @@ async fn spawn_unhandshaken(server: &FakeImapServer, tempdir: TempDir) -> Harnes
     .await
 }
 
+/// Mandatory non-vacuity checks (spec Testing §Non-vacuity), factored out to keep
+/// `cleanup_transcript` within the 100-line limit. Beyond the shared checks (no
+/// errored call, non-empty instructions/catalog/search), the destructive flow
+/// asserts each mutation actually did work — `move_message` moved something,
+/// `delete_message` reached trash, `expunge` erased at least one message — so a
+/// hollowed-out mutation response cannot be silently re-blessed via `insta`.
+fn assert_non_vacuity(
+    init: &Value,
+    tools: &Value,
+    search: &Value,
+    mv: &Value,
+    del: &Value,
+    expunge: &Value,
+) {
+    for (name, r) in [
+        ("search", search),
+        ("move_message", mv),
+        ("delete_message", del),
+        ("expunge", expunge),
+    ] {
+        assert_ne!(
+            r["result"]["isError"],
+            json!(true),
+            "{name} unexpectedly errored (miscalibrated dialog): {r}",
+        );
+    }
+    let instructions = init["result"]["instructions"]
+        .as_str()
+        .or_else(|| init["result"]["serverInfo"]["instructions"].as_str())
+        .unwrap_or("");
+    assert!(
+        instructions.len() > 32,
+        "initialize instructions empty/short: {init}",
+    );
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()),
+        "tools/list advertised empty catalog: {tools}",
+    );
+    assert_valid(&search["result"], "CallToolResult");
+    assert!(
+        search["result"]["structuredContent"]["untrusted"]["messages"]
+            .as_array()
+            .is_some_and(|m| !m.is_empty()),
+        "search returned no messages (empty SEARCH would still snapshot full): {search}",
+    );
+    assert!(
+        mv["result"]["structuredContent"]["meta"]["moves"]
+            .as_array()
+            .is_some_and(|m| !m.is_empty()),
+        "move_message reported no moves: {mv}",
+    );
+    assert_eq!(
+        del["result"]["structuredContent"]["meta"]["moved_to_trash"],
+        json!(true),
+        "delete_message did not move to trash: {del}",
+    );
+    assert!(
+        expunge["result"]["structuredContent"]["meta"]["expunged_count"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "expunge erased nothing (vacuous destructive golden): {expunge}",
+    );
+}
+
 #[tokio::test]
 async fn cleanup_transcript() {
     let server = FakeImapServer::start(cleanup_script()).await;
@@ -219,13 +289,14 @@ async fn cleanup_transcript() {
         .await;
     harness.send_initialized().await;
 
-    let use_acct = rec
-        .call(
-            &mut harness,
-            "tools/call",
-            json!({ "name": "use_account", "arguments": { "account": "agent" } }),
-        )
-        .await;
+    // Recorded into the transcript but not asserted on individually (a failed
+    // use_account would cascade into the search call the flow depends on).
+    rec.call(
+        &mut harness,
+        "tools/call",
+        json!({ "name": "use_account", "arguments": { "account": "agent" } }),
+    )
+    .await;
     let tools = rec.call(&mut harness, "tools/list", json!({})).await;
     let search = rec
         .call(
@@ -259,41 +330,7 @@ async fn cleanup_transcript() {
         )
         .await;
 
-    // --- Mandatory non-vacuity assertions (spec Testing §Non-vacuity) ---
-    for (name, r) in [
-        ("use_account", &use_acct),
-        ("search", &search),
-        ("move_message", &mv),
-        ("delete_message", &del),
-        ("expunge", &expunge),
-    ] {
-        assert_ne!(
-            r["result"]["isError"],
-            json!(true),
-            "{name} unexpectedly errored (miscalibrated dialog): {r}",
-        );
-    }
-    let instructions = init["result"]["instructions"]
-        .as_str()
-        .or_else(|| init["result"]["serverInfo"]["instructions"].as_str())
-        .unwrap_or("");
-    assert!(
-        instructions.len() > 32,
-        "initialize instructions empty/short: {init}",
-    );
-    assert!(
-        tools["result"]["tools"]
-            .as_array()
-            .is_some_and(|t| !t.is_empty()),
-        "tools/list advertised empty catalog: {tools}",
-    );
-    assert_valid(&search["result"], "CallToolResult");
-    assert!(
-        search["result"]["structuredContent"]["untrusted"]["messages"]
-            .as_array()
-            .is_some_and(|m| !m.is_empty()),
-        "search returned no messages (empty SEARCH would still snapshot full): {search}",
-    );
+    assert_non_vacuity(&init, &tools, &search, &mv, &del, &expunge);
 
     let (status, _tempdir) = harness.shutdown_and_wait().await;
     assert!(status.success(), "clean shutdown expected; got {status:?}");

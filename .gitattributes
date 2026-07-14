@@ -10,3 +10,9 @@ crates/rimap-server/tests/fixtures/mcp-spec/** text eol=lf
 # generated on one OS cannot mismatch on another via core.autocrlf, and so an
 # embedded CRLF MIME body line never churns the diff.
 *.snap text eol=lf
+
+# Pin the transcript .eml fixtures to LF too (#524): their on-disk byte length
+# feeds the pinned `meta.size` in the golden snapshots, so a CRLF-converting
+# checkout would inflate the byte count and fail the flow tests. Keeping them LF
+# holds `size` stable across platforms.
+crates/rimap-server/tests/fixtures/transcript/*.eml text eol=lf

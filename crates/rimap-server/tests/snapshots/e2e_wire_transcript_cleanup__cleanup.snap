@@ -1,6 +1,6 @@
 ---
 source: crates/rimap-server/tests/e2e_wire_transcript_cleanup.rs
-assertion_line: 269
+assertion_line: 337
 expression: rec.render()
 ---
 >>> request 1
@@ -460,8 +460,10 @@ expression: rec.render()
     "isError": false,
     "structuredContent": {
       "meta": {
-        "deleted_uids_before_expunge": [],
-        "expunged_count": 0,
+        "deleted_uids_before_expunge": [
+          3
+        ],
+        "expunged_count": 1,
         "folder": "Archive"
       }
     }
