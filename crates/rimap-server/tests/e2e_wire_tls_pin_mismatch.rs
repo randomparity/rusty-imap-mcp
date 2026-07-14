@@ -29,6 +29,9 @@
 #[path = "support/wire/mod.rs"]
 mod wire;
 
+#[path = "support/canary.rs"]
+mod canary;
+
 use rimap_core::TlsFingerprint;
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step};
 use serde_json::Value;
@@ -110,6 +113,7 @@ async fn pin_mismatch_fails_boot_closed_and_records_err_tls_over_wire() {
         "wrong pin must differ from the fake's real leaf fingerprint",
     );
 
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = tempdir.path().join("config.toml");
     let config = fake_config(server.port(), &wrong.to_hex(), &tempdir);
@@ -121,7 +125,7 @@ async fn pin_mismatch_fails_boot_closed_and_records_err_tls_over_wire() {
     let harness = Harness::spawn_with_config(
         &config_path,
         tempdir,
-        &[(PASSWORD_ENV_VAR, "fake-password")],
+        &[(PASSWORD_ENV_VAR, password.as_str())],
     )
     .await;
     let (status, tempdir) = harness.shutdown_and_wait().await;
@@ -158,4 +162,10 @@ async fn pin_mismatch_fails_boot_closed_and_records_err_tls_over_wire() {
         Some(server.pin().to_hex().as_str()),
         "audit must capture the fake's real observed leaf, not a placeholder: {mismatch}",
     );
+
+    // Hygiene-only: the TLS pin fails before LOGIN, so no positive control — the
+    // recorded dialog is empty of the canary and the credential must not appear
+    // in any boot-path artifact (stderr/audit/config).
+    let recorded = server.recorded();
+    canary::assert_absent(&password, &[tempdir.path()], &recorded);
 }
