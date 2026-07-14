@@ -154,10 +154,57 @@ pub fn assert_absent(canary: &str, roots: &[&Path], extra: &[String]) {
     );
 }
 
+/// A recorded frame is a LOGIN frame iff, after the leading tag (first token),
+/// the command token equals LOGIN (case-insensitive). Matches command position
+/// only — a SELECT/APPEND/SEARCH arg containing "LOGIN" is non-LOGIN.
+fn is_login_frame(frame: &str) -> bool {
+    let mut tokens = frame.split_whitespace();
+    let _tag = tokens.next();
+    match tokens.next() {
+        Some(cmd) => cmd.eq_ignore_ascii_case("LOGIN"),
+        None => false,
+    }
+}
+
+/// Positive + negative control over the fake's recorded client dialog. The
+/// credential legitimately appears exactly once — in the plaintext LOGIN frame —
+/// so a blanket `assert_absent` over `recorded()` would always fire. Instead the
+/// positive control asserts at least one recorded LOGIN frame contains the canary
+/// (proof the run authenticated and the credential reached the wire), and the
+/// negative control asserts no non-LOGIN recorded frame contains the canary.
+/// Panics on either violation. Do NOT call for suites that never reach LOGIN
+/// (e.g. a TLS-pin failure) — use `assert_absent` there.
+pub fn assert_login_frame_only(canary: &str, recorded: &[String]) {
+    let needle = canary.as_bytes();
+    let mut login_hits = 0usize;
+    let mut leaks = Vec::new();
+    for frame in recorded {
+        if find_bytes(frame.as_bytes(), needle).is_none() {
+            continue;
+        }
+        if is_login_frame(frame) {
+            login_hits += 1;
+        } else {
+            leaks.push(frame.trim_end().replace(canary, "<CANARY>"));
+        }
+    }
+    assert!(
+        leaks.is_empty(),
+        "canary leaked into {} non-LOGIN recorded frame(s):\n{}",
+        leaks.len(),
+        leaks.join("\n"),
+    );
+    assert!(
+        login_hits >= 1,
+        "positive control failed: canary never appeared in a LOGIN frame — the \
+         run did not authenticate (recorded {} frame(s))",
+        recorded.len(),
+    );
+}
+
 /// Reference every public item so no e2e binary sees a partially-used module as
 /// dead code. Mirrors the `force_use_for_dead_code_link` pattern in
-/// `support/wire/harness.rs`. `assert_login_frame_only` is added in a follow-up
-/// task.
+/// `support/wire/harness.rs`.
 #[expect(
     dead_code,
     reason = "type-link to suppress per-binary dead-code across e2e_wire binaries"
@@ -167,6 +214,8 @@ fn force_use_for_dead_code_link() {
     let _ = fresh_canary;
     let _ = scan;
     let _ = assert_absent;
+    let _ = assert_login_frame_only;
+    let _ = is_login_frame;
     let hit = CanaryHit {
         source: String::new(),
         excerpt: String::new(),

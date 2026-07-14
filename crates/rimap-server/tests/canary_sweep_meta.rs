@@ -91,6 +91,48 @@ fn assert_absent_panics_on_a_leak() {
 }
 
 #[test]
+fn login_frame_only_accepts_canary_in_login() {
+    let canary = canary::fresh_canary();
+    let recorded = vec![
+        "a1 CAPABILITY\r\n".to_string(),
+        format!("a2 LOGIN rimap-test {canary}\r\n"),
+        "a3 SELECT INBOX\r\n".to_string(),
+    ];
+    canary::assert_login_frame_only(&canary, &recorded);
+}
+
+#[test]
+#[should_panic(expected = "non-LOGIN")]
+fn login_frame_only_rejects_canary_outside_login() {
+    let canary = canary::fresh_canary();
+    let recorded = vec![
+        format!("a2 LOGIN rimap-test {canary}\r\n"),
+        format!("a3 APPEND INBOX {{10}}\r\n{canary}\r\n"),
+    ];
+    canary::assert_login_frame_only(&canary, &recorded);
+}
+
+#[test]
+#[should_panic(expected = "positive control failed")]
+fn login_frame_only_rejects_missing_login() {
+    let canary = canary::fresh_canary();
+    let recorded = vec!["a1 CAPABILITY\r\n".to_string()];
+    canary::assert_login_frame_only(&canary, &recorded);
+}
+
+#[test]
+#[should_panic(expected = "non-LOGIN")]
+fn login_frame_predicate_matches_command_position_only() {
+    let canary = canary::fresh_canary();
+    // Command is SEARCH, not LOGIN, even though the arg contains "LOGIN".
+    let recorded = vec![
+        format!("a2 LOGIN rimap-test {canary}\r\n"),
+        format!("a3 SEARCH SUBJECT \"LOGIN {canary}\"\r\n"),
+    ];
+    canary::assert_login_frame_only(&canary, &recorded);
+}
+
+#[test]
 fn dovecot_sentinel_is_colon_free() {
     let p: &Path = Path::new(".");
     let _ = p;
