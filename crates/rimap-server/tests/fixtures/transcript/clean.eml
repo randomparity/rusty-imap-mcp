@@ -1,0 +1,8 @@
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Lunch tomorrow
+Date: Wed, 01 Jan 2020 10:30:00 +0000
+Message-ID: <clean-0001@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Hi Bob, are we still on for lunch tomorrow at noon?
