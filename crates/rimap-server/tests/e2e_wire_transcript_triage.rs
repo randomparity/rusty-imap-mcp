@@ -141,11 +141,16 @@ fn triage_script() -> Vec<Step> {
             text: "OK STORE completed",
         },
     ]);
-    // create_draft: APPEND (fake sends the continuation then the tagged OK; it
-    // need not consume the literal bytes — APPEND is the last command).
+    // create_draft: APPEND with a synchronizing literal. The fake sends the
+    // continuation, then `ExpectLiteral` drains the message literal the client
+    // writes (LEN octets + CRLF) so the connection closes with a clean FIN.
+    // Skipping the drain leaves the literal unread, and closing a socket with
+    // unread bytes RSTs — which raced ahead of the tagged OK and surfaced as
+    // ERR_CONNECTION_LOST in CI even though it passed locally.
     steps.extend([
         Step::Expect { verb: "APPEND" },
         Step::Send(b"+ OK\r\n".to_vec()),
+        Step::ExpectLiteral,
         Step::Reply {
             text: "OK [APPENDUID 3 10] APPEND completed",
         },
