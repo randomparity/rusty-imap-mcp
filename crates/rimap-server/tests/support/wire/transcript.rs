@@ -156,9 +156,16 @@ pub fn record_response(method: &str, resp: &Value) -> Value {
     json!({ "result": result.clone() })
 }
 
+/// One recorded request→response exchange with its stable display id.
+struct Exchange {
+    id: u64,
+    request: Value,
+    response: Value,
+}
+
 /// Captures request→response exchanges for a golden transcript.
 pub struct Recorder {
-    exchanges: Vec<Value>,
+    exchanges: Vec<Exchange>,
     next_display_id: u64,
 }
 
@@ -178,11 +185,11 @@ impl Recorder {
         let display_id = self.next_display_id;
         self.next_display_id += 1;
         let resp = h.request(method, params.clone()).await;
-        self.exchanges.push(json!({
-            "id": display_id,
-            "request": { "method": method, "params": params },
-            "response": record_response(method, &resp),
-        }));
+        self.exchanges.push(Exchange {
+            id: display_id,
+            request: json!({ "method": method, "params": params }),
+            response: record_response(method, &resp),
+        });
         resp
     }
 
@@ -191,9 +198,9 @@ impl Recorder {
     pub fn render(&self) -> String {
         let mut out = String::new();
         for ex in &self.exchanges {
-            let id = ex["id"].as_u64().unwrap_or(0);
-            let req = serde_json::to_string_pretty(&ex["request"]).unwrap_or_default();
-            let resp = serde_json::to_string_pretty(&ex["response"]).unwrap_or_default();
+            let id = ex.id;
+            let req = serde_json::to_string_pretty(&ex.request).unwrap_or_default();
+            let resp = serde_json::to_string_pretty(&ex.response).unwrap_or_default();
             // `writeln!` to a String is infallible; `let _ =` discards the Result
             // without an `unwrap`/`expect` (both denied in this crate). Labels go
             // through `writeln!` (no trailing `\n` in the literal, so
