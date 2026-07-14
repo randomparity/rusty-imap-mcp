@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -166,7 +166,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3  # v4.1.0
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
         with:
           platforms: linux/arm64
       # Built inside an emulated aarch64 container (same pattern as the ppc64le
@@ -208,7 +208,7 @@ jobs:
       # Packages are built host-side (x86_64 runner) via --target; cargo-deb maps
       # the triple to the arm64 Debian/RPM Architecture. No emulated install-test
       # for arm64 (structural + content assertion only — ADR-0006).
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -272,7 +272,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3  # v4.1.0
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
         with:
           platforms: linux/ppc64le
       - name: Build in ppc64le container
@@ -319,7 +319,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3  # v4.1.0
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
         with:
           platforms: linux/s390x
       - name: Build in s390x container
@@ -482,7 +482,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: cargo-semver-checks@0.48.0
       # Gate: fail the publish on accidental SemVer breakage vs the last

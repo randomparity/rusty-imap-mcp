@@ -87,7 +87,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --no-tests=pass
@@ -125,7 +125,7 @@ jobs:
         with:
           key: msrv
       - run: cargo check --workspace --all-targets --all-features --locked
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --no-tests=pass
@@ -146,7 +146,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: tool-schema-drift
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: just
       - name: Regenerate tool schemas
@@ -175,7 +175,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: tools-doc-drift
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: just
       - name: Regenerate docs/tools.md
@@ -203,7 +203,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: just
       - name: Validate publish metadata
@@ -229,7 +229,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: zizmor
       - run: zizmor .github/workflows/
@@ -260,7 +260,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: sonarqube
-      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419  # v2.82.7
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c  # v2.82.10
         with:
           tool: cargo-llvm-cov
       - name: Generate coverage report
