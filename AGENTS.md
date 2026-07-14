@@ -249,6 +249,20 @@ are the ones that trip people up or aren't obvious from the lint set.
   HTML → text pipeline (`rimap-content`).
 - **Snapshot tests** (`insta`) for sanitizer output so changes are visible in
   diffs.
+- **Golden agent transcripts** (`insta`, issue #524).
+  `crates/rimap-server/tests/e2e_wire_transcript_*.rs` snapshot the full JSON-RPC
+  transcript an agent sees across a scripted session (initialize instructions, the
+  advertised tool catalog, and each tool response's `meta`/`untrusted`/
+  `security_warnings`), driven against the in-process fake (no container,
+  PR-blocking). A `.snap` diff means the agent-facing surface changed:
+  - **Intended change** (reworded warning, new `meta` field, protocol bump):
+    review the diff, then `cargo insta review` (or `cargo insta accept`) and
+    commit the updated `.snap`.
+  - An **unintended diff is a drift bug** — investigate, do not accept.
+  - **Never blind-accept** a triage-transcript `security_warnings`/sanitized-body
+    diff: the hostile fixture is transcript-owned
+    (`tests/fixtures/transcript/`), so such a diff is a sanitizer change, not
+    fixture churn — attribute it before accepting.
 - **Adversarial corpus** (`tests/injection-corpus/`) for the content pipeline.
   Each fixture is an `.eml` file plus an `.expected.json` declaring required
   security warnings and forbidden content. The corpus only grows.

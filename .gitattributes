@@ -5,3 +5,8 @@
 # vendored copy byte-for-byte against upstream; any CRLF churn
 # would surface as false-positive drift.
 crates/rimap-server/tests/fixtures/mcp-spec/** text eol=lf
+
+# Force LF for committed insta golden transcripts (#524) so a snapshot
+# generated on one OS cannot mismatch on another via core.autocrlf, and so an
+# embedded CRLF MIME body line never churns the diff.
+*.snap text eol=lf
