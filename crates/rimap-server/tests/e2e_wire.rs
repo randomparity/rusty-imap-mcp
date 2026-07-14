@@ -13,6 +13,8 @@
 
 // Each integration-test binary imports only its needed support
 // submodules directly to avoid cross-binary dead-code warnings.
+#[path = "support/canary.rs"]
+mod canary;
 #[path = "support/dovecot/mod.rs"]
 mod dovecot;
 #[path = "support/wire/mod.rs"]
@@ -66,7 +68,7 @@ fn force_use_for_dead_code_link() {
 /// Dovecot's seeded test password. Matches the value injected via the
 /// docker-compose fixture; see `e2e.rs` `StaticCreds` for the in-process
 /// equivalent.
-const DOVECOT_PASSWORD: &str = "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2";
+const DOVECOT_PASSWORD: &str = canary::DOVECOT_CANARY_PASSWORD;
 
 /// In-process credential store for the seed connection. Returns
 /// `DOVECOT_PASSWORD` unconditionally.
@@ -137,8 +139,9 @@ async fn wire_e2e_full_session_draft_safe() {
     // Bind the returned tempdir guard so the audit file outlives the
     // harness; dropping it before the assertion below would delete the
     // file the test is about to read.
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 
     assert_audit_records(&audit_path);
 }
@@ -740,8 +743,9 @@ async fn wire_e2e_readonly_posture_denial() {
     // Bind the returned tempdir guard so the audit file outlives the
     // harness; dropping it before the assertion below would delete the
     // file the test is about to read.
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "child must exit 0, got {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 
     assert_readonly_audit_records(&audit_path);
 }
@@ -1103,8 +1107,9 @@ async fn wire_e2e_full_posture_sub_capabilities() {
     let uid = assert_search_advanced_query_allow(&mut harness).await;
     assert_fetch_message_html_allow(&mut harness, uid).await;
 
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 }
 
 /// `search.advanced_query` ALLOW round-trip under `full` posture: a raw
