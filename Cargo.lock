@@ -2647,6 +2647,7 @@ dependencies = [
  "governor",
  "hex",
  "infer",
+ "insta",
  "jsonschema",
  "mail-builder",
  "mail-parser",

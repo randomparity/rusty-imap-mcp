@@ -23,3 +23,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0006](0006-native-packaging-build-topology.md) | Native packaging build topology — xtask manpages, host-side deb/rpm, amd64+arm64 only | Accepted |
 | [0007](0007-inband-fetch-truncation-signal.md) | In-band partial-result signal for skipped FETCH items | Accepted |
 | [0008](0008-shared-fake-imap-test-support-crate.md) | Shared fake-IMAP test-support crate for cross-crate wire tests | Accepted |
+| [0009](0009-golden-agent-transcript-snapshots.md) | Golden agent-transcript snapshots on the fake, not Dovecot | Accepted |

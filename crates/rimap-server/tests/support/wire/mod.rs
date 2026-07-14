@@ -12,6 +12,7 @@
 pub mod config;
 pub mod harness;
 pub mod schema;
+pub mod transcript;
 
 pub use harness::{Harness, PINNED_PROTOCOL_VERSION};
 pub use schema::assert_valid;
@@ -32,4 +33,13 @@ fn force_use_of_re_exports() {
     let _ = std::mem::size_of::<Harness>();
     let _ = PINNED_PROTOCOL_VERSION;
     let _ = assert_valid as fn(_, _);
+    // transcript: Recorder/normalize are used by the two flow binaries and by
+    // transcript_normalize.rs, but not by mcp_wire_conformance.rs — reference
+    // them here so every binary that includes this file sees them as used.
+    let _ = transcript::Recorder::new;
+    let _ = transcript::Recorder::call;
+    let _ = transcript::Recorder::render;
+    let _ = <transcript::Recorder as Default>::default;
+    let _ = transcript::normalize as fn(&str) -> String;
+    let _ = transcript::record_response as fn(&str, &serde_json::Value) -> serde_json::Value;
 }

@@ -20,7 +20,7 @@ use rimap_core::auth_sink::{AuthEventSink, AuthSinkError};
 use rimap_core::credential::{CredentialResolver, CredentialResolverError, CredentialSource};
 use rimap_imap::{Connection, ConnectionConfig, ImapEncryption};
 use secrecy::SecretString;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -45,6 +45,14 @@ pub enum Step {
     },
     /// Send these bytes verbatim (untagged data, literals, or malformed bytes).
     Send(Vec<u8>),
+    /// Drain a client synchronizing-literal payload. The most recent `Expect`
+    /// must have read a command line ending in a `{N}` literal declaration (e.g.
+    /// an `APPEND ... {N}`); this reads and discards exactly `N` octets plus the
+    /// trailing `CRLF` the client writes after the continuation. Consuming the
+    /// literal keeps the byte stream aligned for any following command and lets
+    /// the connection close with a clean `FIN` — a close with the literal still
+    /// unread would `RST` and race with delivery of the tagged reply.
+    ExpectLiteral,
     /// Emit `<captured-tag> <text>\r\n` using the most recent `Expect`'s tag.
     Reply {
         /// Status + text after the echoed tag (e.g. `"OK LOGIN completed"`).
@@ -249,6 +257,7 @@ async fn serve(
     let (read, mut write) = tokio::io::split(tls);
     let mut reader = BufReader::new(read);
     let mut last_tag = String::new();
+    let mut pending_literal: Option<usize> = None;
     for step in script {
         match step {
             Step::Expect { verb } => {
@@ -265,6 +274,19 @@ async fn serve(
                     "fake: expected command `{verb}`, got `{}`",
                     line.trim(),
                 );
+                pending_literal = parse_sync_literal(&line);
+            }
+            Step::ExpectLiteral => {
+                let len = pending_literal.take();
+                assert!(
+                    len.is_some(),
+                    "fake: ExpectLiteral requires the preceding Expect to have read a command line ending in a `{{N}}` synchronizing literal",
+                );
+                let mut payload = vec![0u8; len.unwrap()];
+                reader.read_exact(&mut payload).await?;
+                // Consume the CRLF that terminates the command after the literal.
+                let mut trailing = String::new();
+                reader.read_line(&mut trailing).await?;
             }
             Step::Send(bytes) => {
                 write.write_all(bytes).await?;
@@ -279,6 +301,21 @@ async fn serve(
         }
     }
     Ok(())
+}
+
+/// Parse a trailing IMAP synchronizing-literal declaration `{N}` from a command
+/// line (e.g. `A5 APPEND "Drafts" {464}`), returning `N`. Returns `None` when
+/// the line does not end in a literal marker or the literal is non-synchronizing
+/// (`{N+}`) — which the client sends without waiting for a continuation and
+/// which the scripts here never exercise.
+fn parse_sync_literal(line: &str) -> Option<usize> {
+    let inner = line.trim_end().strip_suffix('}')?;
+    let open = inner.rfind('{')?;
+    let digits = &inner[open + 1..];
+    if digits.ends_with('+') {
+        return None; // non-synchronizing literal — no continuation, no drain
+    }
+    digits.parse().ok()
 }
 
 /// Resolver returning a fixed password. Used by `connection`.
@@ -332,7 +369,63 @@ impl AuthEventSink for NoopAudit {
 
 #[cfg(test)]
 mod tests {
-    use super::{FakeImapServer, Step, login_preamble};
+    use super::{FakeImapServer, Step, login_preamble, parse_sync_literal};
+
+    #[test]
+    fn parse_sync_literal_reads_trailing_brace_count() {
+        assert_eq!(
+            parse_sync_literal("A5 APPEND \"Drafts\" (\\Draft) {464}\r\n"),
+            Some(464),
+        );
+        assert_eq!(parse_sync_literal("A1 NOOP\r\n"), None);
+        assert_eq!(parse_sync_literal("A5 APPEND x {12+}\r\n"), None);
+    }
+
+    /// A synchronizing-literal `APPEND` drained by `ExpectLiteral` leaves the
+    /// byte stream aligned, so a second command on the same pooled connection is
+    /// read as a command — not as leftover literal bytes. Two back-to-back
+    /// appends on one `Connection` prove it: without the drain, the first
+    /// message body would be misread as the second `APPEND` line and the second
+    /// call would fail. Guards the RST-on-close race #524's triage transcript
+    /// hit in CI, where the undrained literal made the close a `RST` that beat
+    /// the tagged `OK` to the client.
+    #[tokio::test]
+    async fn expect_literal_drains_append_payload_keeping_connection_aligned() {
+        let mut script = login_preamble("IMAP4rev1 UIDPLUS");
+        script.extend([
+            Step::Expect { verb: "APPEND" },
+            Step::Send(b"+ OK\r\n".to_vec()),
+            Step::ExpectLiteral,
+            Step::Reply {
+                text: "OK [APPENDUID 1 1] APPEND completed",
+            },
+            Step::Expect { verb: "APPEND" },
+            Step::Send(b"+ OK\r\n".to_vec()),
+            Step::ExpectLiteral,
+            Step::Reply {
+                text: "OK [APPENDUID 1 2] APPEND completed",
+            },
+        ]);
+        let server = FakeImapServer::start(script).await;
+        let conn = server.connection("user@example.com");
+
+        conn.append_message("Drafts", b"first message body\r\n", &[], &[])
+            .await
+            .unwrap();
+        conn.append_message("Drafts", b"second, longer message body\r\n", &[], &[])
+            .await
+            .unwrap();
+
+        let appends = server
+            .recorded()
+            .iter()
+            .filter(|line| line.to_ascii_uppercase().contains("APPEND"))
+            .count();
+        assert_eq!(
+            appends, 2,
+            "both APPEND command lines must be read as commands, not literal bytes",
+        );
+    }
 
     /// A connection the server refuses at LOGIN with a tagged `NO`, so the
     /// client's first operation fails and it issues nothing further. Models a
