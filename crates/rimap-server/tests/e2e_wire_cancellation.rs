@@ -18,6 +18,8 @@
 
 // Each integration-test binary imports only its needed support
 // submodules directly to avoid cross-binary dead-code warnings.
+#[path = "support/canary.rs"]
+mod canary;
 #[path = "support/dovecot/mod.rs"]
 mod dovecot;
 #[path = "support/wire/mod.rs"]
@@ -51,7 +53,7 @@ fn force_use_for_dead_code_link() {
 }
 
 /// Dovecot's seeded test password. Matches `e2e_wire.rs`.
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = canary::DOVECOT_CANARY_PASSWORD;
 
 /// Hold the spawned `Harness` together with the `DovecotHarness` that
 /// owns the underlying container. Dropping the latter tears the
@@ -160,6 +162,9 @@ async fn cancel_during_inflight_tools_call_keeps_session_alive() {
         list["result"].is_object(),
         "server must remain responsive after cancellation, got {list}",
     );
+
+    let (_status, tempdir) = session.harness.shutdown_and_wait().await;
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir.path()], &[]);
 }
 
 /// `notifications/cancelled` for an id that was never issued. The
@@ -189,4 +194,7 @@ async fn cancel_unknown_request_id_is_noop() {
         list["result"].is_object(),
         "server must remain responsive after no-op cancellation, got {list}",
     );
+
+    let (_status, tempdir) = session.harness.shutdown_and_wait().await;
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir.path()], &[]);
 }

@@ -16,6 +16,9 @@
 #[path = "support/wire/mod.rs"]
 mod wire;
 
+#[path = "support/canary.rs"]
+mod canary;
+
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -222,16 +225,11 @@ posture = "draft-safe"
 
 /// Spawn the binary against `server` WITHOUT the MCP handshake, so the `Recorder`
 /// can capture the `initialize` exchange itself.
-async fn spawn_unhandshaken(server: &FakeImapServer, tempdir: TempDir) -> Harness {
+async fn spawn_unhandshaken(server: &FakeImapServer, tempdir: TempDir, password: &str) -> Harness {
     let config_path = tempdir.path().join("config.toml");
     let config = fake_config(server.port(), &server.pin().to_hex(), &tempdir);
     std::fs::write(&config_path, config).expect("write config");
-    Harness::spawn_with_config(
-        &config_path,
-        tempdir,
-        &[(PASSWORD_ENV_VAR, "fake-password")],
-    )
-    .await
+    Harness::spawn_with_config(&config_path, tempdir, &[(PASSWORD_ENV_VAR, password)]).await
 }
 
 /// The flow's mandatory non-vacuity checks (spec Testing §Non-vacuity), factored
@@ -286,10 +284,11 @@ fn assert_non_vacuity(
 async fn triage_transcript() {
     let server = FakeImapServer::start(triage_script()).await;
     let _dump = DumpOnPanic(&server);
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
 
     let mut rec = Recorder::new();
-    let mut harness = spawn_unhandshaken(&server, tempdir).await;
+    let mut harness = spawn_unhandshaken(&server, tempdir, &password).await;
 
     let init = rec
         .call(
@@ -384,8 +383,11 @@ async fn triage_transcript() {
         ],
     );
 
-    let (status, _tempdir) = harness.shutdown_and_wait().await;
+    let recorded = server.recorded();
+    let (status, tempdir) = harness.shutdown_and_wait().await;
     assert!(status.success(), "clean shutdown expected; got {status:?}");
+    canary::assert_login_frame_only(&password, &recorded);
+    canary::assert_absent(&password, &[tempdir.path()], &[]);
 
     insta::assert_snapshot!("triage", rec.render());
 }

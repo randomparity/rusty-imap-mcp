@@ -31,6 +31,8 @@ mod chaos;
 // Only the fixtures are needed here (not the DovecotHarness) — include the
 // self-contained fixtures module directly so the harness's items don't appear
 // dead in this binary.
+#[path = "support/canary.rs"]
+mod canary;
 #[path = "support/dovecot/fixtures.rs"]
 mod fixtures;
 #[path = "support/wire/mod.rs"]
@@ -40,7 +42,7 @@ use chaos::{ChaosHarness, ChaosSkip, audit};
 use wire::{Harness, assert_valid};
 
 /// Dovecot's seeded test password (matches `e2e_wire.rs`).
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = canary::DOVECOT_CANARY_PASSWORD;
 
 /// A `max_fetch_body_bytes` comfortably above any fixture (25 MiB).
 const ROOMY_FETCH: u64 = 26_214_400;
@@ -406,8 +408,9 @@ async fn chaos_delayed_greeting_times_out() {
         .await;
     assert_ok(&ok, "recovery list_folders after greeting stall");
 
-    let (status, _tempdir) = h.shutdown_and_wait().await;
+    let (status, tempdir) = h.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir.path()], &[]);
 
     // Audit: op #2's reconnect emitted exactly one `auth` Failure — the
     // connect-phase greeting stall. Scope strictly to op #2's Seq window (the
@@ -473,8 +476,9 @@ async fn chaos_mid_fetch_stall_times_out_then_recovers() {
         .await;
     assert_ok(&ok, "recovery search after mid-FETCH stall");
 
-    let (status, _tempdir) = h.shutdown_and_wait().await;
+    let (status, tempdir) = h.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir.path()], &[]);
 
     // Audit: a preceding successful tool_end (warm-up search) then the failing
     // FETCH tool_end (ERR_TIMEOUT).
@@ -541,8 +545,9 @@ async fn chaos_starttls_reset_typed_error_one_auth() {
         .await;
     assert_ok(&ok, "recovery over STARTTLS after reset");
 
-    let (status, _tempdir) = h.shutdown_and_wait().await;
+    let (status, tempdir) = h.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir.path()], &[]);
 
     // Audit: exactly one `auth` Failure within the failing call's Seq window.
     // (Confirm in first runs: a pre-login RST still emits exactly one auth
@@ -624,8 +629,9 @@ async fn chaos_trickle_over_cap_rejects_promptly() {
         .await;
     assert_ok(&ok, "recovery metadata call after over-cap rejection");
 
-    let (status, _tempdir) = h.shutdown_and_wait().await;
+    let (status, tempdir) = h.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir.path()], &[]);
 }
 
 /// Scenario 4b — an under-cap body trickled below the command budget surfaces
@@ -677,6 +683,7 @@ async fn chaos_trickle_under_cap_times_out_then_recovers() {
         .await;
     assert_ok(&ok, "recovery fetch after byte-trickle timeout");
 
-    let (status, _tempdir) = h.shutdown_and_wait().await;
+    let (status, tempdir) = h.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir.path()], &[]);
 }

@@ -23,6 +23,8 @@
 
 // Each integration-test binary imports only its needed support
 // submodules directly to avoid cross-binary dead-code warnings.
+#[path = "support/canary.rs"]
+mod canary;
 #[path = "support/dovecot/mod.rs"]
 mod dovecot;
 #[path = "support/wire/mod.rs"]
@@ -64,7 +66,7 @@ fn force_use_for_dead_code_link() {
 }
 
 /// Dovecot's seeded test password. Matches `e2e_wire.rs`.
-const DOVECOT_PASSWORD: &str = "testpass";
+const DOVECOT_PASSWORD: &str = canary::DOVECOT_CANARY_PASSWORD;
 
 /// Subject of the message seeded into INBOX for the delete round-trip.
 /// Distinct from `e2e_wire.rs`'s smoke subject so a search for it can
@@ -148,8 +150,9 @@ async fn wire_e2e_destructive_delete_then_expunge() {
     // Bind the returned tempdir guard so the audit file outlives the
     // harness; dropping it before the assertion below would delete the
     // file the test is about to read.
-    let (status, _tempdir_guard) = harness.shutdown_and_wait().await;
+    let (status, tempdir_guard) = harness.shutdown_and_wait().await;
     assert!(status.success(), "binary exited non-zero: {status:?}");
+    canary::assert_absent(DOVECOT_PASSWORD, &[tempdir_guard.path()], &[]);
 
     assert_destructive_audit_records(&audit_path);
 }

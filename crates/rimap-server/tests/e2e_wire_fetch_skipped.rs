@@ -25,6 +25,9 @@
 #[path = "support/wire/mod.rs"]
 mod wire;
 
+#[path = "support/canary.rs"]
+mod canary;
+
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -193,6 +196,7 @@ async fn search_reports_fetch_skipped_on_short_page_over_wire() {
     let server = FakeImapServer::start(short_page_script()).await;
     let _dump = DumpOnPanic(&server);
 
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = tempdir.path().join("config.toml");
     let config = fake_config(server.port(), &server.pin().to_hex(), &tempdir);
@@ -201,7 +205,7 @@ async fn search_reports_fetch_skipped_on_short_page_over_wire() {
     let mut harness = Harness::spawn_with_config(
         &config_path,
         tempdir,
-        &[(PASSWORD_ENV_VAR, "fake-password")],
+        &[(PASSWORD_ENV_VAR, password.as_str())],
     )
     .await;
 
@@ -242,4 +246,9 @@ async fn search_reports_fetch_skipped_on_short_page_over_wire() {
         Some(1),
         "exactly one UID (2) was listed but not returned: {body}",
     );
+
+    let recorded = server.recorded();
+    let (_status, tempdir) = harness.shutdown_and_wait().await;
+    canary::assert_login_frame_only(&password, &recorded);
+    canary::assert_absent(&password, &[tempdir.path()], &[]);
 }

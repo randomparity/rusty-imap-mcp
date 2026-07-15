@@ -32,6 +32,9 @@
 #[path = "support/wire/mod.rs"]
 mod wire;
 
+#[path = "support/canary.rs"]
+mod canary;
+
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -113,6 +116,7 @@ fn read_audit_lines(path: &std::path::Path) -> Vec<Value> {
 async fn login_rejected_fails_boot_closed_and_records_err_auth_over_wire() {
     let server = FakeImapServer::start(login_rejected_script()).await;
 
+    let password = canary::fresh_canary();
     let tempdir = TempDir::new().expect("tempdir");
     let config_path = tempdir.path().join("config.toml");
     let config = fake_config(server.port(), &server.pin().to_hex(), &tempdir);
@@ -124,7 +128,7 @@ async fn login_rejected_fails_boot_closed_and_records_err_auth_over_wire() {
     let harness = Harness::spawn_with_config(
         &config_path,
         tempdir,
-        &[(PASSWORD_ENV_VAR, "fake-password")],
+        &[(PASSWORD_ENV_VAR, password.as_str())],
     )
     .await;
     let (status, tempdir) = harness.shutdown_and_wait().await;
@@ -162,4 +166,11 @@ async fn login_rejected_fails_boot_closed_and_records_err_auth_over_wire() {
         Some(server.pin().to_hex().as_str()),
         "audit must capture the fake's real observed leaf: {rejected}",
     );
+
+    // The rejected LOGIN still reaches the wire, so the positive control holds:
+    // the canary appears in the recorded LOGIN frame and nowhere else, and in no
+    // artifact file.
+    let recorded = server.recorded();
+    canary::assert_login_frame_only(&password, &recorded);
+    canary::assert_absent(&password, &[tempdir.path()], &[]);
 }

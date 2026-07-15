@@ -24,3 +24,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0007](0007-inband-fetch-truncation-signal.md) | In-band partial-result signal for skipped FETCH items | Accepted |
 | [0008](0008-shared-fake-imap-test-support-crate.md) | Shared fake-IMAP test-support crate for cross-crate wire tests | Accepted |
 | [0009](0009-golden-agent-transcript-snapshots.md) | Golden agent-transcript snapshots on the fake, not Dovecot | Accepted |
+| [0010](0010-secret-leak-canary-sweep.md) | Fixed sentinel for Dovecot, per-run canary elsewhere, swept in teardown | Accepted |
