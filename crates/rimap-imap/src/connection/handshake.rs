@@ -379,6 +379,97 @@ mod tests {
         Connection::new(cfg, Arc::new(NoopAudit), Arc::new(PanicResolver))
     }
 
+    /// Sink that keeps every emitted [`AuthEvent`] so a test can assert on
+    /// the audit trail a connect attempt left behind.
+    #[derive(Debug, Default)]
+    pub(super) struct RecordingAudit {
+        events: std::sync::Mutex<Vec<AuthEvent>>,
+    }
+
+    impl RecordingAudit {
+        pub(super) fn failures(&self) -> usize {
+            self.events
+                .lock()
+                .expect("recording sink mutex")
+                .iter()
+                .filter(|e| e.result == rimap_core::auth_event::AuthResult::Failure)
+                .count()
+        }
+    }
+
+    impl AuthEventSink for RecordingAudit {
+        fn emit_auth(&self, event: AuthEvent) -> Result<(), AuthSinkError> {
+            self.events
+                .lock()
+                .expect("recording sink mutex")
+                .push(event);
+            Ok(())
+        }
+    }
+
+    fn connection_with_budgets(
+        addr: std::net::SocketAddr,
+        connect_ms: u64,
+        command_ms: u64,
+        audit: Arc<RecordingAudit>,
+    ) -> Connection {
+        let cfg = ConnectionConfig {
+            account: None,
+            account_id: rimap_core::account::AccountId::default_account(),
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            encryption: ImapEncryption::Starttls,
+            username: "unused".to_string(),
+            pinned_fingerprint: None,
+            connect_timeout: std::time::Duration::from_millis(connect_ms),
+            command_timeout: std::time::Duration::from_millis(command_ms),
+            max_fetch_body_bytes: 1024,
+            max_append_bytes: 1024,
+        };
+        Connection::new(cfg, audit, Arc::new(PanicResolver))
+    }
+
+    /// A connect-phase stall must always leave an `auth` Failure behind, no
+    /// matter how `command_timeout` compares to `connect_timeout`.
+    ///
+    /// `connect_inner` documents "exactly one `Auth` audit record on every
+    /// termination path", but that record is written only if the connect
+    /// deadline is the one that fires. When the enclosing command deadline is
+    /// shorter (or merely starts earlier, as it always does), it cancels the
+    /// connect future while it is still parked on the network and the record
+    /// is silently lost — no error, no emit. This is what dropped the
+    /// nightly-chaos `auth` Failure that scenario 1 asserts on.
+    #[tokio::test]
+    async fn connect_stall_emits_auth_failure_whatever_the_command_budget() {
+        // (connect_ms, command_ms): the tight-command case that chaos
+        // scenarios 2 and 5 use, and the equal case from scenario 1.
+        for (connect_ms, command_ms) in [(600, 100), (400, 400)] {
+            let mock = MockImap::start(vec![
+                Step::Send(b"* OK ready\r\n"),
+                Step::ExpectCommand("CAPABILITY"),
+                Step::Stall,
+            ])
+            .await;
+
+            let audit = Arc::new(RecordingAudit::default());
+            let conn =
+                connection_with_budgets(mock.addr(), connect_ms, command_ms, Arc::clone(&audit));
+            let err = conn.list_folders("*").await.unwrap_err();
+            assert!(
+                matches!(err, ImapError::Timeout { .. }),
+                "connect stall must surface a timeout for \
+                 connect={connect_ms}ms/command={command_ms}ms, got {err:?}",
+            );
+            assert_eq!(
+                audit.failures(),
+                1,
+                "connect stall must emit exactly one auth Failure for \
+                 connect={connect_ms}ms/command={command_ms}ms",
+            );
+            let _ = mock.finish().await;
+        }
+    }
+
     #[test]
     fn map_tls_handshake_error_wraps_io_error() {
         let io_err = std::io::Error::other("handshake boom");

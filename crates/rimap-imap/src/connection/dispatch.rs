@@ -105,22 +105,39 @@ impl Connection {
     }
 
     /// A single timeout-guarded run of `body` against the live session.
+    ///
+    /// The two stages carry **separate** budgets, and deliberately so:
+    ///
+    /// * Acquiring the session lock and running `body` are bounded by
+    ///   `command_timeout` — a peer op mid-command must not stall this one
+    ///   indefinitely, and a stalled command must still trip.
+    /// * The lazy-connect in between is bounded only by its own
+    ///   `connect_timeout`, inside `connect_with_bundle`.
+    ///
+    /// Wrapping the connect in `command_timeout` as well (as this did before)
+    /// loses audit records: the command deadline starts strictly earlier — the
+    /// lock acquisition and `build_tls_config` run before `connect_with_bundle`
+    /// takes its own start instant — so it can elapse first and drop the
+    /// connect future while it is still parked on the network. `connect_inner`
+    /// then never reaches its `emit_auth` call and the `auth` record it
+    /// documents on every termination path is silently lost. With the budgets
+    /// split, the connect deadline always fires first on a stalled connect and
+    /// the record is always written, whatever the two values are configured to.
     async fn attempt<T, B>(&self, op_name: &'static str, body: B) -> Result<T, ImapError>
     where
         B: for<'s> AsyncFnOnce(&'s mut ImapSession) -> Result<T, ImapError>,
     {
         let dur = self.inner.cfg.command_timeout;
-        crate::time::with_timeout(op_name, dur, async {
-            let mut guard = self.session().await?;
-            let session =
-                guard
-                    .as_mut()
-                    .ok_or(ImapError::Protocol(async_imap::error::Error::Bad(
-                        "session invariant violated: guard is None after session()".to_string(),
-                    )))?;
-            body(session).await
-        })
-        .await
+
+        let mut guard =
+            crate::time::with_timeout(op_name, dur, async { Ok(self.inner.session.lock().await) })
+                .await?;
+
+        let session = match &mut *guard {
+            Some(session) => session,
+            slot => slot.insert(self.connect_inner().await?),
+        };
+        crate::time::with_timeout(op_name, dur, body(session)).await
     }
 
     /// `LIST` against `pattern` (e.g. `"*"`, `"INBOX/*"`).
