@@ -106,6 +106,16 @@ single-account format).
 | `command_timeout_seconds` | u32 | 30 | Per-command timeout for IMAP operations |
 | `connect_timeout_seconds` | u32 | 10 | TCP + TLS handshake + greeting + CAPABILITY probe deadline |
 
+The two budgets are independent, and either ordering is valid. A tool
+call that has to open a connection first spends up to
+`connect_timeout_seconds` on the connect and then up to
+`command_timeout_seconds` on the command, so its worst case is the sum
+(plus, if another call holds the connection, up to
+`command_timeout_seconds` waiting for it). Setting
+`command_timeout_seconds` below `connect_timeout_seconds` is supported —
+it means "fail commands fast, tolerate a slow handshake" and does not
+shorten the connect.
+
 Each account holds a single IMAP connection, and concurrent tool calls
 against that account serialize on it: a slow command (a large `FETCH`
 or a `SEARCH` over a big mailbox) can head-of-line-block other queued
