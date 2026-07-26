@@ -179,15 +179,15 @@ impl DovecotHarness {
             }
 
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            if !is_port_collision(&stderr) {
+            if !is_port_collision(&stderr) && !is_address_pool_exhausted(&stderr) {
                 return Err(HarnessError::ComposeFailed(stderr));
             }
             last_stderr = stderr;
         }
 
-        // All attempts hit port collisions.
+        // All attempts hit port collisions or network pool exhaustion.
         Err(HarnessError::ComposeFailed(format!(
-            "exhausted {MAX_ATTEMPTS} port-collision retries; last stderr: {last_stderr}",
+            "exhausted {MAX_ATTEMPTS} retryable failures (port collision or address pool exhaustion); last stderr: {last_stderr}",
         )))
     }
 
@@ -389,6 +389,14 @@ fn is_port_collision(stderr: &str) -> bool {
     s.contains("port is already allocated")
         || s.contains("address already in use")
         || s.contains("bind for 127.0.0.1")
+}
+
+/// Classify a stderr blob from a failed `compose up`: `true` when the
+/// failure indicates Docker address pool exhaustion.
+fn is_address_pool_exhausted(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("address pools have been fully subnetted")
+        || s.contains("failed to create network")
 }
 
 /// Per-binary dead-code suppression for `DovecotHarness` methods that

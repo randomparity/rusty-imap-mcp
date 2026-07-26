@@ -203,6 +203,8 @@ prune-containers:
     | while read -r vol; do
         "$tool" volume rm -f "$vol" 2>/dev/null || true
     done || true
+    # Prune orphaned docker/podman networks.
+    "$tool" network prune -f >/dev/null 2>&1 || true
 
 # Generate roff manpages into man/man1/ (consumed by tarball/deb/rpm packaging).
 # The pages exclude test-support subcommands because xtask depends on rimap-server

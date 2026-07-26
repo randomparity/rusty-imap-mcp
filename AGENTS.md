@@ -87,6 +87,15 @@ container ports 143 (IMAP+STARTTLS) and 993 (IMAPS); the Rust harness
 maps host ports dynamically. There is no arch gate — every supported
 developer host can run the suite.
 
+### Local Test Troubleshooting: Address Pool Exhaustion
+
+If running integration tests locally triggers the error:
+`Error response from daemon: all predefined address pools have been fully subnetted`
+
+This happens when transient Docker Compose networks accumulate. The test runner now automatically runs network pruning via `just test`, but if you encounter this manually, run:
+`docker network prune -f` (or `podman network prune -f`).
+
+
 ### Wire-driven Dovecot e2e (Phase 3, #265)
 
 `crates/rimap-server/tests/e2e_wire.rs` drives the production binary
