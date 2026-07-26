@@ -395,8 +395,7 @@ fn is_port_collision(stderr: &str) -> bool {
 /// failure indicates Docker address pool exhaustion.
 fn is_address_pool_exhausted(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
-    s.contains("address pools have been fully subnetted")
-        || s.contains("failed to create network")
+    s.contains("address pools have been fully subnetted") || s.contains("failed to create network")
 }
 
 /// Per-binary dead-code suppression for `DovecotHarness` methods that
