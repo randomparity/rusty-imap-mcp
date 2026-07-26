@@ -353,6 +353,13 @@ async fn search_seed_uid(h: &mut Harness) -> u64 {
 /// that reaches `connect_inner`'s emit — established against the source), which a
 /// command timeout on the live session does not, so it specifically evidences the
 /// greeting-on-connect stall.
+///
+/// That the reconnect reaches the emit at all is structural, not a timing
+/// accident: `dispatch::attempt` runs the lazy-connect *outside* the command
+/// deadline, so the connect deadline is always the one that fires on a stalled
+/// connect. When the connect was nested inside `command_timeout`, the command
+/// deadline (which starts earlier) could cancel the connect future first and
+/// drop the record — this assertion failed that way in nightly chaos.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chaos_delayed_greeting_times_out() {
     let Ok(chaos) = ChaosHarness::try_start() else {

@@ -186,19 +186,6 @@ impl Connection {
         self.inner.cfg.max_fetch_body_bytes
     }
 
-    /// Acquire the session lock; lazy-connect if needed. The returned guard
-    /// holds the tokio mutex; drop it before any other method on `Connection`.
-    pub(crate) async fn session(
-        &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<ImapSession>>, ImapError> {
-        let mut guard = self.inner.session.lock().await;
-        if guard.is_none() {
-            let session = self.connect_inner().await?;
-            *guard = Some(session);
-        }
-        Ok(guard)
-    }
-
     /// Whether the server advertised the MOVE capability (RFC 6851).
     #[must_use]
     pub fn has_move_capability(&self) -> bool {
@@ -221,7 +208,12 @@ impl Connection {
 
     /// The full connect/handshake/login/CAPABILITY flow. Emits exactly one
     /// `Auth` audit record on every termination path.
-    async fn connect_inner(&self) -> Result<ImapSession, ImapError> {
+    ///
+    /// Callers must not wrap this in a shorter deadline than `connect_timeout`:
+    /// the emit happens after `connect_with_bundle` returns, so cancelling the
+    /// future mid-connect loses the record. See `dispatch::attempt`, which
+    /// deliberately runs it outside the command timeout.
+    pub(super) async fn connect_inner(&self) -> Result<ImapSession, ImapError> {
         let cfg = &self.inner.cfg;
         let bundle = build_tls_config(cfg.pinned_fingerprint)?;
 
