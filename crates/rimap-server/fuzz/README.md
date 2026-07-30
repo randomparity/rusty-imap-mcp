@@ -28,6 +28,30 @@ libFuzzer adds newly-interesting inputs to `corpus/validate/` as it discovers th
 cargo +nightly fuzz cmin validate
 ```
 
+## Lockfile parity
+
+This directory is its own cargo workspace (see the `[workspace]` note in
+`Cargo.toml`), so no Dependabot entry reaches it. Its `Cargo.lock` is tracked
+and **must agree with the root workspace `Cargo.lock` on every shared
+dependency** — the target builds `rimap-server` with `features = ["fuzzing"]`
+and re-checks its decisions against rmcp's deserializer, so once the two
+lockfiles resolve different parser-stack versions the fuzzer is no longer
+differential against the code that ships. Drift of exactly this kind produced
+[#512](https://github.com/randomparity/rusty-imap-mcp/issues/512).
+
+`just check-fuzz-lock-parity` enforces this on every PR. After a workspace
+dependency bump it will fail; restore parity and rebuild with:
+
+```sh
+just realign-fuzz-locks
+cargo +nightly fuzz build -O
+```
+
+The invariant is parity, not freshness — this lockfile follows the workspace
+rather than moving on its own schedule. See
+[ADR-0011](../../../docs/ADR/0011-fuzz-lockfile-workspace-parity.md) for why a
+Dependabot entry here would reintroduce the same drift in the other direction.
+
 ## Findings
 
 Crashes land in `artifacts/validate/<sha>` as raw bytes. Reproduce with:

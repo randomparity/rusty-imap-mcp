@@ -210,6 +210,10 @@ jobs:
         run: just check-metadata
       - name: Unit-test publish-crates.sh
         run: just test-publish-script
+      - name: Unit-test check-fuzz-lock-parity.sh
+        run: just test-fuzz-lock-parity
+      - name: Check fuzz lockfile parity with the workspace
+        run: just check-fuzz-lock-parity
 
   deny:
     name: cargo-deny
