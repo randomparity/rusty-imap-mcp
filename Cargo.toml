@@ -238,8 +238,16 @@ schemars = "1.0"
 infer = "0.22"
 
 # Dev dependencies shared across crates
-# base64 0.22 — deterministic base64 encoding for MIME test fixtures.
-# No build.rs, no proc-macros, pure-Rust. Apache-2.0 OR MIT.
+# base64 0.23 — deterministic base64 encoding for MIME test fixtures.
+# No build.rs, no proc-macros, no dependencies. MIT OR Apache-2.0.
+# 0.23 turns on `simd-unsafe` by default: AVX2/NEON intrinsics behind
+# ~20 `unsafe` sites in engine/simd.rs, where 0.22 had none. Dev-only, so
+# it never reaches a shipped binary — `cargo tree -i base64@0.23.0 -e normal`
+# finds no runtime edge. That same dev-only placement is why three base64
+# versions (0.13, 0.22, 0.23) coexist without tripping `multiple-versions`:
+# cargo-deny does not traverse dev-deps for `bans`. Pass
+# `default-features = false, features = ["std"]` if the unsafe engine is
+# ever unwanted even in tests.
 # Re-audit on minor bump. (SC-DEP-11)
 base64 = "0.23.0"
 assert_cmd = "2.2"
