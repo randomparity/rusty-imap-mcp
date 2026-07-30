@@ -38,6 +38,24 @@ updates:
       prefix: "ci"
       include: "scope"
 
+  # `html-oracle` is excluded from the workspace (`exclude` in the root
+  # Cargo.toml) and carries its own Cargo.lock, so the `/` cargo entry above
+  # never updates it.
+  - package-ecosystem: "cargo"
+    directory: "/html-oracle"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      html-oracle-all:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps(html-oracle)"
+      include: "scope"
+
   - package-ecosystem: "npm"
     directory: "/tests/mcp-conformance"
     schedule:
@@ -55,3 +73,43 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+
+  # Container images used by the integration suites. Both compose files pin
+  # exact versions today, so these entries surface upstream releases instead of
+  # letting the pins silently age. `.clusterfuzzlite/Dockerfile` is deliberately
+  # left uncovered: oss-fuzz requires its base-builder image to float.
+  - package-ecosystem: "docker"
+    directory: "/crates/rimap-imap/tests/integration/dovecot"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      dovecot-images:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci(docker)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/crates/rimap-imap/tests/integration/smtp"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      smtp-images:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci(docker)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
