@@ -85,30 +85,60 @@ def load_lock(path):
     packages = collections.defaultdict(set)
     name = None
     in_package = False
+    blocks = 0
+    parsed = 0
     with open(path, encoding="utf-8") as handle:
         for raw in handle:
             line = raw.strip()
             if line == "[[package]]":
                 in_package, name = True, None
+                blocks += 1
             elif line.startswith("["):
-                # Any other table ends the block (e.g. `[[patch.unused]]`).
+                # Any other table ends the block (e.g. `[[patch.unused]]`,
+                # whose entries are not resolved dependencies).
                 in_package, name = False, None
             elif not in_package or not line.endswith('"'):
+                # Skips `dependencies = [`, its entries, and the top-of-file
+                # `version = 4`, none of which are a package's own fields.
                 continue
             elif line.startswith('name = "'):
                 name = line[len('name = "') : -1]
             elif line.startswith('version = "') and name is not None:
                 packages[name].add(line[len('version = "') : -1])
                 name = None
-    if not packages:
+                parsed += 1
+    if not blocks:
         sys.exit(
             "::error::cannot parse {}: no [[package]] entries found — the "
             "lockfile is empty, missing, or in an unexpected format".format(path)
+        )
+    # A block whose name/version did not parse would be silently dropped, and
+    # a gate that under-reads its input passes vacuously. Fail instead.
+    if parsed != blocks:
+        sys.exit(
+            "::error::cannot parse {}: read {} of {} [[package]] blocks — the "
+            "lockfile format is not what this script expects".format(
+                path, parsed, blocks
+            )
         )
     return packages
 
 
 def discover_fuzz_locks():
+    """Tracked fuzz lockfiles, with paths relative to the repo root.
+
+    `git ls-files` reports paths relative to the working directory and only
+    lists files beneath it, so discovery is anchored to the repo root rather
+    than trusting the caller's cwd. The default WORKSPACE_LOCK path is
+    relative to the same root.
+    """
+    root = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        stdout=subprocess.PIPE,
+        check=True,
+        universal_newlines=True,
+    ).stdout.strip()
+    os.chdir(root)
     result = subprocess.run(
         ["git", "ls-files", FUZZ_LOCK_GLOB],
         stdout=subprocess.PIPE,

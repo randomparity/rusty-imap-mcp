@@ -129,9 +129,28 @@ write_lock "$fz" "rmcp@2.2.0"
 expect_drift "a missing lockfile fails" \
     "No such file" "$ws" "${tmp}/fuzz/absent.lock"
 
+# A block the parser cannot read would be dropped silently, letting the gate
+# pass on a lockfile it only partly understood.
+printf 'version = 4\n\n[[package]]\nname = "rmcp"\nversion = "2.2.0"\n\n[[package]]\nname = "no-version-field"\n\n' >"$fz"
+expect_drift "a [[package]] block the parser cannot read is an error" \
+    "read 1 of 2 [[package]] blocks" "$ws" "$fz"
+
 # A workspace-lock argument with no fuzz lockfiles must not report success.
 expect_drift "no fuzz lockfiles to compare is an error" \
     "no fuzz lockfiles to check" "$ws"
+
+# --- discovery is anchored to the repo root, not the caller's cwd -----------
+
+# `git ls-files` only lists files beneath the working directory, so running
+# from a subdirectory must not silently find nothing to check.
+discovery_out="$(cd "${here}" && "$script" 2>&1)" || true
+if [ "${discovery_out#*no fuzz lockfiles to check}" != "${discovery_out}" ]; then
+    echo "FAIL: discovery from a subdirectory found no lockfiles:" >&2
+    echo "${discovery_out}" >&2
+    failures=$((failures + 1))
+else
+    echo "ok: discovery works from a subdirectory"
+fi
 
 # --- result -----------------------------------------------------------------
 
