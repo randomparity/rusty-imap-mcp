@@ -18,12 +18,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       - name: Checkout corpus (pinned SHA)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: randomparity/rusty-imap-mcp-corpus
           ref: d90cafe938a2c1e2d5d99b9d37893c1ab1d0fb09  # PINNED — bump via reviewed PR only (wave-2, #554)
@@ -42,7 +42,7 @@ jobs:
           workspaces: html-oracle
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2.83.2
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
           tool: cargo-deny
 
