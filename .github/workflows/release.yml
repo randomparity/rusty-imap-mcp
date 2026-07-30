@@ -599,7 +599,7 @@ jobs:
       # floating HEAD (this job holds contents: write). macOS runners ship brew.
       - name: Set up Homebrew (Linux)
         if: runner.os == 'Linux'
-        uses: Homebrew/actions/setup-homebrew@2825979605fed985cccfbd7f3dc3188161aaa15e  # master 2026-06
+        uses: Homebrew/actions/setup-homebrew@9af03b7ae3f9e2ae5c174f659d5c3909f7e7dbac  # master 2026-06
         with:
           stable: true
       - name: Build, bottle, and upload
