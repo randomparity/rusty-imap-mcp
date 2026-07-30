@@ -25,6 +25,11 @@
 # That catches drift in both directions — a stale fuzz pin is absent from the
 # workspace, and so is one that has run ahead.
 #
+# Containment alone is not sufficient, though: a fuzz lockfile that is a
+# verbatim copy of the workspace one satisfies it trivially, which is exactly
+# the wreckage a half-finished realign leaves behind. So each fuzz lockfile
+# must also still contain the fuzz-only packages that prove it is one.
+#
 # Usage:
 #   check-fuzz-lock-parity.sh [--fix] [WORKSPACE_LOCK FUZZ_LOCK...]
 #
@@ -51,11 +56,20 @@ import sys
 
 WORKSPACE_LOCK = "Cargo.lock"
 
-# Tracked lockfiles under any directory named `fuzz`. The root `Cargo.lock`
-# does not match (it is the comparison baseline), and neither does
-# `html-oracle/Cargo.lock` — html-oracle is an independent tool workspace with
-# its own Dependabot entry and is meant to float free of the workspace pins.
-FUZZ_LOCK_GLOB = "*fuzz/Cargo.lock"
+# Tracked lockfiles in a directory named exactly `fuzz`, at the repo root or
+# nested. Two anchored pathspecs rather than one `*fuzz/Cargo.lock`, which
+# would also match a directory merely *ending* in "fuzz" (`notfuzz/`). The
+# root `Cargo.lock` does not match (it is the comparison baseline), and
+# neither does `html-oracle/Cargo.lock` — html-oracle is an independent tool
+# workspace with its own Dependabot entry, meant to float free of the
+# workspace pins.
+FUZZ_LOCK_GLOBS = ["fuzz/Cargo.lock", "*/fuzz/Cargo.lock"]
+
+# Every cargo-fuzz workspace resolves libfuzzer-sys. Requiring it is what stops
+# the check blessing a fuzz lockfile that is really a verbatim copy of the
+# workspace lockfile: containment is trivially satisfied by an identical set,
+# so without this the corrupt state would pass.
+REQUIRED_FUZZ_PACKAGES = ["libfuzzer-sys"]
 
 
 def compat_key(version):
@@ -87,7 +101,11 @@ def load_lock(path):
     in_package = False
     blocks = 0
     parsed = 0
-    with open(path, encoding="utf-8") as handle:
+    try:
+        handle = open(path, encoding="utf-8")
+    except OSError as exc:
+        sys.exit("::error::cannot read {}: {}".format(path, exc.strerror))
+    with handle:
         for raw in handle:
             line = raw.strip()
             if line == "[[package]]":
@@ -140,7 +158,7 @@ def discover_fuzz_locks():
     ).stdout.strip()
     os.chdir(root)
     result = subprocess.run(
-        ["git", "ls-files", FUZZ_LOCK_GLOB],
+        ["git", "ls-files"] + FUZZ_LOCK_GLOBS,
         stdout=subprocess.PIPE,
         check=True,
         universal_newlines=True,
@@ -156,17 +174,40 @@ def realign(workspace_lock, fuzz_lock):
     adds the fuzz-only ones (libfuzzer-sys and its deps). Regenerating from
     scratch instead would re-resolve everything to latest and reintroduce the
     drift this gate exists to prevent.
+
+    The copy has to land at the lockfile's real path for cargo to resolve
+    against it, so this cannot stage the work in a temp file and move it in
+    afterwards. Instead the original bytes are held and written back if cargo
+    fails — otherwise a failed realign (cargo must reach the registry index to
+    add the fuzz-only packages, so it cannot run offline) would leave the fuzz
+    lockfile overwritten with a verbatim copy of the workspace lockfile.
     """
     # flush: cargo writes straight to the inherited fd, so an unflushed
     # buffer would print this line after cargo's own progress output.
     print("realigning {} from {}".format(fuzz_lock, workspace_lock), flush=True)
+    original = None
+    if os.path.exists(fuzz_lock):
+        with open(fuzz_lock, "rb") as handle:
+            original = handle.read()
     shutil.copyfile(workspace_lock, fuzz_lock)
-    subprocess.run(
-        ["cargo", "metadata", "--format-version", "1"],
-        cwd=os.path.dirname(fuzz_lock) or ".",
-        stdout=subprocess.DEVNULL,
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["cargo", "metadata", "--format-version", "1"],
+            cwd=os.path.dirname(fuzz_lock) or ".",
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
+    except BaseException:
+        if original is not None:
+            with open(fuzz_lock, "wb") as handle:
+                handle.write(original)
+            print(
+                "restored the original {} after a failed realign".format(
+                    fuzz_lock
+                ),
+                file=sys.stderr,
+            )
+        raise
 
 
 args = sys.argv[1:]
@@ -182,19 +223,36 @@ else:
 if not fuzz_locks:
     sys.exit(
         "::error::no fuzz lockfiles to check — expected at least "
-        "crates/rimap-server/fuzz/Cargo.lock to be tracked and to match "
-        "{!r}".format(FUZZ_LOCK_GLOB)
+        "crates/rimap-server/fuzz/Cargo.lock to be tracked and to match one "
+        "of {!r}".format(FUZZ_LOCK_GLOBS)
     )
 
 if fix:
     for fuzz_lock in fuzz_locks:
-        realign(workspace_lock, fuzz_lock)
+        try:
+            realign(workspace_lock, fuzz_lock)
+        except subprocess.CalledProcessError as exc:
+            sys.exit(
+                "::error::realigning {} failed: cargo exited {}. The original "
+                "lockfile has been restored. Note cargo must reach the "
+                "registry index to add the fuzz-only packages, so --fix "
+                "cannot run offline.".format(fuzz_lock, exc.returncode)
+            )
 
 workspace = load_lock(workspace_lock)
 errors = []
 
 for fuzz_lock in fuzz_locks:
     fuzz = load_lock(fuzz_lock)
+    missing = [pkg for pkg in REQUIRED_FUZZ_PACKAGES if pkg not in fuzz]
+    if missing:
+        sys.exit(
+            "::error::{} does not look like a fuzz workspace lockfile: no {} "
+            "entry. A verbatim copy of the workspace lockfile would satisfy "
+            "the parity check trivially, so it is rejected here. Rebuild it "
+            "with `just realign-fuzz-locks` rather than copying by "
+            "hand.".format(fuzz_lock, ", ".join(repr(m) for m in missing))
+        )
     for name in sorted(set(fuzz) & set(workspace)):
         for version in sorted(fuzz[name] - workspace[name]):
             bucket = compat_key(version)

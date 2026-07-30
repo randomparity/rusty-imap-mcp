@@ -54,6 +54,20 @@ of exactly this kind produced #512.
   counterpart by semver-compatibility bucket so that drift in the 2.x line of a
   package that also has a 1.x line is reported against 2.x.
 
+- **Containment is necessary but not sufficient, so each fuzz lockfile must
+  also still contain `libfuzzer-sys`.** A fuzz lockfile that is a verbatim copy
+  of the workspace lockfile satisfies containment trivially — an identical
+  version set is a subset of itself — and that copy is exactly the wreckage a
+  half-finished realign leaves behind. Without this requirement the gate would
+  bless it.
+
+- **The build honours the lockfile.** `cargo fuzz build` (0.13.1) has no
+  `--locked` flag and rejects one, so `.clusterfuzzlite/build.sh` asserts the
+  same property with `cargo metadata --locked` before building, in any fuzz
+  directory that has a lockfile. Otherwise cargo would silently re-resolve and
+  rewrite at build time, letting drift return with both the gate and the build
+  green.
+
 - **The gate discovers its inputs** with `git ls-files '*fuzz/Cargo.lock'`
   rather than hard-coding the one path, so a fuzz workspace whose lockfile is
   committed later is covered without editing the script. `html-oracle` does not
@@ -63,7 +77,11 @@ of exactly this kind produced #512.
   lockfile over the fuzz one, then let `cargo metadata` prune the unreachable
   packages and add the fuzz-only ones. This preserves every shared pin
   verbatim. Regenerating from scratch would re-resolve to latest and reintroduce
-  the drift.
+  the drift. The copy has to land at the lockfile's real path for cargo to
+  resolve against it, so the original bytes are held and written back if cargo
+  fails — cargo must reach the registry index to add the fuzz-only packages, so
+  a realign attempted offline fails, and without the restore it would fail with
+  the real lockfile already destroyed.
 
 ## Alternatives considered
 
