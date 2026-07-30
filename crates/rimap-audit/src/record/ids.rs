@@ -47,7 +47,7 @@ impl ProcessId {
     /// Generate a fresh process ID from the current system time + randomness.
     #[must_use]
     pub fn new_now() -> Self {
-        Self(Ulid::new())
+        Self(Ulid::generate())
     }
 }
 
@@ -123,6 +123,8 @@ impl<'de> Deserialize<'de> for Timestamp {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use crate::record::ids::{ProcessId, Seq, Timestamp};
 
     #[test]
@@ -156,6 +158,30 @@ mod tests {
         let id = ProcessId::new_now();
         let s = id.to_string();
         assert_eq!(s.len(), 26, "ULID canonical form is 26 chars: got {s}");
+    }
+
+    #[test]
+    fn process_id_embeds_current_time_in_its_prefix() {
+        // The ULID time prefix is what lets records from different processes
+        // interleave in a meaningful order. A constructor that dropped the
+        // wall-clock component would still produce unique 26-char values, so
+        // neither test above would catch it — this one pins the ordering
+        // property directly across future `ulid` bumps.
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let id = ProcessId::new_now();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        let embedded = u128::from(id.0.timestamp_ms());
+        assert!(
+            (before..=after).contains(&embedded),
+            "ULID time prefix {embedded} outside [{before}, {after}]"
+        );
     }
 
     #[test]
