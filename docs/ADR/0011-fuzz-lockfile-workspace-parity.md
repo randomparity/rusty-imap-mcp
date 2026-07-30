@@ -108,6 +108,16 @@ of exactly this kind produced #512.
   `multiple-versions = deny` ban is unaffected: the fuzz workspace is outside
   its scope.
 
+- That same scoping is why parity also improves advisory posture. `cargo deny
+  check advisories` only scans the root workspace, so whatever the fuzz
+  lockfile resolved was never checked against RUSTSEC at all. After
+  realignment every shared package inherits the workspace's audited
+  resolution, leaving only `libfuzzer-sys`, `arbitrary`, and `jobserver`
+  unscanned. Note this moves a few packages *backward* where the fuzz
+  lockfile had run ahead (`zeroize` 1.9.0 → 1.8.2, `bytes` 1.12.1 → 1.11.1,
+  `cc` 1.2.66 → 1.2.60) — to the versions the workspace ships and cargo-deny
+  has cleared, which is the point of parity.
+
 - The root `fuzz/` directory's own lockfile remains untracked, so the two fuzz
   directories still follow different conventions. Normalizing that is tracked
   separately; the gate already covers it automatically if the lockfile is ever
