@@ -100,6 +100,19 @@ skip = [
     # security advisories. Revisit if utf7-imap publishes a 0.4 bump.
     { name = "base64", version = "0.13" },
 
+    # `syn` is mid-migration across the whole derive ecosystem. The 3.x line
+    # enters via `thiserror-impl 2.0.19` and `clap_derive 4.6.4`, while 2.x is
+    # still what `serde_derive`, `async-trait`, `cssparser-macros`, and
+    # `zerocopy-derive` build against. Holding the tree on 2.x was viable once
+    # (commit f1052de4 downgraded clap to do exactly that) but is not anymore:
+    # it would now mean pinning both clap and thiserror backwards against an
+    # upstream migration that is only going to spread. Both are build-time-only
+    # proc-macro deps, so the duplicate costs compile time and nothing at
+    # runtime. Skip the 2.x line specifically so that once the stragglers
+    # publish syn 3 releases this entry starts reporting `unnecessary-skip` —
+    # that warning is the signal to delete it.
+    { name = "syn", version = "2" },
+
     # `getrandom` is pulled in three versions by upstream-pinned crates:
     #   - 0.2 via `ring 0.17` (rustls transitive). `ring` pins getrandom 0.2
     #     and has no 0.3-compatible release as of this writing. Replacing
