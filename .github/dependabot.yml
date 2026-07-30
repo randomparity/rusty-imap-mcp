@@ -78,7 +78,12 @@ updates:
   # exact versions today, so these entries surface upstream releases instead of
   # letting the pins silently age. `.clusterfuzzlite/Dockerfile` is deliberately
   # left uncovered: oss-fuzz requires its base-builder image to float.
-  - package-ecosystem: "docker"
+  #
+  # These are `docker-compose`, not `docker`. Dependabot keeps the two as
+  # distinct ecosystems: the `docker` file fetcher matches Dockerfiles and
+  # Kubernetes manifests only, and neither directory below contains one, so a
+  # `docker` entry here resolves no manifest and never opens a PR.
+  - package-ecosystem: "docker-compose"
     directory: "/crates/rimap-imap/tests/integration/dovecot"
     schedule:
       interval: "weekly"
@@ -96,7 +101,7 @@ updates:
       - "dependencies"
       - "docker"
 
-  - package-ecosystem: "docker"
+  - package-ecosystem: "docker-compose"
     directory: "/crates/rimap-imap/tests/integration/smtp"
     schedule:
       interval: "weekly"
