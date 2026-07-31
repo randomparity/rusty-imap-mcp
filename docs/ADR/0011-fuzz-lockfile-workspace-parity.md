@@ -36,9 +36,21 @@ of exactly this kind produced #512.
   to be current in its own right.
 
 - **Enforced by a CI gate**, `scripts/check-fuzz-lock-parity.sh`, run as
-  `just check-fuzz-lock-parity` in the `publish-checks` job and as part of
-  `just ci`. `.github/workflows/ci.yml` has no `paths:` filter, so the gate
-  runs on every PR — including any PR that touches either lockfile.
+  `just check-fuzz-lock-parity` and as part of `just ci`.
+  `.github/workflows/ci.yml` has no `paths:` filter, so the gate runs on every
+  PR — including any PR that touches either lockfile.
+
+- **The gate runs in the `cargo-deny` job, not `publish-checks`, because
+  `cargo-deny` is a required status check on main and `publish checks` is
+  not.** This is the non-obvious part. A gate wired into a non-required job
+  runs but does not *enforce*: it goes red and the PR merges regardless. That
+  failure mode is worst precisely where this gate matters most — a Dependabot
+  bump that drifts the lockfile is exactly the PR that would sail through a
+  non-blocking red check, landing the drift #608 exists to prevent. Placing it
+  in an already-required job makes it enforcing with no branch-protection
+  change and no new required job, and `cargo-deny` is its thematic home anyway:
+  both are dependency-resolution gates. Moving these steps back into
+  `publish-checks` on tidiness grounds would silently disarm the gate.
 
 - **The comparison is containment, not equality.** The fuzz dependency graph is
   a *subgraph* of the workspace's, so it legitimately resolves fewer versions

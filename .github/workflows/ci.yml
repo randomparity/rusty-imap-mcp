@@ -210,11 +210,15 @@ jobs:
         run: just check-metadata
       - name: Unit-test publish-crates.sh
         run: just test-publish-script
-      - name: Unit-test check-fuzz-lock-parity.sh
-        run: just test-fuzz-lock-parity
-      - name: Check fuzz lockfile parity with the workspace
-        run: just check-fuzz-lock-parity
 
+  # Dependency hygiene. The fuzz-lockfile parity gate (issue #608) lives here
+  # rather than in `publish-checks` for one reason worth stating: `cargo-deny`
+  # is a REQUIRED status check on main and `publish checks` is not, so a gate
+  # wired into the latter goes red while the PR merges anyway — it would run
+  # without enforcing, which is exactly the drift #608 exists to stop. It is
+  # also the right thematic home: both are dependency-resolution gates.
+  # Do not "tidy" these steps back into publish-checks; that silently disarms
+  # them. See docs/ADR/0011-fuzz-lockfile-workspace-parity.md.
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
@@ -222,7 +226,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+        with:
+          tool: just
+      # Ahead of cargo-deny: the parity result must not be masked by an
+      # advisory/bans failure. These are pure lockfile text analysis (python3
+      # and git only, no cargo resolution, no network), so they cost seconds.
+      - name: Unit-test check-fuzz-lock-parity.sh
+        run: just test-fuzz-lock-parity
+      - name: Check fuzz lockfile parity with the workspace
+        run: just check-fuzz-lock-parity
+      # ...and conversely, a parity failure must not hide an advisory, so this
+      # still runs when an earlier step failed.
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
+        if: ${{ !cancelled() }}
         with:
           command: check advisories licenses bans sources
 

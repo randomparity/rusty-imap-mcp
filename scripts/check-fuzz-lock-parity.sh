@@ -238,6 +238,15 @@ if fix:
                 "registry index to add the fuzz-only packages, so --fix "
                 "cannot run offline.".format(fuzz_lock, exc.returncode)
             )
+        except OSError as exc:
+            # cargo missing entirely. Same guarantee, different cause — say so
+            # rather than letting a traceback stand in for the explanation.
+            sys.exit(
+                "::error::realigning {} failed: could not run cargo ({}). The "
+                "original lockfile has been restored.".format(
+                    fuzz_lock, exc.strerror
+                )
+            )
 
 workspace = load_lock(workspace_lock)
 errors = []
