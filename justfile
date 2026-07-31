@@ -348,6 +348,27 @@ check-metadata:
 test-publish-script:
     ./scripts/publish-crates.test.sh
 
+# Fail if a tracked fuzz workspace's Cargo.lock resolves a dependency shared
+# with the root workspace to a version the workspace lockfile does not hold.
+# `crates/rimap-server/fuzz` is its own cargo workspace, so no Dependabot entry
+# reaches it and nothing else keeps the two in step (issue #608). Pure lockfile
+# text analysis — no cargo resolution, no network. See docs/ADR/0011.
+check-fuzz-lock-parity:
+    ./scripts/check-fuzz-lock-parity.sh
+
+# Restore fuzz-lockfile parity after a workspace dependency bump: seed each
+# fuzz lockfile from the workspace one and let cargo prune/add around it, then
+# re-verify. This is the fix `check-fuzz-lock-parity` points at on failure.
+# Rebuild the fuzz targets afterwards (`cargo +nightly fuzz build -O`).
+realign-fuzz-locks:
+    ./scripts/check-fuzz-lock-parity.sh --fix
+
+# Unit-test check-fuzz-lock-parity.sh against synthetic lockfiles (containment
+# vs. equality, drift in both directions, malformed input). No cargo or repo
+# state. Mirrored in the `publish-checks` CI job.
+test-fuzz-lock-parity:
+    ./scripts/check-fuzz-lock-parity.test.sh
+
 # Dry-run the crates.io publish: package all 8 crates (workspace) without
 # uploading. Validates manifests/metadata; runs on a normal -dev branch.
 publish-dry-run:
@@ -362,7 +383,7 @@ semver-checks:
     cargo semver-checks check-release --workspace
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-installer
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-fuzz-lock-parity check-fuzz-lock-parity test-installer
     typos
 
 # Re-run pre-commit hooks across all files.

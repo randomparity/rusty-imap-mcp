@@ -22,6 +22,17 @@ build_fuzz_dir() {
     local fuzz_dir="$1"
     (
         cd "$fuzz_dir"
+        # `cargo fuzz build` (0.13.1) has no `--locked` flag — it rejects one —
+        # so without a guard it would silently re-resolve and rewrite the
+        # lockfile, letting drift return at build time with both the parity
+        # gate and the build green. `cargo metadata --locked` is the
+        # equivalent assertion: it fails if the lockfile would have to change.
+        # Only meaningful where a lockfile is committed; the root `fuzz/`
+        # directory gitignores its own (issue #611), and this picks it up
+        # automatically if that changes.
+        if [ -f Cargo.lock ]; then
+            cargo +nightly metadata --locked --format-version 1 >/dev/null
+        fi
         cargo +nightly fuzz build -O
     )
     local release_dir="${fuzz_dir}/target/${host_triple}/release"
