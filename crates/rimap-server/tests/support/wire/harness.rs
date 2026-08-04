@@ -87,10 +87,24 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// parent-side work (tempdir, config write, `cargo_bin`, spawn, the write) plus
 /// teardown. The child's true exit time was never observed, so the run bounds
 /// the envelope from below and no further. The size argument is therefore the
-/// cost model, not that log line: start-up here is the same cost class #621
-/// measured taking >9x its unloaded cost under contention, which is what
+/// cost model, not that log line: start-up is the cost class
 /// [`COLD_START_TIMEOUT`] is calibrated for, and the exit slice that follows it
 /// is what [`SHUTDOWN_TIMEOUT`] is calibrated for.
+///
+/// Be precise about how far that model goes, because it does not go all the
+/// way. Measured here, this case costs 0.22-0.28 s end to end across 12 samples
+/// at host load 20-119, so a 5 s timeout implies roughly 20x amplification —
+/// more than the >9x #621 recorded. This harness is also cheaper at boot than
+/// the ones #621 measured: `accounts = []` with `--allow-empty-accounts` skips
+/// credential resolution and the IMAP boot entirely, so it pays only `exec`,
+/// dynamic linking and config parse. The budget is sized on the assumption that
+/// the failing runner was contended well past anything reproduced locally. The
+/// competing explanation — an intermittent stall in the server's own
+/// broken-pipe shutdown path, which a wider budget would mask rather than fix —
+/// is *not* excluded by anything here; it is tracked in #660. The success-path
+/// measurement `wait_for_exit` prints is what tells the two apart: a green CI
+/// distribution clustered near 0.2 s supports the first, and a bimodal one with
+/// multi-second outliers supports the second.
 ///
 /// Composed from the two named constants rather than hand-tuned to a third
 /// number so each cost stays individually documented and tunable. Widening
@@ -349,6 +363,9 @@ allowed_base_dir = "{}"
     /// to exercise the propagated-error path on transport failure.
     #[expect(clippy::unused_async, reason = "uniform async surface")]
     pub async fn spawn_with_closed_stdout() -> DetachedStdoutHarness {
+        // Before the tempdir, so `setup_began` covers every parent-side item
+        // the #638 log lumped in with the child's lifetime.
+        let setup_began = Instant::now();
         let tempdir = TempDir::new().expect("tempdir");
         let config_path = tempdir.path().join("config.toml");
         let audit_path = tempdir.path().join("audit.jsonl");
@@ -390,7 +407,7 @@ allowed_base_dir = "{}"
             stdin,
             stderr_log,
             audit_path,
-            spawned_at: Instant::now(),
+            setup_began,
             _tempdir: tempdir,
         }
     }
@@ -789,11 +806,12 @@ pub struct DetachedStdoutHarness {
     pub stdin: ChildStdin,
     stderr_log: PathBuf,
     audit_path: PathBuf,
-    // When the child was spawned. Only read on the `wait_for_exit` timeout
-    // path, to separate parent-side setup from the wait itself — #638 was hard
-    // to attribute precisely because the failing run reported one wall-clock
-    // number covering both.
-    spawned_at: Instant,
+    // Start of `spawn_with_closed_stdout`, i.e. before the tempdir, config
+    // write, `cargo_bin` resolution and `Command::spawn`. Read on the
+    // `wait_for_exit` timeout path to separate that parent-side setup from the
+    // budgeted wait — #638 was hard to attribute precisely because the failing
+    // run reported one wall-clock number covering both.
+    setup_began: Instant,
     // Held until drop so the audit log path stays valid.
     _tempdir: TempDir,
 }
@@ -828,17 +846,32 @@ impl DetachedStdoutHarness {
     pub async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
         let wait_began = Instant::now();
         let waited = timeout(DETACHED_EXIT_TIMEOUT, self.child.wait()).await;
+        let setup = wait_began.saturating_duration_since(self.setup_began);
         let Ok(reaped) = waited else {
-            let before_wait = wait_began.saturating_duration_since(self.spawned_at);
             panic!(
-                "child did not exit within {DETACHED_EXIT_TIMEOUT:?} of the exit wait \
-                 ({before_wait:?} of parent-side setup preceded it, so the child had \
-                 been running for {:?} in total)\n\
+                "child did not exit within {DETACHED_EXIT_TIMEOUT:?} of the exit wait; \
+                 harness setup and the request write took {setup:?} before it\n\
                  --- captured stderr ---\n{}",
-                self.spawned_at.elapsed(),
                 self.captured_stderr(),
             );
         };
+        // Record the distribution on the success path too. The budget was
+        // widened here without the exit wait ever having been measured on a
+        // failing run (#638 timed out, so it observed only a lower bound); this
+        // is the number that says whether 15 s is generous, marginal, or hiding
+        // a real server-side stall. `nextest` captures test stderr, so it costs
+        // nothing on a green run and is there when one goes red.
+        #[expect(
+            clippy::print_stderr,
+            reason = "budget calibration measurement collected by #660"
+        )]
+        {
+            eprintln!(
+                "detached child exited after {:?} of exit wait ({setup:?} of setup before it, \
+                 budget {DETACHED_EXIT_TIMEOUT:?})",
+                wait_began.elapsed(),
+            );
+        }
         reaped.unwrap_or_else(|err| {
             panic!(
                 "wait for child exit failed: {err}\n\
