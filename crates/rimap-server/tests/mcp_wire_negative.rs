@@ -461,9 +461,7 @@ async fn pre_initialize_notification_silent_close() {
 /// `reason: Error`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pre_initialize_envelope_write_failure_records_error() {
-    use support::wire::harness::SHUTDOWN_TIMEOUT;
     use tokio::io::AsyncWriteExt;
-    use tokio::time::timeout;
 
     let mut detached = support::wire::harness::Harness::spawn_with_closed_stdout().await;
 
@@ -478,11 +476,10 @@ async fn pre_initialize_envelope_write_failure_records_error() {
         .expect("write request");
     detached.stdin.flush().await.expect("flush request");
 
-    // Wait for the child to exit.
-    let status = timeout(SHUTDOWN_TIMEOUT, detached.child.wait())
-        .await
-        .expect("child exit within SHUTDOWN_TIMEOUT")
-        .expect("child wait");
+    // Wait for the child to exit. This harness has no readable stdout, so the
+    // wait covers start-up as well as the exit slice — see
+    // `DETACHED_EXIT_TIMEOUT` for why that needs its own budget (#638).
+    let status = detached.wait_for_exit().await;
 
     // Server must NOT exit 0 on a broken-pipe write failure. It may
     // exit with a non-zero status (anyhow propagated) or, if Rust's
