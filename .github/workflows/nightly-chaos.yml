@@ -61,6 +61,12 @@ jobs:
         # every result after the first failure — the built-in fail-fast
         # default — is more expensive here than anywhere fail-fast stays on,
         # since nobody is watching to re-run it for the rest of the picture.
+        # Trade-off (mirrors .config/nextest.toml's profile.ci comment): a
+        # broadly-broken run now attempts all 5 serial scenarios instead of
+        # cancelling at the first failure, so it can run closer to the
+        # 15-minute timeout-minutes cap above before reporting red. If that
+        # cap is hit the whole job is SIGKILLed, including the `if: always()`
+        # reaper step below — an accepted, bounded cost, not a regression.
         run: |
           set -o pipefail
           cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' \
