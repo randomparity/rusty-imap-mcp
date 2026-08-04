@@ -62,10 +62,13 @@ const BACKSTOP: Duration = Duration::from_secs(5);
 /// Two properties, both satisfied with a wide margin at 500ms:
 ///
 /// * It must outlast the test's setup — waiting for the `EXAMINE` to be
-///   recorded, spawning the peer, and aborting — because a cut command that
-///   had *already failed* on its own would make the assertion vacuous. The
-///   `is_cancelled` assertion below is what actually proves this held, so a
-///   value too small fails the test rather than weakening it.
+///   recorded, spawning the peer, and aborting — because a search that had
+///   *already failed* on its own would leave nothing to poison and make the
+///   assertions vacuous. The `is_cancelled` assertion below is what proves it
+///   held; it is a correctness guard, not a tuning signal. Do not read the
+///   500ms as the threshold: the setup takes single-digit milliseconds on a
+///   warm loopback, so far smaller values also pass here. The headroom is for
+///   a loaded CI runner, where the setup is what stretches.
 /// * It must stay well under `connect_timeout` (5s, from the fake's
 ///   `ConnectionConfig`), because the accept-loop is sequential: a peer that
 ///   reconnects waits out the remainder of this stall for its TLS handshake.
