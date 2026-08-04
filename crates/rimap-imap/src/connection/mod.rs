@@ -362,12 +362,23 @@ impl Connection {
     /// it. `Relaxed` for the same reason as [`Self::poison`]: where an
     /// ordering edge is needed at all, the mutex carries it.
     ///
-    /// This is the only path that empties the slot, so the capability
-    /// atomics are reset here rather than anywhere else: a `has_move` left
-    /// over from a discarded session would let the next command issue
-    /// `MOVE` against a server that never advertised it. The other way out
-    /// of the slot is `dispatch::attempt`'s `insert`, and that follows a
-    /// login, which stores the fresh values.
+    /// This is the only path that empties the slot, so it is also the only
+    /// place the capability atomics are reset. That reset used to run in
+    /// `with_session` as well, the moment a transport failure returned;
+    /// removing it from there (#629) moved the reset *later*, to whenever
+    /// the next command takes the session lock. The last-known values stay
+    /// readable in between, and that is the safer direction rather than an
+    /// accepted cost: the flags are read as a pair, and a forced
+    /// `!has_move && !has_uidplus` is exactly what selects the folder-wide
+    /// EXPUNGE fallback (see
+    /// `ops::expunge::fallback_uses_folder_wide_expunge`), which purges
+    /// every `\Deleted` message in the folder rather than the requested
+    /// UIDs. Holding the values until the reconnect re-reads CAPABILITY
+    /// keeps a command that snapshotted them agreeing with the server it
+    /// will actually talk to.
+    ///
+    /// The other way out of the slot is `dispatch::attempt`'s `insert`, and
+    /// that follows a login, which stores the fresh values.
     pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
         if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
             return false;

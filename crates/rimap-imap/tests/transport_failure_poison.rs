@@ -289,7 +289,9 @@ async fn peer_queued_behind_an_in_sync_failure_reuses_the_session() {
 /// session survived, it is still cached and the third command completes on the
 /// peer's connection, whose script carries a further search for exactly that
 /// purpose — two LOGINs. If the cleanup wiped it, the third command reconnects
-/// against the third script and there are three.
+/// against the third script and there are three. The two scripts answer that
+/// search with different UIDs, so the result itself names the connection that
+/// served it and the LOGIN count is not the only discriminator.
 #[tokio::test]
 async fn peers_reconnected_session_survives_the_failing_commands_cleanup() {
     let mut stalled = login_preamble("IMAP4rev1 UIDPLUS");
@@ -302,9 +304,10 @@ async fn peers_reconnected_session_survives_the_failing_commands_cleanup() {
     reconnect.extend(store_exchange());
     reconnect.extend(search_exchange());
 
-    // Reached only if the peer's healthy session was discarded.
+    // Reached only if the peer's healthy session was discarded. Its distinct
+    // answer is what makes the search assertion below identify the connection.
     let mut third = login_preamble("IMAP4rev1 UIDPLUS");
-    third.extend(search_exchange());
+    third.extend(search_exchange_returning(&[21]));
 
     let server = FakeImapServer::start_sequence(vec![stalled, reconnect, third]).await;
     let conn = server.connection_timeout("user@example.com", TIMEOUT);
@@ -342,7 +345,12 @@ async fn peers_reconnected_session_survives_the_failing_commands_cleanup() {
     let found = search(&conn)
         .await
         .expect("the third command must complete, on whichever session it finds");
-    assert_eq!(found, uids(&[5, 7, 9]), "the third search result");
+    assert_eq!(
+        found,
+        uids(&[5, 7, 9]),
+        "the peer's connection served this; 21 would mean its session was \
+         discarded and a third connection opened",
+    );
 
     let dialog = server.recorded();
     assert_eq!(
@@ -350,6 +358,65 @@ async fn peers_reconnected_session_survives_the_failing_commands_cleanup() {
         2,
         "exactly two LOGINs — the failing command's cleanup must not have \
          discarded the session the peer reconnected: {dialog:?}",
+    );
+}
+
+/// A *mutating* op as the producer rather than the consumer. `with_session`'s
+/// removed cleanup ran for these too — `Idempotency` never entered that
+/// decision — and the poison it relied on is likewise idempotency-agnostic.
+/// This pins that end of it directly: a `STORE` torn down mid-command must
+/// leave the session discarded, so the next command reconnects.
+///
+/// The follow-up is itself mutating, and that is what makes the test bite. A
+/// read-only follow-up would retry its own `ConnectionLost` and recover on the
+/// second attempt whether or not the first command poisoned anything, so the
+/// LOGIN count would read 2 either way. A write has no retry to fall back on:
+/// it succeeds only if the dead session was already gone when it took the lock.
+#[tokio::test]
+async fn mutating_op_torn_down_mid_command_leaves_the_session_discarded() {
+    let mut cut = login_preamble("IMAP4rev1 UIDPLUS");
+    cut.extend([
+        Step::Expect { verb: "SELECT" },
+        Step::Send(b"* 1 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
+        Step::Reply {
+            text: "OK [READ-WRITE] SELECT completed",
+        },
+        // Receive the mutating verb, then tear down mid-command.
+        Step::Expect { verb: "UID STORE" },
+        Step::Disconnect,
+    ]);
+
+    let mut reconnect = login_preamble("IMAP4rev1 UIDPLUS");
+    reconnect.extend(store_exchange());
+
+    let server = FakeImapServer::start_sequence(vec![cut, reconnect]).await;
+    let conn = server.connection_timeout("user@example.com", BACKSTOP);
+
+    let err = store(&conn, None)
+        .await
+        .expect_err("a STORE cut mid-command must surface, not return Ok");
+    assert!(
+        matches!(err, ImapError::ConnectionLost),
+        "the discriminator is a lost connection: {err:?}",
+    );
+
+    let updated = store(&conn, None).await.expect(
+        "the follow-up write must reconnect; reusing the dead session \
+                 is a ConnectionLost that a mutating op does not retry",
+    );
+    assert_eq!(updated, uids(&[5]), "the reconnected STORE result");
+
+    let dialog = server.recorded();
+    assert_eq!(
+        count(&dialog, "LOGIN"),
+        2,
+        "exactly two LOGINs — one per command, so the reconnect happened \
+         between them and not as a retry inside either: {dialog:?}",
+    );
+    assert_eq!(
+        count(&dialog, "UID STORE"),
+        2,
+        "one STORE per command; a third would mean a write was re-sent: {dialog:?}",
     );
 }
 
