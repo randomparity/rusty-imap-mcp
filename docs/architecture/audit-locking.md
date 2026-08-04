@@ -36,7 +36,7 @@ From any async function that needs to emit an audit record, use
 
 ```rust
 let audit = self.audit.clone();   // AuditWriter is cheaply cloneable
-tokio::task::spawn_blocking(move || audit.log_auth(record))
+tokio::task::spawn_blocking(move || audit.log_tool_end(record))
     .await??;
 ```
 
@@ -46,12 +46,19 @@ connect, and the one `AuthEmitGuard`'s `Drop` writes for a cut one —
 goes through `rimap_imap::Connection::emit_auth`, which takes and
 releases the audit lock *inline, on the calling thread*. That still
 satisfies the rule above (the lock is not held across an `.await`; there
-is no `.await`), and it is what makes the record survive a runtime
-shutdown: tokio drops queued blocking tasks once shutdown begins, and
-`rimap-server` shuts down with `Runtime::shutdown_background`, which
-waits for nothing. See [ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md)
-for the decision, the measured cost, and the bound on how many runtime
-workers this can occupy at once.
+is no `.await`).
+
+For the completed connect that is what makes the record survive a
+runtime shutdown, because a deferred write would be dropped by the
+blocking pool's shutdown drain and `rimap-server` shuts down with
+`Runtime::shutdown_background`, which waits for nothing. **It does not
+give the guard's record the same guarantee**: a `Drop` running during a
+shutdown can still lose the race with process exit, so that path stays
+best-effort, exactly as `AuthEmitGuard`'s own rustdoc says. See
+[ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md) for the
+decision, the tokio shutdown semantics it actually rests on, the
+measured cost, and the bound on how many runtime workers this can
+occupy at once.
 
 Note that this reverses what an earlier version of this document said,
 and what [ADR-0012](../ADR/0012-tool-call-ceiling.md)'s consequences
@@ -88,12 +95,16 @@ Why this is fine:
   for one that completed, inline for the same durability reason. Both run
   with `dispatch::attempt`'s session lock still held, so a peer queued on
   that account waits out one fsync — single-digit milliseconds on local
-  storage, measured in [ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md).
+  storage, measured in [ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md) —
+  *plus* any contention on the audit mutex itself, which `tool_start` and
+  `tool_end` also take from the blocking pool.
   These are the only places a blocking audit write happens under the
   session lock, and it must stay that way: it is the `auth` record's
   durability that buys the exception, and nothing else has that claim.
-  The write is unbounded on a non-local `audit.path`, which is why
-  `docs/audit-log.md` makes local storage a requirement.
+  The write is unbounded on a non-local `audit.path`; making
+  `docs/audit-log.md`'s local-storage requirement cover every connect
+  rather than only cut ones is tracked in
+  [#667](https://github.com/randomparity/rusty-imap-mcp/issues/667).
 
 ### Operator impact: concurrent calls to one account serialize
 

@@ -111,15 +111,29 @@ async fn a_successful_connect_emits_one_auth_record_naming_the_credential_source
 /// A completed connect's `auth` record must not depend on tokio's blocking
 /// pool (#643).
 ///
-/// The loss this pins is a runtime shutdown landing between `connect_inner`
-/// queueing its emit and the pool running it: tokio drops queued blocking
-/// tasks once shutdown begins, and `rimap-server` shuts down with
-/// `Runtime::shutdown_background`, which waits for nothing. Racing a real
-/// shutdown against a real queue would be a flake, so the test constructs the
-/// same condition deterministically — a pool with exactly one thread, that
-/// thread occupied, and then a shutdown that discards whatever is queued
-/// behind it. A `connect_inner` that defers its emit cannot record under those
-/// conditions; one that writes inline is unaffected by all of them.
+/// The loss this pins is a runtime shutdown reaching the pool before the pool
+/// reaches `connect_inner`'s queued emit — tokio drops a queued non-mandatory
+/// task on the shutdown drain, and `rimap-server` shuts down with
+/// `Runtime::shutdown_background`, which waits for nothing.
+///
+/// Racing a real shutdown against a real queue would be a flake in both
+/// directions, so the assertion rests on the weaker, fully deterministic
+/// condition that subsumes it: **the pool never runs another task at all.**
+/// One pool thread, occupied for the whole test, and the sink read while it is
+/// still occupied. A `connect_inner` that defers its emit cannot have
+/// recorded — its closure is provably still on the queue at the moment of the
+/// read — and one that writes inline is unaffected. Shutdown semantics are
+/// then not load-bearing here at all, which is deliberate: they are subtler
+/// than they look (a worker that is *busy* when shutdown begins drains and
+/// runs its queue without rechecking the flag), and a test that depended on
+/// them would pass against the bug whenever that path was taken.
+///
+/// One implicit dependency worth naming: with the pool's only thread occupied,
+/// *any* `spawn_blocking` on the connect path would hang this test rather than
+/// fail it informatively. The connect avoids one only because the fake binds
+/// `127.0.0.1` and `TcpStream::connect` short-circuits a literal address
+/// instead of resolving it on the pool. A harness that moved to a hostname
+/// would surface here as a timeout, not as an `emit_auth` regression.
 #[test]
 fn a_completed_connect_records_its_auth_event_without_the_blocking_pool() {
     /// Bounds the occupier thread's own wait, so a failed assertion cannot
@@ -156,7 +170,7 @@ fn a_completed_connect_records_its_auth_event_without_the_blocking_pool() {
         Arc::clone(&sink) as Arc<dyn AuthEventSink>,
         Duration::from_secs(1),
     );
-    rt.spawn(async move {
+    let call = rt.spawn(async move {
         // The `auth` record is written when the connect completes, before
         // LIST is issued, so the command's own outcome is irrelevant here.
         let _ = conn.list_folders("*").await;
@@ -167,13 +181,18 @@ fn a_completed_connect_records_its_auth_event_without_the_blocking_pool() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    // Begin shutdown without draining: this is what discards a queued
-    // blocking closure. Releasing the occupier only afterwards keeps a
-    // deferred emit from being resurrected by the freed thread.
-    rt.shutdown_background();
-    release_tx.send(()).ok();
-
+    // Stop the call before reading, so a `ConnectionLost` retry — `list_folders`
+    // is read-only, and `with_session` reconnects once for those — cannot add a
+    // second connect's record between the poll and the assertion.
+    call.abort();
     let events = sink.events();
+
+    // Everything past here is teardown, deliberately *after* the read: while
+    // the occupier still holds the pool's only thread, a deferred emit is
+    // provably unrun, so `events` cannot have been rescued by the freed thread.
+    release_tx.send(()).ok();
+    rt.shutdown_background();
+
     assert_eq!(
         events.len(),
         1,

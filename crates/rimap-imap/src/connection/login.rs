@@ -159,14 +159,25 @@ impl Connection {
     /// emitter deliberately does not, and ADR-0014 records the decision. The
     /// short form:
     ///
-    /// * **`spawn_blocking` loses the record on a shutdown.** Tokio's blocking
-    ///   pool refuses new work once the runtime begins shutting down — the
-    ///   returned handle never resolves, and even an already-queued closure is
-    ///   discarded rather than run. `rimap-server` shuts down with
-    ///   `Runtime::shutdown_background`, which waits for nothing, and writes
-    ///   `process_end` before it. Deferring guarantees the loss inside that
-    ///   window; writing inline removes the window entirely, because there is
-    ///   no longer an `.await` between the guard's disarm and the write (#643).
+    /// * **`spawn_blocking` loses the record on a shutdown.** Read against
+    ///   tokio 1.53's `runtime::blocking::pool`, a deferred closure survives a
+    ///   shutdown only by luck. Submitted after `Runtime::shutdown_background`
+    ///   has set the flag, `Spawner::spawn_task` shuts the task down and
+    ///   returns `SpawnError::ShuttingDown`; the caller still gets a
+    ///   `JoinHandle`, which resolves immediately with a *cancelled*
+    ///   `JoinError`, so the closure never runs and the old code turned a
+    ///   successful connect into `ImapError::Audit`. Already queued with the
+    ///   pool idle — the ordinary case, since the pool has nothing else to do —
+    ///   the worker wakes on the shutdown notify and drains through
+    ///   `Task::shutdown_or_run_if_mandatory`, which *drops* a non-mandatory
+    ///   task rather than running it, and `spawn_blocking` produces exactly
+    ///   those. Only a closure queued behind a worker that happened to be busy
+    ///   at that instant is run, by a `BUSY` loop that does not recheck the
+    ///   flag — and `rimap-server`'s `main` returns straight after
+    ///   `shutdown_background`, which waits for nothing, so the process
+    ///   usually exits first anyway. Writing inline removes the whole question:
+    ///   there is no longer an `.await` between the guard's disarm and the
+    ///   write (#643).
     /// * **`spawn_blocking` cannot be called from a `Drop` at all.**
     ///   [`super::AuthEmitGuard`] has no caller to await for it, and
     ///   `spawn_blocking` panics when the OS refuses a thread — a panic
@@ -176,31 +187,49 @@ impl Connection {
     ///   returning, so the connect's wall time is unchanged; what moved is the
     ///   thread that spends it, from the blocking pool to a runtime worker.
     ///   Measured at 4.7 ms mean / 6.9 ms p95 / 16.9 ms max per record on
-    ///   APFS-on-NVMe (ADR-0014 has the method and the caveats). Once per
+    ///   APFS-on-NVMe (ADR-0014 has the harness and the caveats). Once per
     ///   connect, and a connect is lazy and serialized per account by the
-    ///   session lock, so the number of workers blocked at once is bounded by
-    ///   the number of configured accounts. When the file is due to rotate the
-    ///   write also takes a rename, an open, and — with retention configured —
-    ///   a `read_dir` and a `remove_file` per pruned file, still under the
-    ///   audit mutex.
+    ///   session lock, so the workers blocked at once are bounded by
+    ///   `min(accounts, worker_threads)` — note the second term: `Runtime::new`
+    ///   sizes workers from `available_parallelism`, which is 1 under a
+    ///   one-vCPU quota, and there the bound is reached by a single account.
+    ///   The wait is also one fsync *plus* any contention on the audit mutex,
+    ///   which `tool_start`/`tool_end` take from the blocking pool. When the
+    ///   file is due to rotate the write additionally takes a rename, an open,
+    ///   and — with retention configured — a `read_dir` and a `remove_file`
+    ///   per pruned file, still under that mutex.
     ///
     ///   No deadline covers that write, and it is unbounded above. On an
     ///   `audit.path` that stops responding — a hung NFS or SMB mount — it
     ///   never returns: the runtime worker is pinned for the life of the
     ///   process, and `dispatch::attempt` still holds the account's session
     ///   lock, so a peer queued on that account waits forever rather than
-    ///   merely spending its `command_timeout`. The runtime is multi-threaded,
-    ///   so enough concurrent connects against such a mount wedge the
-    ///   scheduler itself, including the stdio MCP wire. The same stall on the
-    ///   blocking pool lands against its 512-thread cap instead and cannot
-    ///   starve the scheduler — so this makes `audit.path` a local-storage
-    ///   requirement rather than a preference. `docs/audit-log.md` says so to
-    ///   operators.
+    ///   merely spending its `command_timeout`. With every worker so pinned the
+    ///   time driver stops advancing too, so no `tokio::time` deadline fires —
+    ///   `command_timeout` and the ADR-0012 ceiling included — and the stdio
+    ///   MCP wire stops being served. The same stall on the blocking pool lands
+    ///   against its 512-thread cap instead and cannot starve the scheduler, so
+    ///   this makes `audit.path` a local-storage requirement rather than a
+    ///   preference. `docs/audit-log.md` still scopes that warning to the cut
+    ///   path only; widening it is tracked in #667.
     ///
     /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
     /// file I/O, nothing inside its critical section calls back into this
     /// crate, and the advisory file lock is taken once at open rather than per
     /// write, so it cannot block on another process either.
+    ///
+    /// ## What deferring used to buy, and no longer does
+    ///
+    /// `spawn_blocking` caught a panic from inside the sink and handed it back
+    /// as a `JoinError`, which the old code surfaced as `ImapError::Audit`. A
+    /// panicking sink now unwinds through `connect_inner` instead, and — worse
+    /// than the lost call — poisons the `AuditWriter`'s own mutex, which
+    /// `lock_inner` maps to a permanent `AuditError` for the rest of the
+    /// process. The [`AuthEventSink`](rimap_core::auth_sink::AuthEventSink)
+    /// contract forbids panicking and the shipped `AuditWriter` has no
+    /// panicking construct on its write path, so this is latent rather than
+    /// live; #646 closes it structurally. It is named here because it is a
+    /// property that existed before #643 and does not now.
     ///
     /// ## `ImapError` message sanitization
     ///
