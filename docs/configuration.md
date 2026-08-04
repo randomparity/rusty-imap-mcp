@@ -522,9 +522,70 @@ commands_per_second = 10
 drafts_per_minute = 5
 ```
 
-Per-account `[accounts.security]` and `[accounts.limits]` sections
-override the corresponding `[defaults.*]` sections. Fields not specified
-in the per-account section inherit from defaults.
+### Merge semantics
+
+Per-account `[accounts.security]` and `[accounts.limits]` sections merge
+onto the corresponding `[defaults.*]` section **key by key**. Writing the
+per-account table does not discard the rest of the default block:
+
+- **Tables merge per key.** `[accounts.limits]`, `[accounts.security]`,
+  `[accounts.security.tools]`, and `[accounts.security.lookalike]` each
+  override only the keys the account writes. Every other key keeps its
+  `[defaults]` value.
+- **Scalars and arrays replace.** A key the account writes replaces the
+  inherited value outright. For `protected_folders`, `expunge_folders`,
+  and `lookalike.known_domains` that means the account's list is used as
+  written — it is not unioned with the default list, so an account that
+  wants the default entries plus one more must restate them all.
+- **`[accounts.credentials]`** likewise overrides `fallback` only when
+  the account writes it. An empty `[accounts.credentials]` table keeps the
+  `[defaults.credentials]` policy rather than reverting to
+  `keyring-then-env`.
+
+So this account raises the search limit and keeps the deployment's 600s
+ceiling and 25/s rate:
+
+```toml
+[defaults.limits]
+tool_call_timeout_seconds = 600
+commands_per_second = 25
+
+[[accounts]]
+name = "work"
+# ... [accounts.imap] ...
+
+[accounts.limits]
+max_search_results = 50
+```
+
+An account cannot erase an inherited `[defaults.security.tools]` entry,
+only restate its verdict — write `allow` or `deny` for that tool rather
+than expecting omission to fall back to the posture default.
+
+Validation runs on the merged result, per account. An inherited
+`tool_call_timeout_seconds` that is too small for an account's own
+`[accounts.imap]` budgets is still rejected at startup, naming that
+account.
+
+> **Upgrading from a release before this merge model (#624):** an account
+> that writes a partial `[accounts.security]` block used to fall back to
+> the *built-in* defaults for everything it omitted, and those are the
+> restrictive end of each range. It now inherits your `[defaults]` values
+> instead — so it picks up your `[defaults.security.tools]` verdicts
+> (including `allow` entries, which permit a tool regardless of posture),
+> your `expunge_folders`, and your `protected_folders`.
+>
+> Run `rusty-imap-mcp --dry-run` before and after upgrading and diff the
+> per-account effective matrix it prints. **This catches the tool-verdict
+> change only.** `--dry-run` prints posture, per-tool verdicts,
+> infrastructure tools, IMAP capabilities, and the TLS fingerprint. It does
+> **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
+> field — so an account that silently gained an inherited `expunge_folders`
+> entry produces an identical `--dry-run` diff. Check those two lists
+> against your `[defaults.security]` by hand, for every account carrying a
+> partial `[accounts.security]` block. A boot-time record of each account's
+> resolved values is tracked in
+> [#632](https://github.com/randomparity/rusty-imap-mcp/issues/632).
 
 ## Credential resolution
 
