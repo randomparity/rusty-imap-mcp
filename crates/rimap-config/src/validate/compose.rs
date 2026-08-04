@@ -202,6 +202,7 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
     if let Some(ref smtp_cfg) = smtp {
         identity::validate_smtp_username(&smtp_cfg.username)?;
     }
+    limits::validate_timeouts(&imap, smtp.as_ref())?;
     limits::validate_limits(&limits)?;
     rules::validate_folder_safety(&security)?;
     let tool_overrides = rules::resolve_tool_overrides(&security)?;
@@ -413,6 +414,70 @@ mod tests {
             validate(cfg).unwrap_err(),
             ConfigError::InvalidLimit {
                 field: "limits.drafts_per_minute",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_imap_connect_timeout_fails() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = base_config(dir.path());
+        cfg.imap.connect_timeout_seconds = 0;
+        assert!(matches!(
+            validate(cfg).unwrap_err(),
+            ConfigError::InvalidLimit {
+                field: "imap.connect_timeout_seconds",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_imap_command_timeout_fails() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = base_config(dir.path());
+        cfg.imap.command_timeout_seconds = 0;
+        assert!(matches!(
+            validate(cfg).unwrap_err(),
+            ConfigError::InvalidLimit {
+                field: "imap.command_timeout_seconds",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_smtp_command_timeout_fails() {
+        use crate::model::SmtpConfig;
+        let dir = TempDir::new().unwrap();
+        let mut cfg = base_config(dir.path());
+        cfg.smtp = Some(SmtpConfig {
+            host: "127.0.0.1".into(),
+            port: 1025,
+            encryption: SmtpEncryption::Starttls,
+            username: "user".into(),
+            command_timeout_seconds: 0,
+        });
+        assert!(matches!(
+            validate(cfg).unwrap_err(),
+            ConfigError::InvalidLimit {
+                field: "smtp.command_timeout_seconds",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn multi_account_zero_connect_timeout_fails() {
+        let dir = TempDir::new().unwrap();
+        let mut acct = raw_account("work");
+        acct.imap.connect_timeout_seconds = 0;
+        let cfg = base_multi_config(dir.path(), vec![acct]);
+        assert!(matches!(
+            validate_multi(cfg).unwrap_err(),
+            ConfigError::InvalidLimit {
+                field: "imap.connect_timeout_seconds",
                 ..
             }
         ));

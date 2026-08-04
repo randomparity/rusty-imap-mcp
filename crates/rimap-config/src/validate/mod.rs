@@ -7,6 +7,8 @@
 //!   - Audit directory exists and is writable (parent dir of `audit.path`).
 //!   - Attachment download dir, if non-empty, is writable.
 //!   - All numeric limits are positive and cap/default invariants hold.
+//!   - `[imap]`/`[smtp]` timeouts are positive (a zero budget makes every
+//!     connect or command time out instantly — see #593).
 //!
 //! Submodules group helpers by concern (all private):
 //!   - `compose`  — multi-account composition pipeline and per-account
@@ -14,7 +16,8 @@
 //!     types and the public `validate_multi` / `validate_legacy_as_multi`
 //!     entry points)
 //!   - `identity` — username and TLS fingerprint
-//!   - `limits`   — numeric-limits zero/cap checks
+//!   - `limits`   — numeric-limits zero/cap checks and `[imap]`/`[smtp]`
+//!     timeout zero checks
 //!   - `paths`    — audit and download-dir filesystem probes
 //!   - `rules`    — folder safety, SMTP requirement and encryption,
 //!     per-tool override resolution
