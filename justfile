@@ -148,6 +148,9 @@ setup:
     cargo deny --version >/dev/null 2>&1 || cargo install --locked cargo-deny
     cargo nextest --version >/dev/null 2>&1 || cargo install --locked cargo-nextest
     cargo msrv --version >/dev/null 2>&1 || cargo install --locked cargo-msrv
+    # Pinned to the version the CI `semver-checks` job installs, so a local
+    # `just ci` and the gate agree on which lints are in force.
+    cargo semver-checks --version >/dev/null 2>&1 || cargo install --locked cargo-semver-checks --version 0.48.0
     # Optional, warn only.
     cargo mutants --version >/dev/null 2>&1 || echo "warn: cargo-mutants not installed (optional)"
     # Install pre-commit hooks.
@@ -382,16 +385,40 @@ test-fuzz-lock-parity:
 publish-dry-run:
     ./scripts/publish-crates.sh --dry-run
 
-# Check the workspace public APIs against their last crates.io release for
-# accidental SemVer breakage (issue #544). Requires a network baseline and
-# `cargo-semver-checks` installed (`cargo install cargo-semver-checks --locked
-# --version 0.48.0`). No-ops on crates with no published baseline, so it is not
-# part of `ci`; the release workflow runs it as a publish gate.
+# Check the workspace public APIs against the last release tag for accidental
+# SemVer breakage (issues #544, #633). Requires `cargo-semver-checks`
+# (`just setup` installs it).
+#
+# The baseline is the last reachable `vX.Y.Z` tag, NOT the crates.io release.
+# Every publishable crate is currently reserved on crates.io as a bare `0.0.0`
+# placeholder, so a registry baseline diffs the real API against an empty crate:
+# every item reads as an addition and nothing can ever be reported as a break.
+# A tag baseline is version-aware — `0.1.1-dev` is a patch bump from `0.1.0`, so
+# a break reddens here until the planned version moves to `0.2.0-dev`. Multiple
+# breaking PRs in one release cycle all diff against the same tag, so that one
+# bump covers all of them. See RELEASING.md, "Breaking a public API".
+#
+# A tag baseline has one sharp edge a registry baseline does not: a crate that
+# does not exist at the baseline tag is an error ("package not found"), not a
+# skip. A PR adding a new publishable crate must pass `--exclude <crate>` for
+# that one PR — see RELEASING.md.
 semver-checks:
-    cargo semver-checks check-release --workspace
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Capture stderr rather than discarding it: "no tag found" and "not a git
+    # repo" both exit non-zero, and only the first deserves the fetch hint.
+    if ! baseline="$(git describe --tags --abbrev=0 \
+        --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' 2>&1)"; then
+        echo "error: no vX.Y.Z tag found, so there is no SemVer baseline" >&2
+        echo "  git describe: $baseline" >&2
+        echo "hint: run 'git fetch --tags' (a shallow or tagless clone hides them)" >&2
+        exit 1
+    fi
+    echo "semver baseline: $baseline ($(git rev-parse --short "$baseline"))"
+    cargo semver-checks check-release --workspace --baseline-rev "$baseline"
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-fuzz-lock-parity check-fuzz-lock-parity test-installer
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-fuzz-lock-parity check-fuzz-lock-parity test-installer semver-checks
     typos
 
 # Re-run pre-commit hooks across all files.
