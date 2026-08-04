@@ -87,7 +87,9 @@ an MCP client's own request timeout fires long before the server gives up.
   for a message that went out; an agent that retries on `ERR_TIMEOUT` would
   double-send. Requiring the ceiling to cover
   `smtp.command_timeout_seconds + 2 x (2 x command_timeout + connect_timeout)`
-  puts that outcome out of reach for a send inside its own budgets. Excluding
+  keeps that outcome out of reach for a send whose pre-send work is
+  negligible — not absolutely, since `send_email` reads the attachments off
+  disk before the send and that read has no deadline of its own. Excluding
   `send_email` from the ceiling instead was rejected: it would leave the two
   tools with irreversible side effects as the only unbounded ones.
 
@@ -174,7 +176,8 @@ an MCP client's own request timeout fires long before the server gives up.
   300s against a previous worst case with no upper bound at all.
 
 - **Raising `imap.command_timeout_seconds` past ~72s (at the default
-  `connect_timeout_seconds = 10`) now requires raising
+  `connect_timeout_seconds = 10`, or ~62s once a default `[smtp]` block adds
+  its 30s to the minimum) now requires raising
   `limits.tool_call_timeout_seconds` too.** The startup error states the
   computed minimum. This is the intended cost of making the relationship
   explicit: previously that config silently produced a call nobody had bounded.

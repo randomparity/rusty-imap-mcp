@@ -91,7 +91,11 @@ fn imap_operation_bounded_seconds(imap: &ImapConfig) -> u64 {
 /// of it could cut the call after delivery already happened, reporting
 /// `ERR_TIMEOUT` for a message that went out. Requiring the ceiling to
 /// cover `smtp.command_timeout_seconds + imap_operation_bounded_seconds`
-/// makes that unreachable for a send that is inside its own budgets.
+/// keeps that out of reach for a send whose pre-send work is negligible.
+/// It is not an absolute guarantee: `send_email` builds the message —
+/// reading up to `MAX_ATTACHMENTS` files from disk — before `send_raw`,
+/// and that read carries no deadline of its own, so it is not in this
+/// minimum.
 ///
 /// Failing here is a startup error rather than an intermittent runtime
 /// one. All three blocks resolve per account, so this is checked per

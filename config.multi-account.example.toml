@@ -35,8 +35,9 @@ fallback = "keyring-only"
 # Any [limits] field may be set here; accounts inherit what they don't set.
 commands_per_second = 10
 # Wall-clock ceiling on one tool call (see config.example.toml). Validated
-# against each account's own [accounts.imap] budgets, so an account that
-# raises command_timeout_seconds may need its own [accounts.limits] override.
+# against each account's own [accounts.imap] budgets, plus its
+# [accounts.smtp] command_timeout_seconds when SMTP is configured, so an
+# account that raises either may need its own [accounts.limits] override.
 tool_call_timeout_seconds = 300
 
 # --------------------------------------------------------------------------
