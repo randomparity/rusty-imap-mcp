@@ -196,49 +196,59 @@ impl Connection {
         }
     }
 
-    /// Emit an [`AuthEvent`] from a synchronous context — specifically
-    /// [`super::AuthEmitGuard`]'s `Drop`, which cannot await and has no caller
-    /// left to return a `Result` to.
+    /// Emit an [`AuthEvent`] synchronously, on the calling thread — the only
+    /// shape available to [`super::AuthEmitGuard`]'s `Drop`, which cannot
+    /// await and has no caller left to return a `Result` to.
     ///
-    /// ## Why not a plain synchronous `emit_auth`
+    /// ## Why this blocks rather than deferring to the blocking pool
     ///
-    /// `AuditWriter::write_record` fsyncs `auth` records, and its own docs
-    /// require async callers to route through `spawn_blocking` (RUST-ASYNC-04).
-    /// A `Drop` running inside a dropped future is still on a runtime worker
-    /// thread, so calling the sink inline there would stall that worker for a
-    /// disk sync — the exact failure the rule exists to prevent. Dispatching to
-    /// the blocking pool and detaching the `JoinHandle` costs nothing and
-    /// still writes the record: tokio does not cancel a blocking task when its
-    /// handle is dropped, which is the same property
-    /// [`Connection::emit_auth`]'s cancellation contract already relies on.
+    /// `AuditWriter::write_record` fsyncs `auth` records, and its docs tell
+    /// async callers to route through `spawn_blocking` (RUST-ASYNC-04). Every
+    /// other emitter obeys that, including [`Connection::emit_auth`]. This one
+    /// deliberately does not, and the exception is narrow enough to state
+    /// exactly:
     ///
-    /// Outside a runtime there is no worker to stall, so the write runs inline
-    /// rather than being dropped.
+    /// * **`spawn_blocking` loses the record on the path this guard exists to
+    ///   cover.** Tokio's blocking pool refuses new work once the runtime
+    ///   begins shutting down: the returned handle never resolves and the
+    ///   closure is dropped unrun. `rimap-server` shuts down with
+    ///   `Runtime::shutdown_background`, which does not wait for blocking
+    ///   tasks, and it writes `process_end` *before* that. So a runtime
+    ///   shutdown — one of the three cuts this guard covers, alongside the
+    ///   tool-call ceiling and a client cancellation — would silently drop the
+    ///   very record the guard was added to stop losing.
+    /// * **It also puts a panic inside a `Drop`.** `spawn_blocking` panics
+    ///   when the OS refuses a thread, and a panic escaping a `Drop` that runs
+    ///   during an unwind aborts the process.
+    /// * **The cost is bounded and rare.** One JSONL line plus an fsync, on a
+    ///   path that only runs when a connect was cut — which at the shipped
+    ///   ceiling means the connect was already pathological. It does stall the
+    ///   dropping worker, and the caller (`dispatch::attempt`) still holds the
+    ///   account's session lock, so a peer queued on that account waits out the
+    ///   sync. Making a queued peer wait for one fsync is the better half of
+    ///   the trade against a hole in an append-only security log.
+    ///
+    /// There is no lock-order hazard: the audit mutex is a leaf, and nothing
+    /// that holds it ever reaches for a session lock.
     ///
     /// ## Failure handling
     ///
-    /// Best-effort, and logged at `error` level when the sink rejects the
-    /// event. There is nowhere to propagate to from a `Drop`, and this mirrors
-    /// both `connect_inner`'s existing auth-failure branch (which preserves the
-    /// original error and logs the audit failure) and
-    /// `rimap_audit::spawn_drainer`, which logs and discards a cancellation
-    /// `tool_end` it cannot write. A runtime shutting down can also drop the
-    /// spawned blocking task before it runs; that window is the same one
-    /// `AuditEnvelopeGuard` accepts for its own records.
-    pub(super) fn emit_auth_detached(&self, event: AuthEvent) {
-        let sink = self.inner.audit.clone();
-        let write = move || {
-            if let Err(err) = sink.emit_auth(event) {
-                tracing::error!(
-                    error = %err,
-                    "AuthEventSink::emit_auth failed for a connect that was cut \
-                     before it reached its own verdict; the attempt is unrecorded",
-                );
-            }
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => drop(handle.spawn_blocking(write)),
-            Err(_not_in_runtime) => write(),
+    /// Logged at `error` level when the sink rejects the event; there is
+    /// nowhere to propagate to from a `Drop`. This mirrors `connect_inner`'s
+    /// auth-failure branch, which likewise preserves the original outcome and
+    /// logs the audit failure rather than replacing one with the other.
+    ///
+    /// Implementations of [`rimap_core::auth_sink::AuthEventSink`] must return
+    /// their failures rather than panicking — the production `AuditWriter`
+    /// maps even a poisoned mutex to an `AuditError` — because a panic here
+    /// would escape a `Drop`.
+    pub(super) fn emit_auth_blocking(&self, event: AuthEvent) {
+        if let Err(err) = self.inner.audit.emit_auth(event) {
+            tracing::error!(
+                error = %err,
+                "AuthEventSink::emit_auth failed for a connect that was cut \
+                 before it reached its own verdict; the attempt is unrecorded",
+            );
         }
     }
 }

@@ -18,11 +18,12 @@
 #![expect(clippy::expect_used, reason = "tests")]
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rimap_core::auth_event::{AuthEvent, AuthResult};
 use rimap_core::auth_sink::{AuthEventSink, AuthSinkError};
 use rimap_core::credential::CredentialSource;
-use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
+use rimap_fake_imap::fake_imap::{FakeImapServer, StaticResolver, Step, login_preamble};
 
 /// Records every emitted event so the test can count and inspect them.
 #[derive(Debug, Default)]
@@ -64,9 +65,11 @@ fn list_script() -> Vec<Step> {
 async fn a_successful_connect_emits_one_auth_record_naming_the_credential_source() {
     let server = FakeImapServer::start(list_script()).await;
     let sink = Arc::new(RecordingSink::default());
-    let conn = server.connection_with_sink(
+    let conn = server.connection_with(
         "user@example.com",
+        Arc::new(StaticResolver),
         Arc::clone(&sink) as Arc<dyn AuthEventSink>,
+        Duration::from_secs(1),
     );
 
     let folders = conn

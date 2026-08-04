@@ -23,7 +23,7 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimap_fake_imap::fake_imap::{FakeImapServer, PanicResolver, Step};
+use rimap_fake_imap::fake_imap::{FakeImapServer, NoopAudit, PanicResolver, Step};
 use rimap_imap::error::{AuthFailure, ImapError};
 use rimap_imap::types::Uid;
 
@@ -86,6 +86,7 @@ async fn bye_greeting_surfaces_server_rejected() {
     let conn = server.connection_with(
         "user@example.com",
         Arc::new(PanicResolver),
+        Arc::new(NoopAudit),
         Duration::from_secs(1),
     );
     let err = conn

@@ -279,13 +279,21 @@ an MCP client's own request timeout fires long before the server gives up.
     letting the connect reach its own deadline is what produces a real
     `ERR_TIMEOUT` rather than the guard's placeholder.
 
-  - `Drop` cannot await, and `auth` records are fsynced, so the guard hands the
-    write to `spawn_blocking` and detaches the handle rather than calling the
-    sink inline on a runtime worker. Tokio does not cancel a blocking task when
-    its handle is dropped, which is the same property `Connection::emit_auth`'s
-    cancellation contract already relies on. A runtime shutting down can still
-    drop the spawned task before it runs; that residual window is the one
-    `AuditEnvelopeGuard` already accepts for its own cancellation records.
+  - `Drop` cannot await, so the guard writes the record **synchronously, on the
+    dropping thread**, and is the one emitter in the codebase that does not
+    route through `spawn_blocking`. Deferring it was tried and rejected: tokio's
+    blocking pool refuses work once the runtime begins shutting down, dropping
+    the closure unrun, and `rimap-server` shuts down with
+    `Runtime::shutdown_background` — so a runtime shutdown, one of the three
+    cuts this guard covers, would silently lose the record it was added to stop
+    losing. `spawn_blocking` also panics when the OS refuses a thread, and a
+    panic escaping a `Drop` that runs during an unwind aborts the process. The
+    cost of writing inline is one JSONL line plus an fsync, on a path that only
+    runs when a connect was cut, with the account's session lock still held —
+    so a peer queued on that account waits out the sync. That is the better half
+    of the trade against a hole in an append-only security log. Writing inline
+    also puts the record in its own tool call's `seq` window, ahead of the
+    `tool_end`, which a deferred write could not guarantee.
 
   - Facts the connect learns partway through — the observed TLS fingerprint,
     the credential source — are published to cells (`TlsConfigBundle::

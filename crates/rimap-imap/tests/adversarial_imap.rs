@@ -20,7 +20,7 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimap_fake_imap::fake_imap::{FakeImapServer, PanicResolver, Step, login_preamble};
+use rimap_fake_imap::fake_imap::{FakeImapServer, NoopAudit, PanicResolver, Step, login_preamble};
 use rimap_imap::error::{AuthFailure, ImapError};
 use rimap_imap::types::{FetchSpec, Uid};
 use support::tracing_capture::WarnCapture;
@@ -73,6 +73,7 @@ async fn logindisabled_maps_to_capability_missing_before_resolve() {
     let conn = server.connection_with(
         "user@example.com",
         Arc::new(PanicResolver),
+        Arc::new(NoopAudit),
         Duration::from_secs(1),
     );
     let err = conn.list_folders("*").await.unwrap_err();

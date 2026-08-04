@@ -7,9 +7,13 @@
 //!   points (it has to be — async-imap commands are themselves `.await`).
 //! - The injected [`AuthEventSink`] may hold its own internal
 //!   `std::sync::Mutex` (the production `rimap-audit::AuditWriter`
-//!   does). That lock is NEVER held across an `.await` because every
-//!   call to [`AuthEventSink::emit_auth`] goes through
-//!   `tokio::task::spawn_blocking`.
+//!   does). That lock is NEVER held across an `.await`. Every call
+//!   from an async context goes through `tokio::task::spawn_blocking`;
+//!   the one call from a synchronous context — [`AuthEmitGuard`]'s
+//!   `Drop`, which cannot await at all — takes and releases the lock
+//!   inline. Both shapes satisfy the rule; only the second blocks the
+//!   thread it runs on, and `Connection::emit_auth_blocking` argues why
+//!   that is the right trade there.
 //!
 //! These two rules are independent and both must hold. See
 //! `docs/architecture/audit-locking.md`.
@@ -234,9 +238,13 @@ pub(super) struct ConnectProgress {
 }
 
 impl ConnectProgress {
-    /// Publish the credential source the moment resolution succeeds. Called
-    /// once per connect; a second call is ignored rather than panicking,
-    /// because losing the race is not worth aborting a live connect over.
+    /// Publish the credential source the moment resolution succeeds.
+    ///
+    /// `OnceLock` rather than `Cell` because `&ConnectProgress` is held across
+    /// the connect's awaits: a `Cell` is not `Sync`, which would make the
+    /// connect future non-`Send` and unspawnable on the multi-threaded runtime.
+    /// There is exactly one writer, so `set` cannot lose; ignoring its result
+    /// documents that rather than asserting it.
     pub(super) fn record_credential_source(&self, source: rimap_core::CredentialSource) {
         let _ = self.credential_source.set(source);
     }
@@ -250,12 +258,17 @@ impl ConnectProgress {
 /// is dropped before that function reaches its own emit (#623).
 ///
 /// `connect_inner` documents one `auth` record per connect attempt, and the
-/// audit log it feeds is append-only and security-relevant: a connect that
-/// opened a socket to the server and recorded nothing is a gap an operator
-/// cannot tell from an attempt that never happened. Three cuts reach that gap,
-/// none of which the connect can see coming — the per-tool-call ceiling (#594,
-/// ADR-0012), a client cancellation, and a runtime shutdown. All three drop the
-/// dispatch future, and a `Drop` impl is the only thing that still runs.
+/// audit log it feeds is append-only and security-relevant: an attempt that was
+/// initiated and recorded nothing is a gap an operator cannot tell from an
+/// attempt that never happened. Three cuts reach that gap, none of which the
+/// connect can see coming — the per-tool-call ceiling (#594, ADR-0012), a
+/// client cancellation, and a runtime shutdown. All three drop the dispatch
+/// future, and a `Drop` impl is the only thing that still runs.
+///
+/// Armed for the whole connect rather than from the first socket write, so a
+/// cut parked in `TcpStream::connect` is recorded too. That is deliberate: the
+/// attempt is what the log is about, and an operator reading a gap cannot know
+/// which side of the connect it fell on.
 ///
 /// ## Why it emits from `Drop` rather than being prevented upstream
 ///
@@ -279,6 +292,11 @@ impl ConnectProgress {
 /// see [`ConnectProgress`]. Early cuts (a parked TLS handshake) legitimately
 /// carry no fingerprint and no credential source, which is the same shape a
 /// pre-resolve failure already produces.
+///
+/// The write is synchronous, on the dropping thread. `Connection::
+/// emit_auth_blocking` states why that is the right trade here and nowhere
+/// else; the short version is that deferring it to the blocking pool loses the
+/// record during a runtime shutdown, which is one of the three cuts above.
 struct AuthEmitGuard<'a> {
     conn: &'a Connection,
     bundle: &'a TlsConfigBundle,
@@ -315,7 +333,7 @@ impl Drop for AuthEmitGuard<'_> {
         }
         let ctx = self.conn.auth_context(self.bundle, self.progress);
         self.conn
-            .emit_auth_detached(auth_failure(&ctx, rimap_core::ErrorCode::Cancelled));
+            .emit_auth_blocking(auth_failure(&ctx, rimap_core::ErrorCode::Cancelled));
     }
 }
 
@@ -520,8 +538,10 @@ impl Connection {
     }
 
     /// The full connect/handshake/login/CAPABILITY flow. Emits exactly one
-    /// `Auth` audit record on every termination path, including the paths on
-    /// which this function never returns at all.
+    /// `Auth` audit record on every termination path from the TLS config
+    /// onwards, including the paths on which this function never returns at
+    /// all. The one earlier exit — `build_tls_config` failing, which needs no
+    /// network and no server — predates the attempt and records nothing.
     ///
     /// A caller *may* wrap this in a deadline shorter than `connect_timeout` —
     /// the per-tool-call ceiling (#594, ADR-0012) does. Cutting the future
@@ -706,23 +726,6 @@ mod tests {
         (conn, sink)
     }
 
-    /// Poll `sink` until it holds at least one event, or give up.
-    ///
-    /// The drop-path emit is handed to `spawn_blocking`, so it lands on
-    /// another thread a moment after the awaiting future is gone. Polling
-    /// rather than sleeping a fixed span keeps the test fast when the
-    /// scheduler is prompt and non-flaky when it is not.
-    async fn wait_for_events(sink: &RecordingSink) -> Vec<rimap_core::auth_event::AuthEvent> {
-        for _ in 0..400 {
-            let events = sink.events();
-            if !events.is_empty() {
-                return events;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        sink.events()
-    }
-
     /// A caller-imposed deadline shorter than `connect_timeout` — the
     /// per-tool-call ceiling is the one that ships (#594, ADR-0012) — drops
     /// `connect_inner`'s future while the TLS handshake is still parked. A
@@ -734,6 +737,11 @@ mod tests {
     /// credential resolution, which is what makes this also the early-drop
     /// case: the guard has to build a record from a half-populated
     /// `AuthContext` (no observed fingerprint, no credential source).
+    ///
+    /// No settling wait, deliberately: the guard writes on the dropping
+    /// thread, so `timeout(..).await` returning means the record is already
+    /// in the sink. A test that had to poll for it would also pass with the
+    /// count assertion racing a second record it never saw.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connect_cut_by_a_caller_deadline_still_emits_one_auth_record() {
         use rimap_core::auth_event::AuthResult;
@@ -758,7 +766,7 @@ mod tests {
              its own would make the assertions below vacuous",
         );
 
-        let events = wait_for_events(&sink).await;
+        let events = sink.events();
         assert_eq!(
             events.len(),
             1,
@@ -814,7 +822,7 @@ mod tests {
             "a refused TCP connect must fail rather than open a session",
         );
 
-        let events = wait_for_events(&sink).await;
+        let events = sink.events();
         assert_eq!(
             events.len(),
             1,

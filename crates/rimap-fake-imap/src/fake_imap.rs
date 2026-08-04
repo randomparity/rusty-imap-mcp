@@ -207,31 +207,30 @@ impl FakeImapServer {
     /// (scenario 4 uses a generous 5s backstop).
     #[must_use]
     pub fn connection_timeout(&self, username: &str, command_timeout: Duration) -> Connection {
-        self.connection_with(username, Arc::new(StaticResolver), command_timeout)
+        self.connection_with(
+            username,
+            Arc::new(StaticResolver),
+            Arc::new(NoopAudit),
+            command_timeout,
+        )
     }
 
-    /// Inject an arbitrary resolver and command timeout (scenario 2 uses a
-    /// `PanicResolver` to prove `resolve` is never consulted).
+    /// Inject an arbitrary resolver, auth sink, and command timeout.
+    ///
+    /// Scenario 2 passes a `PanicResolver` to prove `resolve` is never
+    /// consulted. A scenario that asserts on the `auth` records the connect
+    /// flow wrote passes a recording `sink` — [`NoopAudit`], which the other
+    /// constructors use, makes them invisible.
     #[must_use]
     pub fn connection_with(
         &self,
         username: &str,
         resolver: Arc<dyn CredentialResolver>,
+        sink: Arc<dyn AuthEventSink>,
         command_timeout: Duration,
     ) -> Connection {
         let cfg = self.connection_config(username, Some(self.pin), command_timeout);
-        Connection::new(cfg, Arc::new(NoopAudit), resolver)
-    }
-
-    /// Static-resolver connection whose `auth` records go to `sink` instead of
-    /// being discarded, so a test can assert what the connect flow recorded.
-    /// The default [`NoopAudit`] makes the auth log invisible, which is fine
-    /// for the dialog-shape scenarios but not for the ones that exist to count
-    /// records (#623).
-    #[must_use]
-    pub fn connection_with_sink(&self, username: &str, sink: Arc<dyn AuthEventSink>) -> Connection {
-        let cfg = self.connection_config(username, Some(self.pin), Duration::from_secs(1));
-        Connection::new(cfg, sink, Arc::new(StaticResolver))
+        Connection::new(cfg, sink, resolver)
     }
 
     /// Build a `Connection` pinned to `wrong_pin` (which the caller
@@ -342,9 +341,12 @@ fn parse_sync_literal(line: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-/// Resolver returning a fixed password. Used by `connection`.
+/// Resolver returning the password [`FakeImapServer`]'s scripts expect. The
+/// default for [`FakeImapServer::connection`] and
+/// [`FakeImapServer::connection_timeout`]; public so a caller varying only the
+/// auth sink can keep it.
 #[derive(Debug)]
-struct StaticResolver;
+pub struct StaticResolver;
 
 impl CredentialResolver for StaticResolver {
     fn resolve(
@@ -381,9 +383,12 @@ impl CredentialResolver for PanicResolver {
     }
 }
 
-/// No-op audit sink.
+/// No-op audit sink, for scenarios that assert on the IMAP dialog rather than
+/// on what the connect flow recorded. Public for the same reason
+/// [`PanicResolver`] is: [`FakeImapServer::connection_with`] takes the sink,
+/// so a caller that does not care still has to name one.
 #[derive(Debug)]
-struct NoopAudit;
+pub struct NoopAudit;
 
 impl AuthEventSink for NoopAudit {
     fn emit_auth(&self, _event: AuthEvent) -> Result<(), AuthSinkError> {

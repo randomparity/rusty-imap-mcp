@@ -1565,7 +1565,6 @@ mod advertise_on_select_tests {
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
-#[expect(clippy::panic, reason = "tests")]
 mod tool_call_ceiling_tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -1579,27 +1578,17 @@ mod tool_call_ceiling_tests {
     use crate::boot::registry::AccountRegistry;
     use crate::test_support::make_test_account_state_with_sink;
 
-    /// Poll `path` until it holds a line matching `predicate`, or give up after
-    /// roughly two seconds and return `None`.
+    /// Every record of `kind` in the audit file at `path`, parsed.
     ///
-    /// The `auth` record for a cut connect is written from `AuthEmitGuard`'s
-    /// `Drop`, which hands the (fsyncing) write to `spawn_blocking` and
-    /// detaches — so it lands on another thread shortly after the ceiling
-    /// returns, with no handle left to await. Polling keeps the assertion
-    /// honest without a fixed sleep.
-    async fn wait_for_record(
-        path: &std::path::Path,
-        predicate: impl Fn(&str) -> bool,
-    ) -> Option<String> {
-        for _ in 0..400 {
-            if let Ok(contents) = std::fs::read_to_string(path)
-                && let Some(line) = contents.lines().find(|l| predicate(l))
-            {
-                return Some(line.to_string());
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        None
+    /// Parsed rather than substring-matched so a serde `rename` breaks these
+    /// assertions loudly instead of turning them into vacuous truths.
+    fn records_of_kind(path: &std::path::Path, kind: &str) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .expect("read audit log")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse record"))
+            .filter(|record| record["kind"] == kind)
+            .collect()
     }
 
     /// Drive the **production** call site — `dispatch_account_scoped`, via
@@ -1685,54 +1674,41 @@ mod tool_call_ceiling_tests {
             "the 150ms ceiling must cut the call, not the 30s connect budget; took {elapsed:?}",
         );
 
-        // The connect's own record is written from a detached blocking task,
-        // so wait for it before tearing the writer down.
-        let auth = wait_for_record(&path, |l| l.contains(r#""kind":"auth""#))
-            .await
-            .unwrap_or_else(|| {
-                let contents = std::fs::read_to_string(&path).unwrap_or_default();
-                panic!(
-                    "a ceiling that fired mid-connect must still record the \
-                     connection attempt (#623):\n{contents}"
-                )
-            });
-
         drop(tx);
         drop(server);
         drainer.await.expect("drainer");
         accepted.abort();
 
-        let contents = std::fs::read_to_string(&path).expect("read audit log");
-        let tool_end = contents
-            .lines()
-            .find(|l| l.contains(r#""kind":"tool_end""#))
-            .expect("tool_end record");
-        assert!(
-            tool_end.contains(r#""error_code":"ERR_TIMEOUT""#),
-            "a fired ceiling must be audited as ERR_TIMEOUT: {tool_end}",
+        // No settling wait: `AuthEmitGuard` writes on the thread that drops the
+        // cut connect, so the record is on disk before `execute_tool_for_test`
+        // returned.
+        let auth = records_of_kind(&path, "auth");
+        assert_eq!(
+            auth.len(),
+            1,
+            "a ceiling that fired mid-connect must record the connection \
+             attempt exactly once (#623): {auth:?}",
         );
-        assert!(
-            !tool_end.contains("ERR_CANCELLED") && !tool_end.contains(r#""cancelled""#),
-            "a fired ceiling must not be audited as a cancellation: {tool_end}",
-        );
-        assert!(
-            !contents.contains(r#""status":"cancelled""#),
-            "no record may report a cancelled tool call:\n{contents}",
-        );
-        assert!(
-            auth.contains(r#""result":"failure""#)
-                && auth.contains(r#""error_code":"ERR_CANCELLED""#),
+        assert_eq!(auth[0]["result"], "failure");
+        assert_eq!(
+            auth[0]["error_code"], "ERR_CANCELLED",
             "the cut connect never reached a verdict of its own, so its record \
              must say it was cancelled rather than borrow the ceiling's \
-             ERR_TIMEOUT: {auth}",
+             ERR_TIMEOUT: {:?}",
+            auth[0],
+        );
+
+        let tool_end = records_of_kind(&path, "tool_end");
+        assert_eq!(tool_end.len(), 1, "one tool call, one tool_end");
+        assert_eq!(
+            tool_end[0]["error_code"], "ERR_TIMEOUT",
+            "a fired ceiling must be audited as ERR_TIMEOUT: {:?}",
+            tool_end[0],
         );
         assert_eq!(
-            contents
-                .lines()
-                .filter(|l| l.contains(r#""kind":"auth""#))
-                .count(),
-            1,
-            "exactly one auth record per connect attempt:\n{contents}",
+            tool_end[0]["status"], "error",
+            "a fired ceiling must not be audited as a cancellation: {:?}",
+            tool_end[0],
         );
     }
 }

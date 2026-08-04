@@ -55,7 +55,8 @@ recently flushed.
 
 ### `auth`
 
-IMAP authentication attempt.
+IMAP authentication attempt. Exactly one record per attempt, whether or not
+the attempt ran to a conclusion.
 
 | Field | Description |
 |---|---|
@@ -65,7 +66,16 @@ IMAP authentication attempt.
 | `username` | Login identity (never contains credentials) |
 | `tls_fingerprint_sha256` | Observed TLS certificate fingerprint (null if handshake did not complete) |
 | `fingerprint_match` | Whether observed fingerprint matched config (null if no pin configured) |
-| `error_code` | Stable error code on failure (e.g. `ERR_TLS`, `ERR_AUTH`); null on success |
+| `error_code` | Stable error code on failure (e.g. `ERR_TLS`, `ERR_AUTH`, `ERR_CANCELLED`); null on success |
+| `credential_source` | Which store the credential came from; null if the attempt ended before resolution |
+
+**`ERR_CANCELLED` is not an authentication failure.** It means the connect was
+cut before it reached a verdict of its own — the per-tool-call ceiling fired
+(`limits.tool_call_timeout_seconds`), the client cancelled the call, or the
+process shut down mid-connect. The attempt is recorded so the log does not
+silently omit a connection that was opened, but a monitor counting failed
+logins, or alerting on credential-stuffing, must **exclude** these. The reason
+for the cut is on the paired `tool_end` record. See ADR-0012.
 
 ### `tool_start`
 
