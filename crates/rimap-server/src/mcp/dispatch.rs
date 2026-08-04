@@ -155,6 +155,16 @@ pub(super) fn rimap_error_to_breaker_reason(
 /// take the poisoned session. Holding the dispatch across the callback is
 /// what orders the flag ahead of every queued waiter.
 ///
+/// Since #620 that ordering is belt-and-braces for the case where the cut
+/// dispatch holds the session lock: `Connection::attempt` now owns that lock
+/// inside a guard that poisons before releasing it, so a cut mid-command is
+/// covered whether or not this callback runs first. What the callback still
+/// covers alone are the cut points that hold **no** session lock — parked on
+/// the lock-acquire timeout, between two IMAP operations in a multi-op tool,
+/// or inside a `spawn_blocking` join — where the poison is precautionary.
+/// The pinning stays because it costs nothing and keeps this function correct
+/// on its own terms.
+///
 /// That ordering imposes a contract, which the parameter name carries to
 /// the call site: `on_timeout_nonblocking` must not block and must not
 /// touch the session lock, which the cut dispatch still holds.
