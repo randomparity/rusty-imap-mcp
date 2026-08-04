@@ -441,12 +441,18 @@ impl Connection {
     /// replace the session — and the advertisement — in between. So code that
     /// selects a protocol from a capability must read it from *inside* the
     /// `with_session` body, where the slot is already populated with the
-    /// session that will serve the command (#634); `dispatch::move_messages`
-    /// and `dispatch::delete_message` are the two that do.
+    /// session that will serve the command (#634). `dispatch::move_messages`
+    /// and `dispatch::delete_message` are the only two that branch on a
+    /// capability, and both go through `dispatch::session_capabilities`, which
+    /// takes the live session as a witness.
     ///
-    /// Reading it outside a dispatch — a test asserting on what a completed
-    /// command observed, an operator-facing capability report — is fine, and is
-    /// what this accessor is public for.
+    /// Nothing stops a future caller reading this directly and hoisting it back
+    /// out — that is convention, not enforcement. #652 tracks moving the pair
+    /// into the session slot, which would make the stale read unrepresentable.
+    ///
+    /// It stays `pub` because the integration tests live outside the crate and
+    /// assert on what a completed command observed. There is no in-tree
+    /// production caller.
     #[must_use]
     pub fn has_move_capability(&self) -> bool {
         self.inner.has_move.load(Ordering::Relaxed)

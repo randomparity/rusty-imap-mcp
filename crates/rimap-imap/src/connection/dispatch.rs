@@ -186,15 +186,24 @@ impl Connection {
     /// `session` is a witness, not an input — nothing is read from it. It is
     /// there because only [`Self::attempt`] can hand one out, and it does so
     /// after the lazy connect has populated the slot and the login has stored
-    /// that session's CAPABILITY reply. Requiring it makes "read the flags of
-    /// the session that actually serves this command" a thing the compiler
-    /// checks rather than a rule a doc comment asks for: hoisting the call
-    /// above `with_session`, which is what #634 was, leaves no `&ImapSession`
-    /// to pass.
+    /// that session's CAPABILITY reply. So this helper cannot be hoisted above
+    /// `with_session`: out there, there is no `&ImapSession` to pass.
     ///
-    /// The public [`Connection::has_move_capability`] /
-    /// [`Connection::has_uidplus_capability`] stay as they are, for callers
-    /// reporting on a connection rather than selecting a protocol.
+    /// **That is a guard on this call, not on the atomics.**
+    /// [`Connection::has_move_capability`] and
+    /// [`Connection::has_uidplus_capability`] are still `pub` inherent methods
+    /// with no witness, so writing #634 back by hand — a `let has_move =
+    /// self.has_move_capability();` above `with_session` — still compiles.
+    /// What this buys is that the *correct* idiom has a name and reads no
+    /// worse than the hoist, so there is nothing to gain by hoisting.
+    ///
+    /// Making a stale or session-less read unrepresentable needs the pair to
+    /// live with the session rather than beside it — `Option<(ImapSession,
+    /// Caps)>` in the slot, with `imap_login` returning the pair instead of
+    /// storing it. That also deletes [`Connection::take_poisoned`]'s
+    /// capability reset and gives a failed CAPABILITY probe somewhere to say
+    /// "unknown" instead of borrowing "absent" (#649). Tracked as #652; it
+    /// restructures the session slot, which #634 deliberately did not.
     fn session_capabilities(&self, _session: &ImapSession) -> (bool, bool) {
         (self.has_move_capability(), self.has_uidplus_capability())
     }

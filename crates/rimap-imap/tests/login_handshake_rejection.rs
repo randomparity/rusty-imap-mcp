@@ -127,14 +127,16 @@ async fn post_login_capability_probe_failure_forces_move_fallback() {
     // problem of reading flags that describe a *different* session, not this
     // one of reading flags that describe *no* session.
     //
-    // The move is the connection's first op, and that is what makes the
-    // assertion sharp: `Connection::move_messages` reads
-    // `has_move_capability()` / `has_uidplus_capability()` from inside the
-    // `with_session` body (#634), which runs after the lazy connect has logged
-    // in and issued the probe. So the move depends on the probe outcome, not on
-    // the atomics' construction-time `false` — had the probe answered with the
-    // pre-login `MOVE UIDPLUS` line, the atomics would be `true` and the move
-    // would issue `UID MOVE`, diverging from the scripted fallback dialog.
+    // What makes this bite is the divergence between the two advertisements:
+    // the pre-login line offers `MOVE UIDPLUS`, the probe yields nothing, and
+    // the scripted dialog expects the fallback. A client that trusted the
+    // pre-login line would issue `UID MOVE` and desync. That is the whole
+    // assertion — the probe is the only source of truth for these two flags.
+    //
+    // It does NOT pin where the flags are read. The probe's result here is
+    // `(false, false)`, bit-identical to the construction-time default, so
+    // hoisting the read back above `with_session` would leave this test green.
+    // `capability_reconnect_freshness.rs` is what pins the read point (#634).
     let steps = vec![
         Step::Send(b"* OK fake ready\r\n".to_vec()),
         Step::Expect { verb: "CAPABILITY" },
