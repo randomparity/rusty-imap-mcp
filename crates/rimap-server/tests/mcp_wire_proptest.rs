@@ -341,10 +341,10 @@ proptest! {
                              envelope={envelope}\n{diagnostic}",
                         );
                     }
-                    CloseOrResponse::Hung => {
+                    CloseOrResponse::Hung(budget) => {
                         panic!(
                             "server hung during property 1 case (no response, no close \
-                             within {REQUEST_TIMEOUT:?}): envelope={envelope}",
+                             within {budget:?}): envelope={envelope}",
                         );
                     }
                 }
