@@ -294,12 +294,17 @@ are the ones that trip people up or aren't obvious from the lint set.
 - **`prek` hooks run on every commit and push.** If a hook fails, fix the
   underlying issue — do not `--no-verify`. Do not `--amend` commits that have
   been pushed.
-- **PR workflow:** feature branch -> push -> PR against `main`. CI runs all seven
-  status checks (`rustfmt`, `clippy`, `check (macOS)`, `test (stable)`,
-  `test (MSRV 1.88.0)`, `cargo-deny`, `zizmor self-check`), plus `SonarQube` for
-  code quality. `main` has branch protection requiring the status checks strict
-  (branch must be up to date). A separate release workflow triggers on `v*` tags
-  and builds binaries for five platform targets.
+- **PR workflow:** feature branch -> push -> PR against `main`. `main` requires
+  twelve status checks, strict (the branch must be up to date before merging):
+  `rustfmt`, `clippy`, `check (macOS)`, `test (stable)`, `test (MSRV 1.88.0)`,
+  `cargo-deny`, `zizmor self-check`, `SonarQube`, `mcp-conformance (Node)`,
+  `publish checks`, `tool-schema drift`, `tools-doc drift`. A separate release
+  workflow triggers on `v*` tags and builds binaries for five platform targets.
+- **A CI job outside that list runs without enforcing.** It goes red and the PR
+  merges anyway, so adding a gate to an unrequired job silently disarms it
+  (issue #613). Before wiring a new check into a job, confirm the job's
+  status-check name is required, and add it if not:
+  `gh api repos/randomparity/rusty-imap-mcp/branches/main/protection --jq '.required_status_checks.contexts'`
 - **Never force-push to `main`.** Never amend commits that have been pushed.
   Never skip hooks.
 

@@ -212,13 +212,20 @@ jobs:
         run: just test-publish-script
 
   # Dependency hygiene. The fuzz-lockfile parity gate (issue #608) lives here
-  # rather than in `publish-checks` for one reason worth stating: `cargo-deny`
-  # is a REQUIRED status check on main and `publish checks` is not, so a gate
-  # wired into the latter goes red while the PR merges anyway — it would run
-  # without enforcing, which is exactly the drift #608 exists to stop. It is
-  # also the right thematic home: both are dependency-resolution gates.
-  # Do not "tidy" these steps back into publish-checks; that silently disarms
-  # them. See docs/ADR/0011-fuzz-lockfile-workspace-parity.md.
+  # because both are dependency-resolution gates, which is its thematic home.
+  #
+  # It was originally placed here for a second reason that no longer holds:
+  # `publish checks` was not a required status check, so a gate wired into it
+  # would have gone red while the PR merged anyway. Issue #613 closed that hole
+  # — `publish checks`, `tool-schema drift` and `tools-doc drift` are now
+  # required on main alongside `cargo-deny`, so job choice no longer decides
+  # whether a gate enforces. Adding a new gate to `publish-checks` is once
+  # again safe. See docs/ADR/0011-fuzz-lockfile-workspace-parity.md.
+  #
+  # Before adding a check to ANY job here, confirm that job's status-check name
+  # is in main's required list; a job outside it runs without enforcing:
+  #   gh api repos/randomparity/rusty-imap-mcp/branches/main/protection \
+  #     --jq '.required_status_checks.contexts'
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
