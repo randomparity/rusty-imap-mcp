@@ -707,25 +707,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
+      # `just` drives the fuzz-lockfile realign and the parity gate the bump
+      # would otherwise leave red (ADR-0011); cargo-edit provides set-version.
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+        with:
+          tool: just@1.58.0
       - name: Install cargo-edit
         run: cargo install cargo-edit --locked --version 0.13.11
+      # The script performs the bump, re-resolves every lockfile it touches,
+      # runs the gates the bump PR gets no CI to run, and reports the exact set
+      # of dirtied files as `paths`. `add-paths` consumes that set rather than a
+      # hand-written list, which had silently omitted three files (issue #662).
       - name: Compute next -dev and rewrite versions
         id: bump
         env:
           TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          released="${TAG#v}"
-          IFS=. read -r major minor patch <<< "$released"
-          next="${major}.${minor}.$((patch + 1))-dev"
-          cargo set-version --workspace "$next"
-          cargo update --workspace
-          cargo update --manifest-path html-oracle/Cargo.toml -p rimap-core -p rimap-content
-          if ! grep -q '^## \[Unreleased\]' CHANGELOG.md; then
-            awk 'BEGIN{done=0} /^## \[/ && !done {print "## [Unreleased]"; print ""; done=1} {print}' \
-              CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
-          fi
-          echo "next=$next" >> "$GITHUB_OUTPUT"
+        run: ./scripts/post-release-bump.sh "$TAG"
       - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -733,16 +730,19 @@ jobs:
           branch: chore/post-release-bump-v${{ steps.bump.outputs.next }}
           commit-message: "chore: bump version to ${{ steps.bump.outputs.next }} after ${{ github.ref_name }} release"
           title: "chore: bump version to ${{ steps.bump.outputs.next }} after ${{ github.ref_name }}"
-          add-paths: |
-            Cargo.toml
-            Cargo.lock
-            crates/*/Cargo.toml
-            html-oracle/Cargo.lock
-            CHANGELOG.md
+          add-paths: ${{ steps.bump.outputs.paths }}
           body: |
             Automated post-release bump to `${{ steps.bump.outputs.next }}` after the `${{ github.ref_name }}` release (ADR-0003).
 
-            **CI kick-off required before merge:** PRs opened by `GITHUB_TOKEN` do not trigger `pull_request` CI. Push an empty commit to this branch, or run `just ci` locally, to get a green signal. If the next release is a minor/major bump, edit the version on this PR first.
+            The bump job already ran `cargo metadata --locked` and `just check-fuzz-lock-parity` against this exact tree, and committed every file the bump dirtied — `xtask/Cargo.toml` excepted, whose deliberate `0.0.0` is restored (ADR-0003).
+
+            **CI kick-off required before merge:** PRs opened by `GITHUB_TOKEN` do not trigger `pull_request` CI (ADR-0003 accepts this over a standing PAT). Get a signal with either:
+
+            ```
+            gh pr checkout <this PR> && git commit --allow-empty -m "chore: kick CI" && git push
+            ```
+
+            or `just ci` locally on the branch. If the next release is a minor/major bump, edit the version on this PR first.
 
   # Post-publish signal (not a gate): a downstream leaf whose failure does NOT
   # un-publish the release. Pins the version so it never touches the rate-limited
