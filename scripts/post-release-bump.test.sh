@@ -2,7 +2,9 @@
 # Unit tests for the pure functions in post-release-bump.sh (issue #662).
 # Sources the script (which guards `main` behind BASH_SOURCE==$0) and asserts
 # behavior without invoking cargo, git, or the network.
-# Run: `bash scripts/post-release-bump.test.sh`.
+# Run: `bash scripts/post-release-bump.test.sh` (or `just
+# test-post-release-bump`, which `just ci` and the `publish-checks` CI job
+# both invoke).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

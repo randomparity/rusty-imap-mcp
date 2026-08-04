@@ -30,7 +30,9 @@
 # anything that is not a manifest, a lockfile, or the changelog, so a build step
 # that dirties a source file cannot smuggle it into the bump PR.
 #
-# Tested by scripts/post-release-bump.test.sh.
+# Tested by scripts/post-release-bump.test.sh (`just test-post-release-bump`,
+# in `just ci` and the `publish-checks` CI job) — this job runs once per
+# release, so nothing else exercises it on a normal branch.
 set -euo pipefail
 
 # Lockfiles outside the root workspace that this script re-resolves explicitly,
