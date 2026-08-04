@@ -62,6 +62,7 @@ just test-fast       # inner-loop unit tests (~4 s; skips heavy integration/prop
 just test            # full nextest workspace — run before pushing
 just test-msrv       # same as `test` but on the MSRV toolchain (1.88.0)
 just deny            # cargo deny check (advisories, licenses, bans, sources)
+just semver-checks   # public API vs the last vX.Y.Z tag (see RELEASING.md)
 just ci              # full local-CI equivalent — run this before pushing
 just hooks           # re-run prek on all files
 just test-injection  # adversarial email corpus (content pipeline, future)
@@ -305,6 +306,20 @@ are the ones that trip people up or aren't obvious from the lint set.
   (issue #613). Before wiring a new check into a job, confirm the job's
   status-check name is required, and add it if not:
   `gh api repos/randomparity/rusty-imap-mcp/branches/main/protection --jq '.required_status_checks.contexts'`
+- **`semver-checks` is a thirteenth check that is *not* yet required** (issue
+  #633). It runs on every PR and reports, but until `semver-checks` is added to
+  the contexts list above it cannot block a merge — treat a red one as blocking
+  by hand. It fails when a PR breaks the public API of a publishable crate
+  without bumping the planned version; the fix is
+  `cargo set-version --workspace 0.2.0-dev` (from `cargo-edit`), not an
+  override. See
+  [RELEASING.md](RELEASING.md), "Breaking a public API".
+- **`semver-checks` is red on `main` right now** — its first run found a break
+  that predates it: `LimitsConfig` gained a `pub` field after `v0.1.0`. Issue
+  #648 tracks the version bump that clears it. Until then `just ci` fails on
+  that recipe for everyone, and a red `semver-checks` on your PR is that
+  standing failure rather than anything you did. Confirm it is the same
+  `rimap-config` / `LimitsConfig` finding before ignoring it.
 - **Never force-push to `main`.** Never amend commits that have been pushed.
   Never skip hooks.
 
