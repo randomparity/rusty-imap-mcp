@@ -461,6 +461,22 @@ ceiling that fits only the append could fire after delivery — reporting
 an account that raises its own budgets may need an `[accounts.limits]`
 override rather than the inherited `[defaults.limits]` value.
 
+That minimum is a floor, not a promise that the ceiling outlasts every
+call. It models one IMAP operation, and the compose tools can carry more:
+`forward` fetches the source message before sending, and `send_email`
+with `in_reply_to_uid` fetches it to build threading headers. At the
+defaults a forward can reach 140s (fetch) + 30s (send) + 70s (Sent
+append) — above the 170s the validator enforces.
+
+**If you send mail and want the ceiling never to fire after delivery,
+size it yourself rather than relying on the minimum.** A ceiling of
+`3 x (2 x command_timeout + connect_timeout) + smtp.command_timeout` —
+310s at the defaults, so slightly above the 300s default — covers a
+forward. The default is deliberately not raised to that: it would trade a
+tighter bound on every read-only call for a case that only affects
+sending. The failure mode if it does fire mid-send is `ERR_TIMEOUT` on a
+message that was delivered, which an agent may retry into a duplicate.
+
 ## `[audit]` section
 
 Audit log settings. `path` is required. Global (shared across all

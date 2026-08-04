@@ -81,17 +81,32 @@ an MCP client's own request timeout fires long before the server gives up.
   validated against each account's own budgets.
 
 - **`smtp.command_timeout_seconds` is part of that minimum when `[smtp]` is
-  configured.** `send_email` sends over SMTP and *then* appends the message to
-  the Sent folder — a full IMAP operation. A ceiling that fits the append but
-  not the send ahead of it could fire *after* delivery, returning `ERR_TIMEOUT`
-  for a message that went out; an agent that retries on `ERR_TIMEOUT` would
-  double-send. Requiring the ceiling to cover
-  `smtp.command_timeout_seconds + 2 x (2 x command_timeout + connect_timeout)`
-  keeps that outcome out of reach for a send whose pre-send work is
-  negligible — not absolutely, since `send_email` reads the attachments off
-  disk before the send and that read has no deadline of its own. Excluding
-  `send_email` from the ceiling instead was rejected: it would leave the two
-  tools with irreversible side effects as the only unbounded ones.
+  configured, and the minimum is a floor rather than a guarantee.**
+  `send_email` sends over SMTP and *then* appends the message to the Sent
+  folder — a full IMAP operation. A ceiling that fits the append but not the
+  send ahead of it could fire *after* delivery, returning `ERR_TIMEOUT` for a
+  message that went out; an agent that retries on `ERR_TIMEOUT` would
+  double-send. Including the SMTP term raises the floor against that.
+
+  It does not put the outcome out of reach, and an earlier draft of this ADR
+  claimed it did. The minimum models **one** IMAP operation, and a compose
+  call can carry more: `forward` fetches the source message before sending,
+  and `send_email` with `in_reply_to_uid` fetches it for threading headers. A
+  forward at the defaults can reach 140s (fetch) + 30s (send) + 70s (Sent
+  append) against a 170s enforced minimum, so an operator who sets exactly the
+  minimum can still see a post-delivery `ERR_TIMEOUT`.
+
+  Encoding each tool's operation count into the minimum was rejected on two
+  grounds. It puts a number in config validation that any new tool — or an
+  extra operation inside an existing one — silently invalidates, with nothing
+  to catch the drift. And the honest figure (~310s) exceeds the 300s default,
+  so it would force the default up as well, for a bound that still would not
+  be exact. `docs/configuration.md` tells operators who need the ceiling to
+  outlast a forward to size it themselves.
+
+  Excluding `send_email` from the ceiling instead was also rejected: it would
+  leave the two tools with irreversible side effects as the only unbounded
+  ones.
 
 - **The wire error is the existing `ERR_TIMEOUT`, not a new code.** #594 raises
   the question. A new code would be a new stable public contract for a
