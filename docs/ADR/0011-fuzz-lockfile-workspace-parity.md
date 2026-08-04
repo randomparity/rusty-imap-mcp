@@ -108,9 +108,10 @@ of exactly this kind produced #512.
 - **Deleting the tracked fuzz lockfile** so the build always resolves fresh.
   Rejected: it converts a detectable divergence into an undetectable one. The
   ClusterFuzzLite build would silently instrument a different dependency set on
-  every run, with nothing to compare against. This is the shape the root
-  `fuzz/` directory is in today (its lockfile is gitignored) and is the weaker
-  of the two conventions, not the one to standardize on.
+  every run, with nothing to compare against. This was the shape the root
+  `fuzz/` directory was in when this was decided (its lockfile was gitignored)
+  and is the weaker of the two conventions, not the one to standardize on. It
+  no longer describes any directory in the repo — see the Amendment below.
 
 - **Comparing the two lockfiles for exact equality.** Rejected on the data: the
   fuzz graph is a strict subgraph, so equality is not the invariant and the
@@ -151,7 +152,7 @@ of exactly this kind produced #512.
 - The root `fuzz/` directory's own lockfile remains untracked, so the two fuzz
   directories still follow different conventions. Normalizing that is tracked
   separately; the gate already covers it automatically if the lockfile is ever
-  committed.
+  committed. **Discharged — see the Amendment below.**
 
 ## Amendment · 2026-08-03 · issue [#611](https://github.com/randomparity/rusty-imap-mcp/issues/611)
 

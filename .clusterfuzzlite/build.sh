@@ -27,12 +27,17 @@ build_fuzz_dir() {
         # lockfile, letting drift return at build time with both the parity
         # gate and the build green. `cargo metadata --locked` is the
         # equivalent assertion: it fails if the lockfile would have to change.
-        # Both fuzz directories commit a lockfile, so both are pinned; the
-        # conditional is what let this cover the root `fuzz/` directory with no
-        # edit here when its lockfile stopped being gitignored (issue #611).
-        if [ -f Cargo.lock ]; then
-            cargo +nightly metadata --locked --format-version 1 >/dev/null
-        fi
+        #
+        # Unconditional since #611. It used to be guarded by `[ -f Cargo.lock ]`
+        # to tolerate the root `fuzz/` directory, which gitignored its lockfile
+        # — but a fresh ClusterFuzzLite checkout has only tracked files, so that
+        # guard was false there and those five targets really did build against
+        # a floating dependency set. Both fuzz workspaces now commit a lockfile,
+        # so a missing one is the defect rather than the norm, and `cargo
+        # metadata --locked` reports it directly ("cannot create the lock file
+        # ... because --locked was passed"). Restoring the conditional would
+        # silently re-exempt any fuzz directory that lost its lockfile.
+        cargo +nightly metadata --locked --format-version 1 >/dev/null
         cargo +nightly fuzz build -O
     )
     local release_dir="${fuzz_dir}/target/${host_triple}/release"
