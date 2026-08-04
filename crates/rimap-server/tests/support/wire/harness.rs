@@ -83,13 +83,24 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// What #638 actually establishes about the size: the child had **not** exited
 /// 5 s after the request write, and `nextest` reported 8.826 s for the whole
-/// case — of which 5 s was that elapsed timeout and the rest was untimed
-/// parent-side work (tempdir, config write, `cargo_bin`, spawn, the write) plus
-/// teardown. The child's true exit time was never observed, so the run bounds
-/// the envelope from below and no further. The size argument is therefore the
-/// cost model, not that log line: start-up is the cost class
-/// [`COLD_START_TIMEOUT`] is calibrated for, and the exit slice that follows it
-/// is what [`SHUTDOWN_TIMEOUT`] is calibrated for.
+/// case — of which 5 s was that elapsed timeout. The child's true exit time was
+/// never observed, so the run bounds the envelope from below and no further.
+/// The size argument is therefore the cost model, not that log line: start-up
+/// is the cost class [`COLD_START_TIMEOUT`] is calibrated for, and the exit
+/// slice that follows it is what [`SHUTDOWN_TIMEOUT`] is calibrated for.
+///
+/// The remaining ~3.8 s of that case is **unattributed**, and worth resisting
+/// the urge to assign. It is not the parent-side prefix: measured with the
+/// instrument `wait_for_exit` now prints, that prefix is single-digit
+/// milliseconds (6.7 ms observed), which even at the ~20x amplification below
+/// reaches ~0.13 s. Two costs inside `nextest`'s per-case number sit outside
+/// this harness's own clock entirely and are the plausible homes for it:
+/// `nextest`'s spawn of the debug test binary, and post-panic teardown —
+/// unwinding, then the `kill_on_drop` SIGKILL and reap of a child that by
+/// construction had *not* exited, then tempdir removal. If the residue is
+/// teardown, that is seconds spent reaping a live child, which is weak
+/// affirmative evidence for the stall hypothesis below rather than for
+/// contention. #660 carries that.
 ///
 /// Be precise about how far that model goes, because it does not go all the
 /// way. Measured here, this case costs 0.22-0.28 s end to end across 12 samples
@@ -101,16 +112,21 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// the failing runner was contended well past anything reproduced locally. The
 /// competing explanation — an intermittent stall in the server's own
 /// broken-pipe shutdown path, which a wider budget would mask rather than fix —
-/// is *not* excluded by anything here; it is tracked in #660. The success-path
-/// measurement `wait_for_exit` prints is what tells the two apart: a green CI
-/// distribution clustered near 0.2 s supports the first, and a bimodal one with
-/// multi-second outliers supports the second.
+/// is *not* excluded by anything here; it is tracked in #660.
+///
+/// The discriminator is the distribution of the exit wait: clustered near 0.2 s
+/// supports contention, bimodal with multi-second outliers supports a stall.
+/// `wait_for_exit` prints that number — but **CI cannot supply the
+/// distribution** under the current profile, because `nextest` drops a passing
+/// test's stderr by default (see the call site). Collecting it takes a
+/// deliberate instrumented run on a contended host, not passive accumulation
+/// over green CI, and #660 says so.
 ///
 /// Note what this budget does *not* cover. It starts at the `wait_for_exit`
 /// call, so the parent-side prefix — tempdir, config write, `cargo_bin`
-/// resolution, `Command::spawn`, the request write — sits outside it, and by
-/// the reconstruction above that prefix is where most of #638's untimed ~3.8 s
-/// went. Leaving it unbudgeted is deliberate: `nextest`'s slow-timeout is
+/// resolution, `Command::spawn`, the request write — sits outside it. That
+/// prefix is small (single-digit ms measured), and leaving it unbudgeted is
+/// deliberate: `nextest`'s slow-timeout is
 /// advisory and `.config/nextest.toml` sets no `terminate-after`, so a slow
 /// prefix produces a SLOW marker rather than a failure, and wrapping it in a
 /// second timeout would cost more than the risk it removes. Its duration
@@ -126,9 +142,17 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// **Considered and rejected:** the child fsyncs a `process_start` audit record
 /// during boot and this harness already holds `audit_path`, so polling that file
 /// under `COLD_START_TIMEOUT` *would* give a readiness handshake off stdout and
-/// let the exit wait keep the tight `SHUTDOWN_TIMEOUT`. Not built: a polling
-/// loop is materially more code than a summed constant, and all it buys is ~10 s
-/// of fail-faster latency on a genuine post-start hang in one test.
+/// let the exit wait keep the tight `SHUTDOWN_TIMEOUT`.
+///
+/// State its benefit accurately, because it is not mainly about latency: with
+/// the exit slice back on `SHUTDOWN_TIMEOUT`, a 5-15 s stall between the failed
+/// envelope write and process exit stays a *test failure*, whereas a summed
+/// budget cannot fail one. That is the cost being accepted here — the summed
+/// budget masks the very hypothesis #660 is open on, and the printed
+/// measurement is a weaker substitute for a failing assertion. Not built
+/// anyway: a polling loop is materially more code than a summed constant, and
+/// #660 is the place to weigh it once the distribution is known. Revisit this
+/// if that distribution turns out bimodal.
 pub const DETACHED_EXIT_TIMEOUT: Duration = COLD_START_TIMEOUT.saturating_add(SHUTDOWN_TIMEOUT);
 
 /// Deadline to apply to one stdout read: the caller's `requested` budget,
