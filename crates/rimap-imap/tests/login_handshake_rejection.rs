@@ -118,6 +118,15 @@ async fn post_login_capability_probe_failure_forces_move_fallback() {
     // takes the non-atomic COPY + STORE \Deleted + folder-wide EXPUNGE fallback
     // — even though the server advertised MOVE/UIDPLUS pre-login.
     //
+    // This test pins the behaviour as it stands; it does not endorse it. A
+    // failed probe means the capabilities are UNKNOWN, and `imap_login` maps
+    // unknown onto the same `(false, false)` that means "absent" — which is
+    // exactly `fallback_uses_folder_wide_expunge`'s condition, so an
+    // uninformative probe fails open into a destructive default rather than
+    // refusing. Tracked as its own defect in #649; #634 fixed the adjacent
+    // problem of reading flags that describe a *different* session, not this
+    // one of reading flags that describe *no* session.
+    //
     // The move is the connection's first op, and that is what makes the
     // assertion sharp: `Connection::move_messages` reads
     // `has_move_capability()` / `has_uidplus_capability()` from inside the

@@ -4,14 +4,17 @@
 //! asserts both `used_fallback` and `folder_wide_expunge`, plus that a plain
 //! `EXPUNGE` (not `UID EXPUNGE`) reached the wire.
 //!
-//! The move runs as the connection's first op, on a cold connection. That is
-//! not vacuous: `Connection::move_messages` reads
-//! `has_move_capability()` / `has_uidplus_capability()` from inside the
-//! `with_session` body (#634), which runs after the lazy connect has logged in
-//! and run the post-login CAPABILITY probe (scripted in `login_preamble`,
-//! advertising only `IMAP4rev1`). So the atomics the move reads are the ones
-//! that probe populated, and the fallback below genuinely depends on the
-//! absence of MOVE/UIDPLUS rather than on the construction-time `false`.
+//! The move runs as the connection's first op, on a cold connection. What
+//! makes that non-vacuous is the **scripted dialog**, not the capability
+//! assertions: the fake expects `UID COPY`, so a client that had taken the
+//! MOVE path would desync and the move would fail. The assertions only
+//! record that the atomics read `(false, false)` afterwards, which an
+//! `IMAP4rev1`-only server and a connection that never probed at all produce
+//! alike — this scenario cannot tell those apart, and does not try to.
+//! `login_handshake_rejection.rs` is where the atomics discriminate (its
+//! server advertises `MOVE UIDPLUS` pre-login and nothing post-login), and
+//! `capability_reconnect_freshness.rs` is what pins the read point itself
+//! (#634).
 //!
 //! Fake, no container runtime — runs on every PR. Replaces the former
 //! ignored placeholder that marked this gap.
@@ -68,9 +71,9 @@ async fn no_move_no_uidplus_uses_folder_wide_expunge() {
         .await
         .expect("move should succeed via fallback");
 
-    // The move's own lazy connect ran the post-login probe, so these now read
-    // the server's actual advertisement rather than the construction-time
-    // default — the fallback above was chosen from these values.
+    // Consistency check only: after the move, both atomics agree with the
+    // IMAP4rev1-only advertisement. They do not distinguish that from a probe
+    // that never ran — see the module header for what makes this test bite.
     assert!(
         !conn.has_move_capability(),
         "IMAP4rev1-only probe must leave MOVE off",

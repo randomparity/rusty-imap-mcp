@@ -181,6 +181,24 @@ impl Connection {
         outcome
     }
 
+    /// The serving session's `(has_move, has_uidplus)` advertisement.
+    ///
+    /// `session` is a witness, not an input — nothing is read from it. It is
+    /// there because only [`Self::attempt`] can hand one out, and it does so
+    /// after the lazy connect has populated the slot and the login has stored
+    /// that session's CAPABILITY reply. Requiring it makes "read the flags of
+    /// the session that actually serves this command" a thing the compiler
+    /// checks rather than a rule a doc comment asks for: hoisting the call
+    /// above `with_session`, which is what #634 was, leaves no `&ImapSession`
+    /// to pass.
+    ///
+    /// The public [`Connection::has_move_capability`] /
+    /// [`Connection::has_uidplus_capability`] stay as they are, for callers
+    /// reporting on a connection rather than selecting a protocol.
+    fn session_capabilities(&self, _session: &ImapSession) -> (bool, bool) {
+        (self.has_move_capability(), self.has_uidplus_capability())
+    }
+
     /// `LIST` against `pattern` (e.g. `"*"`, `"INBOX/*"`).
     ///
     /// A read-only op: on `ConnectionLost` it reconnects and retries once
@@ -471,14 +489,15 @@ impl Connection {
         self.with_session("move", Idempotency::Mutating, || {
             async |session| {
                 crate::ops::folders::select(session, source_folder, false).await?;
+                let (has_move, has_uidplus) = self.session_capabilities(session);
                 crate::ops::move_message::move_messages(
                     session,
                     source_folder,
                     dest_folder,
                     uids,
                     expected_source_uidvalidity,
-                    self.has_move_capability(),
-                    self.has_uidplus_capability(),
+                    has_move,
+                    has_uidplus,
                 )
                 .await
             }
@@ -545,13 +564,14 @@ impl Connection {
                 let selected = crate::ops::folders::select(session, folder, false).await?;
                 let uid_validity = selected.uid_validity;
                 crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
+                let (has_move, has_uidplus) = self.session_capabilities(session);
                 let result = crate::ops::delete::delete_message(
                     session,
                     uid,
                     folder,
                     trash_folder,
-                    self.has_move_capability(),
-                    self.has_uidplus_capability(),
+                    has_move,
+                    has_uidplus,
                 )
                 .await?;
                 Ok((result, uid_validity))
