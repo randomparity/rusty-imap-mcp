@@ -468,8 +468,6 @@ impl Connection {
         uids: &[crate::types::Uid],
         expected_source_uidvalidity: Option<u32>,
     ) -> Result<crate::ops::move_message::MoveOutcome, ImapError> {
-        let has_move = self.has_move_capability();
-        let has_uidplus = self.has_uidplus_capability();
         self.with_session("move", Idempotency::Mutating, || {
             async |session| {
                 crate::ops::folders::select(session, source_folder, false).await?;
@@ -479,8 +477,8 @@ impl Connection {
                     dest_folder,
                     uids,
                     expected_source_uidvalidity,
-                    has_move,
-                    has_uidplus,
+                    self.has_move_capability(),
+                    self.has_uidplus_capability(),
                 )
                 .await
             }
@@ -542,8 +540,6 @@ impl Connection {
         trash_folder: &str,
         expected_uidvalidity: Option<u32>,
     ) -> Result<(crate::ops::delete::DeleteResult, Option<u32>), ImapError> {
-        let has_move = self.has_move_capability();
-        let has_uidplus = self.has_uidplus_capability();
         self.with_session("delete_message", Idempotency::Mutating, || {
             async |session| {
                 let selected = crate::ops::folders::select(session, folder, false).await?;
@@ -554,8 +550,8 @@ impl Connection {
                     uid,
                     folder,
                     trash_folder,
-                    has_move,
-                    has_uidplus,
+                    self.has_move_capability(),
+                    self.has_uidplus_capability(),
                 )
                 .await?;
                 Ok((result, uid_validity))
