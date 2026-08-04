@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   account that wrote the corresponding table at all discarded the whole
   `[defaults]` block, and every key it left unset silently reverted to the
   built-in default rather than the operator's configured one. See #624 /
-  ADR-0014.
+  ADR-0013.
 
 ### Changed
 
@@ -48,7 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlap an account's own `expunge_folders`.
 
   Run `rusty-imap-mcp --dry-run` before and after upgrading and diff the
-  per-account effective matrix it prints.
+  per-account effective matrix it prints. **That covers the tool-verdict
+  widening only.** `--dry-run` prints posture, per-tool verdicts,
+  infrastructure tools, IMAP capabilities, and the TLS fingerprint — it does
+  **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
+  field, so the folder-list widenings above are invisible in its output.
+  Review those two lists by hand against your `[defaults.security]` for every
+  account carrying a partial `[accounts.security]` block. A boot-time record
+  of the resolved values is tracked in #632.
 - `rimap-config`: `RawAccountConfig::{security, limits, credentials}` change
   type to the new `AccountSecurityOverrides` / `AccountLimitsOverrides` /
   `AccountCredentialsOverrides` mirror structs. Breaking for direct consumers

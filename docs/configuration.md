@@ -573,9 +573,19 @@ account.
 > restrictive end of each range. It now inherits your `[defaults]` values
 > instead — so it picks up your `[defaults.security.tools]` verdicts
 > (including `allow` entries, which permit a tool regardless of posture),
-> your `expunge_folders`, and your `protected_folders`. Run
-> `rusty-imap-mcp --dry-run` before and after upgrading and diff the
-> per-account effective matrix it prints.
+> your `expunge_folders`, and your `protected_folders`.
+>
+> Run `rusty-imap-mcp --dry-run` before and after upgrading and diff the
+> per-account effective matrix it prints. **This catches the tool-verdict
+> change only.** `--dry-run` prints posture, per-tool verdicts,
+> infrastructure tools, IMAP capabilities, and the TLS fingerprint. It does
+> **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
+> field — so an account that silently gained an inherited `expunge_folders`
+> entry produces an identical `--dry-run` diff. Check those two lists
+> against your `[defaults.security]` by hand, for every account carrying a
+> partial `[accounts.security]` block. A boot-time record of each account's
+> resolved values is tracked in
+> [#632](https://github.com/randomparity/rusty-imap-mcp/issues/632).
 
 ## Credential resolution
 

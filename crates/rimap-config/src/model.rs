@@ -452,7 +452,7 @@ pub struct RawAccountConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Per-account overrides (#624, ADR-0014)
+// Per-account overrides (#624, ADR-0013)
 //
 // These mirror `SecurityConfig` / `LimitsConfig` / `LookalikeConfig` /
 // `CredentialsConfig` with every field `Option<T>` and no
@@ -819,7 +819,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Override-struct field coverage (#624, ADR-0014)
+    // Override-struct field coverage (#624, ADR-0013)
     //
     // Each of these serializes a fully-populated concrete config, deserializes
     // it into the mirror override struct, and merges it onto the built-in

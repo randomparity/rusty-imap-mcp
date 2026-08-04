@@ -1,4 +1,4 @@
-# ADR-0014: `[defaults]` merges into an account field by field, through all-`Option` override structs
+# ADR-0013: `[defaults]` merges into an account field by field, through all-`Option` override structs
 
 **Status:** Accepted · 2026-08-04 · issue [#624](https://github.com/randomparity/rusty-imap-mcp/issues/624)
 
@@ -118,13 +118,25 @@ any account that wrote the enclosing table.
     whenever the default list is shorter.
 
   This is the documented semantics finally taking effect rather than a new
-  policy, but it re-grants silently. Operators upgrading a multi-account
-  config should run `rusty-imap-mcp --dry-run`, which prints each
-  account's effective matrix, and diff it against the previous release.
-  Accepting the widening rather than adding a compatibility mode is
-  deliberate: a mode that preserved the old behaviour would preserve the
-  defect, and "replace, don't deprecate" leaves no second resolution path to
-  reason about.
+  policy, but it re-grants silently. Accepting the widening rather than
+  adding a compatibility mode is deliberate: a mode that preserved the old
+  behaviour would preserve the defect, and "replace, don't deprecate" leaves
+  no second resolution path to reason about.
+
+  **The available mitigation is partial, and the gap is the reason #632
+  exists.** Operators upgrading a multi-account config should run
+  `rusty-imap-mcp --dry-run` before and after and diff each account's
+  effective matrix — but that detects only the first of the three
+  widenings. `cli::dry_run::run` prints posture, per-tool verdicts,
+  infrastructure tools, IMAP capabilities, and the TLS fingerprint; it
+  reads `acfg.security.posture` and `acfg.tool_overrides` and nothing else
+  off the resolved account, so `protected_folders`, `expunge_folders`, and
+  every `[limits]` field are absent from its output. An account that gained
+  an inherited `expunge_folders` entry — the widening with the sharpest
+  consequence, since it is the only one that can make a folder expungeable
+  — produces a byte-identical `--dry-run` diff. Those two lists have to be
+  reviewed by hand against `[defaults.security]` until #632 lands a
+  boot-time record of the resolved values.
 
 - Some configs that previously started will now fail validation, all in the
   fail-closed direction: an inherited `send_email = "allow"` requires
@@ -141,9 +153,12 @@ any account that wrote the enclosing table.
   `multi_account_inherited_ceiling_checked_against_account_imap_budgets`
   already pinned.
 
-- `RawAccountConfig::security` and `::limits` change type. They are public, so
-  this is a breaking change to the `rimap-config` API; the crate is pre-1.0 and
-  the only consumers are in-workspace.
+- `RawAccountConfig::security`, `::limits`, and `::credentials` all change
+  type. They are public, so this is a breaking change to the `rimap-config`
+  API; the crate is pre-1.0 and the only consumers are in-workspace. The
+  version stays `0.1.1-dev` — `cargo-semver-checks` runs only in the release
+  workflow, so nothing on a PR catches this, and whether a breaking pre-1.0
+  change should bump the minor is tracked in #633.
 
 - Adding a field to `SecurityConfig`, `LimitsConfig`, or `LookalikeConfig` now
   requires adding it to the mirror struct and its `merge_onto`. The

@@ -94,7 +94,7 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
         // Per-field merge, not wholesale replacement: an account that writes
         // one key of `[accounts.limits]` inherits every other key from
         // `[defaults.limits]` rather than reverting it to the built-in
-        // default (#624, ADR-0014). Same for `[accounts.security]` and
+        // default (#624, ADR-0013). Same for `[accounts.security]` and
         // `[accounts.credentials]`.
         let security = raw.security.map_or_else(
             || config.defaults.security.clone(),
@@ -1177,6 +1177,64 @@ drafts_per_minute = 3
         let acct = work_account(cfg);
         assert_eq!(acct.limits.commands_per_second, 7);
         assert_eq!(acct.limits.drafts_per_minute, 3);
+    }
+
+    #[test]
+    fn account_value_equal_to_the_serde_default_still_overrides_defaults() {
+        // The invariant the mirror structs exist for. `commands_per_second`
+        // and `drafts_per_minute` are written here at exactly their built-in
+        // serde defaults (10 and 5) while `[defaults.limits]` sets 25 and 9.
+        // "Written by the operator" and "filled in by serde" are the same
+        // bytes in the concrete struct, so a merge that inspected values
+        // rather than presence would hand this account 25 and 9 — the
+        // operator asked for the stock rate on this account and would
+        // silently get the deployment's.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r"
+[defaults.limits]
+commands_per_second = 25
+drafts_per_minute = 9
+",
+            r"
+[accounts.limits]
+commands_per_second = 10
+drafts_per_minute = 5
+",
+        );
+        let acct = work_account(cfg);
+        assert_eq!(
+            acct.limits.commands_per_second,
+            LimitsConfig::default().commands_per_second,
+            "explicit value equal to the serde default must win over defaults",
+        );
+        assert_eq!(
+            acct.limits.drafts_per_minute,
+            LimitsConfig::default().drafts_per_minute,
+        );
+    }
+
+    #[test]
+    fn account_posture_equal_to_the_serde_default_still_overrides_defaults() {
+        // Same invariant on the security side: `draft-safe` is
+        // `Posture::default()`, so writing it explicitly must beat an
+        // inherited `readonly` rather than reading as "unset".
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security]
+posture = "readonly"
+"#,
+            r#"
+[accounts.security]
+posture = "draft-safe"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.security.posture, Posture::default());
+        assert_eq!(acct.security.posture, Posture::DraftSafe);
     }
 
     #[test]
