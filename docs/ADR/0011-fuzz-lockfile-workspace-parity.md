@@ -182,3 +182,28 @@ repo. The cost noted under Consequences doubles in the obvious way: a workspace
 bump touching a shared package now needs both fuzz lockfiles realigned, which
 is still the same single `just realign-fuzz-locks` invocation because it too
 discovers its inputs from git.
+
+## Amendment · 2026-08-04 · issue [#613](https://github.com/randomparity/rusty-imap-mcp/issues/613)
+
+The second reason given under *Decision* for placing the gate in `cargo-deny`
+— that `cargo-deny` is required on main and `publish checks` is not — no longer
+describes the repository. `publish checks`, `tool-schema drift` and
+`tools-doc drift` were added to main's required status checks, taking the list
+from nine contexts to twelve. Job choice no longer decides whether a gate
+enforces.
+
+The record above is left as written: it is what was true when the decision was
+made, and the reasoning was sound for the repository it was made in. What
+changed is the repository, not the argument.
+
+Two consequences for anyone reading that bullet today:
+
+- The gate stays in `cargo-deny` on the thematic ground alone — both are
+  dependency-resolution gates. The warning against moving it into
+  `publish-checks` "on tidiness grounds" no longer carries a disarming risk,
+  but the move still has nothing to recommend it.
+- The general hazard the bullet identifies is unchanged and is why #613 was
+  filed: a gate wired into a job outside main's required list runs without
+  enforcing. #613 closed the three instances that existed; it did not make the
+  class impossible. Before adding a check to any job, confirm that job's
+  status-check name is required.
