@@ -163,6 +163,17 @@ Two limits worth knowing before you trust a green result:
    (or run `just ci` locally) to get a green signal before merging. Edit the
    version on the PR first if the next release is a minor/major bump.
 
+   **If no PR appears,** the job refused to open a broken one rather than
+   failing quietly — read its log. `scripts/post-release-bump.sh` deliberately
+   fails, before the PR step, when: the version on `main` is not behind the
+   one it computed (a re-run of an older release's workflow, or a `main`
+   somebody bumped by hand); a cargo workspace exists that it does not know
+   how to re-resolve; `cargo metadata --locked` or `just check-fuzz-lock-parity`
+   disagrees with what it produced; or the bump dirtied something that is not
+   a manifest, a lockfile, or the changelog. Each names the cause. Reproduce
+   any of them locally with `./scripts/post-release-bump.sh vX.Y.Z` on a clean
+   checkout of `main`, fix the cause, and re-run the job.
+
 ## What automation does
 
 Pushing a `v*` tag triggers `release.yml`, which:

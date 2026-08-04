@@ -382,6 +382,14 @@ check-metadata:
 test-publish-script:
     ./scripts/publish-crates.test.sh
 
+# Unit-test the pure functions in post-release-bump.sh (tag -> next -dev,
+# forward-bump guard, the derived-file-set assertions, step-output emission).
+# No cargo, no network; one read-only case reads HEAD of this repo. The job it
+# guards runs once per release, so this is the only thing that exercises it on
+# a normal branch (issue #662). Mirrored in the `publish-checks` CI job.
+test-post-release-bump:
+    ./scripts/post-release-bump.test.sh
+
 # Fail if a tracked fuzz workspace's Cargo.lock resolves a dependency shared
 # with the root workspace to a version the workspace lockfile does not hold.
 # `fuzz` and `crates/rimap-server/fuzz` are each their own cargo workspace, so
@@ -442,7 +450,7 @@ semver-checks:
     cargo semver-checks check-release --workspace --baseline-rev "$baseline"
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-fuzz-lock-parity check-fuzz-lock-parity test-installer semver-checks
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-fuzz-lock-parity check-fuzz-lock-parity test-installer semver-checks
     typos
 
 # Re-run pre-commit hooks across all files.
