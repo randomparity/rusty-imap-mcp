@@ -115,11 +115,18 @@ impl AuditWriter {
                     error_code = %err.code(),
                     "audit write failed; fail_open=true so suppressing and continuing",
                 );
-                self.suppressed_failures.fetch_add(1, Ordering::Relaxed);
+                self.count_suppressed_failure();
                 Ok(())
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// Count one record that is not on disk and that no caller was told
+    /// about. See [`super::AuditWriter::suppressed_failures`] for the two
+    /// sources.
+    pub(super) fn count_suppressed_failure(&self) {
+        self.suppressed_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     fn write_record_inner(&self, record: &crate::record::AuditRecord) -> Result<(), AuditError> {

@@ -20,37 +20,35 @@ use crate::tls::TlsConfigBundle;
 use super::{Connection, ImapEncryption, ImapSession};
 
 impl Connection {
-    /// Returns `Ok((session, credential_source))` on success, or
-    /// `Err((error, Option<credential_source>))` on failure. The
-    /// `credential_source` in the `Err` variant is `Some` when the failure
-    /// occurred after `resolve_credential` succeeded (e.g. server rejected
-    /// the credentials), and `None` for pre-resolve failures (TLS, connect,
-    /// greeting, CAPABILITY).
+    /// Run TCP connect, TLS establishment, and IMAP login against `bundle`,
+    /// all under the account's `connect_timeout` as a single total budget.
+    ///
+    /// Facts the connect learns on the way — the observed TLS fingerprint, the
+    /// credential source — are published to `bundle.last_observed` and
+    /// `progress` respectively rather than returned, so a caller cut mid-connect
+    /// can still read them. See [`super::ConnectProgress`].
     pub(super) async fn connect_with_bundle(
         &self,
         bundle: &TlsConfigBundle,
-    ) -> Result<
-        (ImapSession, rimap_core::CredentialSource),
-        (ImapError, Option<rimap_core::CredentialSource>),
-    > {
+        progress: &super::ConnectProgress,
+    ) -> Result<ImapSession, ImapError> {
         let cfg = &self.inner.cfg;
         let total_deadline = cfg.connect_timeout;
         let started = std::time::Instant::now();
 
-        // Map an elapsed per-step timeout to this function's `(error, None)`
-        // error shape. Factors the repeated timeout arm without wrapping the
-        // (large) step futures in another async layer. Kept local to this fn
-        // because the `(error, None)` shape differs from preflight's (#351).
-        let timeout_err = |op: &'static str| move |_| (ImapError::Timeout { op }, None);
+        // Name the step an elapsed per-step timeout belongs to. Factors the
+        // repeated timeout arm without wrapping the (large) step futures in
+        // another async layer.
+        let timeout_err = |op: &'static str| move |_| ImapError::Timeout { op };
 
-        // Step 1: TCP connect. Pre-resolve; failures carry `None`.
+        // Step 1: TCP connect.
         let tcp = timeout(
             total_deadline,
             TcpStream::connect((cfg.host.as_str(), cfg.port)),
         )
         .await
         .map_err(timeout_err("tcp_connect"))?
-        .map_err(|e| (ImapError::Connect(e), None))?;
+        .map_err(ImapError::Connect)?;
 
         // Step 2: TLS establishment. Branches on encryption mode.
         // The `already_greeted` flag tracks whether the plaintext greeting was
@@ -61,27 +59,27 @@ impl Connection {
             ImapEncryption::Tls => {
                 let s = timeout(remaining, tls_handshake(tcp, bundle, &cfg.host))
                     .await
-                    .map_err(timeout_err("tls_handshake"))?
-                    .map_err(|e| (e, None))?;
+                    .map_err(timeout_err("tls_handshake"))??;
                 (s, false)
             }
             ImapEncryption::Starttls => {
                 let s = timeout(remaining, starttls_upgrade(tcp, bundle, &cfg.host))
                     .await
-                    .map_err(timeout_err("starttls_upgrade"))?
-                    .map_err(|e| (e, None))?;
+                    .map_err(timeout_err("starttls_upgrade"))??;
                 (s, true)
             }
         };
 
-        // Step 3: IMAP greeting + capability check + login. The login step
-        // may return a credential source on both success and certain failures.
-        // STARTTLS already consumed the plaintext greeting during negotiation;
-        // `imap_login` must skip the greeting read in that case.
+        // Step 3: IMAP greeting + capability check + login. STARTTLS already
+        // consumed the plaintext greeting during negotiation; `imap_login` must
+        // skip the greeting read in that case.
         let remaining = total_deadline.saturating_sub(started.elapsed());
-        timeout(remaining, self.imap_login(tls_stream, already_greeted))
-            .await
-            .map_err(timeout_err("imap_login"))?
+        timeout(
+            remaining,
+            self.imap_login(tls_stream, already_greeted, progress),
+        )
+        .await
+        .map_err(timeout_err("imap_login"))?
     }
 }
 
@@ -387,13 +385,18 @@ mod tests {
     }
 
     impl RecordingAudit {
-        pub(super) fn failures(&self) -> usize {
+        /// The error code of every recorded Failure, in order. The codes
+        /// matter and not just the count: since #623 a connect cut by an
+        /// enclosing deadline also leaves a Failure behind, so a test that
+        /// counted alone could no longer tell the two apart.
+        pub(super) fn failure_codes(&self) -> Vec<rimap_core::ErrorCode> {
             self.events
                 .lock()
                 .expect("recording sink mutex")
                 .iter()
                 .filter(|e| e.result == rimap_core::auth_event::AuthResult::Failure)
-                .count()
+                .filter_map(|e| e.error_code)
+                .collect()
         }
     }
 
@@ -433,12 +436,16 @@ mod tests {
     /// matter how `command_timeout` compares to `connect_timeout`.
     ///
     /// `connect_inner` documents "exactly one `Auth` audit record on every
-    /// termination path", but that record is written only if the connect
-    /// deadline is the one that fires. When the enclosing command deadline is
-    /// shorter (or merely starts earlier, as it always does), it cancels the
-    /// connect future while it is still parked on the network and the record
-    /// is silently lost — no error, no emit. This is what dropped the
-    /// nightly-chaos `auth` Failure that scenario 1 asserts on.
+    /// termination path", but a *Failure* record with the connect's own
+    /// verdict is written only if the connect deadline is the one that fires.
+    /// When the enclosing command deadline is shorter (or merely starts
+    /// earlier, as it always does), it cancels the connect future while it is
+    /// still parked on the network. Before #623 that lost the record silently —
+    /// no error, no emit — which is what dropped the nightly-chaos `auth`
+    /// Failure that scenario 1 asserts on; since #623 `AuthEmitGuard` writes an
+    /// `ERR_CANCELLED` record instead. Either way the budget split is what
+    /// keeps the record here a real timeout, so the count below still reads the
+    /// split rather than the guard.
     #[tokio::test]
     async fn connect_stall_emits_auth_failure_whatever_the_command_budget() {
         // (connect_ms, command_ms): the tight-command case that chaos
@@ -461,9 +468,11 @@ mod tests {
                  connect={connect_ms}ms/command={command_ms}ms, got {err:?}",
             );
             assert_eq!(
-                audit.failures(),
-                1,
-                "connect stall must emit exactly one auth Failure for \
+                audit.failure_codes(),
+                vec![rimap_core::ErrorCode::Timeout],
+                "connect stall must emit exactly one auth Failure, carrying the \
+                 connect's own timeout rather than the ERR_CANCELLED a cut \
+                 connect records, for \
                  connect={connect_ms}ms/command={command_ms}ms",
             );
             let _ = mock.finish().await;

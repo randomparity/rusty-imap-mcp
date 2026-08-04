@@ -55,7 +55,11 @@ recently flushed.
 
 ### `auth`
 
-IMAP authentication attempt.
+IMAP authentication attempt. One record per attempt, on every termination path,
+including attempts cut off before they concluded — subject to `audit.fail_open`
+(see below). "Attempt" starts just before the TCP connect, so a cut in that
+narrow window records an attempt that never reached the server; the log errs
+towards recording one too many rather than one too few.
 
 | Field | Description |
 |---|---|
@@ -65,7 +69,17 @@ IMAP authentication attempt.
 | `username` | Login identity (never contains credentials) |
 | `tls_fingerprint_sha256` | Observed TLS certificate fingerprint (null if handshake did not complete) |
 | `fingerprint_match` | Whether observed fingerprint matched config (null if no pin configured) |
-| `error_code` | Stable error code on failure (e.g. `ERR_TLS`, `ERR_AUTH`); null on success |
+| `error_code` | Stable error code on failure (e.g. `ERR_TLS`, `ERR_AUTH`, `ERR_CANCELLED`); null on success |
+| `credential_source` | Which store the credential came from; null if the attempt ended before resolution |
+
+**`ERR_CANCELLED` is not an authentication failure.** It means the connect was
+cut before it reached a verdict of its own — read it as *cut*, not specifically
+*cancelled*. Any of: the per-tool-call ceiling fired
+(`limits.tool_call_timeout_seconds`), the client cancelled the call, the
+process shut down mid-connect, or a panic unwound through it. The attempt is recorded so the log does not
+silently omit a connection that was opened, but a monitor counting failed
+logins, or alerting on credential-stuffing, must **exclude** these. The reason
+for the cut is on the paired `tool_end` record. See ADR-0012.
 
 ### `tool_start`
 
@@ -128,6 +142,20 @@ Config-related event. Declared for future use.
 - **Write failure:** fails the tool call with `ERR_INTERNAL` by
   default. Set `audit.fail_open = true` to suppress write failures
   and continue (not recommended -- audit records will be lost).
+
+  Two `auth` paths are exceptions, because they have no caller to fail:
+  the record for a connect that was cut (written from a drop guard), and
+  the one for a connect that failed on its own terms (where replacing the
+  connect's error with an audit error would hide the reason the connect
+  failed). Both log the failure and continue. Neither goes unaccounted --
+  they increment the same lost-record counter as a `fail_open`
+  suppression.
+- **`audit.path` must be on local storage.** The drop-guard write above
+  runs on a runtime worker thread with the account's connection lock
+  held, and nothing bounds it. Pointed at a network mount that stops
+  responding (NFS, SMB), that write never returns: the account wedges,
+  and enough concurrent occurrences stall the server as a whole. Local
+  disk has no such failure mode.
 
 ## Running multiple MCP clients
 

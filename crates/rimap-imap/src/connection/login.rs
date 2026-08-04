@@ -37,94 +37,81 @@ impl Connection {
     ///      containing `Response::Capabilities` data.
     ///   3. Call `client.login(user, pass)`.
     ///
-    /// Returns `Ok((session, credential_source))` on success.
-    /// Returns `Err((error, Some(source)))` when the failure occurred after
-    /// `resolve_credential` succeeded (e.g. server rejected the credentials).
-    /// Returns `Err((error, None))` for pre-resolve failures (greeting, CAPABILITY).
+    /// The resolved credential's source is published to `progress` the moment
+    /// resolution succeeds, rather than returned, so a connect cut after that
+    /// point still records which store the credential came from. See
+    /// [`super::ConnectProgress`].
     pub(super) async fn imap_login(
         &self,
         tls_stream: TlsStream<TcpStream>,
         already_greeted: bool,
-    ) -> Result<
-        (ImapSession, rimap_core::CredentialSource),
-        (ImapError, Option<rimap_core::CredentialSource>),
-    > {
+        progress: &super::ConnectProgress,
+    ) -> Result<ImapSession, ImapError> {
         let mut client = async_imap::Client::new(tls_stream);
 
         // Read the server greeting — skipped for STARTTLS, which already
         // consumed the greeting during plaintext negotiation. An absent greeting
         // (EOF) or BYE status means the server immediately rejected us.
-        // Pre-resolve; carry `None`.
         if !already_greeted {
             let greeting = client
                 .read_response()
                 .await
-                .map_err(|e| (ImapError::Connect(e), None))?
-                .ok_or((
-                    ImapError::Auth {
-                        reason: AuthFailure::ServerRejected,
-                    },
-                    None,
-                ))?;
+                .map_err(ImapError::Connect)?
+                .ok_or(ImapError::Auth {
+                    reason: AuthFailure::ServerRejected,
+                })?;
 
             if let Response::Data {
                 status: Status::Bye,
                 ..
             } = greeting.parsed()
             {
-                return Err((
-                    ImapError::Auth {
-                        reason: AuthFailure::ServerRejected,
-                    },
-                    None,
-                ));
+                return Err(ImapError::Auth {
+                    reason: AuthFailure::ServerRejected,
+                });
             }
         }
 
         // Issue CAPABILITY and scan responses for LOGINDISABLED.
         // We create a bounded channel so intermediate untagged responses
         // (including `* CAPABILITY ...`) are routed through it rather than
-        // being silently discarded. Pre-resolve; carry `None`.
+        // being silently discarded.
         let (tx, rx) = async_channel::bounded::<UnsolicitedResponse>(32);
         client
             .run_command_and_check_ok("CAPABILITY", Some(tx))
             .await
-            .map_err(|e| (ImapError::Protocol(e), None))?;
+            .map_err(ImapError::Protocol)?;
 
         // Drain whatever arrived on the channel (non-blocking; the command
         // has already completed). A `Response::Capabilities` list containing
-        // LOGINDISABLED means LOGIN is prohibited. Pre-resolve; carry `None`.
+        // LOGINDISABLED means LOGIN is prohibited.
         let logindisabled = drain_for_logindisabled(&rx);
         if logindisabled {
-            return Err((
-                ImapError::Auth {
-                    reason: AuthFailure::CapabilityMissing { needed: "LOGIN" },
-                },
-                None,
-            ));
+            return Err(ImapError::Auth {
+                reason: AuthFailure::CapabilityMissing { needed: "LOGIN" },
+            });
         }
 
         // Resolve the password from the injected resolver. A missing
         // credential is an authentication failure, not a network
         // failure — map it to ERR_AUTH so retry logic and operator
-        // messages stay accurate. Pre-resolve; carry `None`.
+        // messages stay accurate.
         let cfg = &self.inner.cfg;
         let (password, credential_source) = self
             .inner
             .credentials
             .resolve(&cfg.account_id, &cfg.username, &cfg.host)
-            .map_err(|e| {
-                (
-                    ImapError::Auth {
-                        reason: AuthFailure::CredentialUnavailable(e.into_reason()),
-                    },
-                    None,
-                )
+            .map_err(|e| ImapError::Auth {
+                reason: AuthFailure::CredentialUnavailable(e.into_reason()),
             })?;
 
-        // From here on, all errors carry `Some(credential_source)` because
-        // resolution succeeded.
-        //
+        // Publish the source before the LOGIN round trip, which is the first
+        // await that can be cut with the credential already resolved. Every
+        // `auth` record written from here on — this connect's own, or the one
+        // `AuthEmitGuard` writes if the future is dropped — names the store the
+        // credential came from.
+        progress.record_credential_source(credential_source);
+
         // Attempt LOGIN. On NO response the server rejected the credentials.
         // Expose the secret only at the moment of use; the borrow ends
         // when `client.login` returns.
@@ -132,13 +119,10 @@ impl Connection {
             Ok(session) => session,
             Err((err, _client)) => {
                 return match err {
-                    async_imap::error::Error::No(_) => Err((
-                        ImapError::Auth {
-                            reason: AuthFailure::LoginRejected,
-                        },
-                        Some(credential_source),
-                    )),
-                    other => Err((ImapError::Protocol(other), Some(credential_source))),
+                    async_imap::error::Error::No(_) => Err(ImapError::Auth {
+                        reason: AuthFailure::LoginRejected,
+                    }),
+                    other => Err(ImapError::Protocol(other)),
                 };
             }
         };
@@ -159,7 +143,7 @@ impl Connection {
         self.inner.has_move.store(has_move, Ordering::Relaxed);
         self.inner.has_uidplus.store(has_uidplus, Ordering::Relaxed);
 
-        Ok((session, credential_source))
+        Ok(session)
     }
 
     /// Emit an [`AuthEvent`] through the injected sink. Runs the
@@ -209,6 +193,83 @@ impl Connection {
                 })
             }
             Ok(Ok(())) => Ok(()),
+        }
+    }
+
+    /// Emit an [`AuthEvent`] synchronously, on the calling thread — the only
+    /// shape available to [`super::AuthEmitGuard`]'s `Drop`, which cannot
+    /// await and has no caller left to return a `Result` to.
+    ///
+    /// ## Why this blocks rather than deferring to the blocking pool
+    ///
+    /// `AuditWriter::write_record` fsyncs `auth` records, and its docs tell
+    /// async callers to route through `spawn_blocking` (RUST-ASYNC-04). Every
+    /// other emitter obeys that, including [`Connection::emit_auth`]. This one
+    /// deliberately does not, and the exception is narrow enough to state
+    /// exactly:
+    ///
+    /// * **`spawn_blocking` is strictly worse on the shutdown cut.** Tokio's
+    ///   blocking pool refuses new work once the runtime begins shutting down —
+    ///   the returned handle never resolves, and even an already-queued closure
+    ///   is discarded rather than run. `rimap-server` shuts down with
+    ///   `Runtime::shutdown_background`, which waits for nothing, and writes
+    ///   `process_end` before it. Writing inline at least gives the record a
+    ///   chance; deferring it guarantees the loss.
+    /// * **It also puts a panic inside a `Drop`.** `spawn_blocking` panics
+    ///   when the OS refuses a thread, and a panic escaping a `Drop` that runs
+    ///   during an unwind aborts the process.
+    /// * **The cost is rare, and — state this plainly — unbounded.** Usually
+    ///   one JSONL line plus an fsync; when the file is due to rotate, also a
+    ///   rename, an open, and — with retention configured — a `read_dir` and a
+    ///   `remove_file` per pruned file, all under the audit mutex. It runs only
+    ///   when a connect was cut, which at the shipped ceiling means the connect
+    ///   was already pathological.
+    ///
+    ///   No deadline covers that write. On an `audit.path` that stops
+    ///   responding — a hung NFS or SMB mount — it never returns: the runtime
+    ///   worker is pinned for the life of the process, and `dispatch::attempt`
+    ///   still holds the account's session lock, so a peer queued on that
+    ///   account waits forever rather than merely spending its
+    ///   `command_timeout`. The runtime is multi-threaded, so enough
+    ///   concurrent cut connects against such a mount wedge the scheduler
+    ///   itself, including the stdio MCP wire. This is a genuinely new failure
+    ///   mode: the same stall on the blocking pool lands against its
+    ///   512-thread cap and cannot starve the scheduler.
+    ///
+    ///   It does not change the choice — a deferred write on that mount loses
+    ///   the record *and* still pins a pool thread — but it does make
+    ///   `audit.path` a local-storage requirement rather than a preference.
+    ///   `docs/audit-log.md` says so to operators.
+    ///
+    /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
+    /// file I/O, nothing inside its critical section calls back into this
+    /// crate, and the advisory file lock is taken once at open rather than per
+    /// write, so it cannot block on another process either.
+    ///
+    /// This makes the guard **deterministic** for the two cuts that have a
+    /// caller — the tool-call ceiling and a client cancellation, both pinned by
+    /// tests — and best-effort for a runtime shutdown, where the process may
+    /// exit before the dropping worker reaches the write.
+    ///
+    /// ## Failure handling
+    ///
+    /// Logged at `error` level when the sink rejects the event; there is
+    /// nowhere to propagate to from a `Drop`. This mirrors `connect_inner`'s
+    /// auth-failure branch, which likewise preserves the original outcome and
+    /// logs the audit failure rather than replacing one with the other.
+    ///
+    /// Implementations of [`rimap_core::auth_sink::AuthEventSink`] must return
+    /// their failures rather than panicking — the production `AuditWriter`
+    /// maps even a poisoned mutex to an `AuditError` — because a panic here
+    /// would escape a `Drop`.
+    pub(super) fn emit_auth_blocking(&self, event: AuthEvent) {
+        if let Err(err) = self.inner.audit.emit_auth(event) {
+            self.inner.audit.note_auth_write_lost();
+            tracing::error!(
+                error = %err,
+                "AuthEventSink::emit_auth failed for a connect that was cut \
+                 before it reached its own verdict; the attempt is unrecorded",
+            );
         }
     }
 }

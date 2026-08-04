@@ -1576,7 +1576,20 @@ mod tool_call_ceiling_tests {
 
     use super::ImapMcpServer;
     use crate::boot::registry::AccountRegistry;
-    use crate::test_support::make_test_account_state_at;
+    use crate::test_support::make_test_account_state_with_sink;
+
+    /// Every record of `kind` in the audit file at `path`, parsed.
+    ///
+    /// Parsed rather than substring-matched so a serde `rename` breaks these
+    /// assertions loudly instead of turning them into vacuous truths.
+    fn records_of_kind(path: &std::path::Path, kind: &str) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .expect("read audit log")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse record"))
+            .filter(|record| record["kind"] == kind)
+            .collect()
+    }
 
     /// Drive the **production** call site — `dispatch_account_scoped`, via
     /// `execute_tool_for_test` — against an IMAP endpoint that accepts the
@@ -1587,14 +1600,26 @@ mod tool_call_ceiling_tests {
     /// that connect budget, so the ceiling is unambiguously what fires
     /// and deleting it fails this test rather than slowing it (#594).
     ///
-    /// The assertion is on the durable audit record, not the returned
-    /// error, and its negative half is the load-bearing one:
-    /// `AuditEnvelopeGuard` synthesizes an `ERR_CANCELLED` `tool_end`
-    /// whenever the envelope future is dropped, so moving the ceiling from
-    /// inside the envelope's body to around `run_with_audit_envelope`
-    /// would record an operator-configured timeout as a client
-    /// cancellation. That regression is invisible to a test that only
-    /// checks the returned error.
+    /// The assertions are on the durable audit records, not the returned
+    /// error, and there are three:
+    ///
+    /// * The `tool_end` record says `ERR_TIMEOUT`. Its negative half is the
+    ///   load-bearing one: `AuditEnvelopeGuard` synthesizes an `ERR_CANCELLED`
+    ///   `tool_end` whenever the envelope future is dropped, so moving the
+    ///   ceiling from inside the envelope's body to around
+    ///   `run_with_audit_envelope` would record an operator-configured timeout
+    ///   as a client cancellation. That regression is invisible to a test that
+    ///   only checks the returned error.
+    /// * An `auth` record exists at all (#623). The ceiling cut this connect
+    ///   after the socket was open, and an append-only auth log that omits it
+    ///   cannot be told apart from one where the attempt never happened.
+    /// * That `auth` record says `ERR_CANCELLED` — the connect was cut, and it
+    ///   must not borrow the ceiling's `ERR_TIMEOUT` verdict, which the attempt
+    ///   itself never reached.
+    ///
+    /// The last two are why the account's connection is wired to the same
+    /// `AuditWriter` the server logs through rather than to the fixture's
+    /// discarding sink.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn ceiling_fires_through_dispatch_account_scoped_and_records_err_timeout() {
         // Accept connections and never write: the client's TLS handshake
@@ -1625,11 +1650,12 @@ mod tool_call_ceiling_tests {
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());
 
-        let state = make_test_account_state_at(
+        let state = make_test_account_state_with_sink(
             rimap_core::account::DEFAULT_ACCOUNT_NAME,
             port,
             Duration::from_secs(30),
             Duration::from_millis(150),
+            std::sync::Arc::new(writer.clone()),
         );
         let id = state.id.clone();
         let mut accounts = BTreeMap::new();
@@ -1653,18 +1679,52 @@ mod tool_call_ceiling_tests {
         drainer.await.expect("drainer");
         accepted.abort();
 
-        let contents = std::fs::read_to_string(&path).expect("read audit log");
-        let tool_end = contents
-            .lines()
-            .find(|l| l.contains(r#""kind":"tool_end""#))
-            .expect("tool_end record");
-        assert!(
-            tool_end.contains(r#""error_code":"ERR_TIMEOUT""#),
-            "a fired ceiling must be audited as ERR_TIMEOUT: {tool_end}",
+        // No settling wait: `AuthEmitGuard` writes on the thread that drops the
+        // cut connect, so the record is on disk before `execute_tool_for_test`
+        // returned.
+        let auth = records_of_kind(&path, "auth");
+        assert_eq!(
+            auth.len(),
+            1,
+            "a ceiling that fired mid-connect must record the connection \
+             attempt exactly once (#623): {auth:?}",
         );
+        assert_eq!(auth[0]["result"], "failure");
+        assert_eq!(
+            auth[0]["error_code"], "ERR_CANCELLED",
+            "the cut connect never reached a verdict of its own, so its record \
+             must say it was cancelled rather than borrow the ceiling's \
+             ERR_TIMEOUT: {:?}",
+            auth[0],
+        );
+
+        let tool_end = records_of_kind(&path, "tool_end");
+        assert_eq!(tool_end.len(), 1, "one tool call, one tool_end");
+
+        // Writing the guard's record synchronously rather than deferring it is
+        // what puts it inside its own call's window. A deferred write could
+        // land after the `tool_end`, or after a later call's `tool_start`,
+        // which is what `count_auth_failures_between` scopes by.
+        let tool_start = records_of_kind(&path, "tool_start");
+        assert_eq!(tool_start.len(), 1, "one tool call, one tool_start");
+        let seq = |r: &serde_json::Value| r["seq"].as_u64().expect("record seq");
         assert!(
-            !contents.contains("ERR_CANCELLED") && !contents.contains(r#""cancelled""#),
-            "a fired ceiling must not be audited as a cancellation:\n{contents}",
+            seq(&tool_start[0]) < seq(&auth[0]) && seq(&auth[0]) < seq(&tool_end[0]),
+            "the cut connect's auth record must be sequenced inside its own \
+             tool call: tool_start={}, auth={}, tool_end={}",
+            seq(&tool_start[0]),
+            seq(&auth[0]),
+            seq(&tool_end[0]),
+        );
+        assert_eq!(
+            tool_end[0]["error_code"], "ERR_TIMEOUT",
+            "a fired ceiling must be audited as ERR_TIMEOUT: {:?}",
+            tool_end[0],
+        );
+        assert_eq!(
+            tool_end[0]["status"], "error",
+            "a fired ceiling must not be audited as a cancellation: {:?}",
+            tool_end[0],
         );
     }
 }

@@ -41,7 +41,9 @@ tokio::task::spawn_blocking(move || audit.log_auth(record))
 ```
 
 `rimap_imap::Connection::ensure_connected` is the canonical example.
-Every `Auth` audit record passes through this pattern.
+Every `Auth` audit record written from an async context passes through
+this pattern. One is not written from an async context — see the
+deliberate exception under the session lock below.
 
 ## The connection session lock (`tokio::sync::Mutex`)
 
@@ -59,12 +61,20 @@ Why this is fine:
 - The lock serializes IMAP commands per-connection, which is what we
   want: a single IMAP session can only have one in-flight tagged
   command at a time per RFC 3501.
-- We never hold the connection lock and the audit lock simultaneously.
-  When a connect attempt finishes (success or failure), we drop the
-  session lock guard before calling `spawn_blocking` to log the audit
-  record. The two locks are taken in opposite orders by different code
-  paths, so even acquiring both would not deadlock — but in practice
-  nothing in Sprint 3 holds both at once.
+- The audit lock is a leaf: nothing that holds it reaches for a session
+  lock, so no ordering between the two can deadlock.
+- On every ordinary path the audit write also runs on a `spawn_blocking`
+  thread, so the session lock is never held while a runtime worker is
+  parked on disk I/O.
+- **One path is deliberately different.** `AuthEmitGuard` (#623) writes
+  the `auth` record for a connect that was cut before it finished, and
+  it writes it from a `Drop`, which cannot await. That write is
+  synchronous, and it runs with `dispatch::attempt`'s session lock still
+  held — so a peer queued on that account waits out one fsync. The
+  alternative loses the record entirely when the cut is a runtime
+  shutdown; `Connection::emit_auth_blocking` documents the full
+  trade-off. This is the only place a blocking audit write happens under
+  the session lock, and it must stay that way.
 
 ### Operator impact: concurrent calls to one account serialize
 
@@ -101,4 +111,10 @@ connection limits).
 
 Future contributors who add new audit emission paths from async code:
 follow the `spawn_blocking` pattern in
-`crates/rimap-imap/src/connection.rs::Connection::emit_auth`.
+`crates/rimap-imap/src/connection/login.rs::Connection::emit_auth`.
+
+The single exception is `Connection::emit_auth_blocking` in the same
+file, which writes synchronously because its caller is a `Drop` and
+cannot await. Do not copy it without reading the trade-off argument on
+it: it is justified only where there is no async context to defer from,
+and it makes `audit.path` a local-storage requirement.

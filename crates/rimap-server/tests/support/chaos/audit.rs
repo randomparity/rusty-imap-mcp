@@ -92,11 +92,22 @@ pub fn last_tool_call_matching_error(records: &[Value], codes: &[&str]) -> Optio
 
 /// Count `auth` records with `result == "failure"` whose seq lies strictly
 /// between `start_seq` and `end_seq` (the failing call's window).
+///
+/// `ERR_CANCELLED` records are excluded. Since #623 a connect that was cut
+/// before it reached a verdict — by the per-tool-call ceiling, a client
+/// cancellation, or a shutdown — also lands as a `failure`, and counting it as
+/// one would make these scenarios read a cut as the connect failure they exist
+/// to assert. `docs/audit-log.md` gives operators the same rule.
 pub fn count_auth_failures_between(records: &[Value], start_seq: u64, end_seq: u64) -> usize {
     let mut n = 0;
     for r in records {
         let Some(s) = seq(r) else { continue };
-        if r["kind"] == "auth" && r["result"] == "failure" && s > start_seq && s < end_seq {
+        if r["kind"] == "auth"
+            && r["result"] == "failure"
+            && r["error_code"] != "ERR_CANCELLED"
+            && s > start_seq
+            && s < end_seq
+        {
             n += 1;
         }
     }
@@ -135,6 +146,27 @@ mod tests {
             Some("ERR_CONNECTION_LOST")
         );
         assert_eq!(count_auth_failures_between(&recs, s0, s1), 1);
+    }
+
+    /// A connect cut by the ceiling records `failure` / `ERR_CANCELLED`
+    /// (#623). That is not the connect failure a chaos scenario asserts on, so
+    /// it must not be counted alongside one.
+    #[test]
+    fn ignores_cancelled_connects_inside_the_window() {
+        let jsonl = [
+            line(json!({"seq":0,"kind":"tool_start"})),
+            line(json!({"seq":1,"kind":"auth","result":"failure","error_code":"ERR_CANCELLED"})),
+            line(json!({"seq":2,"kind":"auth","result":"failure","error_code":"ERR_TLS"})),
+            line(json!({"seq":3,"kind":"tool_end","start_seq":0,"error_code":"ERR_TIMEOUT"})),
+        ]
+        .join("\n");
+        let recs = parse_lines(&jsonl);
+        let (s0, s1) = last_tool_call(&recs).expect("a tool call");
+        assert_eq!(
+            count_auth_failures_between(&recs, s0, s1),
+            1,
+            "only the ERR_TLS record is a connect failure",
+        );
     }
 
     #[test]

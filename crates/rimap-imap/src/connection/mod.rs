@@ -7,9 +7,13 @@
 //!   points (it has to be — async-imap commands are themselves `.await`).
 //! - The injected [`AuthEventSink`] may hold its own internal
 //!   `std::sync::Mutex` (the production `rimap-audit::AuditWriter`
-//!   does). That lock is NEVER held across an `.await` because every
-//!   call to [`AuthEventSink::emit_auth`] goes through
-//!   `tokio::task::spawn_blocking`.
+//!   does). That lock is NEVER held across an `.await`. Every call
+//!   from an async context goes through `tokio::task::spawn_blocking`;
+//!   the one call from a synchronous context — `AuthEmitGuard`'s
+//!   `Drop`, which cannot await at all — takes and releases the lock
+//!   inline. Both shapes satisfy the rule; only the second blocks the
+//!   thread it runs on, and `Connection::emit_auth_blocking` argues why
+//!   that is the right trade there.
 //!
 //! These two rules are independent and both must hold. See
 //! `docs/architecture/audit-locking.md`.
@@ -214,6 +218,136 @@ impl Drop for SessionGuard<'_> {
     }
 }
 
+/// Facts about an in-flight connect that only become known partway through it.
+///
+/// `AuthContext` needs a credential source, and `connect_with_bundle` learns it
+/// at the moment `imap_login` resolves the credential — well after the TCP
+/// connect and the TLS handshake. Returning it up the stack makes it readable
+/// only once the connect has *finished*, which is exactly the case a cut
+/// connect is not: [`AuthEmitGuard`] has to build its record from whatever is
+/// known at the instant the future is dropped.
+///
+/// A cell written where the fact is learned makes the value readable from both
+/// places, and — because [`Connection::auth_context`] is the single reader —
+/// makes the cut record and the completed record describe the same attempt by
+/// construction. `TlsConfigBundle::last_observed` is the same shape for the
+/// same reason, which is why the observed fingerprint is not duplicated here.
+#[derive(Debug, Default)]
+pub(super) struct ConnectProgress {
+    credential_source: std::sync::OnceLock<rimap_core::CredentialSource>,
+}
+
+impl ConnectProgress {
+    /// Publish the credential source the moment resolution succeeds.
+    ///
+    /// `OnceLock` rather than `Cell` because `&ConnectProgress` is held across
+    /// the connect's awaits: a `Cell` is not `Sync`, which would make the
+    /// connect future non-`Send` and unspawnable on the multi-threaded runtime.
+    /// There is exactly one writer, so `set` cannot lose; ignoring its result
+    /// documents that rather than asserting it.
+    pub(super) fn record_credential_source(&self, source: rimap_core::CredentialSource) {
+        let _ = self.credential_source.set(source);
+    }
+
+    fn credential_source(&self) -> Option<rimap_core::CredentialSource> {
+        self.credential_source.get().copied()
+    }
+}
+
+/// Emits [`Connection::connect_inner`]'s `auth` record when the connect future
+/// is dropped before that function reaches its own emit (#623).
+///
+/// `connect_inner` documents one `auth` record per connect attempt, and the
+/// audit log it feeds is append-only and security-relevant: an attempt that was
+/// initiated and recorded nothing is a gap an operator cannot tell from an
+/// attempt that never happened. Four cuts reach that gap, none of which the
+/// connect can see coming — the per-tool-call ceiling (#594, ADR-0012), a
+/// client cancellation, a runtime shutdown, and a panic unwinding through the
+/// connect. All four drop the frame, and a `Drop` impl is the only thing that
+/// still runs.
+///
+/// So [`rimap_core::ErrorCode::Cancelled`] on an `auth` record reads as *the
+/// attempt was cut*, which is wider than the word "cancelled" suggests. It is
+/// still the right code: none of the four is a verdict the connect reached,
+/// and the alternative is a code per cause that no consumer would branch on.
+///
+/// Deterministic for the ceiling and for a client cancellation. On a runtime
+/// shutdown it is best-effort: `Runtime::shutdown_background` waits for
+/// nothing, so the process can exit before the worker dropping this future
+/// reaches the write.
+///
+/// Armed for the whole connect rather than from the first socket write, so a
+/// cut parked in `TcpStream::connect` is recorded too. That is deliberate: the
+/// attempt is what the log is about, and an operator reading a gap cannot know
+/// which side of the connect it fell on.
+///
+/// ## Why it emits from `Drop` rather than being prevented upstream
+///
+/// The alternative #623 lists first is to exempt an in-flight connect from the
+/// ceiling. That fails on both halves: the ceiling lives in `rimap-server` and
+/// the connect in `rimap-imap`, so the exemption would have to cross a crate
+/// seam that exists to keep the transport free of server policy — and it would
+/// still not cover a client cancellation, where no ceiling is involved and none
+/// of our code runs at all. A guard at the connect covers every cut, including
+/// ones no caller can enumerate.
+///
+/// ## What the record says
+///
+/// [`rimap_core::ErrorCode::Cancelled`], never a verdict the attempt did not
+/// reach. The guard cannot know why it was dropped, and a record claiming
+/// `ERR_TIMEOUT` or `ERR_AUTH` for an attempt that was simply cut would be
+/// worse than the gap it replaces. The `tool_end` record written by the layer
+/// that did the cutting carries the reason.
+///
+/// The rest of the record is whatever was known at the instant of the drop —
+/// see [`ConnectProgress`]. Early cuts (a parked TLS handshake) legitimately
+/// carry no fingerprint and no credential source, which is the same shape a
+/// pre-resolve failure already produces.
+///
+/// The write is synchronous, on the dropping thread. `emit_auth_blocking`
+/// states why that is the right trade here and nowhere else; the short version
+/// is that deferring it to the blocking pool guarantees the loss during a
+/// runtime shutdown, where writing inline at least has a chance.
+struct AuthEmitGuard<'a> {
+    conn: &'a Connection,
+    bundle: &'a TlsConfigBundle,
+    progress: &'a ConnectProgress,
+    armed: bool,
+}
+
+impl<'a> AuthEmitGuard<'a> {
+    fn new(
+        conn: &'a Connection,
+        bundle: &'a TlsConfigBundle,
+        progress: &'a ConnectProgress,
+    ) -> Self {
+        Self {
+            conn,
+            bundle,
+            progress,
+            armed: true,
+        }
+    }
+
+    /// The connect reached its own verdict, so `connect_inner` owns the record
+    /// from here. Called *before* the normal emit, not after: see the comment
+    /// at the call site for why the ordering is load-bearing.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AuthEmitGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let ctx = self.conn.auth_context(self.bundle, self.progress);
+        self.conn
+            .emit_auth_blocking(auth_failure(&ctx, rimap_core::ErrorCode::Cancelled));
+    }
+}
+
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connection")
@@ -389,44 +523,78 @@ impl Connection {
         true
     }
 
-    /// The full connect/handshake/login/CAPABILITY flow. Emits exactly one
-    /// `Auth` audit record on every termination path.
+    /// Assemble the `auth` record's inputs from the connection's own config
+    /// plus whatever the in-flight connect has published so far.
     ///
-    /// Callers must not wrap this in a shorter deadline than `connect_timeout`:
-    /// the emit happens after `connect_with_bundle` returns, so cancelling the
-    /// future mid-connect loses the record. See `dispatch::attempt`, which
-    /// deliberately runs it outside the command timeout.
-    pub(super) async fn connect_inner(&self) -> Result<ImapSession, ImapError> {
+    /// The single reader of [`ConnectProgress`] and of
+    /// `TlsConfigBundle::last_observed`, so a record written by
+    /// [`AuthEmitGuard`] on a cut connect and one written by
+    /// [`Self::connect_inner`] on a completed connect cannot disagree about
+    /// anything but the outcome.
+    fn auth_context<'a>(
+        &'a self,
+        bundle: &TlsConfigBundle,
+        progress: &ConnectProgress,
+    ) -> AuthContext<'a> {
         let cfg = &self.inner.cfg;
-        let bundle = build_tls_config(cfg.pinned_fingerprint)?;
-
-        // Run the connect flow. The return type carries `credential_source` for
-        // both the success and post-resolve-failure paths.  Pre-resolve failures
-        // (TLS, connect, greeting, CAPABILITY) return `None`; post-resolve
-        // failures (LoginRejected) and success both return `Some(source)`.
-        let raw_outcome = self.connect_with_bundle(&bundle).await;
-        let (outcome, credential_source) = match raw_outcome {
-            Ok((session, src)) => (Ok(session), Some(src)),
-            Err((err, src)) => (
-                Err(enrich_tls_handshake_error(
-                    err,
-                    &bundle,
-                    cfg.pinned_fingerprint,
-                )),
-                src,
-            ),
-        };
-
-        let observed = bundle.last_observed.get().copied();
-        let ctx = AuthContext {
+        AuthContext {
             account: cfg.account.as_deref(),
             host: &cfg.host,
             port: cfg.port,
             username: &cfg.username,
             pinned: cfg.pinned_fingerprint,
-            observed,
-            credential_source,
-        };
+            observed: bundle.last_observed.get().copied(),
+            credential_source: progress.credential_source(),
+        }
+    }
+
+    /// The full connect/handshake/login/CAPABILITY flow. Emits exactly one
+    /// `Auth` audit record on every termination path from the TLS config
+    /// onwards, including the paths on which this function never returns at
+    /// all.
+    ///
+    /// Two carve-outs, both narrow and both stated where they arise:
+    /// `build_tls_config` failing exits earlier than the attempt itself and
+    /// records nothing, and a runtime shutdown can discard the completed
+    /// path's queued write — see the comment on the disarm below.
+    ///
+    /// A caller *may* wrap this in a deadline shorter than `connect_timeout` —
+    /// the per-tool-call ceiling (#594, ADR-0012) does. Cutting the future
+    /// mid-connect used to lose the record, because the emit below only runs
+    /// after `connect_with_bundle` returns; [`AuthEmitGuard`] now writes it
+    /// instead (#623). `dispatch::attempt` still runs this outside the command
+    /// timeout, for the separate reason its own docs give.
+    pub(super) async fn connect_inner(&self) -> Result<ImapSession, ImapError> {
+        let cfg = &self.inner.cfg;
+        let bundle = build_tls_config(cfg.pinned_fingerprint)?;
+        let progress = ConnectProgress::default();
+
+        // Armed for the whole connect. Anything that drops this future before
+        // the emit below — the ceiling, a client cancellation, a runtime
+        // shutdown — leaves the guard to write the record.
+        let mut emit_guard = AuthEmitGuard::new(self, &bundle, &progress);
+
+        let outcome = self
+            .connect_with_bundle(&bundle, &progress)
+            .await
+            .map_err(|err| enrich_tls_handshake_error(err, &bundle, cfg.pinned_fingerprint));
+
+        let ctx = self.auth_context(&bundle, &progress);
+
+        // Disarm BEFORE the emit, not after. `emit_auth` dispatches the write
+        // to `spawn_blocking` on its first poll, and tokio does not cancel a
+        // blocking task when its `JoinHandle` is dropped, so a cut at that
+        // `.await` still lands the record. Disarming afterwards would let the
+        // guard add a second one.
+        //
+        // One exception, and it is a gap rather than a duplicate: a runtime
+        // that starts shutting down discards even an already-queued blocking
+        // closure, so a connect that completed and then lost its emit to a
+        // shutdown records nothing — the guard is disarmed by then. Closing it
+        // would mean making this emit synchronous too, which is a wider change
+        // than #623; tracked in #643. Disarming *after* would not fix it
+        // either, only trade a rare gap for a rare duplicate at the same await.
+        emit_guard.disarm();
 
         match &outcome {
             Ok(_) => self.emit_auth(auth_success(&ctx)).await?,
@@ -436,12 +604,16 @@ impl Connection {
                 // ImapError::TlsHandshake, ImapError::Connect, ...) is what the
                 // caller and monitoring need to see. Replacing it with
                 // ImapError::Audit would mask brute-force signals from
-                // whatever observed ERR_AUTH before. Audit-write failures
-                // on this path are still visible via tracing; operators
-                // running fail_open=false will additionally see the
-                // suppressed_failures counter in process_end once #8
-                // lands.
+                // whatever observed ERR_AUTH before.
+                //
+                // Swallowed, but not uncounted: `note_auth_write_lost` folds
+                // the loss into the sink's own counter, which is what an
+                // operator running `fail_open = false` has to go on when the
+                // only other trace is a stderr line. (That counter reaches
+                // `process_end` when #8 wires it; today it is readable via
+                // `AuditWriter::suppressed_failures`.)
                 if let Err(audit_err) = self.emit_auth(auth_failure(&ctx, err.code())).await {
+                    self.inner.audit.note_auth_write_lost();
                     tracing::error!(
                         original_error = %err,
                         audit_error = %audit_err,
@@ -485,7 +657,9 @@ mod tests {
     impl rimap_core::credential::CredentialResolver for UnusedResolver {
         #[expect(
             clippy::panic_in_result_fn,
-            reason = "accessor test builds a Connection but never opens a session"
+            reason = "no test in this module reaches credential resolution: the \
+                      accessor tests never open a session, and the connect tests \
+                      are cut or refused before login"
         )]
         fn resolve(
             &self,
@@ -499,7 +673,7 @@ mod tests {
             ),
             rimap_core::credential::CredentialResolverError,
         > {
-            panic!("credential resolver must not be invoked by an accessor test");
+            panic!("credential resolver must not be invoked by these tests");
         }
     }
 
@@ -522,6 +696,256 @@ mod tests {
             std::sync::Arc::new(NoopSink),
             std::sync::Arc::new(UnusedResolver),
         )
+    }
+
+    /// Collects every [`rimap_core::auth_event::AuthEvent`] the connect flow
+    /// emits, so a test can count them. Counting is the point: the guard added
+    /// for #623 must produce a record when the connect future is dropped and
+    /// must produce *no second* record when it is not.
+    #[derive(Debug, Default)]
+    struct RecordingSink {
+        events: std::sync::Mutex<Vec<rimap_core::auth_event::AuthEvent>>,
+    }
+
+    impl RecordingSink {
+        fn events(&self) -> Vec<rimap_core::auth_event::AuthEvent> {
+            self.events.lock().expect("recording sink mutex").clone()
+        }
+    }
+
+    impl rimap_core::auth_sink::AuthEventSink for RecordingSink {
+        fn emit_auth(
+            &self,
+            event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            self.events
+                .lock()
+                .expect("recording sink mutex")
+                .push(event);
+            Ok(())
+        }
+    }
+
+    /// Rejects every event and counts how many losses the caller reported.
+    /// Models the production sink under `fail_open = false` with a full disk.
+    #[derive(Debug, Default)]
+    struct RejectingSink {
+        losses: std::sync::atomic::AtomicUsize,
+    }
+
+    impl rimap_core::auth_sink::AuthEventSink for RejectingSink {
+        fn emit_auth(
+            &self,
+            _event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            Err(rimap_core::auth_sink::AuthSinkError::new(
+                rimap_core::ErrorCode::Internal,
+                "sink rejects everything",
+                Box::new(std::io::Error::other("disk full (test)")),
+            ))
+        }
+
+        fn note_auth_write_lost(&self) {
+            self.losses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// A record the guard could not write must still be *counted*. The guard
+    /// runs in a `Drop`, so swallowing the error is forced — but under the
+    /// default `fail_open = false` the writer returns the error rather than
+    /// counting it itself, so without this call the loss would leave nothing
+    /// behind but a stderr line. That would make the stricter setting yield
+    /// less evidence than the laxer one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_the_guard_cannot_write_is_still_counted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let accepted = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let sink = std::sync::Arc::new(RejectingSink::default());
+        let cfg = super::ConnectionConfig {
+            account: None,
+            account_id: rimap_core::account::AccountId::default_account(),
+            host: "127.0.0.1".to_string(),
+            port,
+            encryption: super::ImapEncryption::Tls,
+            username: "alice@example.com".to_string(),
+            pinned_fingerprint: None,
+            connect_timeout: std::time::Duration::from_secs(30),
+            command_timeout: std::time::Duration::from_secs(30),
+            max_fetch_body_bytes: 4096,
+            max_append_bytes: 1024,
+        };
+        let conn = super::Connection::new(
+            cfg,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+            std::sync::Arc::new(UnusedResolver),
+        );
+
+        let cut =
+            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
+        assert!(cut.is_err(), "the caller deadline must elapse first");
+
+        assert_eq!(
+            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a rejected guard write must be reported as a lost record",
+        );
+
+        accepted.abort();
+    }
+
+    /// A connection aimed at `127.0.0.1:port` whose sink records every event.
+    /// The resolver is [`UnusedResolver`]: both connect tests below are cut
+    /// or refused before `imap_login` reaches credential resolution, and a
+    /// panic is the loudest way to catch that assumption breaking.
+    fn recording_connection(port: u16) -> (super::Connection, std::sync::Arc<RecordingSink>) {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let cfg = super::ConnectionConfig {
+            account: Some("acct".to_string()),
+            account_id: rimap_core::account::AccountId::default_account(),
+            host: "127.0.0.1".to_string(),
+            port,
+            encryption: super::ImapEncryption::Tls,
+            username: "alice@example.com".to_string(),
+            pinned_fingerprint: None,
+            connect_timeout: std::time::Duration::from_secs(30),
+            command_timeout: std::time::Duration::from_secs(30),
+            max_fetch_body_bytes: 4096,
+            max_append_bytes: 1024,
+        };
+        let conn = super::Connection::new(
+            cfg,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+            std::sync::Arc::new(UnusedResolver),
+        );
+        (conn, sink)
+    }
+
+    /// A caller-imposed deadline shorter than `connect_timeout` — the
+    /// per-tool-call ceiling is the one that ships (#594, ADR-0012) — drops
+    /// `connect_inner`'s future while the TLS handshake is still parked. A
+    /// socket was opened to the server, so the append-only auth log must say
+    /// so; before #623 it recorded nothing at all.
+    ///
+    /// The listener accepts and then writes nothing, so the client blocks on
+    /// a `ServerHello` that never arrives. That parks strictly *before*
+    /// credential resolution, which is what makes this also the early-drop
+    /// case: the guard has to build a record from a half-populated
+    /// `AuthContext` (no observed fingerprint, no credential source).
+    ///
+    /// No settling wait, deliberately: the guard writes on the dropping
+    /// thread, so `timeout(..).await` returning means the record is already
+    /// in the sink. A test that had to poll for it would also pass with the
+    /// count assertion racing a second record it never saw.
+    ///
+    /// The 150ms budget has to stay well clear of `build_tls_config`, which
+    /// runs *before* the guard is armed and builds a ~150-anchor root store on
+    /// every connect. That costs single-digit milliseconds today; a cut landing
+    /// inside it would record nothing and fail here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connect_cut_by_a_caller_deadline_still_emits_one_auth_record() {
+        use rimap_core::auth_event::AuthResult;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let accepted = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream); // keep the socket open, send nothing
+            }
+        });
+
+        let (conn, sink) = recording_connection(port);
+        let cut =
+            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
+        assert!(
+            cut.is_err(),
+            "the caller deadline must elapse first; a connect that finished on \
+             its own would make the assertions below vacuous",
+        );
+
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "a connect cut mid-flight must leave exactly one auth record: {events:?}",
+        );
+        let event = &events[0];
+        assert_eq!(event.result, AuthResult::Failure);
+        assert_eq!(
+            event.error_code,
+            Some(rimap_core::ErrorCode::Cancelled),
+            "the connect did not fail on its own terms — it was cut, and the \
+             record must not claim a verdict the attempt never reached",
+        );
+        assert_eq!(event.account.as_deref(), Some("acct"));
+        assert_eq!(event.username, "alice@example.com");
+        assert_eq!(event.port, port);
+        assert_eq!(
+            event.tls_fingerprint_sha256, None,
+            "the handshake never reached certificate verification",
+        );
+        assert_eq!(
+            event.credential_source, None,
+            "the cut landed before credential resolution",
+        );
+
+        accepted.abort();
+    }
+
+    /// The disarm half. A connect that reaches its own verdict emits its one
+    /// record on the normal path, and the drop guard must not add a second as
+    /// the frame unwinds — a duplicated auth record is as much a defect in an
+    /// append-only log as a missing one.
+    ///
+    /// Nothing is listening on the port, so the TCP connect is refused
+    /// immediately and `connect_inner` returns `Err` rather than being cut.
+    #[tokio::test]
+    async fn a_connect_that_reached_its_own_verdict_emits_exactly_one_record() {
+        use rimap_core::auth_event::AuthResult;
+
+        // Bind and immediately drop, so the port is (near-certainly) unused
+        // and the connect is refused rather than parked.
+        let port = {
+            let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind probe listener");
+            probe.local_addr().expect("probe addr").port()
+        };
+
+        let (conn, sink) = recording_connection(port);
+        let outcome = conn.connect_inner().await;
+        assert!(
+            outcome.is_err(),
+            "a refused TCP connect must fail rather than open a session",
+        );
+
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "the normal emit path and the drop guard must not both fire: {events:?}",
+        );
+        assert_eq!(events[0].result, AuthResult::Failure);
+        assert_eq!(
+            events[0].error_code,
+            Some(rimap_core::ErrorCode::ConnectionLost),
+            "the record must carry the connect's own verdict, not the guard's \
+             ERR_CANCELLED placeholder",
+        );
     }
 
     /// `poison` is a one-shot flag consumed under the session lock. The
@@ -635,10 +1059,39 @@ mod tests {
         assert_eq!(conn.max_fetch_body_bytes(), 4096);
     }
 
+    /// No `ImapError` maps to [`rimap_core::ErrorCode::Cancelled`], and that
+    /// is what makes `kind=auth` + `ERR_CANCELLED` uniquely identify a record
+    /// written by [`super::AuthEmitGuard`] rather than by a connect that
+    /// reached its own verdict.
+    ///
+    /// Consumers rely on that: `docs/audit-log.md` tells operators to exclude
+    /// the code from failed-login counts, and the chaos harness's
+    /// `count_auth_failures_between` does the same. A future variant mapping
+    /// to `Cancelled` would collide with the guard's placeholder and be
+    /// silently dropped from both. The list is the one
+    /// `error_code_for_covers_every_variant` maintains; this asserts the
+    /// property over it.
     #[test]
-    fn error_code_for_covers_every_variant() {
+    fn no_imap_error_maps_to_the_guards_cancelled_placeholder() {
+        for (err, _expected) in error_code_cases() {
+            // Read the real mapping, not the expected-value column: asserting
+            // over the table would only pin that the table says no such thing.
+            assert_ne!(
+                err.code(),
+                rimap_core::ErrorCode::Cancelled,
+                "{err:?} maps to ERR_CANCELLED, which the cut-connect drop \
+                 guard reserves; give it a code of its own or the two become \
+                 indistinguishable in the audit log",
+            );
+        }
+    }
+
+    /// Every `ImapError` variant paired with the audit code it must map to.
+    /// Shared by the mapping test and by the ERR_CANCELLED-reservation test,
+    /// so a new variant is covered by both from one edit.
+    fn error_code_cases() -> Vec<(ImapError, &'static str)> {
         use crate::error::StarttlsFailure;
-        let cases: Vec<(ImapError, &str)> = vec![
+        vec![
             (
                 ImapError::Tls {
                     observed: fp_zeros(),
@@ -718,8 +1171,12 @@ mod tests {
                 },
                 "ERR_INTERNAL",
             ),
-        ];
-        for (err, expected) in &cases {
+        ]
+    }
+
+    #[test]
+    fn error_code_for_covers_every_variant() {
+        for (err, expected) in &error_code_cases() {
             assert_eq!(err.code().as_str(), *expected, "for {err:?}");
         }
     }

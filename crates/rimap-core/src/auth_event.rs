@@ -58,8 +58,11 @@ pub struct AuthEvent {
     /// On failure, the stable error code (`ERR_TLS`, `ERR_AUTH`, …); `None`
     /// on success.
     pub error_code: Option<ErrorCode>,
-    /// Credential source on success; `None` on failure (credential was never
-    /// resolved) or on records from code paths that predate #78.
+    /// Which store the credential came from. `None` when the attempt ended
+    /// before resolution — a TLS or greeting failure, or a cut that landed
+    /// early — and on records from code paths that predate #78. A failure
+    /// *after* resolution (a rejected login, a timeout mid-LOGIN, a cut) does
+    /// carry the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_source: Option<CredentialSource>,
 }

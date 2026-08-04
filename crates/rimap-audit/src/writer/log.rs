@@ -58,6 +58,17 @@ impl AuthEventSink for AuditWriter {
             }
         }
     }
+
+    /// Count an `auth` record the caller could not surface a failure for.
+    ///
+    /// Folded into the same counter as a `fail_open` suppression: both mean
+    /// "a record that should be on disk is not, and no caller was told".
+    /// Distinguishing them would need a second counter for no decision an
+    /// operator makes differently — either way the audit trail has a hole and
+    /// the cause is in the logs.
+    fn note_auth_write_lost(&self) {
+        self.count_suppressed_failure();
+    }
 }
 
 impl AuditWriter {
@@ -269,6 +280,34 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::writer::{AuditOptions, AuditWriter};
+
+    /// `note_auth_write_lost` is how a caller with nowhere to return an audit
+    /// failure — `rimap-imap`'s cut-connect drop guard, and its auth-failure
+    /// branch — keeps the loss countable. It must reach the same counter a
+    /// `fail_open` suppression does, or the stricter `fail_open = false`
+    /// leaves an operator with less evidence than the laxer setting.
+    #[test]
+    fn note_auth_write_lost_increments_the_lost_record_counter() {
+        let dir = TempDir::new().unwrap();
+        let writer = AuditWriter::open(&AuditOptions {
+            path: dir.path().join("audit.jsonl"),
+            rotate_bytes: 0,
+            rotate_keep: 0,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: crate::Seq::FIRST,
+        })
+        .expect("audit open");
+
+        assert_eq!(writer.suppressed_failures(), 0);
+        writer.note_auth_write_lost();
+        writer.note_auth_write_lost();
+        assert_eq!(
+            writer.suppressed_failures(),
+            2,
+            "each reported loss must be counted",
+        );
+    }
 
     #[test]
     fn auth_event_sink_emit_auth_writes_a_record_to_disk() {

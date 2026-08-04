@@ -92,6 +92,30 @@ pub(crate) fn make_test_account_state_at(
     imap_timeout: Duration,
     tool_call_timeout: Duration,
 ) -> AccountState {
+    make_test_account_state_with_sink(
+        name,
+        port,
+        imap_timeout,
+        tool_call_timeout,
+        Arc::new(DiscardingSink),
+    )
+}
+
+/// [`make_test_account_state_at`] with the connection's [`AuthEventSink`]
+/// supplied by the caller.
+///
+/// The default sink discards, which makes the `auth` records the connect flow
+/// writes invisible. A test that asserts on those records — the ceiling test
+/// for #623 asserts a cut connect still writes one — passes the same
+/// `AuditWriter` the server logs through, so both record kinds land in one
+/// file in the order they were written.
+pub(crate) fn make_test_account_state_with_sink(
+    name: &str,
+    port: u16,
+    imap_timeout: Duration,
+    tool_call_timeout: Duration,
+    sink: Arc<dyn AuthEventSink>,
+) -> AccountState {
     let id = AccountId::new(name).expect("test account name must be valid");
     let conn_cfg = ConnectionConfig {
         account: if name == rimap_core::account::DEFAULT_ACCOUNT_NAME {
@@ -111,7 +135,6 @@ pub(crate) fn make_test_account_state_at(
         max_append_bytes: 1024,
     };
     let creds: Arc<dyn CredentialResolver> = Arc::new(PanickingCreds);
-    let sink: Arc<dyn AuthEventSink> = Arc::new(DiscardingSink);
     let imap = Connection::new(conn_cfg, sink, creds);
 
     let matrix = EffectiveMatrix::build(Posture::DraftSafe, &BTreeMap::new());
