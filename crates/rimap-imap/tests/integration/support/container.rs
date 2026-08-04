@@ -15,7 +15,7 @@ use rimap_core::TlsFingerprint;
 
 /// Name of the container runtime binary to invoke (`docker` or `podman`).
 /// Detected once per process. Falls back to `"docker"` even when nothing is
-/// installed — callers gate on [`runtime_available`] before using it.
+/// installed — callers gate on [`probe_runtime`] before using it.
 fn runtime() -> &'static str {
     static TOOL: OnceLock<&'static str> = OnceLock::new();
     TOOL.get_or_init(|| {
@@ -45,8 +45,46 @@ fn binary_present(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn runtime_available() -> bool {
-    binary_present("docker") || binary_present("podman")
+/// Budget for the daemon probe below. A stopped daemon refuses its socket
+/// immediately, but one that is mid-restart can accept the connection and then
+/// never answer — without a deadline that turns the unusable-runtime case from
+/// a fast skip into a hang.
+const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `true` when `<tool> info` completes successfully within
+/// [`DAEMON_PROBE_TIMEOUT`]. This is the first call that actually contacts the
+/// engine — `binary_present` only proves the CLI is on `PATH`. Works for both
+/// runtimes: docker reaches its daemon, podman its local or VM-hosted service.
+fn daemon_responds(tool: &str) -> bool {
+    Command::new(tool)
+        .arg("info")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+        .and_then(|child| wait_bounded(child, DAEMON_PROBE_TIMEOUT))
+        .unwrap_or(false)
+}
+
+/// Wait for `child`, returning `Some(success)` when it exits within `budget`
+/// and `None` after killing it when it does not. `Command::output()` cannot be
+/// used for the probe because it waits forever.
+fn wait_bounded(mut child: std::process::Child, budget: Duration) -> Option<bool> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -82,10 +120,12 @@ pub struct DovecotHarness {
 
 impl DovecotHarness {
     /// Start a fresh Dovecot container. Returns `Err(DockerUnavailable)`
-    /// and skips the test silently when neither `docker` nor `podman`
-    /// is installed (unless `RIMAP_REQUIRE_DOCKER=1` is set, in which
-    /// case the absence becomes a hard error). Pick a specific runtime
-    /// with `RIMAP_CONTAINER_TOOL={docker,podman}`.
+    /// and skips the test silently when the host cannot run containers at
+    /// all — no `docker`/`podman` binary, or a binary whose daemon does not
+    /// answer (unless `RIMAP_REQUIRE_DOCKER=1` is set, in which case either
+    /// becomes a hard error). Pick a specific runtime with
+    /// `RIMAP_CONTAINER_TOOL={docker,podman}`. Failures once the container
+    /// is being brought up are never skipped.
     pub fn try_start() -> Result<Self, HarnessError> {
         check_prerequisites()?;
 
@@ -250,20 +290,60 @@ impl DovecotHarness {
     }
 }
 
+/// Why the container runtime can or cannot be used. `NoBinary` and
+/// `DaemonDown` are both silent-skip reasons — the host genuinely cannot run
+/// the fixture — and differ only in the message they produce under
+/// `RIMAP_REQUIRE_DOCKER=1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeProbe {
+    Ready,
+    NoBinary,
+    DaemonDown,
+}
+
 fn check_prerequisites() -> Result<(), HarnessError> {
-    let require_runtime = std::env::var("RIMAP_REQUIRE_DOCKER").is_ok();
+    gate(
+        probe_runtime(),
+        std::env::var("RIMAP_REQUIRE_DOCKER").is_ok(),
+    )
+}
 
-    if !runtime_available() {
-        return if require_runtime {
-            Err(HarnessError::DockerCommandFailed(
-                "neither docker nor podman found but RIMAP_REQUIRE_DOCKER=1".into(),
-            ))
+/// Probe the runtime `runtime()` actually selected — probing both binaries
+/// would ignore a `RIMAP_CONTAINER_TOOL` override pointing at the unusable one.
+/// Cached for the process: 11 container-gated test binaries with many tests
+/// each must not pay a process spawn per test.
+fn probe_runtime() -> RuntimeProbe {
+    static PROBE: OnceLock<RuntimeProbe> = OnceLock::new();
+    *PROBE.get_or_init(|| {
+        let tool = runtime();
+        if !binary_present(tool) {
+            RuntimeProbe::NoBinary
+        } else if daemon_responds(tool) {
+            RuntimeProbe::Ready
         } else {
-            Err(HarnessError::DockerUnavailable)
-        };
-    }
+            RuntimeProbe::DaemonDown
+        }
+    })
+}
 
-    Ok(())
+/// Map a probe outcome onto the skip-or-fail contract. Pure, so every
+/// combination is unit-testable without a container runtime. Note this covers
+/// only *prerequisites*: a failure after the gate — `compose up` refusing an
+/// image, or exhausting its address pools — stays a `DockerCommandFailed` that
+/// no caller silent-skips on.
+fn gate(probe: RuntimeProbe, require_runtime: bool) -> Result<(), HarnessError> {
+    let reason = match probe {
+        RuntimeProbe::Ready => return Ok(()),
+        RuntimeProbe::NoBinary => "neither docker nor podman found",
+        RuntimeProbe::DaemonDown => "container runtime found but its daemon did not respond",
+    };
+    if require_runtime {
+        Err(HarnessError::DockerCommandFailed(format!(
+            "{reason} but RIMAP_REQUIRE_DOCKER=1"
+        )))
+    } else {
+        Err(HarnessError::DockerUnavailable)
+    }
 }
 
 /// Minimal interface over `docker compose up` so the retry wrapper
@@ -757,6 +837,119 @@ mod tests {
 
     const PORT_COLLISION_STDERR: &str =
         "Bind for 127.0.0.1:12345 failed: port is already allocated";
+
+    /// A reachable binary with a dead daemon must skip, not hard-fail (#636).
+    #[test]
+    fn gate_skips_when_daemon_is_unreachable() {
+        let err = gate(RuntimeProbe::DaemonDown, false).expect_err("must not pass the gate");
+        assert!(
+            matches!(err, HarnessError::DockerUnavailable),
+            "daemon-down must be a silent skip, got {err:?}"
+        );
+    }
+
+    /// ...but CI, which sets `RIMAP_REQUIRE_DOCKER=1`, must still see it.
+    #[test]
+    fn gate_is_loud_when_daemon_is_unreachable_and_docker_required() {
+        let Err(HarnessError::DockerCommandFailed(msg)) = gate(RuntimeProbe::DaemonDown, true)
+        else {
+            panic!("RIMAP_REQUIRE_DOCKER=1 must turn a dead daemon into a hard error");
+        };
+        assert!(
+            msg.contains("daemon"),
+            "message must name the cause: {msg:?}"
+        );
+        assert!(msg.contains("RIMAP_REQUIRE_DOCKER"), "got {msg:?}");
+    }
+
+    #[test]
+    fn gate_skips_when_no_runtime_binary_is_installed() {
+        let err = gate(RuntimeProbe::NoBinary, false).expect_err("must not pass the gate");
+        assert!(matches!(err, HarnessError::DockerUnavailable), "{err:?}");
+    }
+
+    #[test]
+    fn gate_is_loud_when_no_binary_and_docker_required() {
+        let Err(HarnessError::DockerCommandFailed(msg)) = gate(RuntimeProbe::NoBinary, true) else {
+            panic!("RIMAP_REQUIRE_DOCKER=1 must turn a missing binary into a hard error");
+        };
+        assert!(msg.contains("RIMAP_REQUIRE_DOCKER"), "got {msg:?}");
+    }
+
+    #[test]
+    fn gate_admits_a_ready_runtime_under_both_postures() {
+        assert!(gate(RuntimeProbe::Ready, false).is_ok());
+        assert!(gate(RuntimeProbe::Ready, true).is_ok());
+    }
+
+    #[test]
+    fn wait_bounded_reports_the_exit_status_of_a_prompt_child() {
+        let ok = Command::new("true").spawn().expect("spawn true");
+        assert_eq!(wait_bounded(ok, DAEMON_PROBE_TIMEOUT), Some(true));
+        let bad = Command::new("false").spawn().expect("spawn false");
+        assert_eq!(wait_bounded(bad, DAEMON_PROBE_TIMEOUT), Some(false));
+    }
+
+    /// A daemon mid-restart can leave the probe hanging; the budget must cut it
+    /// short rather than stall the whole suite.
+    #[test]
+    fn wait_bounded_kills_a_child_that_outlives_its_budget() {
+        let child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let started = Instant::now();
+        assert_eq!(wait_bounded(child, Duration::from_millis(200)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "wait_bounded must return near its budget, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The gate only covers prerequisites. A daemon that dies *after* the probe
+    /// surfaces at `compose up`, and must stay a hard error — silent-skipping
+    /// there would hide real breakage.
+    #[test]
+    fn compose_up_daemon_error_stays_a_hard_failure() {
+        let runner = FlakyComposeRunner::always_fail_with(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?",
+        );
+        let mut tls = ReservedPort::acquire().expect("tls");
+        let mut starttls = ReservedPort::acquire().expect("starttls");
+
+        let result = compose_up_with_retry(
+            &runner,
+            "test-proj",
+            dummy_compose_dir(),
+            &mut tls,
+            &mut starttls,
+        );
+
+        let Err(HarnessError::DockerCommandFailed(msg)) = result else {
+            panic!("a compose-time daemon failure must not be a skip: {result:?}");
+        };
+        assert!(
+            msg.contains("Cannot connect to the Docker daemon"),
+            "{msg:?}"
+        );
+        assert_eq!(
+            runner.attempts(),
+            1,
+            "daemon errors are not port collisions"
+        );
+    }
+
+    /// Address-pool exhaustion is what concurrent container test runs actually
+    /// hit. It is a live daemon refusing work, not an absent one, so it must
+    /// neither be retried as a port collision nor skipped.
+    #[test]
+    fn address_pool_exhaustion_is_not_a_port_collision() {
+        assert!(!is_port_collision(
+            "Error response from daemon: all predefined address pools have been fully subnetted"
+        ));
+    }
 
     #[test]
     fn is_port_collision_matches_docker_engine_error() {

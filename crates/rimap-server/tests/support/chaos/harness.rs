@@ -25,7 +25,8 @@ const COMPOSE_FILE: &str = "docker-compose.chaos.yml";
 pub enum ChaosSkip {
     /// `RIMAP_CHAOS` is unset — the suite is nightly-only and opted out here.
     Disabled,
-    /// `RIMAP_CHAOS=1` but no container runtime and `RIMAP_REQUIRE_DOCKER` unset.
+    /// `RIMAP_CHAOS=1` but no usable container runtime — no binary, or one
+    /// whose daemon did not respond — and `RIMAP_REQUIRE_DOCKER` unset.
     DockerUnavailable,
 }
 
@@ -36,12 +37,24 @@ fn check_gate() -> Result<(), ChaosSkip> {
     if std::env::var("RIMAP_CHAOS").is_err() {
         return Err(ChaosSkip::Disabled);
     }
-    if !runtime_available() {
-        return Err(loud_or_skip(
-            "RIMAP_CHAOS=1 but no docker/podman runtime found",
-        ));
+    match gate_reason(probe_runtime()) {
+        None => Ok(()),
+        Some(reason) => Err(loud_or_skip(reason)),
     }
-    Ok(())
+}
+
+/// The unusable-runtime message for a probe outcome, or `None` when the
+/// runtime is usable. Split out from `check_gate` so the classification is
+/// unit-testable without touching `RIMAP_CHAOS`/`RIMAP_REQUIRE_DOCKER` (env
+/// mutation is process-global and races other tests in the same binary).
+fn gate_reason(probe: RuntimeProbe) -> Option<&'static str> {
+    match probe {
+        RuntimeProbe::Ready => None,
+        RuntimeProbe::NoBinary => Some("RIMAP_CHAOS=1 but no docker/podman runtime found"),
+        RuntimeProbe::DaemonDown => {
+            Some("RIMAP_CHAOS=1 but the container runtime daemon did not respond")
+        }
+    }
 }
 
 /// Under `RIMAP_REQUIRE_DOCKER=1` a real infrastructure failure must fail loudly;
@@ -82,8 +95,74 @@ fn binary_present(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn runtime_available() -> bool {
-    binary_present("docker") || binary_present("podman")
+/// Why the container runtime can or cannot be used. `NoBinary` and
+/// `DaemonDown` are both silent-skip reasons — the host genuinely cannot run
+/// the fixture — and differ only in the message they produce under
+/// `RIMAP_REQUIRE_DOCKER=1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeProbe {
+    Ready,
+    NoBinary,
+    DaemonDown,
+}
+
+/// Budget for the daemon probe below. A stopped daemon refuses its socket
+/// immediately, but one that is mid-restart can accept the connection and then
+/// never answer — without a deadline that turns the unusable-runtime case from
+/// a fast skip into a hang.
+const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Probe the runtime `runtime()` actually selected — probing both binaries
+/// would ignore a `RIMAP_CONTAINER_TOOL` override pointing at the unusable one.
+/// Cached for the process so each test does not pay a process spawn.
+fn probe_runtime() -> RuntimeProbe {
+    static PROBE: std::sync::OnceLock<RuntimeProbe> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        let tool = runtime();
+        if !binary_present(tool) {
+            RuntimeProbe::NoBinary
+        } else if daemon_responds(tool) {
+            RuntimeProbe::Ready
+        } else {
+            RuntimeProbe::DaemonDown
+        }
+    })
+}
+
+/// `true` when `<tool> info` completes successfully within
+/// [`DAEMON_PROBE_TIMEOUT`]. This is the first call that actually contacts the
+/// engine — `binary_present` only proves the CLI is on `PATH`. Works for both
+/// runtimes: docker reaches its daemon, podman its local or VM-hosted service.
+fn daemon_responds(tool: &str) -> bool {
+    Command::new(tool)
+        .arg("info")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+        .and_then(|child| wait_bounded(child, DAEMON_PROBE_TIMEOUT))
+        .unwrap_or(false)
+}
+
+/// Wait for `child`, returning `Some(success)` when it exits within `budget`
+/// and `None` after killing it when it does not. `Command::output()` cannot be
+/// used for the probe because it waits forever.
+fn wait_bounded(mut child: std::process::Child, budget: Duration) -> Option<bool> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 fn dovecot_container_name(project: &str) -> String {
@@ -412,4 +491,38 @@ fn is_port_collision(stderr: &str) -> bool {
     s.contains("port is already allocated")
         || s.contains("address already in use")
         || s.contains("bind for 127.0.0.1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RuntimeProbe, gate_reason, is_port_collision};
+
+    /// A reachable binary with a dead daemon is an unusable runtime, so the
+    /// chaos gate must reach `loud_or_skip` rather than proceed to compose
+    /// (#636). `loud_or_skip` then skips, or panics under
+    /// `RIMAP_REQUIRE_DOCKER=1`.
+    #[test]
+    fn gate_reason_rejects_an_unreachable_daemon() {
+        let reason = gate_reason(RuntimeProbe::DaemonDown);
+        assert!(
+            reason.is_some_and(|r| r.contains("daemon")),
+            "daemon-down must name its cause, got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn gate_reason_rejects_a_missing_binary_and_admits_a_ready_runtime() {
+        assert!(gate_reason(RuntimeProbe::NoBinary).is_some());
+        assert!(gate_reason(RuntimeProbe::Ready).is_none());
+    }
+
+    /// Address-pool exhaustion is a live daemon refusing work, not an absent
+    /// one: it happens after the gate, and must neither be retried as a port
+    /// collision nor skipped.
+    #[test]
+    fn address_pool_exhaustion_is_not_a_port_collision() {
+        assert!(!is_port_collision(
+            "Error response from daemon: all predefined address pools have been fully subnetted"
+        ));
+    }
 }
