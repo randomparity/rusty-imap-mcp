@@ -71,6 +71,10 @@ pub struct AccountState {
     /// from one `LIST` call. Consulted by `create_draft`, `send_email`,
     /// and expanded into `folder_guard`'s protected list.
     pub special_use: SpecialUseMap,
+    /// Wall-clock ceiling on one tool call against this account, from
+    /// `limits.tool_call_timeout_seconds` (#594, ADR-0012). The `[imap]`
+    /// budgets bound each stage; this bounds their sum plus the retry.
+    pub tool_call_timeout: Duration,
 }
 
 impl std::fmt::Debug for AccountState {

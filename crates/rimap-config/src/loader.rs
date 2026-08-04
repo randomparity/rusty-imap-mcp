@@ -216,6 +216,7 @@ path = "/tmp/rimap-audit.jsonl"
         assert_eq!(cfg.security.posture, Posture::DraftSafe);
         assert_eq!(cfg.limits.commands_per_second, 10);
         assert_eq!(cfg.limits.drafts_per_minute, 5);
+        assert_eq!(cfg.limits.tool_call_timeout_seconds, 300);
         assert!(cfg.security.tools.is_empty());
     }
 

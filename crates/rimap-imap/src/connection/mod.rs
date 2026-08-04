@@ -107,6 +107,10 @@ pub(super) struct ConnectionInner {
     /// Server advertised UIDPLUS capability (RFC 4315) after login.
     /// Reset to `false` on `invalidate()`.
     pub(super) has_uidplus: AtomicBool,
+    /// Set by [`Connection::poison`] when a caller above this crate cut a
+    /// command mid-flight. Consumed by `dispatch::attempt` under the
+    /// session lock; see `poison` for why it is a flag and not a lock.
+    pub(super) poisoned: AtomicBool,
 }
 
 impl std::fmt::Debug for Connection {
@@ -163,6 +167,7 @@ impl Connection {
                 session: Mutex::new(None),
                 has_move: AtomicBool::new(false),
                 has_uidplus: AtomicBool::new(false),
+                poisoned: AtomicBool::new(false),
             }),
         }
     }
@@ -196,6 +201,63 @@ impl Connection {
     #[must_use]
     pub fn has_uidplus_capability(&self) -> bool {
         self.inner.has_uidplus.load(Ordering::Relaxed)
+    }
+
+    /// Mark the cached session unusable without taking the session lock.
+    /// The next command to acquire the lock drops the session before
+    /// touching it, so the account reconnects.
+    ///
+    /// For callers above this crate that cut a command mid-flight — the
+    /// per-tool-call ceiling in `rimap-server` (#594, ADR-0012). A
+    /// dispatch future dropped mid-command leaves the cached session
+    /// holding an unread server response that the next command would
+    /// misparse as its own, and no error `with_session` recognizes as a
+    /// transport failure, so it would never self-heal.
+    ///
+    /// This is a flag rather than a call to [`Self::invalidate`] because
+    /// `tokio::sync::Mutex` is FIFO-fair: a peer command that queued on
+    /// the lock while the cut command held it sits *ahead* of anything
+    /// that starts waiting now, and would take the poisoned session
+    /// first.
+    ///
+    /// The flag beats that waiter only if it is set **before** the cut
+    /// command's guard is dropped, since dropping the guard is what wakes
+    /// the waiter. `with_tool_call_ceiling` holds the cut dispatch alive
+    /// across this call for that reason; see its docs. Because the caller
+    /// therefore still holds the session lock, this must not try to take
+    /// it — hence a plain store rather than an `async fn`.
+    ///
+    /// `Relaxed` is sufficient: the flag publishes no data of its own — the
+    /// session is published through the mutex, whose release/acquire is the
+    /// synchronizing edge whenever the poisoner held the guard.
+    ///
+    /// A ceiling can also fire with no guard held at all: parked on the
+    /// lock-acquire timeout, between two IMAP operations in a multi-op tool,
+    /// or inside a `spawn_blocking` join. Those poisons are precautionary —
+    /// there is no half-read session to protect, and the worst outcome is
+    /// that the next command reconnects a healthy one. So the lack of an
+    /// ordering edge on that path costs correctness nothing; do not read
+    /// the mutex edge as covering every caller.
+    pub fn poison(&self) {
+        self.inner.poisoned.store(true, Ordering::Relaxed);
+    }
+
+    /// Consume the poison flag: if set, clear `slot` so the caller
+    /// lazy-reconnects, and report that it did. Called by
+    /// `dispatch::attempt` while holding the session lock.
+    ///
+    /// The swap makes the flag one-shot — a second command must not
+    /// discard a session poisoned before the first one already replaced
+    /// it. `Relaxed` for the same reason as [`Self::poison`]: where an
+    /// ordering edge is needed at all, the mutex carries it.
+    pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
+        if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
+            return false;
+        }
+        *slot = None;
+        self.inner.has_move.store(false, Ordering::Relaxed);
+        self.inner.has_uidplus.store(false, Ordering::Relaxed);
+        true
     }
 
     /// Drop any current session. Called by ops on connection-lost errors.
@@ -339,6 +401,53 @@ mod tests {
             std::sync::Arc::new(NoopSink),
             std::sync::Arc::new(UnusedResolver),
         )
+    }
+
+    /// `poison` is a one-shot flag consumed under the session lock. The
+    /// one-shot property is load-bearing: a second command must not
+    /// discard a session the first command already reconnected after
+    /// consuming the same poison (#594).
+    ///
+    /// This covers the flag's own state machine. That `attempt` actually
+    /// consumes it — the call site the ceiling's recovery depends on — is
+    /// pinned separately by `tests/poison_reconnect.rs` over the scriptable
+    /// fake, because deleting that call site leaves this test green.
+    ///
+    /// The capability reset is asserted here because a stale `has_move`
+    /// would let the next command issue `MOVE` against a server that never
+    /// advertised it.
+    #[test]
+    fn poison_is_consumed_once_and_resets_capabilities() {
+        use std::sync::atomic::Ordering;
+
+        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
+        let mut slot = None;
+
+        assert!(
+            !conn.take_poisoned(&mut slot),
+            "an unpoisoned connection must not report a discard",
+        );
+
+        conn.inner.has_move.store(true, Ordering::Relaxed);
+        conn.inner.has_uidplus.store(true, Ordering::Relaxed);
+        conn.poison();
+
+        assert!(
+            conn.take_poisoned(&mut slot),
+            "poison must be observed by the next holder of the session lock",
+        );
+        assert!(
+            !conn.has_move_capability(),
+            "MOVE capability must not survive a poison",
+        );
+        assert!(
+            !conn.has_uidplus_capability(),
+            "UIDPLUS capability must not survive a poison",
+        );
+        assert!(
+            !conn.take_poisoned(&mut slot),
+            "the flag must be consumed, not latched",
+        );
     }
 
     #[test]

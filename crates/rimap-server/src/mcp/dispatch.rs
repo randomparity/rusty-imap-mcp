@@ -118,6 +118,76 @@ pub(super) fn rimap_error_to_breaker_reason(
     }
 }
 
+/// Run one account-scoped tool dispatch under the per-tool-call ceiling
+/// (#594, ADR-0012).
+///
+/// `[imap]`'s budgets bound the session-lock wait, the lazy connect and
+/// the command *separately*, and `with_session` may run the whole
+/// sequence twice, so no `[imap]` field predicts how long one tool call
+/// can take. `ceiling` is that single bound.
+///
+/// Two placement properties this relies on, both load-bearing:
+///
+/// * It wraps the dispatch **inside** the audit envelope's body future,
+///   not around the envelope. `AuditEnvelopeGuard` synthesizes an
+///   `ERR_CANCELLED` `tool_end` when the envelope future is dropped, so
+///   timing out the envelope would record an operator-configured ceiling
+///   as a client cancellation. Cutting the body instead leaves the
+///   envelope's frame alive, and the `Err` returned here reaches
+///   `emit_tool_end` as an ordinary `ERR_TIMEOUT` outcome.
+/// * It wraps only the dispatch, so the caller's breaker accounting still
+///   runs on the way out and a ceiling that keeps firing opens the
+///   per-account circuit breaker.
+///
+/// `on_timeout_nonblocking` runs only when the ceiling fires. Dropping the dispatch
+/// future mid-command leaves the cached IMAP session holding an unread
+/// server response, which the next command would misparse as its own, so
+/// the caller uses it to mark the connection unusable. An inner
+/// `ERR_TIMEOUT` is returned verbatim and does *not* run it — that path
+/// stayed inside its stage budget and `with_session` invalidated already.
+///
+/// **The callback runs while `dispatch` is still alive**, which is why
+/// `dispatch` is pinned to a local rather than moved into `timeout`. The
+/// awaited `Timeout` drops the dispatch future — and with it the session
+/// lock guard held inside `Connection::attempt` — as soon as the `.await`
+/// completes, so a callback that ran after that would set its flag *after*
+/// the lock had already woken the next FIFO waiter, and that waiter would
+/// take the poisoned session. Holding the dispatch across the callback is
+/// what orders the flag ahead of every queued waiter.
+///
+/// That ordering imposes a contract, which the parameter name carries to
+/// the call site: `on_timeout_nonblocking` must not block and must not
+/// touch the session lock, which the cut dispatch still holds.
+/// `Connection::poison` is a plain atomic store for exactly this reason.
+/// `impl FnOnce()` rules out an `.await`, but not a `block_on` or a
+/// `std::sync::Mutex` acquisition — either would self-deadlock against
+/// the guard the cut dispatch is holding and pin a worker thread.
+pub(super) async fn with_tool_call_ceiling<T, F>(
+    ceiling: std::time::Duration,
+    dispatch: F,
+    on_timeout_nonblocking: impl FnOnce(),
+) -> Result<T, rimap_core::RimapError>
+where
+    F: std::future::Future<Output = Result<T, rimap_core::RimapError>>,
+{
+    let mut dispatch = std::pin::pin!(dispatch);
+    match tokio::time::timeout(ceiling, dispatch.as_mut()).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            on_timeout_nonblocking();
+            Err(rimap_core::RimapError::Imap {
+                code: rimap_core::ErrorCode::Timeout,
+                message: format!(
+                    "tool call exceeded the {}s ceiling \
+                     (limits.tool_call_timeout_seconds)",
+                    ceiling.as_secs(),
+                ),
+                source: None,
+            })
+        }
+    }
+}
+
 impl ImapMcpServer {
     /// Dispatch to the tool handler for `tool`. Each arm serializes its
     /// typed response to `serde_json::Value` before returning, so the
@@ -290,9 +360,134 @@ impl ImapMcpServer {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use rimap_core::tool::ToolName;
 
-    use super::rimap_error_to_breaker_reason;
+    use super::{rimap_error_to_breaker_reason, with_tool_call_ceiling};
+
+    /// The ceiling drops the in-flight dispatch and reports `ERR_TIMEOUT`
+    /// (not `ERR_CANCELLED`), naming the budget it enforced, and runs the
+    /// caller's cleanup exactly once (#594).
+    #[tokio::test]
+    async fn ceiling_elapsing_reports_timeout_and_runs_cleanup() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cleaned);
+        let err = with_tool_call_ceiling(
+            Duration::from_millis(50),
+            std::future::pending::<Result<(), rimap_core::RimapError>>(),
+            || flag.store(true, Ordering::SeqCst),
+        )
+        .await
+        .expect_err("a pending dispatch must be cut off by the ceiling");
+
+        assert_eq!(err.code(), rimap_core::ErrorCode::Timeout);
+        assert!(
+            err.to_string().contains("tool_call_timeout_seconds"),
+            "the message must name the knob an operator would raise: {err}",
+        );
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "a fired ceiling must run the session-invalidation cleanup",
+        );
+    }
+
+    /// `on_timeout` must run while the cut dispatch still holds whatever
+    /// locks it took — that ordering is the whole reason
+    /// `Connection::poison` beats a peer already queued on the session
+    /// lock. If the dispatch future were dropped first, the lock would
+    /// wake the next FIFO waiter *before* the flag was set and that
+    /// waiter would take the poisoned session.
+    ///
+    /// Asserted directly rather than through the scheduler: a `try_lock`
+    /// inside the callback must FAIL, because the dispatch still owns the
+    /// guard. Moving `dispatch` into `timeout` (dropping it at the
+    /// `.await`) makes this `try_lock` succeed and the test fail, with no
+    /// dependence on tokio's wake heuristics.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_runs_before_the_cut_dispatch_releases_its_locks() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let probe = Arc::clone(&lock);
+        let held_during_cleanup = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&held_during_cleanup);
+
+        let body = {
+            let lock = Arc::clone(&lock);
+            async move {
+                let _guard = lock.lock().await;
+                std::future::pending::<Result<(), rimap_core::RimapError>>().await
+            }
+        };
+
+        let err = with_tool_call_ceiling(Duration::from_millis(50), body, || {
+            // The cut dispatch must still be holding the guard here.
+            flag.store(probe.try_lock().is_err(), Ordering::SeqCst);
+        })
+        .await
+        .expect_err("the ceiling must cut a dispatch parked while holding the lock");
+        assert_eq!(err.code(), rimap_core::ErrorCode::Timeout);
+
+        assert!(
+            held_during_cleanup.load(Ordering::SeqCst),
+            "cleanup ran after the dispatch released its lock: a queued peer \
+             would already have been woken and taken the poisoned session",
+        );
+        assert!(
+            lock.try_lock().is_ok(),
+            "the lock must be released once with_tool_call_ceiling returns",
+        );
+    }
+
+    /// A dispatch that finishes inside the ceiling passes its value
+    /// through untouched and leaves the cleanup unrun.
+    #[tokio::test]
+    async fn dispatch_within_ceiling_passes_through() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cleaned);
+        let value = with_tool_call_ceiling(
+            Duration::from_secs(30),
+            async { Ok::<_, rimap_core::RimapError>(7) },
+            || flag.store(true, Ordering::SeqCst),
+        )
+        .await
+        .expect("dispatch completed inside the ceiling");
+
+        assert_eq!(value, 7);
+        assert!(
+            !cleaned.load(Ordering::SeqCst),
+            "cleanup must not run when the ceiling did not fire",
+        );
+    }
+
+    /// An inner failure — including a per-stage `ERR_TIMEOUT` that
+    /// `with_session` already handled and invalidated for — is returned
+    /// verbatim, and does NOT trigger the ceiling's cleanup.
+    #[tokio::test]
+    async fn inner_error_passes_through_without_cleanup() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cleaned);
+        let err = with_tool_call_ceiling(
+            Duration::from_secs(30),
+            async {
+                Err::<(), _>(rimap_core::RimapError::Imap {
+                    code: rimap_core::ErrorCode::Timeout,
+                    message: "list timed out".into(),
+                    source: None,
+                })
+            },
+            || flag.store(true, Ordering::SeqCst),
+        )
+        .await
+        .expect_err("inner error");
+
+        assert_eq!(err.to_string(), "ERR_TIMEOUT: list timed out");
+        assert!(
+            !cleaned.load(Ordering::SeqCst),
+            "a stage timeout is not a ceiling timeout; with_session already invalidated",
+        );
+    }
 
     #[test]
     fn breaker_reason_maps_every_error_code() {

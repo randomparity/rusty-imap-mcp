@@ -133,6 +133,17 @@ impl Connection {
             crate::time::with_timeout(op_name, dur, async { Ok(self.inner.session.lock().await) })
                 .await?;
 
+        // A caller above this crate may have cut a command mid-flight and
+        // poisoned the session (see `Connection::poison`). Consume the flag
+        // here, under the lock, so this command reconnects instead of
+        // parsing the previous command's unread response as its own.
+        if self.take_poisoned(&mut guard) {
+            tracing::debug!(
+                op = op_name,
+                "dropping poisoned IMAP session before command"
+            );
+        }
+
         let session = match &mut *guard {
             Some(session) => session,
             slot => slot.insert(self.connect_inner().await?),

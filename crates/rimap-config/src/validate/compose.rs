@@ -204,6 +204,7 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
     }
     limits::validate_timeouts(&imap, smtp.as_ref())?;
     limits::validate_limits(&limits)?;
+    limits::validate_tool_call_ceiling(&imap, smtp.as_ref(), &limits)?;
     rules::validate_folder_safety(&security)?;
     let tool_overrides = rules::resolve_tool_overrides(&security)?;
     rules::validate_smtp_required(&security, &tool_overrides, smtp.as_ref())?;
@@ -478,6 +479,42 @@ mod tests {
             validate_multi(cfg).unwrap_err(),
             ConfigError::InvalidLimit {
                 field: "imap.connect_timeout_seconds",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tool_call_ceiling_below_imap_worst_case_fails() {
+        // The ceiling check spans `[imap]` and `[limits]`, so it can only be
+        // wired at the per-account composition point — this drives it from
+        // there rather than from the unit under `validate::limits` (#594).
+        let dir = TempDir::new().unwrap();
+        let mut cfg = base_config(dir.path());
+        cfg.limits.tool_call_timeout_seconds = 139; // worst case is 140
+        assert!(matches!(
+            validate(cfg).unwrap_err(),
+            ConfigError::InvalidLimit {
+                field: "limits.tool_call_timeout_seconds",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn multi_account_inherited_ceiling_checked_against_account_imap_budgets() {
+        // `[defaults.limits]` inheritance must be validated against the
+        // *account's* IMAP budgets, not the defaults' — an account that
+        // raises `command_timeout_seconds` past what the inherited ceiling
+        // covers is rejected.
+        let dir = TempDir::new().unwrap();
+        let mut acct = raw_account("work");
+        acct.imap.command_timeout_seconds = 200; // worst case 2 x (400 + 10) = 820
+        let cfg = base_multi_config(dir.path(), vec![acct]);
+        assert!(matches!(
+            validate_multi(cfg).unwrap_err(),
+            ConfigError::InvalidLimit {
+                field: "limits.tool_call_timeout_seconds",
                 ..
             }
         ));
