@@ -6,8 +6,10 @@
 //! (posture-filtered union across accounts) and `call_tool` (account
 //! resolution + dispatch pipeline).
 
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rimap_audit::AuditWriter;
 use rimap_audit::CancelledToolEndSender;
@@ -24,6 +26,7 @@ use rmcp::model::{
     Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
+use tokio::sync::watch;
 
 use crate::boot::registry::{AccountRegistry, AccountState};
 use crate::mcp::dispatch::{PostureContext, rimap_error_to_breaker_reason, with_tool_call_ceiling};
@@ -107,6 +110,152 @@ MCP resource `rimap://docs/postures` for the full posture matrix and \
 `rimap://docs/workflows` for UIDVALIDITY pinning, attachment retrieval, \
 the draft lifecycle, and numeric limits.";
 
+/// Message returned to the (already-departed) client for a dispatch the
+/// shutdown cut. Nothing reads it over the wire — rmcp's transport is gone by
+/// the time [`DispatchDrain::shutdown`] runs — but the dispatch pipeline needs
+/// an error value to unwind through so its audit envelope closes.
+const SHUTDOWN_CUT_MESSAGE: &str = "server is shutting down";
+
+/// Bounded shutdown drain for in-flight `call_tool` dispatches.
+///
+/// rmcp spawns every request handler as a **detached** `tokio::spawn` (rmcp
+/// 2.2.0, `service.rs:1184`): no `JoinSet` owns them, and dropping the service
+/// future releases only the transport, not the handlers. So the server tracks
+/// them itself. Each dispatch registers here for its lifetime and races its
+/// body against a cancel flag; [`DispatchDrain::shutdown`] sets that flag and
+/// waits, bounded, for the registration count to reach zero.
+///
+/// Before this existed, the only thing that ever dropped a stuck dispatch was
+/// `Runtime::shutdown_background` in `run_server` — which runs *after*
+/// `process_end` is written. A connect cut that way emits its `auth` record
+/// from `AuthEmitGuard::drop`, so the record landed with a higher `seq` than
+/// the `process_end` of its own process, or was lost to process exit, or tore
+/// the JSONL tail mid-line (#645). Draining first makes `process_end`
+/// terminal; see `docs/audit-log.md`.
+///
+/// Both halves are cheap clones of one shared cell, so the server can hand a
+/// clone to `serve_mcp` without any take-once ceremony.
+#[derive(Clone)]
+pub struct DispatchDrain {
+    inner: Arc<DrainCell>,
+}
+
+/// Shared state behind [`DispatchDrain`]. `watch` channels rather than atomics
+/// so both waits are event-driven: no polling interval to tune, and no
+/// wake-lost window between checking a counter and parking on a `Notify`.
+struct DrainCell {
+    /// Dispatches currently registered.
+    inflight: watch::Sender<usize>,
+    /// Set once, by [`DispatchDrain::shutdown`]. Never reset — a shutdown that
+    /// has begun does not un-begin.
+    cancel: watch::Sender<bool>,
+}
+
+impl DispatchDrain {
+    /// A drain with nothing registered and no shutdown requested.
+    #[must_use]
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(DrainCell {
+                inflight: watch::Sender::new(0),
+                cancel: watch::Sender::new(false),
+            }),
+        }
+    }
+
+    /// Run `body` as a tracked dispatch: registered for its whole lifetime, and
+    /// cut short if [`DispatchDrain::shutdown`] fires first.
+    ///
+    /// The drop ordering is load-bearing, and holds whether the returned future
+    /// completes or is itself dropped: `body` lives in the inner block, so it is
+    /// dropped before the registration is released either way. Any audit record
+    /// its guards write on drop (`AuthEmitGuard`, `AuditEnvelopeGuard`) is
+    /// therefore already on disk, or already queued to the cancellation drainer,
+    /// by the time `shutdown` observes the count reach zero.
+    /// `drop_ordering_holds_when_the_track_future_is_aborted` pins it.
+    ///
+    /// It does **not** cover the `tool_start` / `tool_end` writes that
+    /// `mcp::audit_envelope` hands to `spawn_blocking`: dropping the future
+    /// awaiting that `JoinHandle` detaches the closure rather than cancelling
+    /// it, so the write still happens, unordered (#672). `auth` writes are
+    /// synchronous (ADR-0014) and are covered.
+    async fn track<F>(&self, body: F) -> Result<CallToolResult, ErrorData>
+    where
+        F: Future<Output = Result<CallToolResult, ErrorData>>,
+    {
+        let registration = Registration::open(self);
+        let mut cancel = self.inner.cancel.subscribe();
+        let outcome = {
+            let mut body = std::pin::pin!(body);
+            tokio::select! {
+                biased;
+                // `wait_for` resolves immediately on an already-set flag, so a
+                // dispatch rmcp spawned but had not yet polled when `shutdown`
+                // ran never polls `body` at all — it cannot reach a connect,
+                // so it has no record to misorder.
+                _ = cancel.wait_for(|c| *c) =>
+                    Err(ErrorData::internal_error(SHUTDOWN_CUT_MESSAGE.to_string(), None)),
+                result = &mut body => result,
+            }
+        };
+        drop(registration);
+        outcome
+    }
+
+    /// Cancel every registered dispatch and wait up to `budget` for them to
+    /// finish unwinding. Returns the number still registered when the budget
+    /// expired — `0` on a clean drain.
+    ///
+    /// A non-zero return is not recoverable here: the caller logs it and
+    /// proceeds, because the alternative is an unbounded shutdown. Those
+    /// dispatches keep the pre-#645 behaviour — whatever they write lands after
+    /// `process_end` or not at all. The count is the announced residue, so
+    /// discarding it silently absorbs exactly what the caller promised to
+    /// report; hence `#[must_use]`.
+    ///
+    /// `budget` is honoured only while at least one runtime worker can still
+    /// park to drive the timer. The cut path performs a synchronous, fsync-ing
+    /// audit write on a worker, so on a runtime with very few workers and a slow
+    /// `audit.path` the wait can outlast the budget. It stays correct — the
+    /// order is what matters, not the latency — but it stops being bounded.
+    #[must_use]
+    pub async fn shutdown(&self, budget: Duration) -> usize {
+        self.inner.cancel.send_replace(true);
+        let mut inflight = self.inner.inflight.subscribe();
+        let drained = tokio::time::timeout(budget, inflight.wait_for(|n| *n == 0))
+            .await
+            .is_ok_and(|result| result.is_ok());
+        if drained {
+            0
+        } else {
+            *self.inner.inflight.borrow()
+        }
+    }
+}
+
+/// RAII registration in a [`DispatchDrain`]: counts up on open, down on drop.
+struct Registration {
+    drain: DispatchDrain,
+}
+
+impl Registration {
+    fn open(drain: &DispatchDrain) -> Self {
+        drain.inner.inflight.send_modify(|n| *n += 1);
+        Self {
+            drain: drain.clone(),
+        }
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.drain
+            .inner
+            .inflight
+            .send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
 /// Core MCP server. Owns every resource the handler methods need.
 pub struct ImapMcpServer {
     /// Account registry holding per-account state.
@@ -121,6 +270,9 @@ pub struct ImapMcpServer {
     /// Per-process salt used when applying `Redactor` to tool arguments.
     /// Wrapped in `Arc` so `spawn_blocking` closures can cheaply capture it.
     pub(crate) redaction_salt: Arc<RedactionSalt>,
+    /// Registry of in-flight `call_tool` dispatches, drained at shutdown so
+    /// no audit record they produce can outlive `process_end` (#645).
+    drain: DispatchDrain,
 }
 
 impl ImapMcpServer {
@@ -138,7 +290,16 @@ impl ImapMcpServer {
             audit,
             cancellation_sender,
             redaction_salt: Arc::new(RedactionSalt::new_random()),
+            drain: DispatchDrain::new(),
         }
+    }
+
+    /// Clone of this server's in-flight dispatch registry, for the shutdown
+    /// path to drain. Take it before the server is moved into
+    /// `rmcp::serve_server`, which consumes it.
+    #[must_use]
+    pub fn dispatch_drain(&self) -> DispatchDrain {
+        self.drain.clone()
     }
 
     /// Run an account-scoped tool through the full dispatch pipeline:
@@ -217,6 +378,7 @@ impl ImapMcpServer {
             audit,
             cancellation_sender,
             redaction_salt: Arc::new(RedactionSalt::new_random()),
+            drain: DispatchDrain::new(),
         }
     }
 }
@@ -633,7 +795,30 @@ impl ServerHandler for ImapMcpServer {
         Ok(ReadResourceResult::new(vec![contents]))
     }
 
+    /// Registers the dispatch with the server's [`DispatchDrain`] and defers to
+    /// [`ImapMcpServer::dispatch_call_tool`]. rmcp runs this in a detached
+    /// task, so the registration is what lets `serve_mcp` account for the call
+    /// at shutdown instead of leaving it to `Runtime::shutdown_background`
+    /// (#645).
     async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.drain
+            .clone()
+            .track(self.dispatch_call_tool(request, context))
+            .await
+    }
+}
+
+impl ImapMcpServer {
+    /// The `tools/call` body: name parsing, namespace validation, account
+    /// resolution, and dispatch. Split out of the [`ServerHandler::call_tool`]
+    /// trait method so that method is nothing but the drain registration —
+    /// there is exactly one place a dispatch can start, and it cannot be
+    /// entered untracked.
+    async fn dispatch_call_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
@@ -700,7 +885,7 @@ impl ServerHandler for ImapMcpServer {
             // succeeded. (#80)
             //
             // cargo-mutants: known-equivalent (test-infrastructure gap) —
-            // the `replace == with != in <impl ServerHandler ...>::call_tool`
+            // the `replace == with != in ImapMcpServer::dispatch_call_tool`
             // mutation inverts the use_account-specific notify gate so
             // ANY successful non-use_account call would emit
             // `tools/list_changed`. Verifying the suppression for
@@ -1725,6 +1910,224 @@ mod tool_call_ceiling_tests {
             tool_end[0]["status"], "error",
             "a fired ceiling must not be audited as a cancellation: {:?}",
             tool_end[0],
+        );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_drain_tests {
+    #![expect(clippy::expect_used, reason = "unit tests")]
+    #![expect(clippy::panic, reason = "a test body that panics on purpose")]
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use rmcp::model::{CallToolResult, ErrorData};
+
+    use super::{DispatchDrain, SHUTDOWN_CUT_MESSAGE};
+
+    /// Records on drop that it was dropped. Stands in for `AuthEmitGuard`,
+    /// whose drop performs the synchronous audit write whose ordering against
+    /// `process_end` is the whole point of the drain.
+    struct DropWitness(Arc<AtomicBool>);
+
+    impl Drop for DropWitness {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Spin until `flag` is set. Used instead of a fixed sleep so the tests
+    /// synchronise on the dispatch actually having been polled.
+    async fn await_flag(flag: &AtomicBool) {
+        while !flag.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_drain_returns_without_spending_its_budget() {
+        let drain = DispatchDrain::new();
+        let started = Instant::now();
+        assert_eq!(drain.shutdown(Duration::from_secs(30)).await, 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an idle drain must not wait out its budget; took {:?}",
+            started.elapsed(),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cut_dispatch_finishes_dropping_before_shutdown_reports_idle() {
+        let drain = DispatchDrain::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(AtomicBool::new(false));
+
+        let dispatch = tokio::spawn({
+            let drain = drain.clone();
+            let dropped = Arc::clone(&dropped);
+            let entered = Arc::clone(&entered);
+            async move {
+                drain
+                    .track(async move {
+                        let _witness = DropWitness(dropped);
+                        entered.store(true, Ordering::SeqCst);
+                        std::future::pending::<Result<CallToolResult, ErrorData>>().await
+                    })
+                    .await
+            }
+        });
+        await_flag(&entered).await;
+
+        assert_eq!(drain.shutdown(Duration::from_secs(30)).await, 0);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "a dispatch's guards must have run before the drain reports idle — \
+             otherwise their audit writes land after process_end",
+        );
+
+        let outcome = dispatch.await.expect("dispatch task joins");
+        assert_eq!(
+            outcome.err().map(|e| e.message.to_string()),
+            Some(SHUTDOWN_CUT_MESSAGE.to_string()),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dispatch_that_cannot_be_polled_is_reported_undrained() {
+        let drain = DispatchDrain::new();
+        let entered = Arc::new(AtomicBool::new(false));
+
+        // The blocking window is closed by the test, not by a clock: a wall-clock
+        // sleep raced against the drain budget would flip to `0` on a starved
+        // runner.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let dispatch = tokio::spawn({
+            let drain = drain.clone();
+            let entered = Arc::clone(&entered);
+            async move {
+                drain
+                    .track(async move {
+                        entered.store(true, Ordering::SeqCst);
+                        // Stands in for an uncancelable blocking call: the task
+                        // cannot observe the cancel flag until this returns, so
+                        // the drain has to give up on it.
+                        let _ = blocked.recv();
+                        Err(ErrorData::internal_error("finished".to_string(), None))
+                    })
+                    .await
+            }
+        });
+        await_flag(&entered).await;
+
+        assert_eq!(drain.shutdown(Duration::from_millis(50)).await, 1);
+
+        // It then ran to completion on its own terms rather than being cut —
+        // which is exactly why the drain could not account for it.
+        drop(release);
+        let outcome = dispatch.await.expect("dispatch task joins");
+        assert_eq!(
+            outcome.err().map(|e| e.message.to_string()),
+            Some("finished".to_string()),
+        );
+    }
+
+    /// The correctness argument for the whole drain is that a dispatch's guards
+    /// finish running before its registration is released. That holds for the
+    /// cancel path (covered above) and equally when the `track` future is
+    /// dropped outright, which is what `Runtime::shutdown_background` still does
+    /// to anything the drain could not account for. Nothing but this test stops
+    /// a refactor — hoisting the `pin!`, reordering the bindings — from
+    /// silently inverting it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drop_ordering_holds_when_the_track_future_is_aborted() {
+        let drain = DispatchDrain::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(AtomicBool::new(false));
+
+        let dispatch = tokio::spawn({
+            let drain = drain.clone();
+            let dropped = Arc::clone(&dropped);
+            let entered = Arc::clone(&entered);
+            async move {
+                drain
+                    .track(async move {
+                        let _witness = DropWitness(dropped);
+                        entered.store(true, Ordering::SeqCst);
+                        std::future::pending::<Result<CallToolResult, ErrorData>>().await
+                    })
+                    .await
+            }
+        });
+        await_flag(&entered).await;
+
+        dispatch.abort();
+        let _ = dispatch.await;
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the body's guards must run when the tracked future is dropped",
+        );
+        assert_eq!(
+            drain.shutdown(Duration::from_secs(30)).await,
+            0,
+            "an aborted dispatch must not leak its registration",
+        );
+    }
+
+    /// A panicking dispatch must not leak its registration — otherwise every
+    /// later shutdown burns its whole budget and reports a phantom residue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_dispatch_does_not_leak_its_registration() {
+        let drain = DispatchDrain::new();
+        let dispatch = tokio::spawn({
+            let drain = drain.clone();
+            async move {
+                drain
+                    .track(async {
+                        panic!("dispatch body panics");
+                    })
+                    .await
+            }
+        });
+        assert!(
+            dispatch.await.is_err(),
+            "the dispatch task must have panicked",
+        );
+
+        let started = Instant::now();
+        assert_eq!(drain.shutdown(Duration::from_secs(30)).await, 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a leaked registration would make this wait out the budget; took {:?}",
+            started.elapsed(),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_starting_after_shutdown_never_polls_its_body() {
+        let drain = DispatchDrain::new();
+        assert_eq!(drain.shutdown(Duration::from_secs(30)).await, 0);
+
+        let polled = Arc::new(AtomicBool::new(false));
+        let outcome = drain
+            .track({
+                let polled = Arc::clone(&polled);
+                async move {
+                    polled.store(true, Ordering::SeqCst);
+                    Err(ErrorData::internal_error("unreachable".to_string(), None))
+                }
+            })
+            .await;
+
+        assert_eq!(
+            outcome.err().map(|e| e.message.to_string()),
+            Some(SHUTDOWN_CUT_MESSAGE.to_string()),
+        );
+        assert!(
+            !polled.load(Ordering::SeqCst),
+            "the cancel arm is biased first, so a dispatch rmcp had not yet \
+             polled when the drain ran must never reach a connect",
         );
     }
 }

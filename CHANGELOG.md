@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `process_end` is now the terminal audit record of its process. The server
+  cancels and drains in-flight tool dispatches before writing it, so a connect
+  the shutdown cuts records its `auth` entry (`ERR_CANCELLED`) *before*
+  `process_end` instead of appending after it — or losing it, or tearing the
+  JSONL tail. The same drain also stops an in-flight dispatch from holding the
+  process exit for its own command timeout. See #645 and `docs/audit-log.md`.
 - Multi-account configs now merge `[defaults.security]`, `[defaults.limits]`,
   and `[defaults.credentials]` into each account **key by key**. Previously an
   account that wrote the corresponding table at all discarded the whole
