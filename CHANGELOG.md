@@ -69,10 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a `pub` struct with all-`pub` fields and no `#[non_exhaustive]`, so an
   external struct literal written against `v0.1.0` no longer compiles. Under
   SemVer at `0.x` the minor field carries breaking changes, so a patch release
-  could not have shipped it honestly. Caught by the `cargo-semver-checks` gate
-  from #633 on its first run. The same bump also covers the `RawAccountConfig`
-  break noted above and any further break landing in this release cycle — they
-  all diff against the same `v0.1.0` tag. See #648.
+  could not have shipped it honestly. **No action is needed by anyone today** —
+  crates.io holds only `0.0.0` placeholder reservations, so no real `v0.1.0`
+  was ever published and nothing downstream can have built against it; the
+  bump is what keeps that true at the first genuine publish. Caught by the
+  per-PR `cargo-semver-checks` gate added for #633 (PR #651). The same bump
+  also covers the `RawAccountConfig` break noted above and any further break
+  landing in this release cycle — they all diff against the same `v0.1.0` tag.
+  See #648.
 - `rimap-content` now declares `license = "(MIT OR Apache-2.0) AND
   Unicode-3.0"` to cover its vendored Unicode 16.0 TR39 `confusables.txt` data
   (correcting a stale note that misnamed the license `Unicode-DFS-2016`). Every
