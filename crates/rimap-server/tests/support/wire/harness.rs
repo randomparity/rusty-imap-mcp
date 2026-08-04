@@ -67,6 +67,30 @@ pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 // jitter when other tests are spawning binaries / parsers concurrently.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Budget for reaping a [`DetachedStdoutHarness`] child, which is the only wait
+/// in this harness that spans the process's **entire** lifetime — spawn, the
+/// request, and exit — in a single call.
+///
+/// [`Harness::spawn_with_closed_stdout`] drops the stdout read end before the
+/// child writes anything, which is the whole point of that variant: there is no
+/// readable stdout, so there is no readiness handshake, so [`read_deadline`]
+/// cannot pay for start-up on a separate read the way it does for a piped
+/// harness. Cold start is unavoidably inside the exit wait.
+///
+/// Hence the sum: [`COLD_START_TIMEOUT`] for `exec`, dynamic linking, config
+/// parse and credential resolution, plus [`SHUTDOWN_TIMEOUT`] for the exit slice
+/// that follows the failed envelope write. Issue #638 recorded an 8.826 s
+/// envelope under `nextest` contention charged against `SHUTDOWN_TIMEOUT`
+/// alone — a constant scoped to the post-EOF exit of an *already-serving*
+/// child — which failed while an isolated re-run passed.
+///
+/// Composed from the two named constants rather than hand-tuned to a third
+/// number so each cost stays individually documented and tunable. Widening
+/// `SHUTDOWN_TIMEOUT` to cover this instead would also loosen the two waits
+/// that are correctly scoped today (`response_or_close` and
+/// [`Harness::shutdown_and_wait`]), whose callers have already paid start-up.
+pub const DETACHED_EXIT_TIMEOUT: Duration = COLD_START_TIMEOUT.saturating_add(SHUTDOWN_TIMEOUT);
+
 /// Deadline to apply to one stdout read: the caller's `requested` budget,
 /// widened to [`COLD_START_TIMEOUT`] while the child has not yet produced any
 /// output.
@@ -196,13 +220,13 @@ fn force_use_for_dead_code_link() {
     // test), not by other binaries.
     let _ = Harness::spawn_with_closed_stdout;
     // DetachedStdoutHarness methods used by mcp_wire_negative, not by
-    // other binaries. The pub `child` / `stdin` fields are read by the
-    // pre-initialize write-failure test only; reference them here so
-    // every test-binary compilation sees them as used.
+    // other binaries. The pub `stdin` field is written by the
+    // pre-initialize write-failure test only; reference it here so
+    // every test-binary compilation sees it as used.
     let _ = DetachedStdoutHarness::audit_path;
     let _ = DetachedStdoutHarness::captured_stderr;
+    let _ = DetachedStdoutHarness::wait_for_exit;
     let _ = |h: &DetachedStdoutHarness| {
-        let _ = &h.child;
         let _ = &h.stdin;
     };
     // Methods used by mcp_wire_negative and e2e_wire_cancellation, not
@@ -745,7 +769,7 @@ allowed_base_dir = "{}"
 /// it exists only to drive stdin, wait for the child exit, and read
 /// the resulting audit log + captured stderr.
 pub struct DetachedStdoutHarness {
-    pub child: Child,
+    child: Child,
     pub stdin: ChildStdin,
     stderr_log: PathBuf,
     audit_path: PathBuf,
@@ -762,6 +786,34 @@ impl DetachedStdoutHarness {
     /// Read the captured stderr file. Empty string on read failure.
     pub fn captured_stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_log).unwrap_or_default()
+    }
+
+    /// Await the child's exit on the whole-lifetime budget
+    /// ([`DETACHED_EXIT_TIMEOUT`]) and return its status.
+    ///
+    /// The wait lives here rather than at the call site so the budget is chosen
+    /// next to the rationale for its size — a caller reaching for a bare
+    /// `timeout(.., child.wait())` has no way to see that this harness has no
+    /// readiness handshake and so pays start-up inside the exit wait.
+    ///
+    /// Panics if the child has not exited within the budget (a genuine hang) or
+    /// if the wait itself fails, reporting captured stderr either way.
+    pub async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let waited = timeout(DETACHED_EXIT_TIMEOUT, self.child.wait()).await;
+        let Ok(reaped) = waited else {
+            panic!(
+                "child did not exit within {DETACHED_EXIT_TIMEOUT:?} of spawn\n\
+                 --- captured stderr ---\n{}",
+                self.captured_stderr(),
+            );
+        };
+        reaped.unwrap_or_else(|err| {
+            panic!(
+                "wait for child exit failed: {err}\n\
+                 --- captured stderr ---\n{}",
+                self.captured_stderr(),
+            )
+        })
     }
 }
 
@@ -798,5 +850,37 @@ mod read_deadline_tests {
         let chaos = COLD_START_TIMEOUT + Duration::from_secs(20);
         assert_eq!(read_deadline(false, chaos), chaos);
         assert_eq!(read_deadline(true, chaos), chaos);
+    }
+}
+
+#[cfg(test)]
+mod detached_exit_budget_tests {
+    use super::{COLD_START_TIMEOUT, DETACHED_EXIT_TIMEOUT, Duration, SHUTDOWN_TIMEOUT};
+
+    /// The flake in #638. `spawn_with_closed_stdout` drops the stdout read end,
+    /// so no readiness handshake can pay for start-up separately the way
+    /// `read_deadline` does for a piped harness: one `child.wait()` spans both
+    /// cost classes. The budget must therefore be their sum, not either one.
+    #[test]
+    fn budget_is_the_sum_of_both_cost_classes() {
+        assert_eq!(
+            DETACHED_EXIT_TIMEOUT,
+            COLD_START_TIMEOUT + SHUTDOWN_TIMEOUT,
+            "the detached wait spans spawn-to-exit, so it gets both budgets",
+        );
+    }
+
+    /// Issue #638 recorded an 8.826 s spawn-to-exit envelope under `nextest`
+    /// contention against the 5 s `SHUTDOWN_TIMEOUT`. A budget that merely
+    /// clears that measurement reproduces the flake on the next slower run, so
+    /// require half again as much headroom.
+    #[test]
+    fn budget_clears_the_observed_flake_with_headroom() {
+        let observed = Duration::from_millis(8_826);
+        assert!(
+            DETACHED_EXIT_TIMEOUT >= observed * 3 / 2,
+            "budget {DETACHED_EXIT_TIMEOUT:?} leaves under 1.5x headroom over \
+             the {observed:?} envelope measured in #638",
+        );
     }
 }
