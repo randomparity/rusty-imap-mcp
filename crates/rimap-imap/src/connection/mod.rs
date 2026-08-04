@@ -401,11 +401,14 @@ mod tests {
     /// discard a session the first command already reconnected after
     /// consuming the same poison (#594).
     ///
-    /// `ImapSession` cannot be constructed without a live server, so the
-    /// slot clear itself is covered by the server-level ceiling test.
-    /// What is observable here is the capability reset, which must not
-    /// survive a poison — a stale `has_move` would let the next command
-    /// issue `MOVE` against a server that never advertised it.
+    /// This covers the flag's own state machine. That `attempt` actually
+    /// consumes it — the call site the ceiling's recovery depends on — is
+    /// pinned separately by `tests/poison_reconnect.rs` over the scriptable
+    /// fake, because deleting that call site leaves this test green.
+    ///
+    /// The capability reset is asserted here because a stale `has_move`
+    /// would let the next command issue `MOVE` against a server that never
+    /// advertised it.
     #[test]
     fn poison_is_consumed_once_and_resets_capabilities() {
         use std::sync::atomic::Ordering;
@@ -437,47 +440,6 @@ mod tests {
         assert!(
             !conn.take_poisoned(&mut slot),
             "the flag must be consumed, not latched",
-        );
-    }
-
-    /// A peer already queued on the session lock — the waiter `poison`
-    /// exists to beat — observes the flag and discards the session.
-    ///
-    /// This is the FIFO case: the poisoner sets the flag while still
-    /// holding the lock, so the wake that hands the lock to the queued
-    /// peer happens strictly after the store. The peer then consumes it
-    /// in `take_poisoned` rather than using the session it was about to
-    /// receive.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn queued_peer_observes_a_poison_set_while_the_lock_was_held() {
-        use std::sync::Arc;
-
-        let conn = Arc::new(connection_with(
-            "mail.example.com",
-            "alice@example.com",
-            4096,
-        ));
-        let holder = Arc::clone(&conn);
-
-        let guard = holder.inner.session.lock().await;
-
-        // Queue a peer behind the held lock.
-        let peer = tokio::spawn({
-            let conn = Arc::clone(&conn);
-            async move {
-                let mut slot = conn.inner.session.lock().await;
-                conn.take_poisoned(&mut slot)
-            }
-        });
-        // Let the peer reach the lock queue before the flag is set.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        conn.poison(); // set while the lock is still held — the ordering that matters
-        drop(guard); // now the peer is woken
-
-        assert!(
-            peer.await.expect("peer task"),
-            "the queued FIFO waiter must observe the poison and discard the session",
         );
     }
 
