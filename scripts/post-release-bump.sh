@@ -226,8 +226,10 @@ emit_output() {
 # the restore or the guard.
 version_optout_manifests() {
     local matches line status=0
-    matches="$(git grep -l --fixed-strings --line-regexp 'version = "0.0.0"' HEAD -- '*Cargo.toml')" ||
-        status=$?
+    # Anchored, so a dependency requirement of "0.0.0" further down a manifest
+    # cannot be mistaken for the package's own version. `git grep` has no
+    # --line-regexp, hence the explicit ^...$.
+    matches="$(git grep -l '^version = "0\.0\.0"$' HEAD -- '*Cargo.toml')" || status=$?
     # Exit 1 is "no matches", a legitimate answer; anything higher is a failure
     # that must not be read as one.
     if [ "$status" -gt 1 ]; then

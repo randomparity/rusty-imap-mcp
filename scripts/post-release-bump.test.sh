@@ -205,6 +205,18 @@ expect_fail "emit_output refuses a value containing the output delimiter" \
     _ "${here}/post-release-bump.sh"
 check "emit_output writes nothing when it refuses" "" "$(cat "$out")"
 
+# --- version_optout_manifests (real repo, read-only) ------------------------
+# Deliberately not hermetic, and writes nothing: it reads HEAD of the real
+# repo, so it is unaffected by the worktree state. This is the only case that
+# exercises the actual `git grep` invocation — an earlier draft passed a
+# `--line-regexp` flag `git grep` does not have, which every hermetic test
+# above sailed straight past.
+real_optouts="$(cd "${here}/.." && version_optout_manifests)"
+expect_ok "version_optout_manifests finds xtask's deliberate 0.0.0 in HEAD" \
+    grep -Fxq 'xtask/Cargo.toml' <<<"$real_optouts"
+expect_fail "version_optout_manifests does not report a version-inheriting member" \
+    grep -Fxq 'crates/rimap-core/Cargo.toml' <<<"$real_optouts"
+
 # ---------------------------------------------------------------------------
 if [ "$failures" -ne 0 ]; then
     echo "${failures} test(s) failed" >&2
