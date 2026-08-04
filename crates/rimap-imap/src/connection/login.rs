@@ -240,8 +240,12 @@ impl Connection {
     ///
     /// So the sink call is contained here rather than at the `Drop`. This is
     /// the crate's only call into `AuthEventSink::emit_auth`, so one wrapper
-    /// covers both callers, and it covers the mutex-poisoning half — which the
-    /// completed-connect path has too — rather than only the abort half.
+    /// covers both callers — including the completed-connect path, where the
+    /// same panic poisons the writer's mutex without ever reaching a `Drop`.
+    /// Containing it cannot *un*-poison anything: the mutex is poisoned inside
+    /// the sink, before the unwind reaches us. What it buys there is that the
+    /// damage stays one lost record and a typed error rather than an unwind
+    /// through `connect_inner`.
     /// [`Self::note_auth_write_lost`] is contained for the same reason; a
     /// defaulted trait method can panic just as easily, and it is what this
     /// function's own failure handler calls next, so without its own wrapper
@@ -256,8 +260,10 @@ impl Connection {
     /// `hex::encode` — allocation only, and an allocation failure aborts
     /// whatever wraps it.
     ///
-    /// The residual is `tracing::error!`, which both failure handlers call
-    /// after the contained call and which is deliberately left bare. Under the
+    /// The residual is `tracing::error!`, which all three failure handlers on
+    /// this path call after the contained call — this function's panic arm,
+    /// [`Self::note_auth_write_lost`]'s, and [`Self::emit_auth_blocking`]'s —
+    /// and which is deliberately left bare in each. Under the
     /// subscriber `rimap-server` installs it cannot panic, and wrapping it
     /// would put a second containment mechanism on the same path as this one —
     /// two mechanisms for one job, with the second one's own logging then

@@ -10,8 +10,10 @@
 //! block is a runtime worker.
 //!
 //! That is deliberate, and it is an exception: `rimap-audit`'s other
-//! writes — the `tool_start` / `tool_end` pair — are driven through
-//! `tokio::task::spawn_blocking`, and this one used to be too. It
+//! writes *from async code* — the `tool_start` / `tool_end` pair — are
+//! driven through `tokio::task::spawn_blocking`, and this one used to
+//! be too. (`process_start` / `process_end` need no wrapping; they run
+//! outside the runtime entirely, with no worker to block.) It
 //! stopped because a deferred `auth` record is lost when the runtime
 //! shuts down, and because `rimap-imap`'s drop guard for a connect that
 //! was cut has no async context to defer from at all — a `Drop` cannot

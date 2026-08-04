@@ -1000,9 +1000,10 @@ mod tests {
     /// turns this from a pass into an aborted test process.
     #[test]
     fn a_guard_dropped_during_an_unwind_does_not_abort() {
+        let sink = std::sync::Arc::new(WhollyPanickingSink::default());
         let conn = connection_with_sink(
             0,
-            std::sync::Arc::new(WhollyPanickingSink::default())
+            std::sync::Arc::clone(&sink)
                 as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
         );
         let bundle = crate::tls::build_tls_config(None).expect("build a TLS bundle");
@@ -1017,6 +1018,12 @@ mod tests {
             caught.is_err(),
             "the outer panic must unwind normally; reaching this line at all \
              means the guard's own panic did not abort the process",
+        );
+        assert_eq!(
+            sink.notes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the guard must have been armed and reached the sink — surviving \
+             the unwind proves nothing if nothing was emitted",
         );
     }
 
