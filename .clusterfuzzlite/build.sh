@@ -27,9 +27,9 @@ build_fuzz_dir() {
         # lockfile, letting drift return at build time with both the parity
         # gate and the build green. `cargo metadata --locked` is the
         # equivalent assertion: it fails if the lockfile would have to change.
-        # Only meaningful where a lockfile is committed; the root `fuzz/`
-        # directory gitignores its own (issue #611), and this picks it up
-        # automatically if that changes.
+        # Both fuzz directories commit a lockfile, so both are pinned; the
+        # conditional is what let this cover the root `fuzz/` directory with no
+        # edit here when its lockfile stopped being gitignored (issue #611).
         if [ -f Cargo.lock ]; then
             cargo +nightly metadata --locked --format-version 1 >/dev/null
         fi
