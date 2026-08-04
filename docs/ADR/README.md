@@ -27,3 +27,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0010](0010-secret-leak-canary-sweep.md) | Fixed sentinel for Dovecot, per-run canary elsewhere, swept in teardown | Accepted |
 | [0011](0011-fuzz-lockfile-workspace-parity.md) | Fuzz lockfiles gated for parity with the workspace, not kept fresh by Dependabot | Accepted |
 | [0012](0012-tool-call-ceiling.md) | One explicit configurable ceiling per tool call; `command_timeout` stays the per-stage budget | Accepted |
+| [0013](0013-per-field-defaults-merge.md) | `[defaults]` merges into an account field by field, through all-`Option` override structs | Accepted |
