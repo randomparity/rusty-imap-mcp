@@ -74,6 +74,24 @@ impl AuthEventSink for DiscardingSink {
 /// Tests that trigger I/O on the returned state will hit
 /// [`PanickingCreds::resolve`] and fail.
 pub(crate) fn make_test_account_state(name: &str) -> AccountState {
+    make_test_account_state_at(name, 0, Duration::from_secs(1), Duration::from_secs(300))
+}
+
+/// [`make_test_account_state`] with an IMAP `port` and a per-tool-call
+/// `tool_call_timeout` the caller chooses.
+///
+/// Pointing `port` at a listener that accepts and then stays silent is
+/// how the ceiling tests get a dispatch that parks indefinitely inside
+/// the TLS handshake — before any credential resolution, so
+/// [`PanickingCreds`] is not reached. Those tests set `imap_timeout` far
+/// *above* `tool_call_timeout`, so only the ceiling can be what cuts the
+/// call off.
+pub(crate) fn make_test_account_state_at(
+    name: &str,
+    port: u16,
+    imap_timeout: Duration,
+    tool_call_timeout: Duration,
+) -> AccountState {
     let id = AccountId::new(name).expect("test account name must be valid");
     let conn_cfg = ConnectionConfig {
         account: if name == rimap_core::account::DEFAULT_ACCOUNT_NAME {
@@ -83,12 +101,12 @@ pub(crate) fn make_test_account_state(name: &str) -> AccountState {
         },
         account_id: id.clone(),
         host: "127.0.0.1".into(),
-        port: 0,
+        port,
         encryption: rimap_imap::ImapEncryption::Tls,
         username: format!("{name}@test.invalid"),
         pinned_fingerprint: None,
-        connect_timeout: Duration::from_secs(1),
-        command_timeout: Duration::from_secs(1),
+        connect_timeout: imap_timeout,
+        command_timeout: imap_timeout,
         max_fetch_body_bytes: 1024,
         max_append_bytes: 1024,
     };
@@ -111,6 +129,6 @@ pub(crate) fn make_test_account_state(name: &str) -> AccountState {
         folder_guard,
         download_dir: Arc::from(std::path::PathBuf::from("/tmp").into_boxed_path()),
         special_use: SpecialUseMap::default(),
-        tool_call_timeout: Duration::from_secs(300),
+        tool_call_timeout,
     }
 }

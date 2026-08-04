@@ -131,8 +131,9 @@ circuit_breaker_window_seconds = 30
 # Wall-clock ceiling on one tool call. The [imap] budgets bound each stage
 # separately (lock wait, connect, command) and a read-only op may retry the
 # whole sequence once, so this is the only field that bounds the total.
-# Must be >= 2 x (2 x imap.command_timeout_seconds + imap.connect_timeout_seconds)
-# — 140s at the [imap] defaults above — or startup fails.
+# Must be >= 2 x (2 x imap.command_timeout_seconds + imap.connect_timeout_seconds),
+# plus smtp.command_timeout_seconds when [smtp] is configured (a send is
+# followed by an append to Sent) — 170s at the defaults above — or startup fails.
 tool_call_timeout_seconds = 300
 
 # --------------------------------------------------------------------------

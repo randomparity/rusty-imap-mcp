@@ -107,6 +107,10 @@ pub(super) struct ConnectionInner {
     /// Server advertised UIDPLUS capability (RFC 4315) after login.
     /// Reset to `false` on `invalidate()`.
     pub(super) has_uidplus: AtomicBool,
+    /// Set by [`Connection::poison`] when a caller above this crate cut a
+    /// command mid-flight. Consumed by `dispatch::attempt` under the
+    /// session lock; see `poison` for why it is a flag and not a lock.
+    pub(super) poisoned: AtomicBool,
 }
 
 impl std::fmt::Debug for Connection {
@@ -163,6 +167,7 @@ impl Connection {
                 session: Mutex::new(None),
                 has_move: AtomicBool::new(false),
                 has_uidplus: AtomicBool::new(false),
+                poisoned: AtomicBool::new(false),
             }),
         }
     }
@@ -198,13 +203,46 @@ impl Connection {
         self.inner.has_uidplus.load(Ordering::Relaxed)
     }
 
-    /// Drop any current session, so the next command lazy-reconnects.
+    /// Mark the cached session unusable without taking the session lock.
+    /// The next command to acquire the lock drops the session before
+    /// touching it, so the account reconnects.
     ///
-    /// Called by ops on connection-lost errors, and by the server when a
-    /// tool call is cut off above this crate (#594): a dispatch future
-    /// dropped mid-command leaves the cached session holding an unread
-    /// server response that the next command would misparse as its own.
-    pub async fn invalidate(&self) {
+    /// For callers above this crate that cut a command mid-flight — the
+    /// per-tool-call ceiling in `rimap-server` (#594, ADR-0012). A
+    /// dispatch future dropped mid-command leaves the cached session
+    /// holding an unread server response that the next command would
+    /// misparse as its own, and no error `with_session` recognizes as a
+    /// transport failure, so it would never self-heal.
+    ///
+    /// This is a flag rather than a call to [`Self::invalidate`] because
+    /// `tokio::sync::Mutex` is FIFO-fair: a peer command that queued on
+    /// the lock while the cut command held it sits *ahead* of anything
+    /// that starts waiting now, and would take the poisoned session
+    /// first. Setting a flag is ordered ahead of every queued waiter
+    /// because the waiter itself checks it.
+    pub fn poison(&self) {
+        self.inner.poisoned.store(true, Ordering::Release);
+    }
+
+    /// Consume the poison flag: if set, clear `slot` so the caller
+    /// lazy-reconnects, and report that it did. Called by
+    /// `dispatch::attempt` while holding the session lock.
+    ///
+    /// The swap makes the flag one-shot — a second command must not
+    /// discard a session poisoned before the first one already replaced
+    /// it.
+    pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
+        if !self.inner.poisoned.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        *slot = None;
+        self.inner.has_move.store(false, Ordering::Relaxed);
+        self.inner.has_uidplus.store(false, Ordering::Relaxed);
+        true
+    }
+
+    /// Drop any current session. Called by ops on connection-lost errors.
+    pub(crate) async fn invalidate(&self) {
         let mut guard = self.inner.session.lock().await;
         *guard = None;
         self.inner.has_move.store(false, Ordering::Relaxed);
@@ -344,6 +382,48 @@ mod tests {
             std::sync::Arc::new(NoopSink),
             std::sync::Arc::new(UnusedResolver),
         )
+    }
+
+    /// `poison` is a one-shot flag consumed under the session lock, not a
+    /// lock acquisition. The one-shot property is load-bearing: a second
+    /// command must not discard a session the first command already
+    /// reconnected after consuming the same poison (#594).
+    #[test]
+    fn poison_is_consumed_once_and_clears_the_slot() {
+        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
+        let mut slot = None;
+
+        assert!(
+            !conn.take_poisoned(&mut slot),
+            "an unpoisoned connection must not report a discard",
+        );
+
+        conn.poison();
+        assert!(
+            conn.take_poisoned(&mut slot),
+            "poison must be observed by the next holder of the session lock",
+        );
+        assert!(slot.is_none(), "the poisoned session must be dropped");
+        assert!(
+            !conn.take_poisoned(&mut slot),
+            "the flag must be consumed, not latched",
+        );
+    }
+
+    /// `poison` takes no lock, so it cannot be starved by a peer command
+    /// holding the session — the property that makes it correct where an
+    /// `invalidate().await` would be served behind every queued waiter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poison_does_not_wait_on_the_session_lock() {
+        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
+        let mut held = conn.inner.session.lock().await;
+
+        conn.poison(); // would deadlock if it queued on the lock
+
+        assert!(
+            conn.take_poisoned(&mut held),
+            "the lock holder observes the poison set while it held the lock",
+        );
     }
 
     #[test]

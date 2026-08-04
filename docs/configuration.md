@@ -121,9 +121,12 @@ one *stage* each, not a tool call. One IMAP operation spends, worst case:
 
 That is `2 x (2 x command_timeout_seconds + connect_timeout_seconds)` —
 **140 seconds at the defaults** — for a single operation, and a tool that
-issues several operations multiplies it again. No `[imap]` field predicts
-that number, which is why the whole call is bounded separately by
-[`limits.tool_call_timeout_seconds`](#limits-section). Setting
+issues several operations multiplies it again. Those are the stages with
+deadlines; a few awaits on the same path have none of their own (the
+session-lock release after a failed command, and the `auth` audit write
+inside a connect), so the wall clock can exceed even that. No `[imap]`
+field predicts the number, which is why the whole call is bounded
+separately by [`limits.tool_call_timeout_seconds`](#limits-section). Setting
 `command_timeout_seconds` below `connect_timeout_seconds` is supported —
 it means "fail commands fast, tolerate a slow handshake" and does not
 shorten the connect.
@@ -450,10 +453,13 @@ gets cut off.
 
 Startup rejects a ceiling below
 `2 x (2 x imap.command_timeout_seconds + imap.connect_timeout_seconds)`,
-since that would cut off operations still inside their own budgets. The
-check is per account, so an account that raises its IMAP budgets may need
-its own `[accounts.limits]` override rather than the inherited
-`[defaults.limits]` value.
+since that would cut off operations still inside their own budgets. When
+`[smtp]` is configured, `smtp.command_timeout_seconds` is added to that
+minimum: `send_email` sends and *then* appends the message to Sent, and a
+ceiling that fits only the append could fire after delivery — reporting
+`ERR_TIMEOUT` for a message that went out. The check is per account, so
+an account that raises its own budgets may need an `[accounts.limits]`
+override rather than the inherited `[defaults.limits]` value.
 
 ## `[audit]` section
 

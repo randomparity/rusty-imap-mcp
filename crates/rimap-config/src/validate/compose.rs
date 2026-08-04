@@ -204,7 +204,7 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
     }
     limits::validate_timeouts(&imap, smtp.as_ref())?;
     limits::validate_limits(&limits)?;
-    limits::validate_tool_call_ceiling(&imap, &limits)?;
+    limits::validate_tool_call_ceiling(&imap, smtp.as_ref(), &limits)?;
     rules::validate_folder_safety(&security)?;
     let tool_overrides = rules::resolve_tool_overrides(&security)?;
     rules::validate_smtp_required(&security, &tool_overrides, smtp.as_ref())?;

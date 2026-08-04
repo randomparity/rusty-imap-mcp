@@ -170,15 +170,12 @@ impl ImapMcpServer {
             let result = with_tool_call_ceiling(
                 account.tool_call_timeout,
                 Box::pin(self.dispatch_tool(ticket, account, tool, args)),
-                || {
-                    // The ceiling dropped the dispatch mid-command, so the
-                    // cached session may hold an unread server response.
-                    // Detached, not awaited: `invalidate` takes the session
-                    // lock, and waiting for a peer call to release it would
-                    // push this call past the ceiling that just fired.
-                    let imap = account.imap.clone();
-                    tokio::spawn(async move { imap.invalidate().await });
-                },
+                // The ceiling dropped the dispatch mid-command, so the cached
+                // session may hold an unread server response. `poison` is a
+                // flag, not a lock acquisition: a peer command already queued
+                // on the session lock would be served ahead of anything that
+                // started waiting now, and would take the poisoned session.
+                || account.imap.poison(),
             )
             .await;
             match &result {
@@ -1562,6 +1559,112 @@ mod advertise_on_select_tests {
         assert!(
             !names.iter().any(|n| n.starts_with("default.")),
             "legacy single-default must not namespace tools; got {names:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
+mod tool_call_ceiling_tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::{AuditWriter, Seq, cancellation_channel, spawn_drainer};
+    use rimap_core::tool::ToolName;
+    use tempfile::tempdir;
+
+    use super::ImapMcpServer;
+    use crate::boot::registry::AccountRegistry;
+    use crate::test_support::make_test_account_state_at;
+
+    /// Drive the **production** call site — `dispatch_account_scoped`, via
+    /// `execute_tool_for_test` — against an IMAP endpoint that accepts the
+    /// TCP connection and then says nothing, so the TLS handshake parks
+    /// indefinitely (before any credential resolution). The account's
+    /// `tool_call_timeout` is two orders of magnitude below its
+    /// `connect_timeout`, and the call is asserted to return well inside
+    /// that connect budget, so the ceiling is unambiguously what fires
+    /// and deleting it fails this test rather than slowing it (#594).
+    ///
+    /// The assertion is on the durable audit record, not the returned
+    /// error, and its negative half is the load-bearing one:
+    /// `AuditEnvelopeGuard` synthesizes an `ERR_CANCELLED` `tool_end`
+    /// whenever the envelope future is dropped, so moving the ceiling from
+    /// inside the envelope's body to around `run_with_audit_envelope`
+    /// would record an operator-configured timeout as a client
+    /// cancellation. That regression is invisible to a test that only
+    /// checks the returned error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ceiling_fires_through_dispatch_account_scoped_and_records_err_timeout() {
+        // Accept connections and never write: the client's TLS handshake
+        // blocks on a ServerHello that never arrives.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let accepted = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream); // keep the socket open, send nothing
+            }
+        });
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let writer = AuditWriter::open(&AuditOptions {
+            path: path.clone(),
+            rotate_bytes: 10 * 1024 * 1024,
+            rotate_keep: 5,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: Seq::FIRST,
+        })
+        .expect("audit open");
+
+        let (tx, rx) = cancellation_channel();
+        let drainer = spawn_drainer(rx, writer.clone());
+
+        let state = make_test_account_state_at(
+            rimap_core::account::DEFAULT_ACCOUNT_NAME,
+            port,
+            Duration::from_secs(30),
+            Duration::from_millis(150),
+        );
+        let id = state.id.clone();
+        let mut accounts = BTreeMap::new();
+        accounts.insert(id, state);
+        let server = ImapMcpServer::new(AccountRegistry::new(accounts), writer, tx.clone());
+
+        let started = std::time::Instant::now();
+        let err = server
+            .execute_tool_for_test(None, ToolName::ListFolders, serde_json::Value::Null)
+            .await
+            .expect_err("the ceiling must cut off a handshake that never completes");
+        let elapsed = started.elapsed();
+        assert_eq!(err.code(), rimap_core::ErrorCode::Timeout);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the 150ms ceiling must cut the call, not the 30s connect budget; took {elapsed:?}",
+        );
+
+        drop(tx);
+        drop(server);
+        drainer.await.expect("drainer");
+        accepted.abort();
+
+        let contents = std::fs::read_to_string(&path).expect("read audit log");
+        let tool_end = contents
+            .lines()
+            .find(|l| l.contains(r#""kind":"tool_end""#))
+            .expect("tool_end record");
+        assert!(
+            tool_end.contains(r#""error_code":"ERR_TIMEOUT""#),
+            "a fired ceiling must be audited as ERR_TIMEOUT: {tool_end}",
+        );
+        assert!(
+            !contents.contains("ERR_CANCELLED") && !contents.contains(r#""cancelled""#),
+            "a fired ceiling must not be audited as a cancellation:\n{contents}",
         );
     }
 }

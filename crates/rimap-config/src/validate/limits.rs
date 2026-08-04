@@ -56,17 +56,24 @@ pub(super) fn validate_timeouts(
     Ok(())
 }
 
-/// Worst-case seconds one IMAP operation can spend inside its own
-/// `[imap]` budgets, as `rimap_imap::connection::dispatch` spends them:
-/// each `attempt` waits up to `command_timeout` for the session lock,
-/// then up to `connect_timeout` on the lazy connect (which runs outside
-/// the command deadline by design — #592), then up to `command_timeout`
-/// on the command body; `with_session` runs a second `attempt` when a
-/// read-only op fails with `ConnectionLost`.
+/// Longest one IMAP operation can run while every `[imap]` deadline is
+/// still honouring it, as `rimap_imap::connection::dispatch` spends the
+/// budgets: each `attempt` waits up to `command_timeout` for the session
+/// lock, then up to `connect_timeout` on the lazy connect (which runs
+/// outside the command deadline by design — #592), then up to
+/// `command_timeout` on the command body; `with_session` runs a second
+/// `attempt` when a read-only op fails with `ConnectionLost`.
+///
+/// This covers the *deadline-bounded* stages only. A few awaits on the
+/// same path carry no deadline of their own — `with_session`'s
+/// `invalidate()` parks on the session lock, and `connect_inner`'s
+/// `emit_auth` runs an audit write outside the connect deadline — so a
+/// ceiling set exactly at this value still has no slack for them. It is
+/// a floor for the validation below, not a promise about wall clock.
 ///
 /// Computed in `u64` so `u32::MAX` budgets cannot wrap into a value that
 /// passes the comparison in [`validate_tool_call_ceiling`].
-fn imap_operation_worst_case_seconds(imap: &ImapConfig) -> u64 {
+fn imap_operation_bounded_seconds(imap: &ImapConfig) -> u64 {
     const ATTEMPTS: u64 = 2;
     const COMMAND_STAGES_PER_ATTEMPT: u64 = 2;
     COMMAND_STAGES_PER_ATTEMPT
@@ -75,34 +82,51 @@ fn imap_operation_worst_case_seconds(imap: &ImapConfig) -> u64 {
         .saturating_mul(ATTEMPTS)
 }
 
-/// Reject a per-tool-call ceiling that cannot cover a single IMAP
-/// operation running fully inside its own `[imap]` budgets (#594,
-/// ADR-0012).
+/// Reject a per-tool-call ceiling that cannot cover the longest tool call
+/// every per-stage deadline still considers healthy (#594, ADR-0012).
 ///
-/// A ceiling below that worst case would cut off calls that every
-/// per-stage deadline considers healthy, so it is an operator mistake
-/// worth failing at startup rather than intermittently at runtime. Both
-/// blocks resolve per account, so this is checked per account.
+/// The `[smtp]` term is what keeps `send_email` safe. It sends over SMTP
+/// and *then* appends the message to the Sent folder — a full IMAP
+/// operation — so a ceiling that fits the append but not the send ahead
+/// of it could cut the call after delivery already happened, reporting
+/// `ERR_TIMEOUT` for a message that went out. Requiring the ceiling to
+/// cover `smtp.command_timeout_seconds + imap_operation_bounded_seconds`
+/// makes that unreachable for a send that is inside its own budgets.
+///
+/// Failing here is a startup error rather than an intermittent runtime
+/// one. All three blocks resolve per account, so this is checked per
+/// account.
 pub(super) fn validate_tool_call_ceiling(
     imap: &ImapConfig,
+    smtp: Option<&SmtpConfig>,
     limits: &LimitsConfig,
 ) -> Result<(), ConfigError> {
-    let worst_case = imap_operation_worst_case_seconds(imap);
-    if u64::from(limits.tool_call_timeout_seconds) < worst_case {
-        return Err(ConfigError::InvalidLimit {
-            field: "limits.tool_call_timeout_seconds",
-            reason: format!(
-                "{}s is below the {worst_case}s worst case for one IMAP operation \
-                 (2 attempts x (2 x imap.command_timeout_seconds {}s + \
-                 imap.connect_timeout_seconds {}s)); raise the ceiling or lower \
-                 the IMAP timeouts",
-                limits.tool_call_timeout_seconds,
-                imap.command_timeout_seconds,
-                imap.connect_timeout_seconds,
-            ),
-        });
+    let imap_seconds = imap_operation_bounded_seconds(imap);
+    let smtp_seconds = smtp.map_or(0, |s| u64::from(s.command_timeout_seconds));
+    let minimum = imap_seconds.saturating_add(smtp_seconds);
+    if u64::from(limits.tool_call_timeout_seconds) >= minimum {
+        return Ok(());
     }
-    Ok(())
+    let smtp_term = match smtp {
+        Some(s) => format!(
+            " + smtp.command_timeout_seconds {}s for the send that precedes \
+             the Sent-folder append",
+            s.command_timeout_seconds,
+        ),
+        None => String::new(),
+    };
+    Err(ConfigError::InvalidLimit {
+        field: "limits.tool_call_timeout_seconds",
+        reason: format!(
+            "{}s is below the {minimum}s a tool call can take with every \
+             per-stage deadline still honouring it (2 attempts x (2 x \
+             imap.command_timeout_seconds {}s + imap.connect_timeout_seconds \
+             {}s){smtp_term}); raise the ceiling or lower the per-stage timeouts",
+            limits.tool_call_timeout_seconds,
+            imap.command_timeout_seconds,
+            imap.connect_timeout_seconds,
+        ),
+    })
 }
 
 pub(super) fn validate_limits(limits: &LimitsConfig) -> Result<(), ConfigError> {
@@ -278,7 +302,7 @@ username = "alice@example.test"
         let imap = imap_config();
         let limits = LimitsConfig::default();
         assert_eq!(limits.tool_call_timeout_seconds, 300);
-        assert!(validate_tool_call_ceiling(&imap, &limits).is_ok());
+        assert!(validate_tool_call_ceiling(&imap, None, &limits).is_ok());
     }
 
     #[test]
@@ -288,7 +312,7 @@ username = "alice@example.test"
             tool_call_timeout_seconds: 140,
             ..LimitsConfig::default()
         };
-        assert!(validate_tool_call_ceiling(&imap, &limits).is_ok());
+        assert!(validate_tool_call_ceiling(&imap, None, &limits).is_ok());
     }
 
     #[test]
@@ -298,7 +322,7 @@ username = "alice@example.test"
             tool_call_timeout_seconds: 139,
             ..LimitsConfig::default()
         };
-        let err = validate_tool_call_ceiling(&imap, &limits).unwrap_err();
+        let err = validate_tool_call_ceiling(&imap, None, &limits).unwrap_err();
         let ConfigError::InvalidLimit { field, reason } = &err else {
             panic!("expected InvalidLimit, got {err:?}");
         };
@@ -323,10 +347,59 @@ username = "alice@example.test"
             ..imap_config()
         };
         let limits = LimitsConfig::default();
-        let err = validate_tool_call_ceiling(&imap, &limits).unwrap_err();
+        let err = validate_tool_call_ceiling(&imap, None, &limits).unwrap_err();
         assert!(
             matches!(&err, ConfigError::InvalidLimit { field, .. } if *field == "limits.tool_call_timeout_seconds"),
             "unexpected error: {err:?}",
+        );
+    }
+
+    #[test]
+    fn smtp_send_budget_is_added_to_the_minimum() {
+        // `send_email` sends over SMTP and then appends to Sent, so the
+        // ceiling has to cover both or a fired ceiling could report
+        // ERR_TIMEOUT for a message that was already delivered. 140 alone
+        // passes without an [smtp] block and must not with one.
+        let imap = imap_config();
+        let smtp = smtp_config();
+        let limits = LimitsConfig {
+            tool_call_timeout_seconds: 140,
+            ..LimitsConfig::default()
+        };
+        assert!(validate_tool_call_ceiling(&imap, None, &limits).is_ok());
+
+        let err = validate_tool_call_ceiling(&imap, Some(&smtp), &limits).unwrap_err();
+        let ConfigError::InvalidLimit { field, reason } = &err else {
+            panic!("expected InvalidLimit, got {err:?}");
+        };
+        assert_eq!(*field, "limits.tool_call_timeout_seconds");
+        assert!(reason.contains("170"), "140 + smtp 30 = 170: {reason}");
+        assert!(
+            reason.contains("smtp.command_timeout_seconds"),
+            "the reason must name the SMTP term it added: {reason}",
+        );
+
+        let ok = LimitsConfig {
+            tool_call_timeout_seconds: 170,
+            ..LimitsConfig::default()
+        };
+        assert!(validate_tool_call_ceiling(&imap, Some(&smtp), &ok).is_ok());
+    }
+
+    #[test]
+    fn imap_only_reason_omits_the_smtp_term() {
+        let imap = imap_config();
+        let limits = LimitsConfig {
+            tool_call_timeout_seconds: 139,
+            ..LimitsConfig::default()
+        };
+        let err = validate_tool_call_ceiling(&imap, None, &limits).unwrap_err();
+        let ConfigError::InvalidLimit { reason, .. } = &err else {
+            panic!("expected InvalidLimit, got {err:?}");
+        };
+        assert!(
+            !reason.contains("smtp."),
+            "an account without [smtp] must not be told about an SMTP term: {reason}",
         );
     }
 
@@ -342,7 +415,7 @@ username = "alice@example.test"
             tool_call_timeout_seconds: u32::MAX,
             ..LimitsConfig::default()
         };
-        assert!(validate_tool_call_ceiling(&imap, &limits).is_err());
+        assert!(validate_tool_call_ceiling(&imap, None, &limits).is_err());
     }
 
     #[test]

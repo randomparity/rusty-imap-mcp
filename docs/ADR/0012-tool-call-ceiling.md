@@ -28,7 +28,11 @@ fails with `ConnectionLost`, so the real worst case for one IMAP operation is
 ```
 
 which is 140s at the shipped defaults (30s / 10s), not the ~70s #594's body
-estimates — the issue counts one attempt. Nothing above the IMAP layer imposed
+estimates — the issue counts one attempt. That figure covers the
+*deadline-bounded* stages; a few awaits on the same path carry no deadline of
+their own (`with_session`'s `invalidate()` parks on the session lock,
+`connect_inner`'s `emit_auth` runs an audit write outside the connect
+deadline), so the wall clock can exceed it. Nothing above the IMAP layer imposed
 a deadline: `rimap_server::mcp::dispatch` had no timeout at all, so a tool that
 issues several IMAP operations (`list_folders_with_status`, `export_messages`)
 multiplied that figure by its operation count with no bound in sight.
@@ -53,9 +57,10 @@ an MCP client's own request timeout fires long before the server gives up.
   admits the case a derived value cannot express: a ceiling deliberately larger
   than one IMAP operation, because a tool legitimately issues many.
 
-- **Default 300 seconds.** It must exceed the single-operation worst case
-  (140s at the defaults) or a stock config would self-reject, and it should
-  leave room for the multi-operation tools above. 300s is also comfortably
+- **Default 300 seconds.** It must exceed the validated minimum (140s at the
+  `[imap]` defaults, 170s once a default `[smtp]` block is present) or a stock
+  config would self-reject, and it should leave room for the multi-operation
+  tools above. 300s is also comfortably
   beyond any interactive client's own request timeout, which is the point: the
   ceiling is a backstop against an unbounded server-side call, not a latency
   target. Operators who want a tighter bound lower it.
@@ -68,12 +73,23 @@ an MCP client's own request timeout fires long before the server gives up.
   existing config file without a parse error.
 
 - **Validate the relationship between the knobs at startup.** A ceiling below
-  `2 x (2 x command_timeout + connect_timeout)` would preempt a single IMAP
-  operation that is still inside its own budgets, converting a working call
-  into `ERR_TIMEOUT`, so it is a config error naming both sides and the
-  arithmetic. This is a per-account check: both `[imap]` and `[limits]` resolve
-  per account, so `[defaults.limits]` inheritance is validated against each
-  account's own IMAP budgets.
+  `2 x (2 x command_timeout + connect_timeout)` would preempt an IMAP
+  operation that every per-stage deadline still considers healthy, converting a
+  working call into `ERR_TIMEOUT`, so it is a config error naming both sides
+  and the arithmetic. This is a per-account check: `[imap]`, `[smtp]` and
+  `[limits]` all resolve per account, so `[defaults.limits]` inheritance is
+  validated against each account's own budgets.
+
+- **`smtp.command_timeout_seconds` is part of that minimum when `[smtp]` is
+  configured.** `send_email` sends over SMTP and *then* appends the message to
+  the Sent folder — a full IMAP operation. A ceiling that fits the append but
+  not the send ahead of it could fire *after* delivery, returning `ERR_TIMEOUT`
+  for a message that went out; an agent that retries on `ERR_TIMEOUT` would
+  double-send. Requiring the ceiling to cover
+  `smtp.command_timeout_seconds + 2 x (2 x command_timeout + connect_timeout)`
+  puts that outcome out of reach for a send inside its own budgets. Excluding
+  `send_email` from the ceiling instead was rejected: it would leave the two
+  tools with irreversible side effects as the only unbounded ones.
 
 - **The wire error is the existing `ERR_TIMEOUT`, not a new code.** #594 raises
   the question. A new code would be a new stable public contract for a
@@ -99,18 +115,25 @@ an MCP client's own request timeout fires long before the server gives up.
     audit record, not just the returned error.
 
   - It needs the `AccountState`, both for the configured value and for the
-    invalidation below. `dispatch_account_scoped` is the layer that owns the
+    poisoning below. `dispatch_account_scoped` is the layer that owns the
     whole account-scoped call — envelope, `DispatchTicket`, posture, breaker.
 
-- **A fired ceiling invalidates the account's IMAP connection.** Cutting the
+- **A fired ceiling poisons the account's IMAP connection.** Cutting the
   dispatch future mid-command drops the `MutexGuard` over
   `Mutex<Option<ImapSession>>` while the cached session still holds an unread
   server response. Reusing it would parse that reply as the *next* command's,
   desynchronizing the protocol with no error that `with_session`'s
-  `is_transport_failure` would recognize — so it would never self-heal. The
-  invalidation is spawned detached rather than awaited: `Connection::invalidate`
-  takes the session lock, and waiting for a peer call to release it could push
-  this call past the very ceiling that just fired.
+  `is_transport_failure` would recognize — so it would never self-heal.
+
+  `Connection::poison` sets an `AtomicBool` that `dispatch::attempt` consumes
+  *under* the session lock, rather than calling `invalidate().await`. Awaiting
+  the invalidate would be wrong twice over: it would push this call past the
+  ceiling that just fired, and — the decisive one — `tokio::sync::Mutex` is
+  FIFO-fair, so a peer command that queued on the lock while the cut command
+  held it sits **ahead** of anything that starts waiting now and would take the
+  poisoned session first. A flag is ordered ahead of every queued waiter
+  because the waiter itself checks it. It is also synchronous, which is what
+  makes the cancellation path in #620 fixable from a `Drop` impl.
 
 - **Infrastructure tools (`list_accounts`, `use_account`) are not covered.**
   They resolve against in-memory state with no I/O and no account, so they have
@@ -146,9 +169,9 @@ an MCP client's own request timeout fires long before the server gives up.
 
 ## Consequences
 
-- One tool call against an account is bounded by `tool_call_timeout_seconds`.
-  At the defaults that is 300s against a previous worst case with no upper
-  bound at all.
+- One tool call against an account is bounded by `tool_call_timeout_seconds`,
+  up to the untimed awaits noted in the context above. At the defaults that is
+  300s against a previous worst case with no upper bound at all.
 
 - **Raising `imap.command_timeout_seconds` past ~72s (at the default
   `connect_timeout_seconds = 10`) now requires raising
@@ -169,5 +192,12 @@ an MCP client's own request timeout fires long before the server gives up.
 - The ceiling does not cover a client-initiated cancellation, which continues
   to drop the envelope future and record `ERR_CANCELLED` through
   `AuditEnvelopeGuard`. That path has the same mid-command session-poisoning
-  hazard the invalidation above closes for the ceiling; it predates this change
-  and is tracked separately.
+  hazard the poison flag closes for the ceiling; it predates this change and is
+  tracked in [#620](https://github.com/randomparity/rusty-imap-mcp/issues/620).
+
+- A ceiling that fires during `download_attachment` or `export_messages` can
+  leave an artifact on disk that no audit record accounts for: the sandbox
+  write runs in `spawn_blocking`, and dropping the awaiting future does not
+  cancel the blocking closure, while the failed call records the default
+  `ResultSummary`. The window is narrow — the fetch dominates, not the write —
+  but it is a new cut point on the #316 provenance guarantee.
