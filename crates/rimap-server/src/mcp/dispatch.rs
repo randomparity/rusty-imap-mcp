@@ -142,9 +142,23 @@ pub(super) fn rimap_error_to_breaker_reason(
 /// `on_timeout` runs only when the ceiling fires. Dropping the dispatch
 /// future mid-command leaves the cached IMAP session holding an unread
 /// server response, which the next command would misparse as its own, so
-/// the caller uses it to invalidate the connection. An inner
+/// the caller uses it to mark the connection unusable. An inner
 /// `ERR_TIMEOUT` is returned verbatim and does *not* run it — that path
 /// stayed inside its stage budget and `with_session` invalidated already.
+///
+/// **`on_timeout` runs while `dispatch` is still alive**, which is why
+/// `dispatch` is pinned to a local rather than moved into `timeout`. The
+/// awaited `Timeout` drops the dispatch future — and with it the session
+/// lock guard held inside `Connection::attempt` — as soon as the `.await`
+/// completes, so a callback that ran after that would set its flag *after*
+/// the lock had already woken the next FIFO waiter, and that waiter would
+/// take the poisoned session. Holding the dispatch across the callback is
+/// what orders the flag ahead of every queued waiter.
+///
+/// That ordering imposes a contract on `on_timeout`: it must be
+/// non-blocking and must not touch the session lock, which the cut
+/// dispatch still holds. `Connection::poison` is a plain atomic store for
+/// exactly this reason; an `invalidate().await` here would deadlock.
 pub(super) async fn with_tool_call_ceiling<T, F>(
     ceiling: std::time::Duration,
     dispatch: F,
@@ -153,7 +167,8 @@ pub(super) async fn with_tool_call_ceiling<T, F>(
 where
     F: std::future::Future<Output = Result<T, rimap_core::RimapError>>,
 {
-    match tokio::time::timeout(ceiling, dispatch).await {
+    let mut dispatch = std::pin::pin!(dispatch);
+    match tokio::time::timeout(ceiling, dispatch.as_mut()).await {
         Ok(result) => result,
         Err(_elapsed) => {
             on_timeout();
@@ -373,6 +388,52 @@ mod tests {
         assert!(
             cleaned.load(Ordering::SeqCst),
             "a fired ceiling must run the session-invalidation cleanup",
+        );
+    }
+
+    /// `on_timeout` must run while the cut dispatch still holds whatever
+    /// locks it took — that ordering is the whole reason
+    /// `Connection::poison` beats a peer already queued on the session
+    /// lock. If the dispatch future were dropped first, the lock would
+    /// wake the next FIFO waiter *before* the flag was set and that
+    /// waiter would take the poisoned session.
+    ///
+    /// Asserted directly rather than through the scheduler: a `try_lock`
+    /// inside the callback must FAIL, because the dispatch still owns the
+    /// guard. Moving `dispatch` into `timeout` (dropping it at the
+    /// `.await`) makes this `try_lock` succeed and the test fail, with no
+    /// dependence on tokio's wake heuristics.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_runs_before_the_cut_dispatch_releases_its_locks() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let probe = Arc::clone(&lock);
+        let held_during_cleanup = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&held_during_cleanup);
+
+        let body = {
+            let lock = Arc::clone(&lock);
+            async move {
+                let _guard = lock.lock().await;
+                std::future::pending::<Result<(), rimap_core::RimapError>>().await
+            }
+        };
+
+        let err = with_tool_call_ceiling(Duration::from_millis(50), body, || {
+            // The cut dispatch must still be holding the guard here.
+            flag.store(probe.try_lock().is_err(), Ordering::SeqCst);
+        })
+        .await
+        .expect_err("the ceiling must cut a dispatch parked while holding the lock");
+        assert_eq!(err.code(), rimap_core::ErrorCode::Timeout);
+
+        assert!(
+            held_during_cleanup.load(Ordering::SeqCst),
+            "cleanup ran after the dispatch released its lock: a queued peer \
+             would already have been woken and taken the poisoned session",
+        );
+        assert!(
+            lock.try_lock().is_ok(),
+            "the lock must be released once with_tool_call_ceiling returns",
         );
     }
 

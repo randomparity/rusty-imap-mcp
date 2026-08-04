@@ -218,10 +218,21 @@ impl Connection {
     /// `tokio::sync::Mutex` is FIFO-fair: a peer command that queued on
     /// the lock while the cut command held it sits *ahead* of anything
     /// that starts waiting now, and would take the poisoned session
-    /// first. Setting a flag is ordered ahead of every queued waiter
-    /// because the waiter itself checks it.
+    /// first.
+    ///
+    /// The flag beats that waiter only if it is set **before** the cut
+    /// command's guard is dropped, since dropping the guard is what wakes
+    /// the waiter. `with_tool_call_ceiling` holds the cut dispatch alive
+    /// across this call for that reason; see its docs. Because the caller
+    /// therefore still holds the session lock, this must not try to take
+    /// it — hence a plain store rather than an `async fn`.
+    ///
+    /// `Relaxed` is sufficient: the flag publishes no data of its own (the
+    /// session is published through the mutex), and the mutex
+    /// release/acquire between this store and the
+    /// [`Self::take_poisoned`] that observes it is the synchronizing edge.
     pub fn poison(&self) {
-        self.inner.poisoned.store(true, Ordering::Release);
+        self.inner.poisoned.store(true, Ordering::Relaxed);
     }
 
     /// Consume the poison flag: if set, clear `slot` so the caller
@@ -230,9 +241,10 @@ impl Connection {
     ///
     /// The swap makes the flag one-shot — a second command must not
     /// discard a session poisoned before the first one already replaced
-    /// it.
+    /// it. `Relaxed` for the same reason as [`Self::poison`]: the mutex,
+    /// not this flag, carries the happens-before edge.
     pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
-        if !self.inner.poisoned.swap(false, Ordering::AcqRel) {
+        if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
             return false;
         }
         *slot = None;
@@ -384,12 +396,20 @@ mod tests {
         )
     }
 
-    /// `poison` is a one-shot flag consumed under the session lock, not a
-    /// lock acquisition. The one-shot property is load-bearing: a second
-    /// command must not discard a session the first command already
-    /// reconnected after consuming the same poison (#594).
+    /// `poison` is a one-shot flag consumed under the session lock. The
+    /// one-shot property is load-bearing: a second command must not
+    /// discard a session the first command already reconnected after
+    /// consuming the same poison (#594).
+    ///
+    /// `ImapSession` cannot be constructed without a live server, so the
+    /// slot clear itself is covered by the server-level ceiling test.
+    /// What is observable here is the capability reset, which must not
+    /// survive a poison — a stale `has_move` would let the next command
+    /// issue `MOVE` against a server that never advertised it.
     #[test]
-    fn poison_is_consumed_once_and_clears_the_slot() {
+    fn poison_is_consumed_once_and_resets_capabilities() {
+        use std::sync::atomic::Ordering;
+
         let conn = connection_with("mail.example.com", "alice@example.com", 4096);
         let mut slot = None;
 
@@ -398,31 +418,66 @@ mod tests {
             "an unpoisoned connection must not report a discard",
         );
 
+        conn.inner.has_move.store(true, Ordering::Relaxed);
+        conn.inner.has_uidplus.store(true, Ordering::Relaxed);
         conn.poison();
+
         assert!(
             conn.take_poisoned(&mut slot),
             "poison must be observed by the next holder of the session lock",
         );
-        assert!(slot.is_none(), "the poisoned session must be dropped");
+        assert!(
+            !conn.has_move_capability(),
+            "MOVE capability must not survive a poison",
+        );
+        assert!(
+            !conn.has_uidplus_capability(),
+            "UIDPLUS capability must not survive a poison",
+        );
         assert!(
             !conn.take_poisoned(&mut slot),
             "the flag must be consumed, not latched",
         );
     }
 
-    /// `poison` takes no lock, so it cannot be starved by a peer command
-    /// holding the session — the property that makes it correct where an
-    /// `invalidate().await` would be served behind every queued waiter.
+    /// A peer already queued on the session lock — the waiter `poison`
+    /// exists to beat — observes the flag and discards the session.
+    ///
+    /// This is the FIFO case: the poisoner sets the flag while still
+    /// holding the lock, so the wake that hands the lock to the queued
+    /// peer happens strictly after the store. The peer then consumes it
+    /// in `take_poisoned` rather than using the session it was about to
+    /// receive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn poison_does_not_wait_on_the_session_lock() {
-        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
-        let mut held = conn.inner.session.lock().await;
+    async fn queued_peer_observes_a_poison_set_while_the_lock_was_held() {
+        use std::sync::Arc;
 
-        conn.poison(); // would deadlock if it queued on the lock
+        let conn = Arc::new(connection_with(
+            "mail.example.com",
+            "alice@example.com",
+            4096,
+        ));
+        let holder = Arc::clone(&conn);
+
+        let guard = holder.inner.session.lock().await;
+
+        // Queue a peer behind the held lock.
+        let peer = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            async move {
+                let mut slot = conn.inner.session.lock().await;
+                conn.take_poisoned(&mut slot)
+            }
+        });
+        // Let the peer reach the lock queue before the flag is set.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        conn.poison(); // set while the lock is still held — the ordering that matters
+        drop(guard); // now the peer is woken
 
         assert!(
-            conn.take_poisoned(&mut held),
-            "the lock holder observes the poison set while it held the lock",
+            peer.await.expect("peer task"),
+            "the queued FIFO waiter must observe the poison and discard the session",
         );
     }
 
