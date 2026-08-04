@@ -108,10 +108,16 @@ pub(super) struct ConnectionInner {
     /// Server advertised MOVE capability (RFC 6851) after login.
     /// Reset to `false` by [`Connection::take_poisoned`], which is what
     /// discards a session; the next login re-reads the real value.
+    ///
+    /// Only a read taken while `session` holds the session that will serve the
+    /// command describes that session — see [`Connection::has_move_capability`]
+    /// for what a read from outside the session scope can be, and #634.
     pub(super) has_move: AtomicBool,
     /// Server advertised UIDPLUS capability (RFC 4315) after login.
     /// Reset to `false` by [`Connection::take_poisoned`], which is what
     /// discards a session; the next login re-reads the real value.
+    ///
+    /// Same read-inside-the-session-scope rule as [`Self::has_move`].
     pub(super) has_uidplus: AtomicBool,
     /// Set by [`Connection::poison`] when a command was cut mid-flight.
     /// Consumed by `dispatch::attempt` under the session lock; see `poison`
@@ -427,12 +433,35 @@ impl Connection {
     }
 
     /// Whether the server advertised the MOVE capability (RFC 6851).
+    ///
+    /// Reports the *last* login's advertisement, which describes the session
+    /// currently in the slot only while there is one. A caller that reads this
+    /// and then issues a command is not guaranteed both refer to the same
+    /// session: the command lazy-connects, and the connect it triggers can
+    /// replace the session — and the advertisement — in between. So code that
+    /// selects a protocol from a capability must read it from *inside* the
+    /// `with_session` body, where the slot is already populated with the
+    /// session that will serve the command (#634). `dispatch::move_messages`
+    /// and `dispatch::delete_message` are the only two that branch on a
+    /// capability, and both go through `dispatch::session_capabilities`, which
+    /// takes the live session as a witness.
+    ///
+    /// Nothing stops a future caller reading this directly and hoisting it back
+    /// out — that is convention, not enforcement. #652 tracks moving the pair
+    /// into the session slot, which would make the stale read unrepresentable.
+    ///
+    /// It stays `pub` because the integration tests live outside the crate and
+    /// assert on what a completed command observed. There is no in-tree
+    /// production caller.
     #[must_use]
     pub fn has_move_capability(&self) -> bool {
         self.inner.has_move.load(Ordering::Relaxed)
     }
 
     /// Whether the server advertised the UIDPLUS capability (RFC 4315).
+    ///
+    /// Same read-inside-the-session-scope rule as
+    /// [`Self::has_move_capability`].
     #[must_use]
     pub fn has_uidplus_capability(&self) -> bool {
         self.inner.has_uidplus.load(Ordering::Relaxed)
@@ -499,17 +528,28 @@ impl Connection {
     /// This is the only path that empties the slot, so it is also the only
     /// place the capability atomics are reset. That reset used to run in
     /// `with_session` as well, the moment a transport failure returned;
-    /// removing it from there (#629) moved the reset *later*, to whenever
-    /// the next command takes the session lock. The last-known values stay
-    /// readable in between, and that is the safer direction rather than an
-    /// accepted cost: the flags are read as a pair, and a forced
-    /// `!has_move && !has_uidplus` is exactly what selects the folder-wide
-    /// EXPUNGE fallback (see
-    /// `ops::expunge::fallback_uses_folder_wide_expunge`), which purges
-    /// every `\Deleted` message in the folder rather than the requested
-    /// UIDs. Holding the values until the reconnect re-reads CAPABILITY
-    /// keeps a command that snapshotted them agreeing with the server it
-    /// will actually talk to.
+    /// removing it from there (#629) moved the reset *later*, to whenever the
+    /// next command takes the session lock. Either placement leaves a window
+    /// in which the atomics describe no session at all — the `false`/`false`
+    /// this store leaves behind, or the discarded session's values before it
+    /// runs — and `!has_move && !has_uidplus` is exactly what selects the
+    /// folder-wide EXPUNGE fallback (see
+    /// `ops::expunge::fallback_uses_folder_wide_expunge`), which purges every
+    /// `\Deleted` message in the folder rather than the requested UIDs.
+    ///
+    /// No command can observe **that** window, because the reset and the
+    /// reconnect that follows it both happen under this lock, and the two
+    /// capability readers run inside the `with_session` body — after
+    /// `dispatch::attempt` has populated the slot (#634). The reset is
+    /// therefore bookkeeping for the public accessors, not a value any
+    /// protocol selection is built from.
+    ///
+    /// That statement is about this window only. The same `false`/`false` also
+    /// arises from *inside* a completed login, when the post-login CAPABILITY
+    /// probe fails and `login::imap_login` encodes "unknown" as "absent" — and
+    /// a command does observe that one, by design, because it describes the
+    /// session it just got. Tracked as #649; the reconnect this function
+    /// triggers is one of the paths that reaches it.
     ///
     /// The other way out of the slot is `dispatch::attempt`'s `insert`, and
     /// that follows a login, which stores the fresh values.
@@ -958,9 +998,12 @@ mod tests {
     /// pinned separately by `tests/poison_reconnect.rs` over the scriptable
     /// fake, because deleting that call site leaves this test green.
     ///
-    /// The capability reset is asserted here because a stale `has_move`
-    /// would let the next command issue `MOVE` against a server that never
-    /// advertised it.
+    /// The capability reset is asserted here because the atomics must not
+    /// keep describing a session that is gone: the public accessors read
+    /// them with no lock, and emptying the slot without clearing them is
+    /// what leaves a `true` over an empty slot. The commands themselves are
+    /// no longer at risk — they read the flags inside the `with_session`
+    /// body, after the reconnect has repopulated them (#634).
     #[test]
     fn poison_is_consumed_once_and_resets_capabilities() {
         use std::sync::atomic::Ordering;
