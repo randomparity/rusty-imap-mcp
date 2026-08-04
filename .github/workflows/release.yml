@@ -711,7 +711,7 @@ jobs:
       # would otherwise leave red (ADR-0011); cargo-edit provides set-version.
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
-          tool: just
+          tool: just@1.58.0
       - name: Install cargo-edit
         run: cargo install cargo-edit --locked --version 0.13.11
       # The script performs the bump, re-resolves every lockfile it touches,
