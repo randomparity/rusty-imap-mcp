@@ -22,6 +22,40 @@ test-group = 'container-backed'
 filter = 'binary(e2e_wire_chaos)'
 test-group = 'chaos-backed'
 
+# After a test process exits, nextest waits up to `leak-timeout` for its
+# stdout/stderr pipes to be observed closed, and reports a LEAK marker if the
+# window expires. The built-in default is 100 ms, which is inside the scheduling
+# noise band on a machine starting several test processes at once: running only
+# the three `rimap-imap` poison binaries on an 18-CPU host produced a marker in
+# 8 of 60 runs, and the most frequent leaker was `poison_reconnect`, which
+# spawns no child process at all. Those tests hold no handle that could outlive
+# them — the leak window opens after process exit, by which point the kernel has
+# closed every descriptor the process held (#630). The markers were a timing
+# artifact of the window, not a resource leak.
+#
+# 5s is deliberately far above the regime the artifacts occur in rather than
+# just past it. The same three binaries measured 0 markers in 50 runs at 2s, but
+# that is the smallest value shown sufficient on a fast, lightly loaded host;
+# CI runners have fewer cores and run the whole workspace, so their tail is
+# worse. The cost of the larger window is only paid when a marker would have
+# fired anyway, so overshooting is cheap and undershooting reintroduces the
+# noise.
+#
+# Leaks stay advisory (nextest's default `result = "pass"`): the workspace does
+# have genuinely subprocess-spawning tests (the Dovecot/Proton/chaos harnesses
+# shell out to the container runtime, the wire harness spawns the server binary)
+# and this window has not yet been calibrated against them under real CI load.
+# Making leaks fatal — `leak-timeout = { period = "5s", result = "fail" }` —
+# requires that calibration first: a run of CI at this period with no markers on
+# either required test job or the nightly chaos workflow (#642).
+#
+# Declared after the overrides above so both profile tables read together;
+# `[profile.ci]` inherits this, and so does every recipe that passes no profile
+# (`test-fast`, `test-proton`, `test-injection`, nightly-chaos), which is where
+# the markers were actually observed.
+[profile.default]
+leak-timeout = "5s"
+
 # nextest's built-in default is fail-fast = true: the first failure cancels
 # the run and every test still in flight is reported as "not run" rather than
 # pass or fail (#625). That is fine for a quick local iteration loop — see
