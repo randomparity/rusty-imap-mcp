@@ -13,8 +13,8 @@ description = "In-process scriptable adversarial IMAP fake for rusty-imap-mcp te
 workspace = true
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.1.1-dev" }
-rimap-imap = { path = "../rimap-imap", version = "0.1.1-dev" }
+rimap-core = { path = "../rimap-core", version = "0.2.0-dev" }
+rimap-imap = { path = "../rimap-imap", version = "0.2.0-dev" }
 secrecy = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }

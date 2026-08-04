@@ -118,20 +118,25 @@ async fn post_login_capability_probe_failure_forces_move_fallback() {
     // takes the non-atomic COPY + STORE \Deleted + folder-wide EXPUNGE fallback
     // — even though the server advertised MOVE/UIDPLUS pre-login.
     //
-    // Why the connection is WARMED first (with `list_folders`) before the move:
-    // `Connection::move_messages` snapshots `has_move_capability()` /
-    // `has_uidplus_capability()` *before* it establishes the session (see
-    // `connection/dispatch.rs`). On a cold connection those atomics still hold
-    // their construction-time `false`, so a move issued as the very first
-    // operation would take the fallback *regardless of the probe result* — a
-    // vacuous assertion. Warming the connection first runs the post-login probe
-    // and populates the atomics from the server's actual reply, so the move
-    // below genuinely depends on the probe outcome: with a MOVE/UIDPLUS-
-    // advertising probe the atomics would be `true` and the move would issue
-    // `UID MOVE` instead, diverging from the scripted fallback dialog.
+    // This test pins the behaviour as it stands; it does not endorse it. A
+    // failed probe means the capabilities are UNKNOWN, and `imap_login` maps
+    // unknown onto the same `(false, false)` that means "absent" — which is
+    // exactly `fallback_uses_folder_wide_expunge`'s condition, so an
+    // uninformative probe fails open into a destructive default rather than
+    // refusing. Tracked as its own defect in #649; #634 fixed the adjacent
+    // problem of reading flags that describe a *different* session, not this
+    // one of reading flags that describe *no* session.
     //
-    // (`expunge_folder_wide_gap.rs` issues its move as the first op and so does
-    // not exercise the post-login probe result; this test does.)
+    // What makes this bite is the divergence between the two advertisements:
+    // the pre-login line offers `MOVE UIDPLUS`, the probe yields nothing, and
+    // the scripted dialog expects the fallback. A client that trusted the
+    // pre-login line would issue `UID MOVE` and desync. That is the whole
+    // assertion — the probe is the only source of truth for these two flags.
+    //
+    // It does NOT pin where the flags are read. The probe's result here is
+    // `(false, false)`, bit-identical to the construction-time default, so
+    // hoisting the read back above `with_session` would leave this test green.
+    // `capability_reconnect_freshness.rs` is what pins the read point (#634).
     let steps = vec![
         Step::Send(b"* OK fake ready\r\n".to_vec()),
         Step::Expect { verb: "CAPABILITY" },
@@ -150,14 +155,6 @@ async fn post_login_capability_probe_failure_forces_move_fallback() {
         Step::Expect { verb: "CAPABILITY" },
         Step::Reply {
             text: "BAD capability temporarily unavailable",
-        },
-        // Warm-up: the boot-style `LIST` that establishes the session and runs
-        // the probe above, so the capability atomics are populated before the
-        // move snapshots them.
-        Step::Expect { verb: "LIST" },
-        Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
-        Step::Reply {
-            text: "OK LIST completed",
         },
         // move_messages fallback dialog: SELECT source (read-write) → UID COPY →
         // STATUS dest → UID STORE \Deleted → folder-wide EXPUNGE (NOT
@@ -191,12 +188,15 @@ async fn post_login_capability_probe_failure_forces_move_fallback() {
 
     let conn = server.connection("user@example.com");
 
-    // Warm the connection so the post-login probe runs and the atomics reflect
-    // its (empty) result.
-    conn.list_folders("*").await.expect("warm-up list");
+    let uid = Uid::from(NonZeroU32::new(5).unwrap());
+    let outcome = conn
+        .move_messages("INBOX", "Archive", &[uid], None)
+        .await
+        .expect("move should succeed via the fallback path");
 
     // The probe yielded no capabilities despite the pre-login advertisement —
-    // the post-login probe is the only source of truth for MOVE/UIDPLUS.
+    // the post-login probe is the only source of truth for MOVE/UIDPLUS, and
+    // the move above read these same values from inside its dispatch.
     assert!(
         !conn.has_move_capability(),
         "an empty post-login CAPABILITY probe must leave MOVE off",
@@ -205,12 +205,6 @@ async fn post_login_capability_probe_failure_forces_move_fallback() {
         !conn.has_uidplus_capability(),
         "an empty post-login CAPABILITY probe must leave UIDPLUS off",
     );
-
-    let uid = Uid::from(NonZeroU32::new(5).unwrap());
-    let outcome = conn
-        .move_messages("INBOX", "Archive", &[uid], None)
-        .await
-        .expect("move should succeed via the fallback path");
 
     assert!(
         outcome.used_fallback,

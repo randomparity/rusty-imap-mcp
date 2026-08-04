@@ -181,6 +181,33 @@ impl Connection {
         outcome
     }
 
+    /// The serving session's `(has_move, has_uidplus)` advertisement.
+    ///
+    /// `session` is a witness, not an input — nothing is read from it. It is
+    /// there because only [`Self::attempt`] can hand one out, and it does so
+    /// after the lazy connect has populated the slot and the login has stored
+    /// that session's CAPABILITY reply. So this helper cannot be hoisted above
+    /// `with_session`: out there, there is no `&ImapSession` to pass.
+    ///
+    /// **That is a guard on this call, not on the atomics.**
+    /// [`Connection::has_move_capability`] and
+    /// [`Connection::has_uidplus_capability`] are still `pub` inherent methods
+    /// with no witness, so writing #634 back by hand — a `let has_move =
+    /// self.has_move_capability();` above `with_session` — still compiles.
+    /// What this buys is that the *correct* idiom has a name and reads no
+    /// worse than the hoist, so there is nothing to gain by hoisting.
+    ///
+    /// Making a stale or session-less read unrepresentable needs the pair to
+    /// live with the session rather than beside it — `Option<(ImapSession,
+    /// Caps)>` in the slot, with `imap_login` returning the pair instead of
+    /// storing it. That also deletes [`Connection::take_poisoned`]'s
+    /// capability reset and gives a failed CAPABILITY probe somewhere to say
+    /// "unknown" instead of borrowing "absent" (#649). Tracked as #652; it
+    /// restructures the session slot, which #634 deliberately did not.
+    fn session_capabilities(&self, _session: &ImapSession) -> (bool, bool) {
+        (self.has_move_capability(), self.has_uidplus_capability())
+    }
+
     /// `LIST` against `pattern` (e.g. `"*"`, `"INBOX/*"`).
     ///
     /// A read-only op: on `ConnectionLost` it reconnects and retries once
@@ -468,11 +495,10 @@ impl Connection {
         uids: &[crate::types::Uid],
         expected_source_uidvalidity: Option<u32>,
     ) -> Result<crate::ops::move_message::MoveOutcome, ImapError> {
-        let has_move = self.has_move_capability();
-        let has_uidplus = self.has_uidplus_capability();
         self.with_session("move", Idempotency::Mutating, || {
             async |session| {
                 crate::ops::folders::select(session, source_folder, false).await?;
+                let (has_move, has_uidplus) = self.session_capabilities(session);
                 crate::ops::move_message::move_messages(
                     session,
                     source_folder,
@@ -542,13 +568,12 @@ impl Connection {
         trash_folder: &str,
         expected_uidvalidity: Option<u32>,
     ) -> Result<(crate::ops::delete::DeleteResult, Option<u32>), ImapError> {
-        let has_move = self.has_move_capability();
-        let has_uidplus = self.has_uidplus_capability();
         self.with_session("delete_message", Idempotency::Mutating, || {
             async |session| {
                 let selected = crate::ops::folders::select(session, folder, false).await?;
                 let uid_validity = selected.uid_validity;
                 crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
+                let (has_move, has_uidplus) = self.session_capabilities(session);
                 let result = crate::ops::delete::delete_message(
                     session,
                     uid,
