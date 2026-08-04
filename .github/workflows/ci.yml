@@ -97,12 +97,27 @@ jobs:
       # The main --workspace pass above runs with the default silent-skip
       # posture: container-gated e2e tests return early when no docker/podman
       # runtime is present, so a runtime hiccup would let them all vanish while
-      # CI stays green. This step re-runs every container-gated e2e binary
-      # (binary(/e2e/) matches e2e, e2e_smtp, and the e2e_wire* family) under
+      # CI stays green. This step re-runs every container-gated binary under
       # RIMAP_REQUIRE_DOCKER=1, which flips the harness from silent-skip to a
       # hard failure. --no-tests=fail additionally guards against a binary being
       # renamed or dropped (zero tests selected). The binary regex auto-covers
       # any future e2e* binary without another CI edit.
+      #
+      # The selector spans two crates. rimap-imap was omitted until #636, which
+      # widened the skip path from "no docker/podman binary" to "no reachable
+      # daemon" — a strictly larger set of conditions, so leaving that crate
+      # outside this arm would let a CI daemon outage silently delete its 28
+      # container tests.
+      #
+      # It joins as `binary(dovecot) and test(case_01)`, not the whole binary:
+      # this step is a canary for "did the harness skip?", and one container
+      # boot answers that as well as 28 do. The --workspace pass above already
+      # runs all 28 in parallel, whereas --no-capture pins this step to a single
+      # test thread — so selecting the full binary would serialize ~28 Dovecot
+      # boots and add minutes for no extra signal. If case_01 is ever renamed,
+      # --no-tests=fail turns that into a loud failure here rather than a silent
+      # loss of the canary. rimap-imap's other container binary, proton, stays
+      # out on purpose: it needs a Proton Bridge no CI runner has.
       #
       # Deliberately NOT --profile ci (#625): this step runs only
       # container-backed e2e binaries, so under a dead or contended Docker
@@ -113,8 +128,8 @@ jobs:
       # daemon outage fails this step in seconds instead of minutes.
       - name: e2e suites — fail if container runtime unavailable or zero tests selected
         run: |
-          cargo nextest run -p rimap-server \
-            -E 'binary(/e2e/)' \
+          cargo nextest run -p rimap-server -p rimap-imap \
+            -E 'binary(/e2e/) + (binary(dovecot) and test(case_01))' \
             --locked --no-tests=fail \
             --no-capture
         env:

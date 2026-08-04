@@ -78,9 +78,29 @@ The Dovecot integration harness autodetects `docker` first, then falls
 back to `podman` (via `podman compose` / `podman-compose`). Both
 runtimes work on macOS (Apple Silicon and Intel), Ubuntu CI, and Fedora.
 Override with `RIMAP_CONTAINER_TOOL=docker` or
-`RIMAP_CONTAINER_TOOL=podman` if you need to force a specific one. Set
-`RIMAP_REQUIRE_DOCKER=1` to fail loudly instead of silently skipping
-when no runtime is installed.
+`RIMAP_CONTAINER_TOOL=podman` if you need to force a specific one.
+
+That autodetect picks the first runtime *installed*, not the first one
+that works: with a stopped Docker Desktop and a working podman it still
+selects docker, and skips. Use `RIMAP_CONTAINER_TOOL` to override.
+
+The gate probes the runtime it selected, not just the binary: it runs
+`<runtime> info`, the first call that actually contacts the daemon. A
+missing binary *and* a binary whose daemon cannot be reached (stopped,
+restarting, socket gone) are both silent skips — they are the two ways a
+host genuinely cannot run the fixture. The probe runs once per test
+process and gives up after 10s. Set `RIMAP_REQUIRE_DOCKER=1` to turn
+either into a loud failure; CI does.
+
+Everything else is loud, deliberately. The probe only reports "cannot
+run containers" when the runtime's own stderr says it could not reach
+its engine; any other non-zero exit — and a probe that overruns its
+budget — is treated as usable, so the run proceeds to `compose up` and
+fails there. That is what keeps a *live* daemon refusing work visible:
+an unpullable image, a readiness timeout, or
+`all predefined address pools have been fully subnetted` (which is what
+several agents running `just ci` at once actually hit) is a hard failure
+at every posture, never a skip.
 
 The fixture image is `docker.io/dovecot/dovecot:2.4.4-root` (rootful
 flavor, multi-arch `linux/amd64` + `linux/arm64`). It listens on
@@ -111,10 +131,11 @@ audit-log pairing + namespace attribution.
   is available; with Docker on either linux/amd64 or macOS arm64,
   expect ~10–60s on a warm machine (Dovecot bring-up dominates).
 - Gating: silent-skip ONLY when the host genuinely cannot run the
-  fixture — missing docker/podman. `RIMAP_REQUIRE_DOCKER=1` flips
-  every failure mode (compose-up, readiness timeout, port reservation,
-  fingerprint read) to a panic with diagnostic context. Same
-  convention as the legacy in-process `e2e_full_session`.
+  fixture — missing docker/podman, or a runtime whose daemon does not
+  answer the pre-flight probe. `RIMAP_REQUIRE_DOCKER=1` flips every
+  failure mode (unusable runtime, compose-up, readiness timeout, port
+  reservation, fingerprint read) to a panic with diagnostic context.
+  Same convention as the legacy in-process `e2e_full_session`.
 - Schema regen: when changing any `<Tool>Meta` or `<Tool>Untrusted`
   struct in `crates/rimap-server/src/tools/`, run
   `just regen-tool-schemas` and commit the diff. CI fails on a
@@ -283,7 +304,8 @@ are the ones that trip people up or aren't obvious from the lint set.
   disconnects. It terminates TLS with a pinned self-signed cert, is
   host-runnable (no container), and is PR-blocking. Use the Dovecot container
   harness (`tests/integration/`) for *conformant* end-to-end behavior; it is
-  container-gated and silent-skips without a runtime.
+  container-gated and silent-skips without a usable runtime (see "Container
+  runtime for integration tests").
 
 ## Git, commits, and PR workflow
 
