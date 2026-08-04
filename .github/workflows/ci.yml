@@ -90,7 +90,10 @@ jobs:
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --locked --no-tests=pass
+      # --profile ci selects the bounded max-fail policy in
+      # .config/nextest.toml (#625): an unrelated flake or container hiccup
+      # no longer suppresses every other test's result.
+      - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
       # The main --workspace pass above runs with the default silent-skip
       # posture: container-gated e2e tests return early when no docker/podman
       # runtime is present, so a runtime hiccup would let them all vanish while
@@ -128,7 +131,7 @@ jobs:
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --locked --no-tests=pass
+      - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
 
   tool-schema-drift:
     name: tool-schema drift

@@ -220,9 +220,11 @@ man:
 test-installer:
     bash scripts/install.test.sh
 
-# Unit and fast tests (no Proton Bridge).
+# Unit and fast tests (no Proton Bridge). --profile ci matches CI's "test
+# (stable)" job (#625): a bounded number of independent failures all get
+# reported, instead of the first one cancelling the rest of the run.
 test: prune-containers
-    cargo nextest run --workspace --locked --no-tests=pass
+    cargo nextest run --workspace --locked --no-tests=pass --profile ci
 
 # Inner-loop unit tests. Skips the five heaviest test binaries
 # (dovecot integration, e2e/e2e_wire MCP suites, and the slow HTML
@@ -230,14 +232,19 @@ test: prune-containers
 # inner-loop iteration. Before pushing, run `just test` (or `just ci`)
 # for the full sweep. See
 # docs/superpowers/specs/2026-05-20-local-test-runtime-trim-design.md.
+#
+# Intentionally keeps nextest's built-in fail-fast=true (not --profile ci):
+# this target is for iterating on one failure at a time, so stopping at the
+# first one is the wanted behavior, not the bug #625 fixes.
 test-fast:
     cargo nextest run --workspace --locked --no-tests=pass \
         -E 'not (binary(dovecot) | binary(e2e) | binary(e2e_wire) | binary(e2e_wire_cancellation) | binary(proptest_html_lookalike))'
 
-# Verify the MSRV toolchain still builds and tests the workspace.
+# Verify the MSRV toolchain still builds and tests the workspace. --profile
+# ci matches CI's "test (MSRV 1.88.0)" job (#625).
 test-msrv:
     cargo +{{MSRV}} check --workspace --all-targets --all-features --locked
-    cargo +{{MSRV}} nextest run --workspace --locked --no-tests=pass
+    cargo +{{MSRV}} nextest run --workspace --locked --no-tests=pass --profile ci
 
 # Cargo-mutants survey. In-place is required on macOS; see docs/security/cargo-mutants-runbook.md.
 mutants *args:
