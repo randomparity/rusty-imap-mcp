@@ -32,7 +32,10 @@ posture = "readonly"
 fallback = "keyring-only"
 
 [defaults.limits]
-# Any [limits] field may be set here; accounts inherit what they don't set.
+# Any [limits] field may be set here. NOTE: an account that declares its own
+# [accounts.limits] block replaces this one WHOLESALE — fields it does not set
+# fall back to the built-in defaults, not to the values here (issue #624). Set
+# every field you care about on such an account.
 commands_per_second = 10
 # Wall-clock ceiling on one tool call (see config.example.toml). Validated
 # against each account's own [accounts.imap] budgets, plus its
