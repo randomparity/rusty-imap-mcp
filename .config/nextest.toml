@@ -21,3 +21,32 @@ test-group = 'container-backed'
 [[profile.default.overrides]]
 filter = 'binary(e2e_wire_chaos)'
 test-group = 'chaos-backed'
+
+# nextest's built-in default is fail-fast = true: the first failure cancels
+# the run and every test still in flight is reported as "not run" rather than
+# pass or fail (#625). That is fine for a quick local iteration loop — see
+# `test-fast` in justfile, which intentionally keeps the built-in default so
+# a developer sees the first failure and stops — but it is the wrong
+# trade-off for `just test`/`just test-msrv` and CI's "test (stable)" /
+# "test (MSRV 1.88.0)" jobs, where an unrelated flake or a container hiccup
+# (Docker port/address-pool contention under `binary(dovecot)` /
+# `binary(e2e)`) can suppress hundreds of unrelated results.
+#
+# `fail-fast = false` was considered and rejected: an unbounded run gives up
+# the one thing fail-fast protects, a bound on how many tests a genuinely
+# broken branch gets to run. `retries` was also considered and rejected: a
+# test passing on retry is not evidence the code is correct, and retries
+# would have quietly absorbed the #621 flake instead of surfacing it.
+# `max-fail` keeps both properties: every result from a bounded number of
+# independent failures is still visible, and a broadly-broken branch still
+# aborts instead of running the rest of the suite.
+#
+# max-fail bounds failure *count*, not wall-clock time — it is not a
+# substitute for a job-level timeout. If the container daemon itself is
+# unhealthy, the 20 failures budgeted here can each be a slow container-backed
+# test (`container-backed` above throttles those to max-threads = 4), so this
+# profile can still cost several minutes of CI time before aborting. That is
+# an accepted, bounded cost, not the near-instant abort fail-fast = true gave
+# a systemic failure.
+[profile.ci]
+fail-fast = { max-fail = 20 }

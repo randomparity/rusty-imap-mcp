@@ -218,9 +218,21 @@ mark_read = "allow"  # override: personal account can mark read
 
 **Merge semantics:**
 - Per-account overrides replace defaults for the same tool
-- Tools not mentioned in per-account inherit from defaults
-- Per-account posture (if set) replaces default posture
+- Tools not mentioned in per-account inherit from defaults — writing
+  `[accounts.security.tools]` at all does not drop the rest of
+  `[defaults.security.tools]`
+- Per-account posture (if set) replaces default posture; leaving it unset
+  inherits the default posture even when the account writes other
+  `[accounts.security]` keys
 - Per-account overrides apply on top of per-account posture
+
+This is the general rule for `[defaults]`, not something specific to
+tools: `[accounts.security]` and `[accounts.limits]` merge onto
+`[defaults.*]` key by key, and only the keys an account writes are
+overridden. Arrays (`protected_folders`, `expunge_folders`,
+`lookalike.known_domains`) replace the inherited list rather than adding
+to it. See
+[configuration.md — Merge semantics](configuration.md#merge-semantics).
 
 In the example above:
 - `work` account: `mark_read` denied (inherited from defaults)

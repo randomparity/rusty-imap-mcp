@@ -15,8 +15,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo-semver-checks` and the `crates-io` deployment environment. See #544 /
   ADR-0004 and RELEASING.md.
 
+### Fixed
+
+- Multi-account configs now merge `[defaults.security]`, `[defaults.limits]`,
+  and `[defaults.credentials]` into each account **key by key**. Previously an
+  account that wrote the corresponding table at all discarded the whole
+  `[defaults]` block, and every key it left unset silently reverted to the
+  built-in default rather than the operator's configured one. See #624 /
+  ADR-0013.
+
 ### Changed
 
+- **Behaviour break for multi-account configs (#624).** Because the fix above
+  makes accounts inherit keys they previously reverted, an account carrying a
+  partial `[accounts.security]` block can come out *more* permissive after
+  upgrading:
+  - it now inherits `[defaults.security.tools]` verdicts, including `allow`
+    entries — and an explicit `allow` permits a tool regardless of posture, so
+    an account marked `posture = "readonly"` can acquire `delete_message`,
+    `export_messages`, or `send_email`;
+  - it now inherits `[defaults.security] expunge_folders` in place of the
+    built-in empty list, which is the one way a folder can become expungeable
+    that was not before;
+  - it now inherits `[defaults.security] protected_folders`, which narrows
+    protection whenever that list is shorter than the built-in
+    `INBOX`/`Sent`/`Drafts`/`Trash`.
+
+  Some configs that previously started will now fail validation instead, all
+  fail-closed: an inherited `send_email = "allow"` requires `[accounts.smtp]`,
+  an inherited `export_messages = "allow"` requires a server-private
+  `[attachments].download_dir`, and an inherited `protected_folders` may now
+  overlap an account's own `expunge_folders`.
+
+  Run `rusty-imap-mcp --dry-run` before and after upgrading and diff the
+  per-account effective matrix it prints. **That covers the tool-verdict
+  widening only.** `--dry-run` prints posture, per-tool verdicts,
+  infrastructure tools, IMAP capabilities, and the TLS fingerprint — it does
+  **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
+  field, so the folder-list widenings above are invisible in its output.
+  Review those two lists by hand against your `[defaults.security]` for every
+  account carrying a partial `[accounts.security]` block. A boot-time record
+  of the resolved values is tracked in #632.
+- `rimap-config`: `RawAccountConfig::{security, limits, credentials}` change
+  type to the new `AccountSecurityOverrides` / `AccountLimitsOverrides` /
+  `AccountCredentialsOverrides` mirror structs. Breaking for direct consumers
+  of the crate's model types.
 - Version model: `Cargo.toml` now carries the next planned version with a
   `-dev` suffix (e.g. `0.1.1-dev`); release-prep strips it and a
   `post-release-bump` job re-bumps after each release. See ADR-0003.
