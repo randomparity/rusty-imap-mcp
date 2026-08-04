@@ -114,8 +114,10 @@ pub(super) struct ConnectionInner {
 }
 
 /// The session lock, held together with the poison flag it has to be ordered
-/// against. Dropped undisarmed — which is what a cut command leaves behind —
-/// it poisons the connection before releasing the lock (#620).
+/// against. Dropped over a cached session without having been disarmed —
+/// which is what a cut command leaves behind — it poisons the connection
+/// before releasing the lock (#620). See *When it fires* below for the exact
+/// condition.
 ///
 /// The ceiling in `rimap-server` (#594) poisons by *calling*
 /// [`Connection::poison`], which works because the ceiling's own code runs on
