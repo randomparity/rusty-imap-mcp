@@ -37,9 +37,9 @@ fn check_gate() -> Result<(), ChaosSkip> {
     if std::env::var("RIMAP_CHAOS").is_err() {
         return Err(ChaosSkip::Disabled);
     }
-    match gate_reason(probe_runtime()) {
+    match gate_reason(runtime(), probe_runtime()) {
         None => Ok(()),
-        Some(reason) => Err(loud_or_skip(reason)),
+        Some(reason) => Err(loud_or_skip(&reason)),
     }
 }
 
@@ -47,13 +47,13 @@ fn check_gate() -> Result<(), ChaosSkip> {
 /// runtime is usable. Split out from `check_gate` so the classification is
 /// unit-testable without touching `RIMAP_CHAOS`/`RIMAP_REQUIRE_DOCKER` (env
 /// mutation is process-global and races other tests in the same binary).
-fn gate_reason(probe: RuntimeProbe) -> Option<&'static str> {
+fn gate_reason(tool: &str, probe: RuntimeProbe) -> Option<String> {
     match probe {
         RuntimeProbe::Ready => None,
-        RuntimeProbe::NoBinary => Some("RIMAP_CHAOS=1 but no docker/podman runtime found"),
-        RuntimeProbe::DaemonDown => {
-            Some("RIMAP_CHAOS=1 but the container runtime daemon did not respond")
-        }
+        RuntimeProbe::NoBinary => Some(format!("RIMAP_CHAOS=1 but {tool} is not installed")),
+        RuntimeProbe::DaemonDown => Some(format!(
+            "RIMAP_CHAOS=1 but {tool} is installed and its daemon is unreachable"
+        )),
     }
 }
 
@@ -106,61 +106,101 @@ enum RuntimeProbe {
     DaemonDown,
 }
 
-/// Budget for the daemon probe below. A stopped daemon refuses its socket
+/// Budget for the daemon probe. A stopped daemon refuses its socket
 /// immediately, but one that is mid-restart can accept the connection and then
-/// never answer — without a deadline that turns the unusable-runtime case from
-/// a fast skip into a hang.
+/// never answer, so the probe needs a deadline of its own.
 const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Probe the runtime `runtime()` actually selected — probing both binaries
-/// would ignore a `RIMAP_CONTAINER_TOOL` override pointing at the unusable one.
-/// Cached for the process so each test does not pay a process spawn.
+/// State of the runtime `runtime()` selected — probing both binaries would
+/// ignore a `RIMAP_CONTAINER_TOOL` override pointing at the unusable one.
+/// Cached because the verdict cannot usefully change within one test process:
+/// a daemon that dies after the probe surfaces at `compose up`, which is a hard
+/// error at every posture.
 fn probe_runtime() -> RuntimeProbe {
     static PROBE: std::sync::OnceLock<RuntimeProbe> = std::sync::OnceLock::new();
     *PROBE.get_or_init(|| {
         let tool = runtime();
-        if !binary_present(tool) {
-            RuntimeProbe::NoBinary
-        } else if daemon_responds(tool) {
-            RuntimeProbe::Ready
+        if binary_present(tool) {
+            classify_probe(run_daemon_probe(tool, DAEMON_PROBE_TIMEOUT))
         } else {
-            RuntimeProbe::DaemonDown
+            RuntimeProbe::NoBinary
         }
     })
 }
 
-/// `true` when `<tool> info` completes successfully within
-/// [`DAEMON_PROBE_TIMEOUT`]. This is the first call that actually contacts the
-/// engine — `binary_present` only proves the CLI is on `PATH`. Works for both
-/// runtimes: docker reaches its daemon, podman its local or VM-hosted service.
-fn daemon_responds(tool: &str) -> bool {
-    Command::new(tool)
+/// Decide what a finished probe means. Only a stderr naming an unreachable
+/// engine is `DaemonDown`; everything else is `Ready`, which sends the harness
+/// on to `compose up`, where failures are loud. That asymmetry is the point: a
+/// daemon that is merely contended, out of address pools, or misconfigured is
+/// refusing work rather than absent, and skipping those would hide real
+/// breakage. A probe that outlives its budget (`None`) is read the same way —
+/// too busy to answer in ten seconds is busy, not missing.
+fn classify_probe(outcome: Option<(bool, String)>) -> RuntimeProbe {
+    match outcome {
+        Some((false, stderr)) if names_unreachable_engine(&stderr) => RuntimeProbe::DaemonDown,
+        _ => RuntimeProbe::Ready,
+    }
+}
+
+/// Recognize the stderr of a client that could not reach its engine at all.
+/// Covers docker's current `failed to connect to the docker API ...`, the older
+/// `Cannot connect to the Docker daemon ...` that compose still emits, podman's
+/// remote/machine equivalent, and the bare socket errors underneath all three.
+fn names_unreachable_engine(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("failed to connect to the docker api")
+        || s.contains("cannot connect to the docker daemon")
+        || s.contains("is the docker daemon running")
+        || s.contains("cannot connect to podman")
+        || s.contains("connect: no such file or directory")
+        || s.contains("connection refused")
+}
+
+/// Run `<tool> info` — the cheapest call that actually contacts the engine,
+/// where `binary_present` only proves the CLI is on `PATH` — and return
+/// `Some((succeeded, stderr))`, or `None` when it outlives `budget`.
+/// `Command::output()` cannot be used here: it waits forever, which is exactly
+/// what a restarting daemon provokes.
+fn run_daemon_probe(tool: &str, budget: Duration) -> Option<(bool, String)> {
+    let mut child = Command::new(tool)
         .arg("info")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()
-        .and_then(|child| wait_bounded(child, DAEMON_PROBE_TIMEOUT))
-        .unwrap_or(false)
+        .ok()?;
+    let status = wait_bounded(&mut child, budget)?;
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        // The child has already exited, so the pipe is at EOF and this read
+        // cannot block. (A child wedged on a full stderr pipe never reaches
+        // here — it trips the budget above and is killed.)
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
+    }
+    Some((status.success(), stderr))
 }
 
-/// Wait for `child`, returning `Some(success)` when it exits within `budget`
-/// and `None` after killing it when it does not. `Command::output()` cannot be
-/// used for the probe because it waits forever.
-fn wait_bounded(mut child: std::process::Child, budget: Duration) -> Option<bool> {
+/// Wait for `child`, returning its status if it exits within `budget`. On
+/// expiry the child is killed and reaped. A `try_wait` error abandons it
+/// instead: that is an OS-level failure, and the `wait()` used to reap could
+/// block just as long as the case being escaped.
+fn wait_bounded(
+    child: &mut std::process::Child,
+    budget: Duration,
+) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + budget;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status.success()),
+            Ok(Some(status)) => return Some(status),
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            _ => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
+            Err(_) => return None,
         }
     }
 }
@@ -495,7 +535,47 @@ fn is_port_collision(stderr: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeProbe, gate_reason, is_port_collision};
+    use super::{RuntimeProbe, classify_probe, gate_reason, is_port_collision};
+
+    /// Verbatim stderr from `docker info` against a socket with nothing behind
+    /// it — the shape of the outage in #636.
+    const DEAD_SOCKET_STDERR: &str = "failed to connect to the docker API at \
+        unix:///Users/dev/.docker/run/docker.sock; check if the path is correct \
+        and if the daemon is running: dial unix \
+        /Users/dev/.docker/run/docker.sock: connect: no such file or directory";
+
+    /// The classification that was broken: a live binary whose engine cannot be
+    /// reached is `DaemonDown`, not usable. Flipping this to `Ready`
+    /// reintroduces #636.
+    #[test]
+    fn classify_probe_reads_an_unreachable_engine_as_daemon_down() {
+        assert_eq!(
+            classify_probe(Some((false, DEAD_SOCKET_STDERR.into()))),
+            RuntimeProbe::DaemonDown
+        );
+    }
+
+    /// The other half of the contract: a live daemon refusing work — the
+    /// address-pool exhaustion that concurrent test runs actually hit — is
+    /// `Ready`, so it reaches `compose up` and fails there, loudly.
+    #[test]
+    fn classify_probe_reads_a_daemon_refusing_work_as_ready() {
+        assert_eq!(
+            classify_probe(Some((
+                false,
+                "Error response from daemon: all predefined address pools have been \
+                 fully subnetted"
+                    .into()
+            ))),
+            RuntimeProbe::Ready
+        );
+        assert_eq!(
+            classify_probe(Some((true, String::new()))),
+            RuntimeProbe::Ready
+        );
+        // Probe outlived its budget: too busy to answer is busy, not absent.
+        assert_eq!(classify_probe(None), RuntimeProbe::Ready);
+    }
 
     /// A reachable binary with a dead daemon is an unusable runtime, so the
     /// chaos gate must reach `loud_or_skip` rather than proceed to compose
@@ -503,17 +583,19 @@ mod tests {
     /// `RIMAP_REQUIRE_DOCKER=1`.
     #[test]
     fn gate_reason_rejects_an_unreachable_daemon() {
-        let reason = gate_reason(RuntimeProbe::DaemonDown);
+        let reason = gate_reason("podman", RuntimeProbe::DaemonDown);
         assert!(
-            reason.is_some_and(|r| r.contains("daemon")),
-            "daemon-down must name its cause, got {reason:?}"
+            reason
+                .as_deref()
+                .is_some_and(|r| r.contains("daemon") && r.contains("podman")),
+            "daemon-down must name its cause and runtime, got {reason:?}"
         );
     }
 
     #[test]
     fn gate_reason_rejects_a_missing_binary_and_admits_a_ready_runtime() {
-        assert!(gate_reason(RuntimeProbe::NoBinary).is_some());
-        assert!(gate_reason(RuntimeProbe::Ready).is_none());
+        assert!(gate_reason("docker", RuntimeProbe::NoBinary).is_some());
+        assert!(gate_reason("docker", RuntimeProbe::Ready).is_none());
     }
 
     /// Address-pool exhaustion is a live daemon refusing work, not an absent

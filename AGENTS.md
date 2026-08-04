@@ -80,20 +80,27 @@ runtimes work on macOS (Apple Silicon and Intel), Ubuntu CI, and Fedora.
 Override with `RIMAP_CONTAINER_TOOL=docker` or
 `RIMAP_CONTAINER_TOOL=podman` if you need to force a specific one.
 
-The gate probes the runtime it selected, not just the binary: it runs
-`<runtime> info`, which is the first call that actually contacts the
-daemon. A missing binary *and* a binary whose daemon does not answer
-(stopped, restarting, or unreachable) are both silent skips — they are
-the two ways a host genuinely cannot run the fixture. The probe runs
-once per test process and gives up after 10s, so a wedged daemon skips
-promptly instead of hanging. Set `RIMAP_REQUIRE_DOCKER=1` to turn either
-into a loud failure; CI does.
+That autodetect picks the first runtime *installed*, not the first one
+that works: with a stopped Docker Desktop and a working podman it still
+selects docker, and skips. Use `RIMAP_CONTAINER_TOOL` to override.
 
-Only *prerequisites* skip. Anything that fails once the container is
-being brought up — an unpullable image, a readiness timeout, or
+The gate probes the runtime it selected, not just the binary: it runs
+`<runtime> info`, the first call that actually contacts the daemon. A
+missing binary *and* a binary whose daemon cannot be reached (stopped,
+restarting, socket gone) are both silent skips — they are the two ways a
+host genuinely cannot run the fixture. The probe runs once per test
+process and gives up after 10s. Set `RIMAP_REQUIRE_DOCKER=1` to turn
+either into a loud failure; CI does.
+
+Everything else is loud, deliberately. The probe only reports "cannot
+run containers" when the runtime's own stderr says it could not reach
+its engine; any other non-zero exit — and a probe that overruns its
+budget — is treated as usable, so the run proceeds to `compose up` and
+fails there. That is what keeps a *live* daemon refusing work visible:
+an unpullable image, a readiness timeout, or
 `all predefined address pools have been fully subnetted` (which is what
-several agents running `just ci` at once actually hit) — is a live
-daemon refusing work, and stays a hard failure at every posture.
+several agents running `just ci` at once actually hit) is a hard failure
+at every posture, never a skip.
 
 The fixture image is `docker.io/dovecot/dovecot:2.4.4-root` (rootful
 flavor, multi-arch `linux/amd64` + `linux/arm64`). It listens on
