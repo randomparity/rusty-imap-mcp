@@ -47,7 +47,7 @@ test-group = 'chaos-backed'
 # and this window has not yet been calibrated against them under real CI load.
 # Making leaks fatal — `leak-timeout = { period = "5s", result = "fail" }` —
 # requires that calibration first: a run of CI at this period with no markers on
-# either required test job or the nightly chaos workflow.
+# either required test job or the nightly chaos workflow (#642).
 #
 # Declared after the overrides above so both profile tables read together;
 # `[profile.ci]` inherits this, and so does every recipe that passes no profile
