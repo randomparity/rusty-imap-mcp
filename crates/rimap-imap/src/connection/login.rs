@@ -9,6 +9,7 @@
 //! shutdown (ADR-0014). The guard's record can still lose a race with
 //! process exit; see `AuthEmitGuard`.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering;
 
 use async_imap::imap_proto::{Response, Status};
@@ -219,18 +220,83 @@ impl Connection {
     /// crate, and the advisory file lock is taken once at open rather than per
     /// write, so it cannot block on another process either.
     ///
-    /// ## What deferring used to buy, and no longer does
+    /// ## Why the sink call is wrapped in `catch_unwind` (#646)
     ///
-    /// `spawn_blocking` caught a panic from inside the sink and handed it back
-    /// as a `JoinError`, which the old code surfaced as `ImapError::Audit`. A
-    /// panicking sink now unwinds through `connect_inner` instead, and — worse
-    /// than the lost call — poisons the `AuditWriter`'s own mutex, which
-    /// `lock_inner` maps to a permanent `AuditError` for the rest of the
-    /// process. The [`AuthEventSink`](rimap_core::auth_sink::AuthEventSink)
-    /// contract forbids panicking and the shipped `AuditWriter` has no
-    /// panicking construct on its write path, so this is latent rather than
-    /// live; #646 closes it structurally. It is named here because it is a
-    /// property that existed before #643 and does not now.
+    /// The [`AuthEventSink`](rimap_core::auth_sink::AuthEventSink) contract
+    /// forbids panicking, and the shipped `AuditWriter` honours it — even a
+    /// poisoned mutex comes back as a typed `AuditError`. Until #643 that
+    /// contract also had a structural backstop it was never credited for:
+    /// `spawn_blocking` turned a panicking sink into a `JoinError`, which the
+    /// old code surfaced as `ImapError::Audit`. Deleting the hop deleted the
+    /// backstop, and left two ways to lose more than one record:
+    ///
+    /// * From [`Self::emit_auth_blocking`] the unwind escapes
+    ///   [`super::AuthEmitGuard`]'s `Drop`. A panic escaping a `Drop` that is
+    ///   itself running during an unwind **aborts the process** — no unwinding,
+    ///   no `process_end` record, nothing to observe.
+    /// * From either caller it poisons the `AuditWriter`'s own mutex, which
+    ///   `lock_inner` maps to a permanent `AuditError`: one transient panic
+    ///   becomes a process-wide audit outage for the life of the process.
+    ///
+    /// So the sink call is contained here rather than at the `Drop`. This is
+    /// the crate's only call into `AuthEventSink::emit_auth`, so one wrapper
+    /// covers both callers — including the completed-connect path, where the
+    /// same panic poisons the writer's mutex without ever reaching a `Drop`.
+    /// Containing it cannot *un*-poison anything: the mutex is poisoned inside
+    /// the sink, before the unwind reaches us. What it buys there is that the
+    /// damage stays one lost record and a typed error rather than an unwind
+    /// through `connect_inner`.
+    /// [`Self::note_auth_write_lost`] is contained for the same reason; a
+    /// defaulted trait method can panic just as easily, and it is what this
+    /// function's own failure handler calls next, so without its own wrapper
+    /// the abort would merely move one frame.
+    ///
+    /// ### What is contained, and what is not
+    ///
+    /// Every frame between [`super::AuthEmitGuard`]'s `Drop` and the sink is
+    /// covered, and the two that are not wrapped are covered by being
+    /// panic-free rather than by luck: `auth_context` reads config fields and
+    /// two `OnceLock::get`s, and `auth_failure` is `to_string` plus
+    /// `hex::encode` — allocation only, and an allocation failure aborts
+    /// whatever wraps it.
+    ///
+    /// The residual is `tracing::error!`, which all three failure handlers on
+    /// this path call after the contained call — this function's panic arm,
+    /// [`Self::note_auth_write_lost`]'s, and [`Self::emit_auth_blocking`]'s —
+    /// and which is deliberately left bare in each. Under the
+    /// subscriber `rimap-server` installs it cannot panic, and wrapping it
+    /// would put a second containment mechanism on the same path as this one —
+    /// two mechanisms for one job, with the second one's own logging then
+    /// unwrappable in turn. Named here so the guarantee is not read as wider
+    /// than it is: **a panicking *sink* cannot abort the process; a panicking
+    /// *subscriber* is a separate problem with a separate owner.**
+    ///
+    /// ### `AssertUnwindSafe`
+    ///
+    /// Required, because `&Connection` is not `UnwindSafe` — it holds `Arc`s
+    /// and `AtomicBool`s. Justified by what a caught panic here can have
+    /// broken. Nothing of `rimap-imap`'s: the closure captures `&self` and the
+    /// event, its body is a single dynamic call, and no field of
+    /// `ConnectionInner` is reachable from inside it. The `AuthEvent` was moved
+    /// into the sink and is gone on either outcome.
+    ///
+    /// What a panic *can* leave inconsistent is the sink's own state — and the
+    /// sink is shared process-wide, so that damage is not confined to this
+    /// call. That is the point rather than a gap in the argument: the
+    /// production `AuditWriter` makes it explicit by poisoning its mutex, after
+    /// which every user of it — `tool_start`, `tool_end`, `process_end` — gets
+    /// a typed `AuditError` rather than a bad value. A sink that corrupts
+    /// itself therefore surfaces as lost records, which is exactly what this
+    /// function reports, and the alternative to catching is not a healthy sink
+    /// but the same damage plus an aborted process.
+    ///
+    /// On the guard's path the argument is simpler still: the guard is dropped
+    /// immediately after, so nothing observes it again at all.
+    ///
+    /// **This containment depends on unwinding.** No profile in this workspace
+    /// sets `panic = "abort"`; under it `catch_unwind` never returns, the
+    /// process dies at the panic, and this guarantee is silently gone. Treat
+    /// adding it as a decision about the audit trail, not a build-size tweak.
     ///
     /// ## `ImapError` message sanitization
     ///
@@ -239,16 +305,59 @@ impl Connection {
     /// [`rimap_core::AuthSinkError`] (no filesystem paths or
     /// operator-configured layout). This function forwards that `message`
     /// verbatim — the full underlying error is preserved on the `source` chain
-    /// for observability.
+    /// for observability. A panic payload carries no such guarantee, so it is
+    /// dropped unread rather than formatted: it is an arbitrary `Any` a sink
+    /// built from its own state, and `ImapError::Audit`'s `message` reaches the
+    /// MCP wire.
+    ///
+    /// Dropping it keeps the payload off the wire, not out of the process.
+    /// `catch_unwind` runs *after* the panic hook, and nothing here installs
+    /// one, so std's default has already written the payload and its location
+    /// to stderr by the time this arm runs — and, for a panic raised while
+    /// another unwind is in flight, a full backtrace regardless of
+    /// `RUST_BACKTRACE`. stdout, which carries the MCP protocol, is untouched.
     pub(super) fn emit_auth(&self, event: AuthEvent) -> Result<(), ImapError> {
-        self.inner.audit.emit_auth(event).map_err(|sink_err| {
-            let message = sink_err.message().to_string();
-            ImapError::Audit {
-                op: "emit_auth",
-                message,
-                source: Box::new(sink_err),
+        match catch_unwind(AssertUnwindSafe(|| self.inner.audit.emit_auth(event))) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(sink_err)) => {
+                let message = sink_err.message().to_string();
+                Err(ImapError::Audit {
+                    op: "emit_auth",
+                    message,
+                    source: Box::new(sink_err),
+                })
             }
-        })
+            Err(_payload) => {
+                tracing::error!(
+                    "AuthEventSink::emit_auth panicked, violating the trait's \
+                     no-panic contract; the record is lost and the sink may be \
+                     unusable for the rest of the process",
+                );
+                Err(ImapError::Audit {
+                    op: "emit_auth",
+                    message: "auth-event sink panicked".to_string(),
+                    source: Box::new(std::io::Error::other("AuthEventSink::emit_auth panicked")),
+                })
+            }
+        }
+    }
+
+    /// Count a lost `auth` record through the sink, containing a panic the
+    /// same way [`Self::emit_auth`] does and for the same reasons — both of
+    /// this function's callers are the failure handler for an emit that
+    /// already failed, and one of them is [`super::AuthEmitGuard`]'s `Drop`.
+    ///
+    /// A panic caught here leaves the loss uncounted, which is strictly worse
+    /// than the `error` log it is replaced by but strictly better than the
+    /// abort. There is no retry: calling the same broken method again would
+    /// panic again.
+    pub(super) fn note_auth_write_lost(&self) {
+        if catch_unwind(AssertUnwindSafe(|| self.inner.audit.note_auth_write_lost())).is_err() {
+            tracing::error!(
+                "AuthEventSink::note_auth_write_lost panicked, violating the \
+                 trait's no-panic contract; the lost auth record is uncounted",
+            );
+        }
     }
 
     /// Emit an [`AuthEvent`] for a connect that was cut before it reached its
@@ -261,13 +370,16 @@ impl Connection {
     /// auth-failure branch, which likewise preserves the original outcome and
     /// logs the audit failure rather than replacing one with the other.
     ///
-    /// Implementations of [`rimap_core::auth_sink::AuthEventSink`] must return
-    /// their failures rather than panicking — the production `AuditWriter`
-    /// maps even a poisoned mutex to an `AuditError` — because a panic here
-    /// would escape a `Drop`.
+    /// Implementations of [`rimap_core::auth_sink::AuthEventSink`] must still
+    /// return their failures rather than panicking — the production
+    /// `AuditWriter` maps even a poisoned mutex to an `AuditError`. A panic
+    /// here would escape a `Drop`, so neither call this makes goes to the sink
+    /// unwrapped: [`Self::emit_auth`] and [`Self::note_auth_write_lost`] each
+    /// contain one (#646). That is a backstop for a broken sink, not a licence
+    /// for one — a contained panic still costs the record.
     pub(super) fn emit_auth_blocking(&self, event: AuthEvent) {
         if let Err(err) = self.emit_auth(event) {
-            self.inner.audit.note_auth_write_lost();
+            self.note_auth_write_lost();
             tracing::error!(
                 error = %err,
                 "AuthEventSink::emit_auth failed for a connect that was cut \
