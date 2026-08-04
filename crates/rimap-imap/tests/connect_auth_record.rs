@@ -21,6 +21,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use rimap_core::ErrorCode;
 use rimap_core::auth_event::{AuthEvent, AuthResult};
 use rimap_core::auth_sink::{AuthEventSink, AuthSinkError};
 use rimap_core::credential::CredentialSource;
@@ -39,12 +40,23 @@ impl RecordingSink {
 }
 
 impl AuthEventSink for RecordingSink {
+    /// Reports a poisoned lock as an [`AuthSinkError`] rather than unwrapping,
+    /// because that is what the trait requires of every implementation and an
+    /// in-tree example should model the contract it documents (#646).
+    /// [`Self::events`] still unwraps: it is the *test's* accessor, not part of
+    /// the sink's contract, and a poisoned lock there should fail the test.
     fn emit_auth(&self, event: AuthEvent) -> Result<(), AuthSinkError> {
-        self.events
-            .lock()
-            .expect("recording sink mutex")
-            .push(event);
-        Ok(())
+        match self.events.lock() {
+            Ok(mut events) => {
+                events.push(event);
+                Ok(())
+            }
+            Err(poisoned) => Err(AuthSinkError::new(
+                ErrorCode::Internal,
+                "recording sink lock poisoned",
+                Box::new(std::io::Error::other(poisoned.to_string())),
+            )),
+        }
     }
 }
 

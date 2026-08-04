@@ -2,16 +2,24 @@
 //! the IMAP transport to a specific audit-log implementation.
 //!
 //! `rimap-imap`'s `Connection` holds an `Arc<dyn AuthEventSink>` and
-//! calls [`AuthEventSink::emit_auth`] from within
-//! `tokio::task::spawn_blocking` — implementations may perform
-//! synchronous filesystem I/O (the `rimap-audit::AuditWriter` impl
-//! takes the writer's mutex and writes one JSONL line) and MUST NOT
-//! be invoked from an async context without that wrapping.
+//! calls [`AuthEventSink::emit_auth`] **synchronously, on the calling
+//! thread** — including from an async task, and including from a
+//! `Drop`. Implementations may perform blocking filesystem I/O (the
+//! `rimap-audit::AuditWriter` impl takes the writer's mutex and writes
+//! one fsynced JSONL line), and they should assume the thread they
+//! block is a runtime worker.
 //!
-//! One caller is exempt because it has no async context to defer from:
-//! `rimap-imap`'s drop guard for a connect that was cut calls this
-//! synchronously, since a `Drop` cannot await. That is what the
-//! no-panic requirement on [`AuthEventSink::emit_auth`] exists for.
+//! That is deliberate and is not the workspace's general rule: every
+//! other blocking call from async code here routes through
+//! `tokio::task::spawn_blocking`, and this one used to as well. It
+//! stopped because a deferred `auth` record is lost when the runtime
+//! shuts down, and because `rimap-imap`'s drop guard for a connect that
+//! was cut has no async context to defer from at all — a `Drop` cannot
+//! await. ADR-0014 in the `rusty-imap-mcp` repository records the
+//! decision and what it costs.
+//!
+//! The `Drop` caller is why implementations must not panic (see
+//! [`AuthEventSink::emit_auth`]).
 //!
 //! Implementations live downstream:
 //! - `rimap-audit::AuditWriter` records to the rotated, locked
@@ -84,12 +92,12 @@ impl AuthSinkError {
 /// Sync` because the IMAP transport is `Clone`able and its clones may
 /// run on different runtime tasks.
 ///
-/// The single method is sync; async callers must invoke it inside
-/// `tokio::task::spawn_blocking` if the implementation performs
-/// blocking I/O (the production `AuditWriter` impl does). One caller
-/// deliberately does not — `rimap-imap`'s `AuthEmitGuard` records a
-/// connect that was cut, from a `Drop`, which cannot await at all.
-/// That caller is why implementations must not panic (below).
+/// The single required method is sync, and `rimap-imap` calls it
+/// inline on whatever thread produced the event — a runtime worker on
+/// the ordinary path, and a `Drop` on the cut-connect path, which
+/// cannot await at all. Both callers block until it returns, so an
+/// implementation that blocks unboundedly (an audit path on a hung
+/// network mount) pins a runtime worker for the life of the process.
 pub trait AuthEventSink: Send + Sync + std::fmt::Debug {
     /// Record `event`. Returns the implementation's error on failure.
     ///
@@ -98,6 +106,18 @@ pub trait AuthEventSink: Send + Sync + std::fmt::Debug {
     /// production `AuditWriter` impl does. One caller invokes this
     /// synchronously from a `Drop`, and a panic escaping a `Drop` that
     /// runs during an unwind aborts the process.
+    ///
+    /// `rimap-imap` no longer takes that on trust: since #646 it calls
+    /// this inside `std::panic::catch_unwind` and treats a panic as a
+    /// lost record, logged at `error`. Read that as a backstop against
+    /// a broken sink, **not** as permission to panic. A contained
+    /// panic still costs the `auth` record — a hole in an append-only
+    /// security log, on the entry saying a credential was used against
+    /// a remote server — and it may leave the sink unusable for the
+    /// rest of the process, as it does for `AuditWriter`, whose mutex
+    /// a panic poisons. The containment also depends on the binary
+    /// unwinding; a profile built with `panic = "abort"` removes it
+    /// silently.
     ///
     /// # Errors
     /// Returns [`AuthSinkError`] if the underlying sink rejects the
@@ -123,5 +143,13 @@ pub trait AuthEventSink: Send + Sync + std::fmt::Debug {
     /// this is not also called for it.
     ///
     /// The default is a no-op, for sinks with no counter to keep.
+    ///
+    /// **Overrides must not panic either**, for a sharper version of
+    /// [`Self::emit_auth`]'s reason: this is what the caller reaches
+    /// for *after* an emit has already failed, so on the `Drop` path a
+    /// panic here would land in exactly the same place. `rimap-imap`
+    /// contains this call too (#646); a panic caught here leaves the
+    /// loss uncounted, and there is no retry, since calling the same
+    /// broken method again would only panic again.
     fn note_auth_write_lost(&self) {}
 }

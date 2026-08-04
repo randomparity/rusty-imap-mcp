@@ -644,7 +644,7 @@ impl Connection {
                 // `process_end` when #8 wires it; today it is readable via
                 // `AuditWriter::suppressed_failures`.)
                 if let Err(audit_err) = self.emit_auth(auth_failure(&ctx, err.code())) {
-                    self.inner.audit.note_auth_write_lost();
+                    self.note_auth_write_lost();
                     tracing::error!(
                         original_error = %err,
                         audit_error = %audit_err,
@@ -745,15 +745,27 @@ mod tests {
     }
 
     impl rimap_core::auth_sink::AuthEventSink for RecordingSink {
+        /// Reports a poisoned lock as an [`AuthSinkError`] rather than
+        /// unwrapping, because that is what the trait requires of every
+        /// implementation and an in-tree example should model the contract it
+        /// documents. [`Self::events`] still unwraps: it is the *test's*
+        /// accessor, not part of the sink's contract, and a poisoned lock
+        /// there should fail the test loudly.
         fn emit_auth(
             &self,
             event: rimap_core::auth_event::AuthEvent,
         ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
-            self.events
-                .lock()
-                .expect("recording sink mutex")
-                .push(event);
-            Ok(())
+            match self.events.lock() {
+                Ok(mut events) => {
+                    events.push(event);
+                    Ok(())
+                }
+                Err(poisoned) => Err(rimap_core::auth_sink::AuthSinkError::new(
+                    rimap_core::ErrorCode::Internal,
+                    "recording sink lock poisoned",
+                    Box::new(std::io::Error::other(poisoned.to_string())),
+                )),
+            }
         }
     }
 
@@ -782,14 +794,66 @@ mod tests {
         }
     }
 
-    /// A record the guard could not write must still be *counted*. The guard
-    /// runs in a `Drop`, so swallowing the error is forced — but under the
-    /// default `fail_open = false` the writer returns the error rather than
-    /// counting it itself, so without this call the loss would leave nothing
-    /// behind but a stderr line. That would make the stricter setting yield
-    /// less evidence than the laxer one.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_record_the_guard_cannot_write_is_still_counted() {
+    /// Violates the [`rimap_core::auth_sink::AuthEventSink`] no-panic contract
+    /// on the write, but keeps its counter honest. Models the realistic shape:
+    /// a sink whose write path acquired a lock with `.unwrap()`.
+    #[derive(Debug, Default)]
+    struct PanickingSink {
+        losses: std::sync::atomic::AtomicUsize,
+    }
+
+    impl rimap_core::auth_sink::AuthEventSink for PanickingSink {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "the contract violation under test is precisely a panic \
+                      from a Result-returning sink"
+        )]
+        fn emit_auth(
+            &self,
+            _event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            panic!("sink violates the no-panic contract (test)");
+        }
+
+        fn note_auth_write_lost(&self) {
+            self.losses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Violates the contract on *both* trait methods. `note_auth_write_lost` is
+    /// a defaulted method an override can panic inside just as easily, and it
+    /// is what the emit's own containment calls next — so a sink like this is
+    /// the one that proves the abort was removed rather than moved one frame
+    /// down the stack.
+    #[derive(Debug, Default)]
+    struct WhollyPanickingSink;
+
+    impl rimap_core::auth_sink::AuthEventSink for WhollyPanickingSink {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "the contract violation under test is precisely a panic \
+                      from a Result-returning sink"
+        )]
+        fn emit_auth(
+            &self,
+            _event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            panic!("sink violates the no-panic contract on emit (test)");
+        }
+
+        fn note_auth_write_lost(&self) {
+            panic!("sink violates the no-panic contract on note (test)");
+        }
+    }
+
+    /// A listener that accepts and then sends nothing, so a client parks on a
+    /// `ServerHello` that never arrives. Every connect-cut test below needs
+    /// exactly this: a socket that was opened to a server, and a handshake that
+    /// will not finish on its own.
+    ///
+    /// The returned handle owns the accepted streams; abort it to close them.
+    async fn silent_listener() -> (u16, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind silent listener");
@@ -797,50 +861,20 @@ mod tests {
         let accepted = tokio::spawn(async move {
             let mut held = Vec::new();
             while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream);
+                held.push(stream); // keep the socket open, send nothing
             }
         });
-
-        let sink = std::sync::Arc::new(RejectingSink::default());
-        let cfg = super::ConnectionConfig {
-            account: None,
-            account_id: rimap_core::account::AccountId::default_account(),
-            host: "127.0.0.1".to_string(),
-            port,
-            encryption: super::ImapEncryption::Tls,
-            username: "alice@example.com".to_string(),
-            pinned_fingerprint: None,
-            connect_timeout: std::time::Duration::from_secs(30),
-            command_timeout: std::time::Duration::from_secs(30),
-            max_fetch_body_bytes: 4096,
-            max_append_bytes: 1024,
-        };
-        let conn = super::Connection::new(
-            cfg,
-            std::sync::Arc::clone(&sink)
-                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
-            std::sync::Arc::new(UnusedResolver),
-        );
-
-        let cut =
-            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
-        assert!(cut.is_err(), "the caller deadline must elapse first");
-
-        assert_eq!(
-            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "a rejected guard write must be reported as a lost record",
-        );
-
-        accepted.abort();
+        (port, accepted)
     }
 
-    /// A connection aimed at `127.0.0.1:port` whose sink records every event.
-    /// The resolver is [`UnusedResolver`]: both connect tests below are cut
-    /// or refused before `imap_login` reaches credential resolution, and a
-    /// panic is the loudest way to catch that assumption breaking.
-    fn recording_connection(port: u16) -> (super::Connection, std::sync::Arc<RecordingSink>) {
-        let sink = std::sync::Arc::new(RecordingSink::default());
+    /// A connection aimed at `127.0.0.1:port` with the caller's sink. The
+    /// resolver is [`UnusedResolver`]: every connect test below is cut or
+    /// refused before `imap_login` reaches credential resolution, and a panic
+    /// is the loudest way to catch that assumption breaking.
+    fn connection_with_sink(
+        port: u16,
+        sink: std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+    ) -> super::Connection {
         let cfg = super::ConnectionConfig {
             account: Some("acct".to_string()),
             account_id: rimap_core::account::AccountId::default_account(),
@@ -854,11 +888,117 @@ mod tests {
             max_fetch_body_bytes: 4096,
             max_append_bytes: 1024,
         };
-        let conn = super::Connection::new(
-            cfg,
+        super::Connection::new(cfg, sink, std::sync::Arc::new(UnusedResolver))
+    }
+
+    /// Drive a connect until a caller deadline cuts it, which runs
+    /// [`AuthEmitGuard`]'s `Drop` on this task. Returns once the guard's write
+    /// has been attempted.
+    ///
+    /// The 150ms budget has to stay well clear of `build_tls_config`, which
+    /// runs *before* the guard is armed and builds a ~150-anchor root store on
+    /// every connect. That costs single-digit milliseconds today; a cut landing
+    /// inside it would record nothing.
+    async fn connect_then_cut(conn: &super::Connection) {
+        let cut =
+            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
+        assert!(
+            cut.is_err(),
+            "the caller deadline must elapse first; a connect that finished on \
+             its own would make the assertions that follow vacuous",
+        );
+    }
+
+    /// A sink that panics must not take the process with it (#646).
+    ///
+    /// Containment used to be a side effect of `spawn_blocking`: a panicking
+    /// sink came back as a `JoinError`. #643 deleted that hop to stop losing
+    /// records on shutdown (ADR-0014), which left the no-panic contract
+    /// enforced by documentation alone — and the two in-tree test sinks were
+    /// already violating it. `Connection::emit_auth` now contains the panic
+    /// deliberately.
+    ///
+    /// The guard's `Drop` is the shape that matters. On the ordinary path a
+    /// panic here merely unwinds; on a `Drop` that is itself running during an
+    /// unwind it aborts the process outright, leaving nothing for a test to
+    /// observe. Reaching this assertion at all is the assertion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_sink_cannot_abort_the_process_through_the_guard() {
+        let (port, accepted) = silent_listener().await;
+        let sink = std::sync::Arc::new(PanickingSink::default());
+        let conn = connection_with_sink(
+            port,
             std::sync::Arc::clone(&sink)
                 as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
-            std::sync::Arc::new(UnusedResolver),
+        );
+
+        connect_then_cut(&conn).await;
+
+        assert_eq!(
+            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a contained panic is still a lost record, and must be counted as \
+             one rather than silently swallowed",
+        );
+
+        accepted.abort();
+    }
+
+    /// Containing the emit's panic is not enough on its own: the handler's very
+    /// next call is `note_auth_write_lost`, a *defaulted* trait method a bad
+    /// sink can panic inside just as easily. Without its own containment the
+    /// abort would move one frame rather than disappear.
+    ///
+    /// Nothing to count here — the counter is the thing that panics — so, as
+    /// above, returning from this test is the assertion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sink_that_panics_in_note_auth_write_lost_cannot_abort_either() {
+        let (port, accepted) = silent_listener().await;
+        let conn = connection_with_sink(
+            port,
+            std::sync::Arc::new(WhollyPanickingSink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+        );
+
+        connect_then_cut(&conn).await;
+
+        accepted.abort();
+    }
+
+    /// A record the guard could not write must still be *counted*. The guard
+    /// runs in a `Drop`, so swallowing the error is forced — but under the
+    /// default `fail_open = false` the writer returns the error rather than
+    /// counting it itself, so without this call the loss would leave nothing
+    /// behind but a stderr line. That would make the stricter setting yield
+    /// less evidence than the laxer one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_the_guard_cannot_write_is_still_counted() {
+        let (port, accepted) = silent_listener().await;
+        let sink = std::sync::Arc::new(RejectingSink::default());
+        let conn = connection_with_sink(
+            port,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+        );
+
+        connect_then_cut(&conn).await;
+
+        assert_eq!(
+            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a rejected guard write must be reported as a lost record",
+        );
+
+        accepted.abort();
+    }
+
+    /// A connection aimed at `127.0.0.1:port` whose sink records every event.
+    fn recording_connection(port: u16) -> (super::Connection, std::sync::Arc<RecordingSink>) {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let conn = connection_with_sink(
+            port,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
         );
         (conn, sink)
     }
@@ -879,34 +1019,14 @@ mod tests {
     /// thread, so `timeout(..).await` returning means the record is already
     /// in the sink. A test that had to poll for it would also pass with the
     /// count assertion racing a second record it never saw.
-    ///
-    /// The 150ms budget has to stay well clear of `build_tls_config`, which
-    /// runs *before* the guard is armed and builds a ~150-anchor root store on
-    /// every connect. That costs single-digit milliseconds today; a cut landing
-    /// inside it would record nothing and fail here.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connect_cut_by_a_caller_deadline_still_emits_one_auth_record() {
         use rimap_core::auth_event::AuthResult;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind silent listener");
-        let port = listener.local_addr().expect("listener addr").port();
-        let accepted = tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream); // keep the socket open, send nothing
-            }
-        });
-
+        let (port, accepted) = silent_listener().await;
         let (conn, sink) = recording_connection(port);
-        let cut =
-            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
-        assert!(
-            cut.is_err(),
-            "the caller deadline must elapse first; a connect that finished on \
-             its own would make the assertions below vacuous",
-        );
+
+        connect_then_cut(&conn).await;
 
         let events = sink.events();
         assert_eq!(
