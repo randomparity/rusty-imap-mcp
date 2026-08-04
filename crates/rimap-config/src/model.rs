@@ -587,14 +587,16 @@ impl AccountSecurityOverrides {
         if let Some(overriding) = self.tools {
             tools.extend(overriding);
         }
+        let lookalike = match self.lookalike {
+            Some(overriding) => overriding.merge_onto(lookalike),
+            None => lookalike,
+        };
         SecurityConfig {
             posture: self.posture.unwrap_or(posture),
             tools,
             protected_folders: self.protected_folders.unwrap_or(protected_folders),
             expunge_folders: self.expunge_folders.unwrap_or(expunge_folders),
-            lookalike: self
-                .lookalike
-                .map_or(lookalike.clone(), |o| o.merge_onto(lookalike)),
+            lookalike,
         }
     }
 }
