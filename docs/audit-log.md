@@ -53,6 +53,33 @@ recently flushed.
 | `reason` | One of `signal_int`, `signal_term`, `eof`, `error` |
 | `total_tool_calls` | Number of tool calls dispatched in this process |
 
+**`process_end` is terminal for its `process_id`.** When a `process_end`
+record is present, no other record carrying the same `process_id` follows it
+anywhere in the file. A reader may treat it as closing that process, and may
+attribute every subsequent record to a later run.
+
+The guarantee is enforced, not incidental. Before writing `process_end` the
+server cancels every in-flight tool dispatch and waits, bounded, for each to
+unwind -- so a connect the shutdown cuts writes its `auth` record (`ERR_CANCELLED`,
+see below) *before* the `process_end`, rather than racing it. The two states this
+rules out are a trailing `auth` record that a naive reader would attribute to the
+*next* process in the same file, and a half-written final line that makes the
+JSONL tail unparseable.
+
+Two residues remain, both bounded and both announced on stderr rather than
+silently absorbed:
+
+- **A dispatch that outlives the drain budget.** If a dispatch cannot be
+  unwound in time -- it is inside an uncancelable blocking call, say -- the
+  server logs `tool dispatches outlived the shutdown drain` with the count and
+  proceeds. Anything those dispatches write afterwards is subject to the old
+  behaviour: sequenced after `process_end`, or lost to process exit. A reader
+  that must be certain should treat a log carrying that warning as suspect;
+  operators should alert on it.
+- **A record that was never written at all.** Loss on shutdown is expected and
+  documented (best-effort). `process_end` being terminal says nothing about
+  completeness -- only that what *is* present is correctly ordered.
+
 ### `auth`
 
 IMAP authentication attempt. One record per attempt, on every termination path,

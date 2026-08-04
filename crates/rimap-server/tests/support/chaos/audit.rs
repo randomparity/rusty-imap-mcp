@@ -15,16 +15,32 @@ use std::path::Path;
 
 use serde_json::Value;
 
-/// Parse each non-empty JSONL line into a `Value`, skipping unparseable lines.
+/// Parse each non-empty JSONL line into a `Value`.
+///
+/// An unparseable line is a failure, not a skip. Skipping was the original
+/// behaviour and it hid a real defect class: a record torn by a write racing
+/// process exit reads as an *absent* record, so a scenario asserting "no such
+/// record" passes on a corrupt log (#645). The audit file is append-only JSONL
+/// written under an exclusive lock; every line in it is supposed to parse, and a
+/// line that does not is the finding.
+///
+/// # Panics
+/// Panics naming the 1-based line number and its content if any non-empty line
+/// is not valid JSON.
 pub fn parse_lines(s: &str) -> Vec<Value> {
     let mut out = Vec::new();
-    for line in s.lines() {
+    for (i, line) in s.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            out.push(v);
+        match serde_json::from_str::<Value>(line) {
+            Ok(v) => out.push(v),
+            Err(e) => panic!(
+                "audit line {} is not valid JSON ({e}); a torn or corrupt record \
+                 must be reported, not skipped: {line:?}",
+                i + 1,
+            ),
         }
     }
     out
@@ -202,6 +218,20 @@ mod tests {
             Some((2, 3))
         );
         assert_eq!(last_tool_call_matching_error(&recs, &["ERR_TLS"]), None);
+    }
+
+    /// A torn final line — a write cut by process exit — must surface as a
+    /// failure. Skipping it makes a corrupt log indistinguishable from one
+    /// missing a record, which is the blind spot #645 was filed against.
+    #[test]
+    #[should_panic(expected = "is not valid JSON")]
+    fn a_torn_final_line_is_reported_not_skipped() {
+        let jsonl = [
+            line(json!({"seq":0,"kind":"process_start"})),
+            r#"{"seq":1,"kind":"au"#.to_string(),
+        ]
+        .join("\n");
+        let _ = parse_lines(&jsonl);
     }
 
     #[test]
