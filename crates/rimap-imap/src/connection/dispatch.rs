@@ -156,8 +156,21 @@ impl Connection {
             slot => slot.insert(self.connect_inner().await?),
         };
         let outcome = crate::time::with_timeout(op_name, dur, body(session)).await;
-        // The command is done reading; this return is not a cut.
-        guard.disarm();
+
+        // A body that RETURNED can still have ended mid-response, and that
+        // reaches the same desync a cancellation does with nothing cancelled:
+        // `with_timeout` elapsing drops the body future exactly as a cut would,
+        // and `SizeLimit` aborts a fetch mid-stream (see `is_transport_failure`,
+        // which is the same judgement `with_session` makes three lines up).
+        //
+        // Leaving the guard armed for those hands the flag to the next holder
+        // of the lock. Disarming and relying on `with_session`'s
+        // `invalidate().await` instead would not: that has to RE-ACQUIRE the
+        // lock, so a FIFO peer queued behind this command takes the desynced
+        // session first.
+        if !is_transport_failure(&outcome) {
+            guard.disarm();
+        }
         outcome
     }
 

@@ -554,6 +554,23 @@ mod tests {
             !conn.take_poisoned(&mut slot),
             "the flag must be consumed, not latched",
         );
+
+        // A fired ceiling poisons TWICE (#620): `on_timeout_nonblocking` calls
+        // `poison` directly, and dropping the cut dispatch then drops the
+        // `SessionGuard`, which poisons again. Both stores land while the cut
+        // dispatch still holds the session lock — #594 pins it alive across
+        // the callback — so no peer can consume one in between. They must
+        // collapse to a single discard, not cost two reconnects.
+        conn.poison();
+        conn.poison();
+        assert!(
+            conn.take_poisoned(&mut slot),
+            "the first holder of the lock must see the doubly-set flag",
+        );
+        assert!(
+            !conn.take_poisoned(&mut slot),
+            "two poisons must collapse to one discard, not two reconnects",
+        );
     }
 
     /// An **armed** `SessionGuard` dropped over an empty slot must not poison.
