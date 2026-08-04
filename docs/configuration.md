@@ -106,15 +106,32 @@ single-account format).
 | `command_timeout_seconds` | u32 | 30 | Per-command timeout for IMAP operations |
 | `connect_timeout_seconds` | u32 | 10 | TCP + TLS handshake + greeting + CAPABILITY probe deadline |
 
-The two budgets are independent, and either ordering is valid. A tool
-call that has to open a connection first spends up to
-`connect_timeout_seconds` on the connect and then up to
-`command_timeout_seconds` on the command, so its worst case is the sum
-(plus, if another call holds the connection, up to
-`command_timeout_seconds` waiting for it). Setting
+The two budgets are independent, and either ordering is valid. They bound
+one *stage* each, not a tool call. One IMAP operation spends, worst case:
+
+1. up to `command_timeout_seconds` waiting for the account's connection
+   (another call holds it), then
+2. up to `connect_timeout_seconds` on the connect, if the session needs
+   opening — this runs outside the command deadline by design, so that a
+   stalled connect still writes its `auth` audit record, then
+3. up to `command_timeout_seconds` on the command itself, and
+4. **all of the above a second time** when a read-only operation fails
+   with `ERR_CONNECTION_LOST` and is transparently reconnected and
+   retried once.
+
+That is `2 x (2 x command_timeout_seconds + connect_timeout_seconds)` —
+**140 seconds at the defaults** — for a single operation, and a tool that
+issues several operations multiplies it again. No `[imap]` field predicts
+that number, which is why the whole call is bounded separately by
+[`limits.tool_call_timeout_seconds`](#limits-section). Setting
 `command_timeout_seconds` below `connect_timeout_seconds` is supported —
 it means "fail commands fast, tolerate a slow handshake" and does not
 shorten the connect.
+
+Raising `command_timeout_seconds` much past 70s at the default
+`connect_timeout_seconds` pushes that worst case above the default
+ceiling, and startup then fails until `tool_call_timeout_seconds` is
+raised to match. The error states the computed minimum.
 
 Each account holds a single IMAP connection, and concurrent tool calls
 against that account serialize on it: a slow command (a large `FETCH`
@@ -384,6 +401,7 @@ Numeric limits for rate limiting, search, and size caps.
 | `sends_per_minute` | u32 | 3 | Separate rate limit for `send_email` |
 | `circuit_breaker_error_threshold` | u32 | 5 | Error count within the window to trip the circuit breaker |
 | `circuit_breaker_window_seconds` | u32 | 30 | Sliding window for the circuit breaker error counter |
+| `tool_call_timeout_seconds` | u32 | 300 | Wall-clock ceiling on one account-scoped tool call |
 
 The global rate limiter is a token bucket: it allows a **burst** of
 `2 x commands_per_second` calls before throttling down to a sustained
@@ -411,6 +429,31 @@ Tuning guidance:
   the global limiter. Each has a burst equal to its own rate (e.g.
   `sends_per_minute = 3` allows a burst of 3), not the global bucket's
   `2x` multiplier.
+
+### `tool_call_timeout_seconds`
+
+The single upper bound on one tool call, covering everything the
+[`[imap]` budgets](#imap-section) bound only stage by stage: the wait for
+the account's connection, the lazy connect, the command, and the one
+transparent retry. When it fires the call returns `ERR_TIMEOUT`, the
+`tool_end` audit record carries that code, and the account's IMAP
+connection is dropped so the next call reconnects rather than reusing a
+session with a half-read response on it.
+
+The default is deliberately generous — it is a backstop against a call
+nobody bounded, not a latency target, and it has to stay above the 140s
+worst case a single operation can reach at the `[imap]` defaults.
+Interactive clients usually give up long before it. Lower it if you want
+tool calls to fail faster than your MCP client's own request timeout;
+raise it if a legitimate long-running call (a large `export_messages`)
+gets cut off.
+
+Startup rejects a ceiling below
+`2 x (2 x imap.command_timeout_seconds + imap.connect_timeout_seconds)`,
+since that would cut off operations still inside their own budgets. The
+check is per account, so an account that raises its IMAP budgets may need
+its own `[accounts.limits]` override rather than the inherited
+`[defaults.limits]` value.
 
 ## `[audit]` section
 
