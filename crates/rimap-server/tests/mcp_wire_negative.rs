@@ -86,8 +86,8 @@ async fn unparsable_json_errors_or_closes() {
         CloseOrResponse::Crashed(diag) => {
             panic!("server crashed on unparsable JSON input: {diag}");
         }
-        CloseOrResponse::Hung => {
-            panic!("server hung (no response within {REQUEST_TIMEOUT:?}) on unparsable JSON input");
+        CloseOrResponse::Hung(budget) => {
+            panic!("server hung (no response within {budget:?}) on unparsable JSON input");
         }
     }
 }
@@ -129,10 +129,8 @@ async fn valid_json_invalid_envelope_returns_minus_32600() {
         CloseOrResponse::Crashed(diag) => {
             panic!("server crashed on invalid JSON-RPC envelope: {diag}");
         }
-        CloseOrResponse::Hung => {
-            panic!(
-                "server hung (no response within {REQUEST_TIMEOUT:?}) on invalid JSON-RPC envelope"
-            );
+        CloseOrResponse::Hung(budget) => {
+            panic!("server hung (no response within {budget:?}) on invalid JSON-RPC envelope");
         }
     }
 }
@@ -178,10 +176,8 @@ async fn missing_method_field() {
         CloseOrResponse::Crashed(diag) => {
             panic!("server crashed on missing `method` field: {diag}");
         }
-        CloseOrResponse::Hung => {
-            panic!(
-                "server hung (no response within {REQUEST_TIMEOUT:?}) on missing `method` field"
-            );
+        CloseOrResponse::Hung(budget) => {
+            panic!("server hung (no response within {budget:?}) on missing `method` field");
         }
     }
 }
@@ -225,10 +221,8 @@ async fn wrong_type_method_field() {
         CloseOrResponse::Crashed(diag) => {
             panic!("server crashed on wrong-type `method` field: {diag}");
         }
-        CloseOrResponse::Hung => {
-            panic!(
-                "server hung (no response within {REQUEST_TIMEOUT:?}) on wrong-type `method` field"
-            );
+        CloseOrResponse::Hung(budget) => {
+            panic!("server hung (no response within {budget:?}) on wrong-type `method` field");
         }
     }
 }
@@ -272,10 +266,8 @@ async fn oversized_params_payload() {
         CloseOrResponse::Crashed(diag) => {
             panic!("server crashed on oversized params payload: {diag}");
         }
-        CloseOrResponse::Hung => {
-            panic!(
-                "server hung (no response within {REQUEST_TIMEOUT:?}) on oversized params payload"
-            );
+        CloseOrResponse::Hung(budget) => {
+            panic!("server hung (no response within {budget:?}) on oversized params payload");
         }
     }
 }
@@ -334,10 +326,8 @@ async fn initialize_after_already_initialized() {
         CloseOrResponse::Crashed(diag) => {
             panic!("server crashed on second initialize request: {diag}");
         }
-        CloseOrResponse::Hung => {
-            panic!(
-                "server hung (no response within {REQUEST_TIMEOUT:?}) on second initialize request"
-            );
+        CloseOrResponse::Hung(budget) => {
+            panic!("server hung (no response within {budget:?}) on second initialize request");
         }
     }
 }

@@ -32,13 +32,55 @@ pub const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
 pub(crate) const MCP_SCHEMA_JSON: &str =
     include_str!("../../fixtures/mcp-spec/2025-11-25/schema.json");
 
+/// Budget for a **steady-state** response read: the child is already serving,
+/// so the request is in-process work plus at most one round trip to an
+/// already-connected IMAP session. Measured at 0.4-6 ms for a `tools/call`
+/// against the in-process fake, so 2 s fails fast on a real hang with three
+/// orders of magnitude of headroom. Does NOT cover the first read after spawn
+/// — see [`COLD_START_TIMEOUT`].
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Budget for the **first** response read of a freshly spawned child, which is
+/// the only read that pays for process start-up.
+///
+/// Everything the binary does before it can answer anything lands inside this
+/// one read: `exec` and dynamic linking, config parse, credential resolution
+/// (the keyring miss and `RUSTY_IMAP_MCP_PASSWORD` fallback that CI runners
+/// always take), and — for the e2e wire binaries — a full IMAP boot of TCP
+/// connect, TLS handshake, `CAPABILITY`, `LOGIN` and the catalog `LIST`. That
+/// is a different cost class from a steady-state request, not a slower
+/// instance of one, so it gets its own budget rather than inflating
+/// [`REQUEST_TIMEOUT`] for every read.
+///
+/// Value: measured at 220-270 ms unloaded (`e2e_wire_uidvalidity`, in-process
+/// fake). Issue #621 recorded a CI run that blew a 2 s budget mid-`LOGIN`,
+/// i.e. start-up alone took >9x its unloaded cost under `nextest` contention.
+/// 10 s is ~40x the unloaded measurement, which absorbs that contention while
+/// still failing a genuinely hung boot in single-digit seconds — the same
+/// trade-off, and the same order of magnitude, as [`SHUTDOWN_TIMEOUT`].
+pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
+
 // Under `cargo nextest run` with the full workspace suite (~1100 tests
 // in parallel), the EOF-to-exit slice for `wire_clean_eof_shutdown_exits_zero`
 // can exceed a tight 1 s budget on CPU-contended runners. 5 s remains
 // tight enough to fail-fast on a real hang while absorbing scheduling
 // jitter when other tests are spawning binaries / parsers concurrently.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline to apply to one stdout read: the caller's `requested` budget,
+/// widened to [`COLD_START_TIMEOUT`] while the child has not yet produced any
+/// output.
+///
+/// `max` rather than a substitution because chaos scenarios pass deadlines well
+/// above the cold-start grace via `request_within`; shrinking those to the
+/// grace would reintroduce the fast-fail cap they exist to escape.
+fn read_deadline(first_output_seen: bool, requested: Duration) -> Duration {
+    if first_output_seen {
+        requested
+    } else {
+        requested.max(COLD_START_TIMEOUT)
+    }
+}
 
 /// Possible outcomes when probing the server for "either a
 /// response or a close." Codex review finding #1 verified that
@@ -61,10 +103,15 @@ pub enum CloseOrResponse {
     /// EOF. Includes a diagnostic string with the precise sub-
     /// reason and captured stderr. Harness poisoned.
     Crashed(String),
-    /// Stdout did NOT yield EOF AND no line arrived within
-    /// `request_dur`. The server is hung or unresponsive.
-    /// Harness poisoned.
-    Hung,
+    /// Stdout did NOT yield EOF AND no line arrived within the budget
+    /// carried here. The server is hung or unresponsive. Harness poisoned.
+    ///
+    /// The budget is reported rather than left to the caller to name, because
+    /// it is not always the `request_dur` the caller passed: a first read after
+    /// spawn is widened to `COLD_START_TIMEOUT`, so a caller interpolating its
+    /// own constant into the panic message would understate how long the
+    /// server actually had.
+    Hung(Duration),
 }
 
 /// Owns the spawned child plus its piped stdio.
@@ -96,6 +143,12 @@ pub struct Harness {
     /// necessary because a closed-stdout child may not yet be
     /// reaped, so `try_wait` alone is insufficient.
     poisoned: bool,
+    /// False until the child has written its first byte to stdout. While
+    /// false, response reads are widened to `COLD_START_TIMEOUT` because they
+    /// are still paying for process start-up; once true every read runs on the
+    /// caller's own budget so genuine hangs stay fast-fail. Start-up is a
+    /// once-per-process cost, so it is charged to exactly one read.
+    first_output_seen: bool,
     // Hold the tempdir until the harness drops so the audit log path
     // remains valid for the lifetime of the spawned process.
     _tempdir: TempDir,
@@ -127,6 +180,9 @@ fn force_use_for_dead_code_link() {
         CloseOrResponse::Response(String::new())
     {
         let _ = s;
+    }
+    if let CloseOrResponse::Hung(budget) = CloseOrResponse::Hung(Duration::ZERO) {
+        let _ = budget;
     }
     // Method used by mcp_wire_proptest, not by other binaries.
     let _ = Harness::is_usable;
@@ -241,6 +297,7 @@ allowed_base_dir = "{}"
             stderr_log,
             buffered_responses: std::collections::VecDeque::new(),
             poisoned: false,
+            first_output_seen: false,
             _tempdir: tempdir,
         }
     }
@@ -355,14 +412,21 @@ allowed_base_dir = "{}"
     }
 
     /// Read exactly one parsed envelope from stdout, bounding the read by
-    /// `read_timeout`. Skips notifications (which have a `method` and
+    /// `read_timeout` — widened to `COLD_START_TIMEOUT` if the child has not
+    /// produced any output yet. Skips notifications (which have a `method` and
     /// absent/null `id`) but does NOT skip responses; returns the first
     /// response observed. Panics on timeout, EOF, or parse failure with stderr
     /// included in the diagnostic.
+    ///
+    /// The deadline is resolved once, before the notification-skipping loop, so
+    /// a start-up notification arriving ahead of the response cannot consume
+    /// the cold-start grace and leave the response itself on the tight budget.
     async fn read_one_envelope_within(&mut self, caller: &str, read_timeout: Duration) -> Value {
+        let read_timeout = read_deadline(self.first_output_seen, read_timeout);
         loop {
             let mut buf = String::new();
             let read_result = timeout(read_timeout, self.stdout.read_line(&mut buf)).await;
+            self.first_output_seen |= read_result.is_ok();
             let read = match read_result {
                 Ok(io_result) => io_result.unwrap_or_else(|e| {
                     panic!(
@@ -406,8 +470,10 @@ allowed_base_dir = "{}"
     }
 
     /// Send a JSON-RPC request and return the parsed response value, bounding the
-    /// response read by the shared 2s `REQUEST_TIMEOUT`. Panics on timeout, EOF
-    /// before a response arrives, or non-JSON output.
+    /// response read by the shared [`REQUEST_TIMEOUT`] — or by
+    /// [`COLD_START_TIMEOUT`] if this is the first read after spawn, which is
+    /// still paying for process start-up. Panics on timeout, EOF before a
+    /// response arrives, or non-JSON output.
     pub async fn request(&mut self, method: &str, params: Value) -> Value {
         self.request_within(method, params, REQUEST_TIMEOUT).await
     }
@@ -416,6 +482,10 @@ allowed_base_dir = "{}"
     /// shared 2s `REQUEST_TIMEOUT`. For chaos scenarios whose server-side timeout
     /// budget (connect/command) is >= 2s and would otherwise trip the fast-fail
     /// cap — used for both the fault call and reconnect-bearing recovery calls.
+    ///
+    /// A `deadline` below [`COLD_START_TIMEOUT`] is still widened to it on the
+    /// first read after spawn; larger ones are passed through untouched, which
+    /// is the case these callers rely on.
     pub async fn request_within(
         &mut self,
         method: &str,
@@ -504,8 +574,10 @@ allowed_base_dir = "{}"
     /// review failure because they re-introduce the original
     /// Option-shaped bug.
     pub async fn response_or_close(&mut self, request_dur: Duration) -> CloseOrResponse {
+        let request_dur = read_deadline(self.first_output_seen, request_dur);
         let mut buf = String::new();
         let read = timeout(request_dur, self.stdout.read_line(&mut buf)).await;
+        self.first_output_seen |= read.is_ok();
         match read {
             Ok(Ok(0)) => {
                 // EOF. Verify the child exited cleanly within
@@ -542,7 +614,7 @@ allowed_base_dir = "{}"
             }
             Err(_elapsed) => {
                 self.poisoned = true;
-                CloseOrResponse::Hung
+                CloseOrResponse::Hung(request_dur)
             }
         }
     }
@@ -654,6 +726,7 @@ allowed_base_dir = "{}"
             stderr_log: _,
             buffered_responses: _,
             poisoned: _,
+            first_output_seen: _,
             _tempdir: tempdir,
         } = self;
         drop(stdin);
@@ -689,5 +762,41 @@ impl DetachedStdoutHarness {
     /// Read the captured stderr file. Empty string on read failure.
     pub fn captured_stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_log).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod read_deadline_tests {
+    use super::{COLD_START_TIMEOUT, Duration, REQUEST_TIMEOUT, read_deadline};
+
+    /// The flake in #621: the first read after spawn pays for process
+    /// start-up, so it must not run on the steady-state budget.
+    #[test]
+    fn first_read_is_widened_to_the_cold_start_budget() {
+        assert_eq!(
+            read_deadline(false, REQUEST_TIMEOUT),
+            COLD_START_TIMEOUT,
+            "the first read after spawn must get the cold-start grace",
+        );
+    }
+
+    /// The other half of the split: once the child has spoken, start-up is
+    /// paid for and a genuine hang must still fail fast.
+    #[test]
+    fn later_reads_keep_the_callers_budget() {
+        assert_eq!(
+            read_deadline(true, REQUEST_TIMEOUT),
+            REQUEST_TIMEOUT,
+            "the grace is a once-per-process cost, not a blanket increase",
+        );
+    }
+
+    /// Chaos scenarios pass deadlines above the grace through
+    /// `request_within`; widening must never shrink one, in either state.
+    #[test]
+    fn a_larger_caller_budget_is_never_shrunk() {
+        let chaos = COLD_START_TIMEOUT + Duration::from_secs(20);
+        assert_eq!(read_deadline(false, chaos), chaos);
+        assert_eq!(read_deadline(true, chaos), chaos);
     }
 }
