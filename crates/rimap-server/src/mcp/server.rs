@@ -1565,6 +1565,7 @@ mod advertise_on_select_tests {
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
+#[expect(clippy::panic, reason = "tests")]
 mod tool_call_ceiling_tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -1576,7 +1577,30 @@ mod tool_call_ceiling_tests {
 
     use super::ImapMcpServer;
     use crate::boot::registry::AccountRegistry;
-    use crate::test_support::make_test_account_state_at;
+    use crate::test_support::make_test_account_state_with_sink;
+
+    /// Poll `path` until it holds a line matching `predicate`, or give up after
+    /// roughly two seconds and return `None`.
+    ///
+    /// The `auth` record for a cut connect is written from `AuthEmitGuard`'s
+    /// `Drop`, which hands the (fsyncing) write to `spawn_blocking` and
+    /// detaches — so it lands on another thread shortly after the ceiling
+    /// returns, with no handle left to await. Polling keeps the assertion
+    /// honest without a fixed sleep.
+    async fn wait_for_record(
+        path: &std::path::Path,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        for _ in 0..400 {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Some(line) = contents.lines().find(|l| predicate(l))
+            {
+                return Some(line.to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        None
+    }
 
     /// Drive the **production** call site — `dispatch_account_scoped`, via
     /// `execute_tool_for_test` — against an IMAP endpoint that accepts the
@@ -1587,14 +1611,26 @@ mod tool_call_ceiling_tests {
     /// that connect budget, so the ceiling is unambiguously what fires
     /// and deleting it fails this test rather than slowing it (#594).
     ///
-    /// The assertion is on the durable audit record, not the returned
-    /// error, and its negative half is the load-bearing one:
-    /// `AuditEnvelopeGuard` synthesizes an `ERR_CANCELLED` `tool_end`
-    /// whenever the envelope future is dropped, so moving the ceiling from
-    /// inside the envelope's body to around `run_with_audit_envelope`
-    /// would record an operator-configured timeout as a client
-    /// cancellation. That regression is invisible to a test that only
-    /// checks the returned error.
+    /// The assertions are on the durable audit records, not the returned
+    /// error, and there are three:
+    ///
+    /// * The `tool_end` record says `ERR_TIMEOUT`. Its negative half is the
+    ///   load-bearing one: `AuditEnvelopeGuard` synthesizes an `ERR_CANCELLED`
+    ///   `tool_end` whenever the envelope future is dropped, so moving the
+    ///   ceiling from inside the envelope's body to around
+    ///   `run_with_audit_envelope` would record an operator-configured timeout
+    ///   as a client cancellation. That regression is invisible to a test that
+    ///   only checks the returned error.
+    /// * An `auth` record exists at all (#623). The ceiling cut this connect
+    ///   after the socket was open, and an append-only auth log that omits it
+    ///   cannot be told apart from one where the attempt never happened.
+    /// * That `auth` record says `ERR_CANCELLED` — the connect was cut, and it
+    ///   must not borrow the ceiling's `ERR_TIMEOUT` verdict, which the attempt
+    ///   itself never reached.
+    ///
+    /// The last two are why the account's connection is wired to the same
+    /// `AuditWriter` the server logs through rather than to the fixture's
+    /// discarding sink.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn ceiling_fires_through_dispatch_account_scoped_and_records_err_timeout() {
         // Accept connections and never write: the client's TLS handshake
@@ -1625,11 +1661,12 @@ mod tool_call_ceiling_tests {
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());
 
-        let state = make_test_account_state_at(
+        let state = make_test_account_state_with_sink(
             rimap_core::account::DEFAULT_ACCOUNT_NAME,
             port,
             Duration::from_secs(30),
             Duration::from_millis(150),
+            std::sync::Arc::new(writer.clone()),
         );
         let id = state.id.clone();
         let mut accounts = BTreeMap::new();
@@ -1648,6 +1685,18 @@ mod tool_call_ceiling_tests {
             "the 150ms ceiling must cut the call, not the 30s connect budget; took {elapsed:?}",
         );
 
+        // The connect's own record is written from a detached blocking task,
+        // so wait for it before tearing the writer down.
+        let auth = wait_for_record(&path, |l| l.contains(r#""kind":"auth""#))
+            .await
+            .unwrap_or_else(|| {
+                let contents = std::fs::read_to_string(&path).unwrap_or_default();
+                panic!(
+                    "a ceiling that fired mid-connect must still record the \
+                     connection attempt (#623):\n{contents}"
+                )
+            });
+
         drop(tx);
         drop(server);
         drainer.await.expect("drainer");
@@ -1663,8 +1712,27 @@ mod tool_call_ceiling_tests {
             "a fired ceiling must be audited as ERR_TIMEOUT: {tool_end}",
         );
         assert!(
-            !contents.contains("ERR_CANCELLED") && !contents.contains(r#""cancelled""#),
-            "a fired ceiling must not be audited as a cancellation:\n{contents}",
+            !tool_end.contains("ERR_CANCELLED") && !tool_end.contains(r#""cancelled""#),
+            "a fired ceiling must not be audited as a cancellation: {tool_end}",
+        );
+        assert!(
+            !contents.contains(r#""status":"cancelled""#),
+            "no record may report a cancelled tool call:\n{contents}",
+        );
+        assert!(
+            auth.contains(r#""result":"failure""#)
+                && auth.contains(r#""error_code":"ERR_CANCELLED""#),
+            "the cut connect never reached a verdict of its own, so its record \
+             must say it was cancelled rather than borrow the ceiling's \
+             ERR_TIMEOUT: {auth}",
+        );
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|l| l.contains(r#""kind":"auth""#))
+                .count(),
+            1,
+            "exactly one auth record per connect attempt:\n{contents}",
         );
     }
 }

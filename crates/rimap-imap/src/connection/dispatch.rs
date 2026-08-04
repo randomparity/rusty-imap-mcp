@@ -117,14 +117,19 @@ impl Connection {
     ///   `connect_timeout`, inside `connect_with_bundle`.
     ///
     /// Wrapping the connect in `command_timeout` as well (as this did before)
-    /// loses audit records: the command deadline starts strictly earlier — the
-    /// lock acquisition and `build_tls_config` run before `connect_with_bundle`
-    /// takes its own start instant — so it can elapse first and drop the
-    /// connect future while it is still parked on the network. `connect_inner`
-    /// then never reaches its `emit_auth` call and the `auth` record it
-    /// documents on every termination path is silently lost. With the budgets
-    /// split, the connect deadline always fires first on a stalled connect and
-    /// the record is always written, whatever the two values are configured to.
+    /// degrades audit records: the command deadline starts strictly earlier —
+    /// the lock acquisition and `build_tls_config` run before
+    /// `connect_with_bundle` takes its own start instant — so it can elapse
+    /// first and drop the connect future while it is still parked on the
+    /// network. `connect_inner` then never reaches its `emit_auth` call.
+    ///
+    /// That used to lose the `auth` record outright; since #623 the connect's
+    /// [`super::AuthEmitGuard`] writes one from `Drop` whatever cuts it, so the
+    /// split is no longer what stands between a stalled connect and a silent
+    /// gap. It is still what decides the record's *verdict*: a guard record can
+    /// only say `ERR_CANCELLED`, because a cut connect has no verdict of its
+    /// own, whereas letting the connect reach its own deadline records the
+    /// `ERR_TIMEOUT` an operator can act on. Keep the budgets split.
     async fn attempt<T, B>(&self, op_name: &'static str, body: B) -> Result<T, ImapError>
     where
         B: for<'s> AsyncFnOnce(&'s mut ImapSession) -> Result<T, ImapError>,

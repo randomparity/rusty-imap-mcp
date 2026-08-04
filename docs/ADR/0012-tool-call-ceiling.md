@@ -29,10 +29,12 @@ fails with `ConnectionLost`, so the real worst case for one IMAP operation is
 
 which is 140s at the shipped defaults (30s / 10s), not the ~70s #594's body
 estimates — the issue counts one attempt. That figure covers the
-*deadline-bounded* stages; a few awaits on the same path carry no deadline of
-their own (`with_session`'s `invalidate()` parks on the session lock,
-`connect_inner`'s `emit_auth` runs an audit write outside the connect
-deadline), so the wall clock can exceed it. Nothing above the IMAP layer imposed
+*deadline-bounded* stages; an await on the same path carries no deadline of its
+own (`connect_inner`'s `emit_auth` runs an audit write outside the connect
+deadline), so the wall clock can exceed it. At the time of writing this ADR,
+`with_session`'s `invalidate()` parking on the session lock was a second such
+await; #629 deleted that call and the method with it, so the session lock is no
+longer waited on outside a stage budget. Nothing above the IMAP layer imposed
 a deadline: `rimap_server::mcp::dispatch` had no timeout at all, so a tool that
 issues several IMAP operations (`list_folders_with_status`, `export_messages`)
 multiplied that figure by its operation count with no bound in sight.
@@ -143,14 +145,16 @@ an MCP client's own request timeout fires long before the server gives up.
   `is_transport_failure` would recognize — so it would never self-heal.
 
   `Connection::poison` sets an `AtomicBool` that `dispatch::attempt` consumes
-  *under* the session lock, rather than calling `invalidate().await`. Awaiting
-  the invalidate would be wrong twice over: it would push this call past the
-  ceiling that just fired, and — the decisive one — `tokio::sync::Mutex` is
-  FIFO-fair, so a peer command that queued on the lock while the cut command
-  held it sits **ahead** of anything that starts waiting now and would take the
-  poisoned session first. A flag is ordered ahead of every queued waiter
-  because the waiter itself checks it. It is also synchronous, which is what
-  makes the cancellation path in #620 fixable from a `Drop` impl.
+  *under* the session lock, rather than awaiting the session lock to clear the
+  slot directly (which is what the since-deleted `Connection::invalidate` did;
+  see #629). Awaiting the lock would be wrong twice over: it would push this
+  call past the ceiling that just fired, and — the decisive one —
+  `tokio::sync::Mutex` is FIFO-fair, so a peer command that queued on the lock
+  while the cut command held it sits **ahead** of anything that starts waiting
+  now and would take the poisoned session first. A flag is ordered ahead of
+  every queued waiter because the waiter itself checks it. It is also
+  synchronous, which is what makes the cancellation path in #620 fixable from a
+  `Drop` impl.
 
 - **Infrastructure tools (`list_accounts`, `use_account`) are not covered.**
   They resolve against in-memory state with no I/O and no account, so they have
@@ -241,15 +245,55 @@ an MCP client's own request timeout fires long before the server gives up.
     ordering discipline is now belt-and-braces for the guard-held case rather
     than the sole guarantee.
 
-- **A ceiling that fires during a lazy connect drops that connect's `auth`
-  audit record.** `connect_inner` emits it after `connect_with_bundle`
-  returns, and warns that a caller wrapping it in a shorter deadline than
-  `connect_timeout` loses the record — which is what the ceiling can do. This is
-  the loss #592 fixed for the `command_timeout`/`connect_timeout` nesting,
-  reappearing one layer up with a far larger budget, so reaching it means the
-  connect was already pathological. The `tool_end` record still lands with
-  `ERR_TIMEOUT`; only the connection attempt goes unrecorded. Tracked in
-  [#623](https://github.com/randomparity/rusty-imap-mcp/issues/623).
+- **A ceiling that fired during a lazy connect used to drop that connect's
+  `auth` audit record.** `connect_inner` emits after `connect_with_bundle`
+  returns, so a caller wrapping it in a deadline shorter than `connect_timeout`
+  — which is exactly what the ceiling can be — dropped the future before the
+  emit and left a socket opened to the server with nothing in the append-only
+  auth log to say so. This was the loss #592 fixed for the
+  `command_timeout`/`connect_timeout` nesting, reappearing one layer up with a
+  far larger budget. Fixed by
+  [#623](https://github.com/randomparity/rusty-imap-mcp/issues/623), and again
+  **not** where that issue proposed:
+
+  - #623's first option was to exempt an in-flight connect from the ceiling, the
+    way `dispatch::attempt` already exempts it from `command_timeout`. Rejected
+    on two counts. The ceiling lives in `rimap-server` and the connect in
+    `rimap-imap`, so the exemption has to cross a crate seam that exists to keep
+    the transport free of server policy. And it closes one trigger only: a
+    client cancellation drops the same future with no ceiling involved, so the
+    record would still be lost there.
+
+  - The fix instead arms an `AuthEmitGuard` inside `connect_inner` for the
+    duration of the connect, which writes the record from `Drop` if the future
+    goes away first, and is disarmed the moment `connect_inner` reaches its own
+    emit. Like the `SessionGuard` above, placing it at the thing being protected
+    rather than at one caller covers every cut — the ceiling, a client
+    cancellation, a runtime shutdown — without enumerating them.
+
+  - A guard record says `ERR_CANCELLED`, never `ERR_TIMEOUT`. The guard cannot
+    know what dropped it, and a record claiming a verdict the attempt never
+    reached would be worse than the gap it replaces; the `tool_end` record from
+    the layer that did the cutting carries the reason. This is why the
+    `connect_timeout`/`command_timeout` split #592 established still matters:
+    letting the connect reach its own deadline is what produces a real
+    `ERR_TIMEOUT` rather than the guard's placeholder.
+
+  - `Drop` cannot await, and `auth` records are fsynced, so the guard hands the
+    write to `spawn_blocking` and detaches the handle rather than calling the
+    sink inline on a runtime worker. Tokio does not cancel a blocking task when
+    its handle is dropped, which is the same property `Connection::emit_auth`'s
+    cancellation contract already relies on. A runtime shutting down can still
+    drop the spawned task before it runs; that residual window is the one
+    `AuditEnvelopeGuard` already accepts for its own cancellation records.
+
+  - Facts the connect learns partway through — the observed TLS fingerprint,
+    the credential source — are published to cells (`TlsConfigBundle::
+    last_observed`, `ConnectProgress`) as they become known rather than
+    returned up the stack, because a cut connect never returns. One reader,
+    `Connection::auth_context`, builds both the guard's record and
+    `connect_inner`'s, so the two cannot disagree about the attempt they
+    describe.
 
 - A ceiling that fires during `download_attachment` or `export_messages` can
   leave an artifact on disk that no audit record accounts for: the sandbox

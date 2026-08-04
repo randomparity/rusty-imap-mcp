@@ -37,94 +37,81 @@ impl Connection {
     ///      containing `Response::Capabilities` data.
     ///   3. Call `client.login(user, pass)`.
     ///
-    /// Returns `Ok((session, credential_source))` on success.
-    /// Returns `Err((error, Some(source)))` when the failure occurred after
-    /// `resolve_credential` succeeded (e.g. server rejected the credentials).
-    /// Returns `Err((error, None))` for pre-resolve failures (greeting, CAPABILITY).
+    /// The resolved credential's source is published to `progress` the moment
+    /// resolution succeeds, rather than returned, so a connect cut after that
+    /// point still records which store the credential came from. See
+    /// [`super::ConnectProgress`].
     pub(super) async fn imap_login(
         &self,
         tls_stream: TlsStream<TcpStream>,
         already_greeted: bool,
-    ) -> Result<
-        (ImapSession, rimap_core::CredentialSource),
-        (ImapError, Option<rimap_core::CredentialSource>),
-    > {
+        progress: &super::ConnectProgress,
+    ) -> Result<ImapSession, ImapError> {
         let mut client = async_imap::Client::new(tls_stream);
 
         // Read the server greeting — skipped for STARTTLS, which already
         // consumed the greeting during plaintext negotiation. An absent greeting
         // (EOF) or BYE status means the server immediately rejected us.
-        // Pre-resolve; carry `None`.
         if !already_greeted {
             let greeting = client
                 .read_response()
                 .await
-                .map_err(|e| (ImapError::Connect(e), None))?
-                .ok_or((
-                    ImapError::Auth {
-                        reason: AuthFailure::ServerRejected,
-                    },
-                    None,
-                ))?;
+                .map_err(ImapError::Connect)?
+                .ok_or(ImapError::Auth {
+                    reason: AuthFailure::ServerRejected,
+                })?;
 
             if let Response::Data {
                 status: Status::Bye,
                 ..
             } = greeting.parsed()
             {
-                return Err((
-                    ImapError::Auth {
-                        reason: AuthFailure::ServerRejected,
-                    },
-                    None,
-                ));
+                return Err(ImapError::Auth {
+                    reason: AuthFailure::ServerRejected,
+                });
             }
         }
 
         // Issue CAPABILITY and scan responses for LOGINDISABLED.
         // We create a bounded channel so intermediate untagged responses
         // (including `* CAPABILITY ...`) are routed through it rather than
-        // being silently discarded. Pre-resolve; carry `None`.
+        // being silently discarded.
         let (tx, rx) = async_channel::bounded::<UnsolicitedResponse>(32);
         client
             .run_command_and_check_ok("CAPABILITY", Some(tx))
             .await
-            .map_err(|e| (ImapError::Protocol(e), None))?;
+            .map_err(ImapError::Protocol)?;
 
         // Drain whatever arrived on the channel (non-blocking; the command
         // has already completed). A `Response::Capabilities` list containing
-        // LOGINDISABLED means LOGIN is prohibited. Pre-resolve; carry `None`.
+        // LOGINDISABLED means LOGIN is prohibited.
         let logindisabled = drain_for_logindisabled(&rx);
         if logindisabled {
-            return Err((
-                ImapError::Auth {
-                    reason: AuthFailure::CapabilityMissing { needed: "LOGIN" },
-                },
-                None,
-            ));
+            return Err(ImapError::Auth {
+                reason: AuthFailure::CapabilityMissing { needed: "LOGIN" },
+            });
         }
 
         // Resolve the password from the injected resolver. A missing
         // credential is an authentication failure, not a network
         // failure — map it to ERR_AUTH so retry logic and operator
-        // messages stay accurate. Pre-resolve; carry `None`.
+        // messages stay accurate.
         let cfg = &self.inner.cfg;
         let (password, credential_source) = self
             .inner
             .credentials
             .resolve(&cfg.account_id, &cfg.username, &cfg.host)
-            .map_err(|e| {
-                (
-                    ImapError::Auth {
-                        reason: AuthFailure::CredentialUnavailable(e.into_reason()),
-                    },
-                    None,
-                )
+            .map_err(|e| ImapError::Auth {
+                reason: AuthFailure::CredentialUnavailable(e.into_reason()),
             })?;
 
-        // From here on, all errors carry `Some(credential_source)` because
-        // resolution succeeded.
-        //
+        // Publish the source before the LOGIN round trip, which is the first
+        // await that can be cut with the credential already resolved. Every
+        // `auth` record written from here on — this connect's own, or the one
+        // `AuthEmitGuard` writes if the future is dropped — names the store the
+        // credential came from.
+        progress.record_credential_source(credential_source);
+
         // Attempt LOGIN. On NO response the server rejected the credentials.
         // Expose the secret only at the moment of use; the borrow ends
         // when `client.login` returns.
@@ -132,13 +119,10 @@ impl Connection {
             Ok(session) => session,
             Err((err, _client)) => {
                 return match err {
-                    async_imap::error::Error::No(_) => Err((
-                        ImapError::Auth {
-                            reason: AuthFailure::LoginRejected,
-                        },
-                        Some(credential_source),
-                    )),
-                    other => Err((ImapError::Protocol(other), Some(credential_source))),
+                    async_imap::error::Error::No(_) => Err(ImapError::Auth {
+                        reason: AuthFailure::LoginRejected,
+                    }),
+                    other => Err(ImapError::Protocol(other)),
                 };
             }
         };
@@ -159,7 +143,7 @@ impl Connection {
         self.inner.has_move.store(has_move, Ordering::Relaxed);
         self.inner.has_uidplus.store(has_uidplus, Ordering::Relaxed);
 
-        Ok((session, credential_source))
+        Ok(session)
     }
 
     /// Emit an [`AuthEvent`] through the injected sink. Runs the
@@ -209,6 +193,52 @@ impl Connection {
                 })
             }
             Ok(Ok(())) => Ok(()),
+        }
+    }
+
+    /// Emit an [`AuthEvent`] from a synchronous context — specifically
+    /// [`super::AuthEmitGuard`]'s `Drop`, which cannot await and has no caller
+    /// left to return a `Result` to.
+    ///
+    /// ## Why not a plain synchronous `emit_auth`
+    ///
+    /// `AuditWriter::write_record` fsyncs `auth` records, and its own docs
+    /// require async callers to route through `spawn_blocking` (RUST-ASYNC-04).
+    /// A `Drop` running inside a dropped future is still on a runtime worker
+    /// thread, so calling the sink inline there would stall that worker for a
+    /// disk sync — the exact failure the rule exists to prevent. Dispatching to
+    /// the blocking pool and detaching the `JoinHandle` costs nothing and
+    /// still writes the record: tokio does not cancel a blocking task when its
+    /// handle is dropped, which is the same property
+    /// [`Connection::emit_auth`]'s cancellation contract already relies on.
+    ///
+    /// Outside a runtime there is no worker to stall, so the write runs inline
+    /// rather than being dropped.
+    ///
+    /// ## Failure handling
+    ///
+    /// Best-effort, and logged at `error` level when the sink rejects the
+    /// event. There is nowhere to propagate to from a `Drop`, and this mirrors
+    /// both `connect_inner`'s existing auth-failure branch (which preserves the
+    /// original error and logs the audit failure) and
+    /// `rimap_audit::spawn_drainer`, which logs and discards a cancellation
+    /// `tool_end` it cannot write. A runtime shutting down can also drop the
+    /// spawned blocking task before it runs; that window is the same one
+    /// `AuditEnvelopeGuard` accepts for its own records.
+    pub(super) fn emit_auth_detached(&self, event: AuthEvent) {
+        let sink = self.inner.audit.clone();
+        let write = move || {
+            if let Err(err) = sink.emit_auth(event) {
+                tracing::error!(
+                    error = %err,
+                    "AuthEventSink::emit_auth failed for a connect that was cut \
+                     before it reached its own verdict; the attempt is unrecorded",
+                );
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => drop(handle.spawn_blocking(write)),
+            Err(_not_in_runtime) => write(),
         }
     }
 }

@@ -223,6 +223,17 @@ impl FakeImapServer {
         Connection::new(cfg, Arc::new(NoopAudit), resolver)
     }
 
+    /// Static-resolver connection whose `auth` records go to `sink` instead of
+    /// being discarded, so a test can assert what the connect flow recorded.
+    /// The default [`NoopAudit`] makes the auth log invisible, which is fine
+    /// for the dialog-shape scenarios but not for the ones that exist to count
+    /// records (#623).
+    #[must_use]
+    pub fn connection_with_sink(&self, username: &str, sink: Arc<dyn AuthEventSink>) -> Connection {
+        let cfg = self.connection_config(username, Some(self.pin), Duration::from_secs(1));
+        Connection::new(cfg, sink, Arc::new(StaticResolver))
+    }
+
     /// Build a `Connection` pinned to `wrong_pin` (which the caller
     /// guarantees differs from [`FakeImapServer::pin`]) to exercise the
     /// live TLS pin-mismatch rejection path. The rustls handshake fails
