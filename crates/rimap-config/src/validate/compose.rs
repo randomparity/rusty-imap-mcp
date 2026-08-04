@@ -91,10 +91,18 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
             return Err(ConfigError::DuplicateAccountName { name: raw.name });
         }
 
-        let security = raw
-            .security
-            .unwrap_or_else(|| config.defaults.security.clone());
-        let limits = raw.limits.unwrap_or_else(|| config.defaults.limits.clone());
+        // Per-field merge, not wholesale replacement: an account that writes
+        // one key of `[accounts.limits]` inherits every other key from
+        // `[defaults.limits]` rather than reverting it to the built-in
+        // default (#624, ADR-0014). Same for `[accounts.security]`.
+        let security = raw.security.map_or_else(
+            || config.defaults.security.clone(),
+            |overrides| overrides.merge_onto(config.defaults.security.clone()),
+        );
+        let limits = raw.limits.map_or_else(
+            || config.defaults.limits.clone(),
+            |overrides| overrides.merge_onto(config.defaults.limits.clone()),
+        );
         let fallback_mode = raw
             .credentials
             .map_or(config.defaults.credentials.fallback, |c| c.fallback);
@@ -782,7 +790,10 @@ path = "/tmp/audit.jsonl"
     // Multi-account validation tests
     // -----------------------------------------------------------------------
 
-    use crate::model::{DefaultsConfig, MultiAccountConfig, RawAccountConfig};
+    use crate::model::{
+        AccountLimitsOverrides, AccountSecurityOverrides, DefaultsConfig, MultiAccountConfig,
+        RawAccountConfig,
+    };
     use crate::validate::validate_multi;
     #[cfg(feature = "test-support")]
     use crate::validate::validate_multi_allowing_empty;
@@ -1003,9 +1014,9 @@ allowed_base_dir = "{}"
     fn account_overrides_defaults() {
         let dir = TempDir::new().unwrap();
         let mut acct = raw_account("work");
-        acct.limits = Some(LimitsConfig {
-            commands_per_second: 99,
-            ..LimitsConfig::default()
+        acct.limits = Some(AccountLimitsOverrides {
+            commands_per_second: Some(99),
+            ..AccountLimitsOverrides::default()
         });
         let mut cfg = base_multi_config(dir.path(), vec![acct]);
         cfg.defaults.limits.commands_per_second = 42;
@@ -1014,13 +1025,355 @@ allowed_base_dir = "{}"
         assert_eq!(validated_acct.limits.commands_per_second, 99);
     }
 
+    // -----------------------------------------------------------------------
+    // Per-field `[defaults]` merge (#624)
+    //
+    // Driven from TOML rather than from constructed structs: the defect is
+    // that deserialization erases "key absent" vs "key set to the built-in
+    // default", so only a real parse can distinguish the two.
+    // -----------------------------------------------------------------------
+
+    /// Build a multi-account TOML document with the given `[defaults]` and
+    /// `[[accounts]]` bodies, wiring `[audit]` at `dir`.
+    fn multi_toml(dir: &std::path::Path, defaults: &str, account: &str) -> MultiAccountConfig {
+        let doc = format!(
+            r#"
+{defaults}
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "imap.work.test"
+port = 993
+username = "alice@work.test"
+
+{account}
+
+[audit]
+path = "{audit}/audit.jsonl"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.display(),
+            base = dir.display(),
+        );
+        toml::from_str(&doc).unwrap()
+    }
+
+    /// Validate `cfg` and return the "work" account.
+    fn work_account(cfg: MultiAccountConfig) -> ValidatedAccountConfig {
+        let v = validate_multi(cfg).unwrap();
+        v.accounts[&AccountId::new("work").unwrap()].clone()
+    }
+
+    #[test]
+    fn partial_account_limits_inherits_unset_defaults() {
+        // The reproduction from #624: an account setting one limits field for
+        // an unrelated reason must not revert the rest to the built-in
+        // defaults.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r"
+[defaults.limits]
+tool_call_timeout_seconds = 600
+commands_per_second = 25
+",
+            r"
+[accounts.limits]
+max_search_results = 50
+",
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.limits.max_search_results, 50, "account's own value");
+        assert_eq!(acct.limits.tool_call_timeout_seconds, 600, "inherited");
+        assert_eq!(acct.limits.commands_per_second, 25, "inherited");
+    }
+
+    #[test]
+    fn partial_account_security_inherits_unset_defaults() {
+        // The security flavour: tightening one field must not silently drop
+        // the deployment-wide protected-folder list.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security]
+posture = "draft-safe"
+protected_folders = ["INBOX", "Sent", "Archive"]
+"#,
+            r#"
+[accounts.security]
+posture = "readonly"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.security.posture, Posture::Readonly, "account's own");
+        assert_eq!(
+            acct.security.protected_folders,
+            vec![
+                "INBOX".to_string(),
+                "Sent".to_string(),
+                "Archive".to_string()
+            ],
+            "inherited",
+        );
+    }
+
+    #[test]
+    fn empty_account_limits_table_inherits_every_default() {
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r"
+[defaults.limits]
+commands_per_second = 25
+drafts_per_minute = 9
+",
+            "[accounts.limits]",
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.limits.commands_per_second, 25);
+        assert_eq!(acct.limits.drafts_per_minute, 9);
+    }
+
+    #[test]
+    fn empty_account_security_table_inherits_every_default() {
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security]
+posture = "readonly"
+expunge_folders = ["Junk"]
+"#,
+            "[accounts.security]",
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.security.posture, Posture::Readonly);
+        assert_eq!(acct.security.expunge_folders, vec!["Junk".to_string()]);
+    }
+
+    #[test]
+    fn account_limits_setting_every_field_wins_outright() {
+        // The all-fields-set case still overrides — the merge must not
+        // resurrect a default the account explicitly restated.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r"
+[defaults.limits]
+commands_per_second = 25
+drafts_per_minute = 9
+",
+            r"
+[accounts.limits]
+commands_per_second = 7
+drafts_per_minute = 3
+",
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.limits.commands_per_second, 7);
+        assert_eq!(acct.limits.drafts_per_minute, 3);
+    }
+
+    #[test]
+    fn account_tool_overrides_merge_per_key_with_defaults() {
+        // `docs/multi-account.md` documents per-key inheritance for
+        // `[security.tools]`. A default `deny` must survive an account that
+        // allows an unrelated tool.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security.tools]
+mark_read = "deny"
+"#,
+            r#"
+[accounts.security.tools]
+search = "allow"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(
+            acct.tool_overrides.get(&ToolName::MarkRead),
+            Some(&Verdict::Deny),
+            "inherited",
+        );
+        assert_eq!(
+            acct.tool_overrides.get(&ToolName::Search),
+            Some(&Verdict::Allow),
+            "account's own",
+        );
+    }
+
+    #[test]
+    fn account_tool_override_replaces_default_verdict_for_same_tool() {
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security.tools]
+mark_read = "deny"
+"#,
+            r#"
+[accounts.security.tools]
+mark_read = "allow"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(
+            acct.tool_overrides.get(&ToolName::MarkRead),
+            Some(&Verdict::Allow),
+        );
+    }
+
+    #[test]
+    fn account_lookalike_partial_inherits_unset_defaults() {
+        // The same defect one level down: `[security.lookalike]` is a table
+        // inside a table, so it merges per key too.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security.lookalike]
+known_domains = ["work.test"]
+warn_on_any_non_ascii_domain = true
+"#,
+            r"
+[accounts.security.lookalike]
+enabled = false
+",
+        );
+        let acct = work_account(cfg);
+        assert!(!acct.security.lookalike.enabled, "account's own");
+        assert_eq!(
+            acct.security.lookalike.known_domains,
+            vec!["work.test".to_string()],
+            "inherited",
+        );
+        assert!(
+            acct.security.lookalike.warn_on_any_non_ascii_domain,
+            "inherited",
+        );
+    }
+
+    #[test]
+    fn account_arrays_replace_rather_than_union() {
+        // Arrays replace: a union could not be narrowed, and could
+        // manufacture the protected/expunge overlap validation rejects.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security]
+protected_folders = ["INBOX", "Sent", "Archive"]
+"#,
+            r#"
+[accounts.security]
+protected_folders = ["INBOX"]
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(
+            acct.security.protected_folders,
+            vec!["INBOX".to_string()],
+            "replaced, not unioned",
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_account_limits_is_rejected() {
+        // `deny_unknown_fields` must survive the move to a partial struct.
+        let dir = TempDir::new().unwrap();
+        let doc = format!(
+            r#"
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "imap.work.test"
+port = 993
+username = "alice@work.test"
+
+[accounts.limits]
+commands_per_secnod = 7
+
+[audit]
+path = "{d}/audit.jsonl"
+allowed_base_dir = "{d}"
+"#,
+            d = dir.path().display(),
+        );
+        let err = toml::from_str::<MultiAccountConfig>(&doc).unwrap_err();
+        assert!(
+            err.to_string().contains("commands_per_secnod"),
+            "diagnostic should name the misspelled key: {err}",
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_account_security_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let doc = format!(
+            r#"
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "imap.work.test"
+port = 993
+username = "alice@work.test"
+
+[accounts.security]
+postrue = "readonly"
+
+[audit]
+path = "{d}/audit.jsonl"
+allowed_base_dir = "{d}"
+"#,
+            d = dir.path().display(),
+        );
+        let err = toml::from_str::<MultiAccountConfig>(&doc).unwrap_err();
+        assert!(
+            err.to_string().contains("postrue"),
+            "diagnostic should name the misspelled key: {err}",
+        );
+    }
+
+    #[test]
+    fn merged_limits_are_still_validated_against_account_imap_budgets() {
+        // An inherited ceiling too small for the account's own raised
+        // command budget must still be rejected — the merge feeds
+        // validation, it does not bypass it.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r"
+[defaults.limits]
+tool_call_timeout_seconds = 300
+",
+            r"
+[accounts.limits]
+max_search_results = 50
+",
+        );
+        let mut cfg = cfg;
+        cfg.accounts[0].imap.command_timeout_seconds = 200; // worst case 820
+        let err = validate_multi(cfg).unwrap_err();
+        let ConfigError::InvalidLimit { field, .. } = &err else {
+            panic!("expected InvalidLimit, got {err:?}");
+        };
+        assert_eq!(*field, "limits.tool_call_timeout_seconds");
+    }
+
     #[test]
     fn per_account_smtp_required_still_works() {
         let dir = TempDir::new().unwrap();
         let mut acct = raw_account("work");
-        acct.security = Some(SecurityConfig {
-            posture: Posture::Full,
-            ..SecurityConfig::default()
+        acct.security = Some(AccountSecurityOverrides {
+            posture: Some(Posture::Full),
+            ..AccountSecurityOverrides::default()
         });
         let cfg = base_multi_config(dir.path(), vec![acct]);
         let err = validate_multi(cfg).unwrap_err();
@@ -1031,10 +1384,10 @@ allowed_base_dir = "{}"
     fn per_account_conflicting_folders_still_works() {
         let dir = TempDir::new().unwrap();
         let mut acct = raw_account("work");
-        acct.security = Some(SecurityConfig {
-            protected_folders: vec!["Trash".into()],
-            expunge_folders: vec!["Trash".into()],
-            ..SecurityConfig::default()
+        acct.security = Some(AccountSecurityOverrides {
+            protected_folders: Some(vec!["Trash".into()]),
+            expunge_folders: Some(vec!["Trash".into()]),
+            ..AccountSecurityOverrides::default()
         });
         let cfg = base_multi_config(dir.path(), vec![acct]);
         let err = validate_multi(cfg).unwrap_err();
@@ -1181,9 +1534,9 @@ allowed_base_dir = "{}"
         let mut exporter = raw_account("work");
         let mut tools = std::collections::BTreeMap::new();
         tools.insert("export_messages".into(), Verdict::Allow);
-        exporter.security = Some(SecurityConfig {
-            tools,
-            ..SecurityConfig::default()
+        exporter.security = Some(AccountSecurityOverrides {
+            tools: Some(tools),
+            ..AccountSecurityOverrides::default()
         });
 
         let mut cfg = base_multi_config(audit_dir.path(), vec![exporter, raw_account("personal")]);

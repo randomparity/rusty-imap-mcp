@@ -522,9 +522,48 @@ commands_per_second = 10
 drafts_per_minute = 5
 ```
 
-Per-account `[accounts.security]` and `[accounts.limits]` sections
-override the corresponding `[defaults.*]` sections. Fields not specified
-in the per-account section inherit from defaults.
+### Merge semantics
+
+Per-account `[accounts.security]` and `[accounts.limits]` sections merge
+onto the corresponding `[defaults.*]` section **key by key**. Writing the
+per-account table does not discard the rest of the default block:
+
+- **Tables merge per key.** `[accounts.limits]`, `[accounts.security]`,
+  `[accounts.security.tools]`, and `[accounts.security.lookalike]` each
+  override only the keys the account writes. Every other key keeps its
+  `[defaults]` value.
+- **Scalars and arrays replace.** A key the account writes replaces the
+  inherited value outright. For `protected_folders`, `expunge_folders`,
+  and `lookalike.known_domains` that means the account's list is used as
+  written — it is not unioned with the default list, so an account that
+  wants the default entries plus one more must restate them all.
+- **`[accounts.credentials]`** likewise overrides `fallback` only when
+  the account writes it.
+
+So this account raises the search limit and keeps the deployment's 600s
+ceiling and 25/s rate:
+
+```toml
+[defaults.limits]
+tool_call_timeout_seconds = 600
+commands_per_second = 25
+
+[[accounts]]
+name = "work"
+# ... [accounts.imap] ...
+
+[accounts.limits]
+max_search_results = 50
+```
+
+An account cannot erase an inherited `[defaults.security.tools]` entry,
+only restate its verdict — write `allow` or `deny` for that tool rather
+than expecting omission to fall back to the posture default.
+
+Validation runs on the merged result, per account. An inherited
+`tool_call_timeout_seconds` that is too small for an account's own
+`[accounts.imap]` budgets is still rejected at startup, naming that
+account.
 
 ## Credential resolution
 

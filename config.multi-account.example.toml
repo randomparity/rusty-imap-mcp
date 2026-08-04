@@ -3,7 +3,10 @@
 # One server, several mailboxes. Each entry in the [[accounts]] array is an
 # independent account with its own IMAP/SMTP connection, security posture,
 # limits, and credentials. Accounts inherit anything they omit from the
-# [defaults] block.
+# [defaults] block, key by key: writing [accounts.limits] to change one field
+# leaves every other field inherited. Arrays (protected_folders,
+# expunge_folders, known_domains) replace the inherited list rather than
+# adding to it.
 #
 # This is the [[accounts]] format. For a single mailbox, use the flat format
 # instead — see config.example.toml. Mixing both formats in one file is a
@@ -32,10 +35,9 @@ posture = "readonly"
 fallback = "keyring-only"
 
 [defaults.limits]
-# Any [limits] field may be set here. NOTE: an account that declares its own
-# [accounts.limits] block replaces this one WHOLESALE — fields it does not set
-# fall back to the built-in defaults, not to the values here (issue #624). Set
-# every field you care about on such an account.
+# Any [limits] field may be set here. An account that declares its own
+# [accounts.limits] block overrides only the keys it writes; every other key
+# still comes from here.
 commands_per_second = 10
 # Wall-clock ceiling on one tool call (see config.example.toml). Validated
 # against each account's own [accounts.imap] budgets, plus its
@@ -78,11 +80,15 @@ encryption = "tls"
 # username = "alice@personal.example.com"
 
 [accounts.security]
-# Override the inherited "readonly" posture for this account.
+# Override the inherited "readonly" posture for this account. Every other
+# [defaults.security] key — protected_folders, expunge_folders, the tool
+# overrides below, the lookalike settings — is still inherited.
 posture = "draft-safe"
 
 [accounts.security.tools]
-# Per-account tool override. Enables the advanced-query escape hatch.
+# Per-account tool override, merged per tool onto [defaults.security.tools]:
+# this entry does not drop verdicts the defaults set for other tools.
+# Enables the advanced-query escape hatch.
 "search.advanced_query" = "allow"
 # Raw-message export is base-deny everywhere; enabling it requires a
 # server-private [attachments].download_dir:

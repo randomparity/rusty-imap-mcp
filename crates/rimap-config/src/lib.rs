@@ -23,9 +23,10 @@ pub use crate::loader::load_and_validate_allowing_empty;
 pub use crate::loader::{CONFIG_ENV_VAR, load_and_validate, load_from_path, resolve_config_path};
 pub use crate::login::{run_login, tty_prompt};
 pub use crate::model::{
-    AttachmentsConfig, AuditConfig, Config, CredentialsConfig, DefaultsConfig, FallbackMode,
-    ImapConfig, LimitsConfig, LookalikeConfig, MultiAccountConfig, RawAccountConfig,
-    SecurityConfig, SmtpConfig, SmtpEncryption, Verdict,
+    AccountLimitsOverrides, AccountLookalikeOverrides, AccountSecurityOverrides, AttachmentsConfig,
+    AuditConfig, Config, CredentialsConfig, DefaultsConfig, FallbackMode, ImapConfig, LimitsConfig,
+    LookalikeConfig, MultiAccountConfig, RawAccountConfig, SecurityConfig, SmtpConfig,
+    SmtpEncryption, Verdict,
 };
 #[cfg(feature = "test-support")]
 pub use crate::validate::validate_multi_allowing_empty;
