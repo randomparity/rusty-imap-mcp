@@ -78,16 +78,26 @@ cargo semver-checks check-release --workspace --baseline-rev v0.1.0 --exclude <n
 
 From the next tag onward it has a baseline and needs no exclusion.
 
-Two limits worth knowing before you trust a green result:
+**The release runs the same gate.** `release.yml`'s `publish-crates` job runs
+`just semver-checks` too, immediately before uploading to crates.io — one
+baseline definition, two callers (issue #650). It is not redundant with the PR
+job: the release triggers on a tag push and `verify-tag` only checks the tag
+against `Cargo.toml`, so a tag cut off a branch would otherwise publish a tree
+the PR gate never saw. And a crates.io version cannot be unpublished, only
+yanked, so this is the one gate in the repo standing in front of something
+irreversible.
 
-- The gate is only as good as `cargo-semver-checks`' lint set. It catches
-  removed and re-typed public items well; it does not model behavioral
-  compatibility, and it cannot see through a re-export from a private module it
-  declines to traverse.
-- The **release** job's own `semver-checks` step baselines on crates.io, where
-  every crate currently sits at a `0.0.0` placeholder reservation. That step is
-  vacuous until a real version is published; the tag-baselined CI job is the
-  one carrying the weight today.
+At release time HEAD *is* the tag being released, so the baseline has to be the
+tag before it. `scripts/semver-baseline.sh` resolves that — the most recent
+reachable `vX.Y.Z` tag that is not on HEAD — and fails loudly rather than
+returning nothing, because a self-comparison is green whatever it is handed.
+`scripts/semver-baseline.test.sh` (`just test-semver-baseline`, mirrored in the
+`publish checks` CI job) covers that case and the tag shapes around it.
+
+One limit worth knowing before you trust a green result: the gate is only as
+good as `cargo-semver-checks`' lint set. It catches removed and re-typed public
+items well; it does not model behavioral compatibility, and it cannot see
+through a re-export from a private module it declines to traverse.
 
 ## One-time setup (before the first release)
 

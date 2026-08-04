@@ -314,12 +314,10 @@ are the ones that trip people up or aren't obvious from the lint set.
   `cargo set-version --workspace 0.2.0-dev` (from `cargo-edit`), not an
   override. See
   [RELEASING.md](RELEASING.md), "Breaking a public API".
-- **`semver-checks` is red on `main` right now** — its first run found a break
-  that predates it: `LimitsConfig` gained a `pub` field after `v0.1.0`. Issue
-  #648 tracks the version bump that clears it. Until then `just ci` fails on
-  that recipe for everyone, and a red `semver-checks` on your PR is that
-  standing failure rather than anything you did. Confirm it is the same
-  `rimap-config` / `LimitsConfig` finding before ignoring it.
+- **`release.yml` runs the same `just semver-checks` before publishing** (issue
+  #650), so a red one is not only a PR problem — it is what stands between a
+  break and an unpublishable-back crates.io version. Do not paper over it in the
+  recipe; the fix belongs in the manifest version.
 - **Never force-push to `main`.** Never amend commits that have been pushed.
   Never skip hooks.
 
