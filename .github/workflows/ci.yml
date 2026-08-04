@@ -236,6 +236,13 @@ jobs:
         run: just check-metadata
       - name: Unit-test publish-crates.sh
         run: just test-publish-script
+      # post-release-bump runs once per release, against a workspace layout
+      # that has grown since the job was written. Nothing else exercises it on
+      # a normal branch, which is how its file set fell three files behind
+      # (issue #662). Pure bash plus one read-only git read — same profile as
+      # the publish-script tests above.
+      - name: Unit-test post-release-bump.sh
+        run: just test-post-release-bump
 
   # Public-API SemVer gate (issue #633). Until this job existed,
   # `cargo semver-checks` ran only in release.yml's `publish` job, so a PR that
