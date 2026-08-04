@@ -53,32 +53,41 @@ recently flushed.
 | `reason` | One of `signal_int`, `signal_term`, `eof`, `error` |
 | `total_tool_calls` | Number of tool calls dispatched in this process |
 
-**`process_end` is terminal for its `process_id`.** When a `process_end`
-record is present, no other record carrying the same `process_id` follows it
-anywhere in the file. A reader may treat it as closing that process, and may
-attribute every subsequent record to a later run.
+**`process_end` is terminal for its `process_id`, subject to the two exceptions
+below.** When a `process_end` record is present, no other record carrying the
+same `process_id` follows it anywhere in the file. A reader may treat it as
+closing that process, and may attribute every subsequent record to a later run.
 
-The guarantee is enforced, not incidental. Before writing `process_end` the
-server cancels every in-flight tool dispatch and waits, bounded, for each to
-unwind -- so a connect the shutdown cuts writes its `auth` record (`ERR_CANCELLED`,
-see below) *before* the `process_end`, rather than racing it. The two states this
+The rule is enforced, not incidental. Before writing `process_end` the server
+cancels every in-flight tool dispatch and waits, bounded, for each to unwind --
+so a connect the shutdown cuts writes its `auth` record (`ERR_CANCELLED`, see
+below) *before* the `process_end`, rather than racing it. The two states this
 rules out are a trailing `auth` record that a naive reader would attribute to the
 *next* process in the same file, and a half-written final line that makes the
 JSONL tail unparseable.
 
-Two residues remain, both bounded and both announced on stderr rather than
-silently absorbed:
+Read the exceptions before building on the rule.
 
-- **A dispatch that outlives the drain budget.** If a dispatch cannot be
+- **A dispatch that outlived the drain budget.** If a dispatch cannot be
   unwound in time -- it is inside an uncancelable blocking call, say -- the
   server logs `tool dispatches outlived the shutdown drain` with the count and
-  proceeds. Anything those dispatches write afterwards is subject to the old
-  behaviour: sequenced after `process_end`, or lost to process exit. A reader
-  that must be certain should treat a log carrying that warning as suspect;
-  operators should alert on it.
-- **A record that was never written at all.** Loss on shutdown is expected and
-  documented (best-effort). `process_end` being terminal says nothing about
-  completeness -- only that what *is* present is correctly ordered.
+  proceeds. Anything those dispatches write afterwards keeps the old behaviour:
+  sequenced after `process_end`, or lost to process exit. This one is
+  **announced on stderr**, so a reader can tell: treat a run whose log carries
+  that warning as suspect, and alert on it.
+- **A write already handed to the blocking pool.** Most audit writes are
+  offloaded with `spawn_blocking`. Dropping the task that awaits one *detaches*
+  the write rather than cancelling it, so a dispatch cut in that narrow window
+  still appends its record, after `process_end`. This one is **not** announced:
+  the drain counts the dispatch as cleanly unwound. Tracked as
+  [#672](https://github.com/randomparity/rusty-imap-mcp/issues/672); until it
+  closes, the rule is "terminal except for a record that was already mid-flight
+  at the cut".
+
+Separately, and not an exception to *ordering*: a record may be missing
+entirely. Loss on shutdown is expected and documented (best-effort). Terminality
+says nothing about completeness -- only that what *is* present is correctly
+ordered.
 
 ### `auth`
 

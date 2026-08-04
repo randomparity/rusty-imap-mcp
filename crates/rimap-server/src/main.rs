@@ -229,9 +229,12 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
 
 /// Build the account registry, wrap stdio with the #277 envelope
 /// validator, and drive the two-phase init/serve race against the
-/// validator bridges. The `select!` / `drop` / supervisor-shutdown /
-/// drainer-join ordering here is load-bearing (#277) and must not be
-/// reordered.
+/// validator bridges. The `select!` / `drop` / dispatch-drain /
+/// supervisor-shutdown / drainer-join ordering here is load-bearing
+/// (#277, #645) and must not be reordered. In particular the whole
+/// function must complete before `run_server` writes `process_end`,
+/// which is what makes that record terminal (see `docs/audit-log.md`
+/// and ADR-0015).
 async fn serve_mcp(
     multi: &rimap_config::validate::ValidatedMultiConfig,
     audit: &rimap_audit::AuditWriter,
@@ -329,7 +332,7 @@ async fn serve_mcp(
     if undrained > 0 {
         tracing::warn!(
             undrained,
-            budget_ms = u64::try_from(DISPATCH_DRAIN_BUDGET.as_millis()).unwrap_or(u64::MAX),
+            budget = ?DISPATCH_DRAIN_BUDGET,
             "tool dispatches outlived the shutdown drain; any audit record they \
              still write is sequenced after process_end or lost",
         );
@@ -354,14 +357,24 @@ async fn serve_mcp(
     // Bounded: an undrained dispatch still owns a sender clone, and an
     // unbounded join would then hold the whole process exit for that
     // command's timeout.
-    match tokio::time::timeout(DRAINER_JOIN_BUDGET, drainer_handle).await {
+    //
+    // `abort` on expiry, not just a dropped handle: dropping a `JoinHandle`
+    // *detaches* the task, so the drainer would keep looping and keep appending
+    // `tool_end` records — after `process_end`, which is the ordering this
+    // whole path exists to establish.
+    let mut drainer_handle = drainer_handle;
+    match tokio::time::timeout(DRAINER_JOIN_BUDGET, &mut drainer_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::error!(error = %e, "cancellation drainer join error"),
-        Err(_) => tracing::warn!(
-            undrained,
-            "cancellation drainer did not finish within the join budget; \
-             queued cancellation records are lost",
-        ),
+        Err(_) => {
+            drainer_handle.abort();
+            tracing::warn!(
+                undrained,
+                "cancellation drainer did not finish within the join budget; \
+                 queued cancellation records are lost, and any write already \
+                 handed to the blocking pool is sequenced after process_end",
+            );
+        }
     }
     mcp_result
 }

@@ -166,11 +166,18 @@ impl DispatchDrain {
     /// Run `body` as a tracked dispatch: registered for its whole lifetime, and
     /// cut short if [`DispatchDrain::shutdown`] fires first.
     ///
-    /// The drop ordering is load-bearing. `body` is dropped at the end of the
-    /// inner block — before the registration is released — so any audit record
+    /// The drop ordering is load-bearing, and holds whether the returned future
+    /// completes or is itself dropped: `body` lives in the inner block, so it is
+    /// dropped before the registration is released either way. Any audit record
     /// its guards write on drop (`AuthEmitGuard`, `AuditEnvelopeGuard`) is
-    /// already on disk, or already queued to the cancellation drainer, by the
-    /// time `shutdown` observes the count reach zero.
+    /// therefore already on disk, or already queued to the cancellation drainer,
+    /// by the time `shutdown` observes the count reach zero.
+    /// `drop_ordering_holds_when_the_track_future_is_aborted` pins it.
+    ///
+    /// It does **not** cover a write already handed to `spawn_blocking`:
+    /// dropping the future awaiting that `JoinHandle` detaches the closure
+    /// rather than cancelling it, so the write still happens, unordered. See the
+    /// residues in `docs/audit-log.md`.
     async fn track<F>(&self, body: F) -> Result<CallToolResult, ErrorData>
     where
         F: Future<Output = Result<CallToolResult, ErrorData>>,
@@ -201,7 +208,16 @@ impl DispatchDrain {
     /// A non-zero return is not recoverable here: the caller logs it and
     /// proceeds, because the alternative is an unbounded shutdown. Those
     /// dispatches keep the pre-#645 behaviour — whatever they write lands after
-    /// `process_end` or not at all.
+    /// `process_end` or not at all. The count is the announced residue, so
+    /// discarding it silently absorbs exactly what the caller promised to
+    /// report; hence `#[must_use]`.
+    ///
+    /// `budget` is honoured only while at least one runtime worker can still
+    /// park to drive the timer. The cut path performs a synchronous, fsync-ing
+    /// audit write on a worker, so on a runtime with very few workers and a slow
+    /// `audit.path` the wait can outlast the budget. It stays correct — the
+    /// order is what matters, not the latency — but it stops being bounded.
+    #[must_use]
     pub async fn shutdown(&self, budget: Duration) -> usize {
         self.inner.cancel.send_replace(true);
         let mut inflight = self.inner.inflight.subscribe();
@@ -1900,6 +1916,7 @@ mod tool_call_ceiling_tests {
 #[cfg(test)]
 mod dispatch_drain_tests {
     #![expect(clippy::expect_used, reason = "unit tests")]
+    #![expect(clippy::panic, reason = "a test body that panics on purpose")]
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1981,6 +1998,10 @@ mod dispatch_drain_tests {
         let drain = DispatchDrain::new();
         let entered = Arc::new(AtomicBool::new(false));
 
+        // The blocking window is closed by the test, not by a clock: a wall-clock
+        // sleep raced against the drain budget would flip to `0` on a starved
+        // runner.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
         let dispatch = tokio::spawn({
             let drain = drain.clone();
             let entered = Arc::clone(&entered);
@@ -1991,7 +2012,7 @@ mod dispatch_drain_tests {
                         // Stands in for an uncancelable blocking call: the task
                         // cannot observe the cancel flag until this returns, so
                         // the drain has to give up on it.
-                        std::thread::sleep(Duration::from_secs(1));
+                        let _ = blocked.recv();
                         Err(ErrorData::internal_error("finished".to_string(), None))
                     })
                     .await
@@ -2001,12 +2022,84 @@ mod dispatch_drain_tests {
 
         assert_eq!(drain.shutdown(Duration::from_millis(50)).await, 1);
 
-        // It ran to completion on its own terms rather than being cut — which
-        // is exactly why the drain could not account for it.
+        // It then ran to completion on its own terms rather than being cut —
+        // which is exactly why the drain could not account for it.
+        drop(release);
         let outcome = dispatch.await.expect("dispatch task joins");
         assert_eq!(
             outcome.err().map(|e| e.message.to_string()),
             Some("finished".to_string()),
+        );
+    }
+
+    /// The correctness argument for the whole drain is that a dispatch's guards
+    /// finish running before its registration is released. That holds for the
+    /// cancel path (covered above) and equally when the `track` future is
+    /// dropped outright, which is what `Runtime::shutdown_background` still does
+    /// to anything the drain could not account for. Nothing but this test stops
+    /// a refactor — hoisting the `pin!`, reordering the bindings — from
+    /// silently inverting it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drop_ordering_holds_when_the_track_future_is_aborted() {
+        let drain = DispatchDrain::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(AtomicBool::new(false));
+
+        let dispatch = tokio::spawn({
+            let drain = drain.clone();
+            let dropped = Arc::clone(&dropped);
+            let entered = Arc::clone(&entered);
+            async move {
+                drain
+                    .track(async move {
+                        let _witness = DropWitness(dropped);
+                        entered.store(true, Ordering::SeqCst);
+                        std::future::pending::<Result<CallToolResult, ErrorData>>().await
+                    })
+                    .await
+            }
+        });
+        await_flag(&entered).await;
+
+        dispatch.abort();
+        let _ = dispatch.await;
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the body's guards must run when the tracked future is dropped",
+        );
+        assert_eq!(
+            drain.shutdown(Duration::from_secs(30)).await,
+            0,
+            "an aborted dispatch must not leak its registration",
+        );
+    }
+
+    /// A panicking dispatch must not leak its registration — otherwise every
+    /// later shutdown burns its whole budget and reports a phantom residue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_dispatch_does_not_leak_its_registration() {
+        let drain = DispatchDrain::new();
+        let dispatch = tokio::spawn({
+            let drain = drain.clone();
+            async move {
+                drain
+                    .track(async {
+                        panic!("dispatch body panics");
+                    })
+                    .await
+            }
+        });
+        assert!(
+            dispatch.await.is_err(),
+            "the dispatch task must have panicked",
+        );
+
+        let started = Instant::now();
+        assert_eq!(drain.shutdown(Duration::from_secs(30)).await, 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a leaked registration would make this wait out the budget; took {:?}",
+            started.elapsed(),
         );
     }
 

@@ -233,11 +233,15 @@ fn assert_cut_auth_precedes_terminal_process_end(raw: &str) {
         cut["process_id"], process_end["process_id"],
         "the cut connect's auth record belongs to this process",
     );
+    // Unwrapped, not compared as `Option`: `None < Some(_)`, so a record that
+    // lost its `seq` would satisfy the comparison instead of failing it.
+    let cut_seq = cut["seq"].as_u64().expect("cut auth record carries a seq");
+    let end_seq = process_end["seq"]
+        .as_u64()
+        .expect("process_end carries a seq");
     assert!(
-        cut["seq"].as_u64() < process_end["seq"].as_u64(),
-        "cut auth seq {} must precede process_end seq {}",
-        cut["seq"],
-        process_end["seq"],
+        cut_seq < end_seq,
+        "cut auth seq {cut_seq} must precede process_end seq {end_seq}",
     );
 }
 
