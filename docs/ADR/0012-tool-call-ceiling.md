@@ -195,6 +195,16 @@ an MCP client's own request timeout fires long before the server gives up.
   hazard the poison flag closes for the ceiling; it predates this change and is
   tracked in [#620](https://github.com/randomparity/rusty-imap-mcp/issues/620).
 
+- **A ceiling that fires during a lazy connect drops that connect's `auth`
+  audit record.** `connect_inner` emits it after `connect_with_bundle`
+  returns, and warns that a caller wrapping it in a shorter deadline than
+  `connect_timeout` loses the record — which is what the ceiling can do. This is
+  the loss #592 fixed for the `command_timeout`/`connect_timeout` nesting,
+  reappearing one layer up with a far larger budget, so reaching it means the
+  connect was already pathological. The `tool_end` record still lands with
+  `ERR_TIMEOUT`; only the connection attempt goes unrecorded. Tracked in
+  [#623](https://github.com/randomparity/rusty-imap-mcp/issues/623).
+
 - A ceiling that fires during `download_attachment` or `export_messages` can
   leave an artifact on disk that no audit record accounts for: the sandbox
   write runs in `spawn_blocking`, and dropping the awaiting future does not
