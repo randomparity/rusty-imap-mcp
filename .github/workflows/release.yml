@@ -505,6 +505,12 @@ jobs:
       # `verify-tag` checks the tag against Cargo.toml, not that the tagged
       # commit ever reached `main` — a tag cut off a branch is published without
       # the PR gate having seen that tree.
+      #
+      # This runs on `stable` (the job's publish toolchain) where the PR job pins
+      # 1.94.0. Both halves of a run use one toolchain, so the diff stays
+      # consistent; the skew only bites if the baseline tag's code stops
+      # compiling under a future stable, which reads as a build error, not a
+      # SemVer verdict.
       - name: Check for SemVer breakage
         run: just semver-checks
       - name: Publish crates
