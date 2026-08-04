@@ -450,9 +450,12 @@ mod tests {
             !wait_until_port_refused(addr, Duration::from_millis(300)),
             "a still-listening port must time out as not-refused",
         );
-        // Drain the connections the poll left in the accept backlog so the test
-        // leaves no half-open loopback sockets behind (nextest flags those as
-        // "leaky").
+        // Drain the connections the poll left in the accept backlog before
+        // dropping the listener, so each one is closed from this side rather
+        // than reset. Defensive hygiene: the sockets are process-local and the
+        // kernel reclaims them at exit either way, but leaving accepted-but-
+        // unread connections around is the kind of state that confuses the next
+        // person who adds a case here.
         listener.set_nonblocking(true).expect("set nonblocking");
         while listener.accept().is_ok() {}
         drop(listener);
