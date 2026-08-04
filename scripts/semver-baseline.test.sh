@@ -121,6 +121,18 @@ else
     failures=$((failures + 1))
 fi
 
+# What `actions/checkout` actually hands the release job: a detached HEAD at an
+# ANNOTATED tag. `--points-at` has to peel the tag object to see the commit, and
+# a detached HEAD has no branch for `describe` to walk from.
+new_repo
+commit "${repo}" one
+git -C "${repo}" tag -a v0.1.0 -m 'release 0.1.0'
+commit "${repo}" two
+git -C "${repo}" tag -a v0.2.0 -m 'release 0.2.0'
+git -C "${repo}" checkout -q --detach v0.2.0
+expect_baseline "an annotated tag on a detached HEAD still resolves the previous release" \
+    "${repo}" v0.1.0
+
 # A re-tag or a version-alias tag can leave several release tags on one commit.
 new_repo
 commit "${repo}" one
