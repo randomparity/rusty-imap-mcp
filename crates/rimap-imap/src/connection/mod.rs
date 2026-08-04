@@ -227,10 +227,17 @@ impl Connection {
     /// therefore still holds the session lock, this must not try to take
     /// it — hence a plain store rather than an `async fn`.
     ///
-    /// `Relaxed` is sufficient: the flag publishes no data of its own (the
-    /// session is published through the mutex), and the mutex
-    /// release/acquire between this store and the
-    /// [`Self::take_poisoned`] that observes it is the synchronizing edge.
+    /// `Relaxed` is sufficient: the flag publishes no data of its own — the
+    /// session is published through the mutex, whose release/acquire is the
+    /// synchronizing edge whenever the poisoner held the guard.
+    ///
+    /// A ceiling can also fire with no guard held at all: parked on the
+    /// lock-acquire timeout, between two IMAP operations in a multi-op tool,
+    /// or inside a `spawn_blocking` join. Those poisons are precautionary —
+    /// there is no half-read session to protect, and the worst outcome is
+    /// that the next command reconnects a healthy one. So the lack of an
+    /// ordering edge on that path costs correctness nothing; do not read
+    /// the mutex edge as covering every caller.
     pub fn poison(&self) {
         self.inner.poisoned.store(true, Ordering::Relaxed);
     }
@@ -241,8 +248,8 @@ impl Connection {
     ///
     /// The swap makes the flag one-shot — a second command must not
     /// discard a session poisoned before the first one already replaced
-    /// it. `Relaxed` for the same reason as [`Self::poison`]: the mutex,
-    /// not this flag, carries the happens-before edge.
+    /// it. `Relaxed` for the same reason as [`Self::poison`]: where an
+    /// ordering edge is needed at all, the mutex carries it.
     pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
         if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
             return false;

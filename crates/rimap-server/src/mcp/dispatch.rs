@@ -139,14 +139,14 @@ pub(super) fn rimap_error_to_breaker_reason(
 ///   runs on the way out and a ceiling that keeps firing opens the
 ///   per-account circuit breaker.
 ///
-/// `on_timeout` runs only when the ceiling fires. Dropping the dispatch
+/// `on_timeout_nonblocking` runs only when the ceiling fires. Dropping the dispatch
 /// future mid-command leaves the cached IMAP session holding an unread
 /// server response, which the next command would misparse as its own, so
 /// the caller uses it to mark the connection unusable. An inner
 /// `ERR_TIMEOUT` is returned verbatim and does *not* run it — that path
 /// stayed inside its stage budget and `with_session` invalidated already.
 ///
-/// **`on_timeout` runs while `dispatch` is still alive**, which is why
+/// **The callback runs while `dispatch` is still alive**, which is why
 /// `dispatch` is pinned to a local rather than moved into `timeout`. The
 /// awaited `Timeout` drops the dispatch future — and with it the session
 /// lock guard held inside `Connection::attempt` — as soon as the `.await`
@@ -155,14 +155,17 @@ pub(super) fn rimap_error_to_breaker_reason(
 /// take the poisoned session. Holding the dispatch across the callback is
 /// what orders the flag ahead of every queued waiter.
 ///
-/// That ordering imposes a contract on `on_timeout`: it must be
-/// non-blocking and must not touch the session lock, which the cut
-/// dispatch still holds. `Connection::poison` is a plain atomic store for
-/// exactly this reason; an `invalidate().await` here would deadlock.
+/// That ordering imposes a contract, which the parameter name carries to
+/// the call site: `on_timeout_nonblocking` must not block and must not
+/// touch the session lock, which the cut dispatch still holds.
+/// `Connection::poison` is a plain atomic store for exactly this reason.
+/// `impl FnOnce()` rules out an `.await`, but not a `block_on` or a
+/// `std::sync::Mutex` acquisition — either would self-deadlock against
+/// the guard the cut dispatch is holding and pin a worker thread.
 pub(super) async fn with_tool_call_ceiling<T, F>(
     ceiling: std::time::Duration,
     dispatch: F,
-    on_timeout: impl FnOnce(),
+    on_timeout_nonblocking: impl FnOnce(),
 ) -> Result<T, rimap_core::RimapError>
 where
     F: std::future::Future<Output = Result<T, rimap_core::RimapError>>,
@@ -171,7 +174,7 @@ where
     match tokio::time::timeout(ceiling, dispatch.as_mut()).await {
         Ok(result) => result,
         Err(_elapsed) => {
-            on_timeout();
+            on_timeout_nonblocking();
             Err(rimap_core::RimapError::Imap {
                 code: rimap_core::ErrorCode::Timeout,
                 message: format!(
