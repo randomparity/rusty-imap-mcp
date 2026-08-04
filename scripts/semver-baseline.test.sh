@@ -35,7 +35,9 @@ new_repo() {
     case_n=$((case_n + 1))
     repo="${tmp}/repo${case_n}"
     mkdir -p "${repo}"
-    git -C "${repo}" init -q
+    # Pin the initial branch: with no global config there is no
+    # `init.defaultBranch`, and git then prints an advisory to stderr.
+    git -C "${repo}" init -q -b main
 }
 
 commit() {

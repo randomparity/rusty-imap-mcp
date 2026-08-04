@@ -76,7 +76,12 @@ must skip it for that one PR:
 cargo semver-checks check-release --workspace --baseline-rev v0.1.0 --exclude <new-crate>
 ```
 
-From the next tag onward it has a baseline and needs no exclusion.
+From the next tag onward it has a baseline and needs no exclusion. The release
+job below runs the same check with no way to pass `--exclude`, so that cycle's
+release stops at `publish-crates` — but not by surprise: `semver-checks` is red
+on every PR for the whole cycle first, and `publish-crates` is a leaf, so the
+GitHub Release still stands and `./scripts/publish-crates.sh` finishes the job
+by hand.
 
 **The release runs the same gate.** `release.yml`'s `publish-crates` job runs
 `just semver-checks` too, immediately before uploading to crates.io — one
