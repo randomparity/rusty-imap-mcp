@@ -215,6 +215,62 @@ else
     echo "ok: discovery works from a subdirectory"
 fi
 
+# --- every fuzz workspace in the repo commits a lockfile --------------------
+
+# Discovery reports what *is* tracked, so it notices a fuzz lockfile appearing
+# but not one going away: re-add `Cargo.lock` to a fuzz/.gitignore and
+# `git rm --cached` it, and the gate drops that directory and still exits 0.
+# The floor in the script itself only fires at zero. So regressing from two
+# tracked lockfiles to one — the exact state #611 closed — would be silent, and
+# `.clusterfuzzlite/build.sh` would stop asserting `--locked` for that
+# directory at the same time.
+#
+# Pin the invariant to the manifests rather than to a path list, so this stays
+# true when a fuzz workspace is added or moved: every tracked `fuzz/Cargo.toml`
+# must have a tracked sibling `Cargo.lock`. Same two anchored globs the script
+# uses, for the same reason — `*fuzz/` would also match `notfuzz/`.
+repo_root="$(cd "${here}/.." && pwd)"
+fuzz_manifests="$(cd "${repo_root}" && git ls-files 'fuzz/Cargo.toml' '*/fuzz/Cargo.toml')"
+
+if [ -z "${fuzz_manifests}" ]; then
+    echo "FAIL: found no tracked fuzz/Cargo.toml — the globs no longer match" >&2
+    failures=$((failures + 1))
+fi
+
+unlocked=""
+manifest_count=0
+while IFS= read -r manifest; do
+    [ -n "${manifest}" ] || continue
+    manifest_count=$((manifest_count + 1))
+    lock="${manifest%Cargo.toml}Cargo.lock"
+    if ! (cd "${repo_root}" && git ls-files --error-unmatch "${lock}" >/dev/null 2>&1); then
+        unlocked="${unlocked} ${lock}"
+    fi
+done <<EOF
+${fuzz_manifests}
+EOF
+
+if [ -n "${unlocked}" ]; then
+    echo "FAIL: fuzz workspace(s) with no tracked lockfile:${unlocked}" >&2
+    echo "      Un-ignore and commit it, then run 'just realign-fuzz-locks'." >&2
+    failures=$((failures + 1))
+else
+    echo "ok: all ${manifest_count} tracked fuzz workspaces commit a lockfile"
+fi
+
+# The count the gate reports must match, so that a lockfile tracked but outside
+# the script's globs (a fuzz workspace moved somewhere the globs miss) is a
+# failure here rather than an untested directory.
+counted_out="$(cd "${repo_root}" && "$script" 2>&1)" || true
+counted="$(printf '%s\n' "${counted_out}" | sed -n 's/^ok: \([0-9][0-9]*\) fuzz lockfile.*/\1/p')"
+if [ "${counted}" = "${manifest_count}" ]; then
+    echo "ok: the gate checks all ${manifest_count} of them"
+else
+    echo "FAIL: ${manifest_count} fuzz workspace(s) tracked, gate checked '${counted}':" >&2
+    echo "${counted_out}" >&2
+    failures=$((failures + 1))
+fi
+
 # --- result -----------------------------------------------------------------
 
 if [ "$failures" -ne 0 ]; then
