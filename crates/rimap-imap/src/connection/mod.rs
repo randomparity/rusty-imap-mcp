@@ -7,13 +7,13 @@
 //!   points (it has to be — async-imap commands are themselves `.await`).
 //! - The injected [`AuthEventSink`] may hold its own internal
 //!   `std::sync::Mutex` (the production `rimap-audit::AuditWriter`
-//!   does). That lock is NEVER held across an `.await`. Every call
-//!   from an async context goes through `tokio::task::spawn_blocking`;
-//!   the one call from a synchronous context — `AuthEmitGuard`'s
-//!   `Drop`, which cannot await at all — takes and releases the lock
-//!   inline. Both shapes satisfy the rule; only the second blocks the
-//!   thread it runs on, and `Connection::emit_auth_blocking` argues why
-//!   that is the right trade there.
+//!   does). That lock is NEVER held across an `.await`. Every `auth`
+//!   record — `connect_inner`'s own, and the one `AuthEmitGuard`'s
+//!   `Drop` writes for a cut connect — goes through
+//!   `Connection::emit_auth`, which takes and releases the lock inline
+//!   on the calling thread. That satisfies the rule and costs a
+//!   blocked thread for the duration of one fsync; `emit_auth` and
+//!   ADR-0014 argue why that is the right trade (#643).
 //!
 //! These two rules are independent and both must hold. See
 //! `docs/architecture/audit-locking.md`.
@@ -310,10 +310,11 @@ impl ConnectProgress {
 /// carry no fingerprint and no credential source, which is the same shape a
 /// pre-resolve failure already produces.
 ///
-/// The write is synchronous, on the dropping thread. `emit_auth_blocking`
-/// states why that is the right trade here and nowhere else; the short version
-/// is that deferring it to the blocking pool guarantees the loss during a
-/// runtime shutdown, where writing inline at least has a chance.
+/// The write is synchronous, on the dropping thread — the same shape
+/// `connect_inner`'s own emit uses since #643. `Connection::emit_auth` states
+/// why; the short version is that deferring to the blocking pool loses the
+/// record during a runtime shutdown, which is one of the cuts this guard
+/// exists for.
 struct AuthEmitGuard<'a> {
     conn: &'a Connection,
     bundle: &'a TlsConfigBundle,
@@ -336,8 +337,7 @@ impl<'a> AuthEmitGuard<'a> {
     }
 
     /// The connect reached its own verdict, so `connect_inner` owns the record
-    /// from here. Called *before* the normal emit, not after: see the comment
-    /// at the call site for why the ordering is load-bearing.
+    /// from here.
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -593,10 +593,8 @@ impl Connection {
     /// onwards, including the paths on which this function never returns at
     /// all.
     ///
-    /// Two carve-outs, both narrow and both stated where they arise:
-    /// `build_tls_config` failing exits earlier than the attempt itself and
-    /// records nothing, and a runtime shutdown can discard the completed
-    /// path's queued write — see the comment on the disarm below.
+    /// One carve-out, narrow and stated where it arises: `build_tls_config`
+    /// failing exits earlier than the attempt itself and records nothing.
     ///
     /// A caller *may* wrap this in a deadline shorter than `connect_timeout` —
     /// the per-tool-call ceiling (#594, ADR-0012) does. Cutting the future
@@ -621,23 +619,14 @@ impl Connection {
 
         let ctx = self.auth_context(&bundle, &progress);
 
-        // Disarm BEFORE the emit, not after. `emit_auth` dispatches the write
-        // to `spawn_blocking` on its first poll, and tokio does not cancel a
-        // blocking task when its `JoinHandle` is dropped, so a cut at that
-        // `.await` still lands the record. Disarming afterwards would let the
-        // guard add a second one.
-        //
-        // One exception, and it is a gap rather than a duplicate: a runtime
-        // that starts shutting down discards even an already-queued blocking
-        // closure, so a connect that completed and then lost its emit to a
-        // shutdown records nothing — the guard is disarmed by then. Closing it
-        // would mean making this emit synchronous too, which is a wider change
-        // than #623; tracked in #643. Disarming *after* would not fix it
-        // either, only trade a rare gap for a rare duplicate at the same await.
+        // Nothing awaits between here and the emit below — `emit_auth` writes
+        // on this thread (#643) — so the future cannot be dropped in the gap.
+        // The handover from guard to `connect_inner` is therefore neither a
+        // gap nor a duplicate, whichever order it is written in.
         emit_guard.disarm();
 
         match &outcome {
-            Ok(_) => self.emit_auth(auth_success(&ctx)).await?,
+            Ok(_) => self.emit_auth(auth_success(&ctx))?,
             Err(err) => {
                 // Deliberate: log but do NOT propagate emit_auth failures on
                 // the error branch. The ORIGINAL outcome (ImapError::Auth,
@@ -652,7 +641,7 @@ impl Connection {
                 // only other trace is a stderr line. (That counter reaches
                 // `process_end` when #8 wires it; today it is readable via
                 // `AuditWriter::suppressed_failures`.)
-                if let Err(audit_err) = self.emit_auth(auth_failure(&ctx, err.code())).await {
+                if let Err(audit_err) = self.emit_auth(auth_failure(&ctx, err.code())) {
                     self.inner.audit.note_auth_write_lost();
                     tracing::error!(
                         original_error = %err,

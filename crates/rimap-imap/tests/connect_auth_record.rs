@@ -17,8 +17,9 @@
 //! Fake, no container runtime — runs on every PR.
 #![expect(clippy::expect_used, reason = "tests")]
 
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rimap_core::auth_event::{AuthEvent, AuthResult};
 use rimap_core::auth_sink::{AuthEventSink, AuthSinkError};
@@ -105,4 +106,79 @@ async fn a_successful_connect_emits_one_auth_record_naming_the_credential_source
         "the connection pins the fake's own certificate",
     );
     assert_eq!(event.username, "user@example.com");
+}
+
+/// A completed connect's `auth` record must not depend on tokio's blocking
+/// pool (#643).
+///
+/// The loss this pins is a runtime shutdown landing between `connect_inner`
+/// queueing its emit and the pool running it: tokio drops queued blocking
+/// tasks once shutdown begins, and `rimap-server` shuts down with
+/// `Runtime::shutdown_background`, which waits for nothing. Racing a real
+/// shutdown against a real queue would be a flake, so the test constructs the
+/// same condition deterministically — a pool with exactly one thread, that
+/// thread occupied, and then a shutdown that discards whatever is queued
+/// behind it. A `connect_inner` that defers its emit cannot record under those
+/// conditions; one that writes inline is unaffected by all of them.
+#[test]
+fn a_completed_connect_records_its_auth_event_without_the_blocking_pool() {
+    /// Bounds the occupier thread's own wait, so a failed assertion cannot
+    /// leave it parked for the rest of the test binary's life.
+    const OCCUPIER_MAX_HOLD: Duration = Duration::from_secs(30);
+    /// Generous upper bound on a local connect; the passing path needs
+    /// milliseconds, and only the failing path spends the whole budget.
+    const RECORD_DEADLINE: Duration = Duration::from_secs(5);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("multi-thread test runtime");
+
+    // Saturate the blocking pool before the connect starts, so any
+    // `spawn_blocking` the connect issues is queued rather than run.
+    let (occupied_tx, occupied_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    rt.spawn_blocking(move || {
+        occupied_tx.send(()).ok();
+        let _ = release_rx.recv_timeout(OCCUPIER_MAX_HOLD);
+    });
+    occupied_rx
+        .recv_timeout(RECORD_DEADLINE)
+        .expect("the pool's only thread must be occupied before the connect");
+
+    let server = rt.block_on(FakeImapServer::start(list_script()));
+    let sink = Arc::new(RecordingSink::default());
+    let conn = server.connection_with(
+        "user@example.com",
+        Arc::new(StaticResolver),
+        Arc::clone(&sink) as Arc<dyn AuthEventSink>,
+        Duration::from_secs(1),
+    );
+    rt.spawn(async move {
+        // The `auth` record is written when the connect completes, before
+        // LIST is issued, so the command's own outcome is irrelevant here.
+        let _ = conn.list_folders("*").await;
+    });
+
+    let deadline = Instant::now() + RECORD_DEADLINE;
+    while sink.events().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Begin shutdown without draining: this is what discards a queued
+    // blocking closure. Releasing the occupier only afterwards keeps a
+    // deferred emit from being resurrected by the freed thread.
+    rt.shutdown_background();
+    release_tx.send(()).ok();
+
+    let events = sink.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "a connect that completed must leave its auth record even when the \
+         blocking pool never runs another task: {events:?}",
+    );
+    assert_eq!(events[0].result, AuthResult::Success);
 }
