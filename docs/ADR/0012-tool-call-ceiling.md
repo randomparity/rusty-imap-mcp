@@ -209,9 +209,37 @@ an MCP client's own request timeout fires long before the server gives up.
 
 - The ceiling does not cover a client-initiated cancellation, which continues
   to drop the envelope future and record `ERR_CANCELLED` through
-  `AuditEnvelopeGuard`. That path has the same mid-command session-poisoning
-  hazard the poison flag closes for the ceiling; it predates this change and is
-  tracked in [#620](https://github.com/randomparity/rusty-imap-mcp/issues/620).
+  `AuditEnvelopeGuard`. That path had the same mid-command session-poisoning
+  hazard the poison flag closes for the ceiling. Closed by
+  [#620](https://github.com/randomparity/rusty-imap-mcp/issues/620), but **not**
+  where that issue proposed, and the reason generalizes this decision:
+
+  - #620 suggested poisoning from `AuditEnvelopeGuard::drop`, or from a sibling
+    drop guard armed around the dispatch in `dispatch_account_scoped`. Both sit
+    in a frame that *encloses* the dispatch future. Dropping a future drops that
+    frame's live locals in reverse declaration order, so the nested
+    `Connection::attempt` frame — and the `MutexGuard` it holds — is already gone
+    by the time such a guard runs. Releasing that lock is what wakes the next
+    FIFO waiter, so either placement sets the flag strictly too late for exactly
+    the queued peer the flag exists to protect. Measured both shapes against
+    `tokio::sync::Mutex::try_lock` before choosing.
+
+  - The fix instead makes the lock guard a *field* of a `SessionGuard` inside
+    `Connection::attempt`. Rust runs a value's own `Drop::drop` before dropping
+    its fields, so `poison` precedes the lock release on every drop path,
+    independently of how `attempt` is later arranged. `Connection::poison` being
+    a synchronous atomic store rather than an async invalidate is what makes it
+    callable from `Drop` at all.
+
+  - Because the guard sits at the lock rather than at one caller, it covers
+    *every* cut that holds a live session — a client cancellation, a runtime
+    shutdown, and the ceiling itself. `with_tool_call_ceiling`'s
+    `on_timeout_nonblocking` callback is retained: it still covers the cut
+    points where no session lock is held at all (parked on the lock-acquire
+    timeout, between two IMAP operations in a multi-op tool, inside a
+    `spawn_blocking` join), where the poison is precautionary. Its pin-and-poll
+    ordering discipline is now belt-and-braces for the guard-held case rather
+    than the sole guarantee.
 
 - **A ceiling that fires during a lazy connect drops that connect's `auth`
   audit record.** `connect_inner` emits it after `connect_with_bundle`

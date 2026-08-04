@@ -129,14 +129,21 @@ impl Connection {
     {
         let dur = self.inner.cfg.command_timeout;
 
-        let mut guard =
+        // `SessionGuard` owns the lock for the rest of this function. Anything
+        // that cuts the command from here — a client cancellation, a runtime
+        // shutdown, the per-tool-call ceiling — drops it, and its `Drop`
+        // poisons the connection *before* releasing the lock, so the flag is
+        // ordered ahead of any peer already queued on it. See `SessionGuard`.
+        let mut guard = super::SessionGuard::new(
+            self,
             crate::time::with_timeout(op_name, dur, async { Ok(self.inner.session.lock().await) })
-                .await?;
+                .await?,
+        );
 
-        // A caller above this crate may have cut a command mid-flight and
-        // poisoned the session (see `Connection::poison`). Consume the flag
-        // here, under the lock, so this command reconnects instead of
-        // parsing the previous command's unread response as its own.
+        // Something may have cut a command mid-flight and poisoned the
+        // session. Consume the flag here, under the lock, so this command
+        // reconnects instead of parsing the previous command's unread
+        // response as its own.
         if self.take_poisoned(&mut guard) {
             tracing::debug!(
                 op = op_name,
@@ -148,7 +155,23 @@ impl Connection {
             Some(session) => session,
             slot => slot.insert(self.connect_inner().await?),
         };
-        crate::time::with_timeout(op_name, dur, body(session)).await
+        let outcome = crate::time::with_timeout(op_name, dur, body(session)).await;
+
+        // A body that RETURNED can still have ended mid-response, and that
+        // reaches the same desync a cancellation does with nothing cancelled:
+        // `with_timeout` elapsing drops the body future exactly as a cut would,
+        // and `SizeLimit` aborts a fetch mid-stream (see `is_transport_failure`,
+        // which is the same judgement `with_session` makes three lines up).
+        //
+        // Leaving the guard armed for those hands the flag to the next holder
+        // of the lock. Disarming and relying on `with_session`'s
+        // `invalidate().await` instead would not: that has to RE-ACQUIRE the
+        // lock, so a FIFO peer queued behind this command takes the desynced
+        // session first.
+        if !is_transport_failure(&outcome) {
+            guard.disarm();
+        }
+        outcome
     }
 
     /// `LIST` against `pattern` (e.g. `"*"`, `"INBOX/*"`).

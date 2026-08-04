@@ -107,10 +107,109 @@ pub(super) struct ConnectionInner {
     /// Server advertised UIDPLUS capability (RFC 4315) after login.
     /// Reset to `false` on `invalidate()`.
     pub(super) has_uidplus: AtomicBool,
-    /// Set by [`Connection::poison`] when a caller above this crate cut a
-    /// command mid-flight. Consumed by `dispatch::attempt` under the
-    /// session lock; see `poison` for why it is a flag and not a lock.
+    /// Set by [`Connection::poison`] when a command was cut mid-flight.
+    /// Consumed by `dispatch::attempt` under the session lock; see `poison`
+    /// for why it is a flag and not a lock.
     pub(super) poisoned: AtomicBool,
+}
+
+/// The session lock, held together with the poison flag it has to be ordered
+/// against. Dropped over a cached session without having been disarmed —
+/// which is what a cut command leaves behind — it poisons the connection
+/// before releasing the lock (#620). See *When it fires* below for the exact
+/// condition.
+///
+/// The ceiling in `rimap-server` (#594) poisons by *calling*
+/// [`Connection::poison`], which works because the ceiling's own code runs on
+/// the way out. Nothing runs on the way out of a client cancellation or a
+/// runtime shutdown: those drop the whole dispatch future, and a `Drop` impl
+/// is the only thing left that can observe it. [`Connection::poison`] being a
+/// synchronous atomic store rather than an async invalidate is what makes
+/// that expressible at all — a `Drop` impl cannot await.
+///
+/// ## Why the lock guard is a *field*
+///
+/// The flag only helps if it is set **before** the session lock is released,
+/// because releasing the lock is what wakes the next FIFO waiter, and a peer
+/// that queued while the cut command held the lock sits ahead of anything
+/// that starts waiting later. Owning the lock guard is what makes that
+/// ordering a property of this type: Rust runs a value's own `Drop::drop`
+/// before dropping its fields, so `poison` always precedes the release, in
+/// every drop path, however `dispatch::attempt` is later rearranged.
+///
+/// Two weaker placements were measured and rejected:
+///
+/// * A guard in a frame that *encloses* `attempt` — the audit envelope, or a
+///   sibling around the dispatch, as issue #620 originally proposed. Dropping
+///   a future drops that frame's locals in reverse declaration order, so the
+///   nested `attempt` frame (and its lock guard) is already gone by the time
+///   such a guard runs. It sets the flag strictly too late for exactly the
+///   peer that needed it.
+/// * A separate local declared after the lock guard inside `attempt`. That
+///   one does drop first and is correct today, but only because of the order
+///   of two `let` statements — nothing a reader or a refactor is forced to
+///   preserve.
+///
+/// ## When it fires
+///
+/// Two conditions, both necessary. The guard must still be armed —
+/// [`Self::disarm`] is called once the command body has finished with the
+/// session, so an ordinary return is not a cut. And the slot must hold a
+/// session: a cut during the lazy connect, or a `connect_inner` that returned
+/// an error, leaves it empty, and there is no half-read response to protect
+/// the next command from. Testing the slot in `Drop` is what keeps the flag
+/// meaning "a command was cut" rather than also firing on every failed
+/// connect; the alternative, an arming window opened after the connect, would
+/// have to re-derive the live session afterwards and cost a branch that cannot
+/// be reached.
+pub(super) struct SessionGuard<'a> {
+    conn: &'a Connection,
+    armed: bool,
+    /// Field order is irrelevant to the ordering guarantee above — `Drop::drop`
+    /// precedes *all* field drops — so this sits last purely for readability.
+    slot: tokio::sync::MutexGuard<'a, Option<ImapSession>>,
+}
+
+impl<'a> SessionGuard<'a> {
+    /// Take ownership of an acquired session lock, armed.
+    pub(super) fn new(
+        conn: &'a Connection,
+        slot: tokio::sync::MutexGuard<'a, Option<ImapSession>>,
+    ) -> Self {
+        Self {
+            conn,
+            armed: true,
+            slot,
+        }
+    }
+
+    /// The command finished with the session under its own control, so the
+    /// drop that follows is an ordinary scope exit and must not poison.
+    pub(super) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl std::ops::Deref for SessionGuard<'_> {
+    type Target = Option<ImapSession>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.slot
+    }
+}
+
+impl std::ops::DerefMut for SessionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.slot
+    }
+}
+
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed && self.slot.is_some() {
+            self.conn.poison();
+        }
+    }
 }
 
 impl std::fmt::Debug for Connection {
@@ -207,12 +306,19 @@ impl Connection {
     /// The next command to acquire the lock drops the session before
     /// touching it, so the account reconnects.
     ///
-    /// For callers above this crate that cut a command mid-flight — the
-    /// per-tool-call ceiling in `rimap-server` (#594, ADR-0012). A
-    /// dispatch future dropped mid-command leaves the cached session
-    /// holding an unread server response that the next command would
-    /// misparse as its own, and no error `with_session` recognizes as a
-    /// transport failure, so it would never self-heal.
+    /// For anything that cuts a command mid-flight. A dispatch future
+    /// dropped mid-command leaves the cached session holding an unread
+    /// server response that the next command would misparse as its own,
+    /// and no error `with_session` recognizes as a transport failure, so
+    /// it would never self-heal. Two callers reach it:
+    ///
+    /// * The per-tool-call ceiling in `rimap-server` (#594, ADR-0012),
+    ///   which calls this directly because its own code runs when it
+    ///   fires.
+    /// * [`SessionGuard`], which holds the session lock inside
+    ///   `dispatch::attempt`, for the cuts where none of our code runs at
+    ///   all — a client cancellation or a runtime shutdown dropping the
+    ///   dispatch future (#620).
     ///
     /// This is a flag rather than a call to [`Self::invalidate`] because
     /// `tokio::sync::Mutex` is FIFO-fair: a peer command that queued on
@@ -447,6 +553,58 @@ mod tests {
         assert!(
             !conn.take_poisoned(&mut slot),
             "the flag must be consumed, not latched",
+        );
+
+        // A fired ceiling poisons TWICE (#620): `on_timeout_nonblocking` calls
+        // `poison` directly, and dropping the cut dispatch then drops the
+        // `SessionGuard`, which poisons again. Both stores land while the cut
+        // dispatch still holds the session lock — #594 pins it alive across
+        // the callback — so no peer can consume one in between. They must
+        // collapse to a single discard, not cost two reconnects.
+        conn.poison();
+        conn.poison();
+        assert!(
+            conn.take_poisoned(&mut slot),
+            "the first holder of the lock must see the doubly-set flag",
+        );
+        assert!(
+            !conn.take_poisoned(&mut slot),
+            "two poisons must collapse to one discard, not two reconnects",
+        );
+    }
+
+    /// An **armed** `SessionGuard` dropped over an empty slot must not poison.
+    /// That is the lazy-connect window: a cut there, or a `connect_inner` that
+    /// returned an error, caches nothing, so there is no half-read response to
+    /// protect the next command from and the flag must keep meaning "a command
+    /// was cut".
+    ///
+    /// This is the only arm of `Drop` a unit test can decide. Both others turn
+    /// on a slot holding a live `ImapSession`, which only a server can
+    /// produce — so *poison when armed* and *do not poison once disarmed* are
+    /// pinned end-to-end by the paired tests in `tests/cancel_poison.rs`, over
+    /// the scriptable fake. Asserting them here against an empty slot would
+    /// pass whatever `armed` held, which is no assertion at all.
+    ///
+    /// That the guard's `Drop` beats the lock release is asserted nowhere,
+    /// deliberately: a test of it could only flake, never fail, because the
+    /// woken waiter cannot run until the dropping task yields. It is a
+    /// language guarantee (`Drop::drop` runs before a value's fields are
+    /// dropped) bought by making the lock guard a *field*.
+    #[tokio::test]
+    async fn session_guard_does_not_poison_before_a_session_is_cached() {
+        use std::sync::atomic::Ordering;
+
+        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
+        {
+            let _guard = super::SessionGuard::new(&conn, conn.inner.session.lock().await);
+            // Dropped armed, slot still empty.
+        }
+
+        assert!(
+            !conn.inner.poisoned.load(Ordering::Relaxed),
+            "a cut before a session was cached must not poison: the next \
+             command would discard an already-empty slot",
         );
     }
 
