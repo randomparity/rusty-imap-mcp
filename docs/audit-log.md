@@ -75,14 +75,15 @@ Read the exceptions before building on the rule.
   sequenced after `process_end`, or lost to process exit. This one is
   **announced on stderr**, so a reader can tell: treat a run whose log carries
   that warning as suspect, and alert on it.
-- **A write already handed to the blocking pool.** Most audit writes are
-  offloaded with `spawn_blocking`. Dropping the task that awaits one *detaches*
-  the write rather than cancelling it, so a dispatch cut in that narrow window
-  still appends its record, after `process_end`. This one is **not** announced:
-  the drain counts the dispatch as cleanly unwound. Tracked as
+- **A `tool_start` or `tool_end` write already handed to the blocking pool.**
+  Those two are offloaded with `spawn_blocking`; every `auth` write is
+  synchronous (ADR-0014). Dropping the task that awaits the offloaded write
+  *detaches* it rather than cancelling it, so a dispatch cut in that narrow
+  window still appends its record, after `process_end`. This one is **not**
+  announced: the drain counts the dispatch as cleanly unwound. Tracked as
   [#672](https://github.com/randomparity/rusty-imap-mcp/issues/672); until it
-  closes, the rule is "terminal except for a record that was already mid-flight
-  at the cut".
+  closes, the rule is "terminal except for a `tool_start`/`tool_end` that was
+  already mid-flight at the cut".
 
 Separately, and not an exception to *ordering*: a record may be missing
 entirely. Loss on shutdown is expected and documented (best-effort). Terminality

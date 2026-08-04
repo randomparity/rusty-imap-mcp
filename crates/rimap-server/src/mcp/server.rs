@@ -174,10 +174,11 @@ impl DispatchDrain {
     /// by the time `shutdown` observes the count reach zero.
     /// `drop_ordering_holds_when_the_track_future_is_aborted` pins it.
     ///
-    /// It does **not** cover a write already handed to `spawn_blocking`:
-    /// dropping the future awaiting that `JoinHandle` detaches the closure
-    /// rather than cancelling it, so the write still happens, unordered. See the
-    /// residues in `docs/audit-log.md`.
+    /// It does **not** cover the `tool_start` / `tool_end` writes that
+    /// `mcp::audit_envelope` hands to `spawn_blocking`: dropping the future
+    /// awaiting that `JoinHandle` detaches the closure rather than cancelling
+    /// it, so the write still happens, unordered (#672). `auth` writes are
+    /// synchronous (ADR-0014) and are covered.
     async fn track<F>(&self, body: F) -> Result<CallToolResult, ErrorData>
     where
         F: Future<Output = Result<CallToolResult, ErrorData>>,

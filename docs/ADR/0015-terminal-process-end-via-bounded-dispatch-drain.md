@@ -115,14 +115,14 @@ rather than skipping it. A corrupt log must not read as a log missing a record.
     one is announced on stderr with a count, so an operator can alert on it, and
     the doc tells a reader to treat such a run as suspect. #647 will carry the
     same fact into the audit trail as a counter on `process_end`.
-  - **A write already handed to `spawn_blocking`** — which is how
-    `emit_tool_start`, `emit_tool_end`, and the completed-connect `emit_auth`
-    all write. Dropping the task awaiting that `JoinHandle` *detaches* the
-    closure rather than cancelling it, so the write still lands, after
-    `process_end`. This one is silent: the drain sees the registration released
-    and reports a clean drain. Closing it means making those writes countable
-    (an RAII ticket taken before the offload) across `rimap-audit`,
-    `rimap-server`, and `rimap-imap` — a wider change than #645, tracked as
+  - **A `tool_start` or `tool_end` write already handed to `spawn_blocking`**
+    (`mcp/audit_envelope.rs`). Dropping the task awaiting that `JoinHandle`
+    *detaches* the closure rather than cancelling it, so the write still lands,
+    after `process_end`. This one is silent: the drain sees the registration
+    released and reports a clean drain. `auth` writes are not affected —
+    ADR-0014 made every one of them synchronous. Closing it means making the two
+    offloaded writes countable, with an RAII ticket taken on the async side
+    before the offload and moved into the closure; tracked as
     [#672](https://github.com/randomparity/rusty-imap-mcp/issues/672).
 - `ImapMcpServer::new`'s signature is unchanged; the drain is constructed
   internally and handed out by a new `dispatch_drain()` accessor. The public
