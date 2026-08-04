@@ -58,6 +58,18 @@ pub enum Step {
         /// Status + text after the echoed tag (e.g. `"OK LOGIN completed"`).
         text: &'static str,
     },
+    /// Hold the connection open for `duration` without reading or writing,
+    /// then continue the script.
+    ///
+    /// Parks a client that is awaiting a tagged reply, which is the only way
+    /// to script a command that is genuinely *in flight* — `Disconnect` ends
+    /// it instead. Tests that cut a command mid-flight need that state.
+    ///
+    /// The duration is bounded rather than infinite because the accept-loop
+    /// serves connections **sequentially**: a connection that never finishes
+    /// its script would stop the fake from ever accepting the next one, so a
+    /// client that reconnects during the stall would hang.
+    Stall(Duration),
     /// Drop the connection immediately (prompt FIN, no `close_notify`).
     Disconnect,
 }
@@ -297,6 +309,7 @@ async fn serve(
                 write.write_all(line.as_bytes()).await?;
                 write.flush().await?;
             }
+            Step::Stall(duration) => tokio::time::sleep(*duration).await,
             Step::Disconnect => return Ok(()), // drop halves → FIN
         }
     }
