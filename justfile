@@ -350,8 +350,9 @@ test-publish-script:
 
 # Fail if a tracked fuzz workspace's Cargo.lock resolves a dependency shared
 # with the root workspace to a version the workspace lockfile does not hold.
-# `crates/rimap-server/fuzz` is its own cargo workspace, so no Dependabot entry
-# reaches it and nothing else keeps the two in step (issue #608). Pure lockfile
+# `fuzz` and `crates/rimap-server/fuzz` are each their own cargo workspace, so
+# no Dependabot entry reaches them and nothing else keeps them in step with the
+# root workspace (issues #608, #611). Pure lockfile
 # text analysis — no cargo resolution, no network. See docs/ADR/0011.
 check-fuzz-lock-parity:
     ./scripts/check-fuzz-lock-parity.sh
