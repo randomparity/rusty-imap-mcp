@@ -42,6 +42,42 @@ forgotten `-dev` strip (tagging `v0.1.1` while the manifest still says
 **Prerelease tags are not supported** — `verify-tag` rejects any tag
 containing `-`.
 
+### Breaking a public API
+
+Under SemVer at `0.x`, the **minor** field is the breaking-change field: a break
+between `0.1.z` and the next release requires `0.2.0`, not `0.1.z+1`. So a PR
+that breaks the public API of a publishable workspace crate must move the
+planned version with it:
+
+```bash
+cargo set-version --workspace 0.2.0-dev   # from 0.1.1-dev
+```
+
+This is the PR author's job, not release-prep's. Release-prep chooses between
+patch and minor for *accumulated features*; it cannot retroactively discover
+that some merged PR removed a `pub fn`.
+
+The `semver-checks` CI job enforces this. It diffs the branch's public API
+against the last `vX.Y.Z` tag and fails when a break is not covered by the
+manifest version, so a breaking PR is red until the version bump lands in the
+same PR. Once the planned version is already `0.2.0-dev`, further breaks in the
+same cycle are free — they all diff against the same tag, and one bump covers
+them all. Run it locally with `just semver-checks` (`just ci` includes it).
+
+"Public API" here means the API of the 8 publishable crates. `rimap-fake-imap`
+and `xtask` are `publish = false` and are skipped.
+
+Two limits worth knowing before you trust a green result:
+
+- The gate is only as good as `cargo-semver-checks`' lint set. It catches
+  removed and re-typed public items well; it does not model behavioral
+  compatibility, and it cannot see through a re-export from a private module it
+  declines to traverse.
+- The **release** job's own `semver-checks` step baselines on crates.io, where
+  every crate currently sits at a `0.0.0` placeholder reservation. That step is
+  vacuous until a real version is published; the tag-baselined CI job is the
+  one carrying the weight today.
+
 ## One-time setup (before the first release)
 
 1. Confirm `randomparity/homebrew-tap` exists with a `Formula/` directory.
