@@ -11,7 +11,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 use rmcp::model::ProtocolVersion;
@@ -72,23 +72,38 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// request, and exit — in a single call.
 ///
 /// [`Harness::spawn_with_closed_stdout`] drops the stdout read end before the
-/// child writes anything, which is the whole point of that variant: there is no
-/// readable stdout, so there is no readiness handshake, so [`read_deadline`]
-/// cannot pay for start-up on a separate read the way it does for a piped
-/// harness. Cold start is unavoidably inside the exit wait.
+/// child writes anything, which is the whole point of that variant. So there is
+/// no *stdout* readiness handshake, and [`read_deadline`] — which keys off
+/// stdout output — cannot pay for start-up on a separate read the way it does
+/// for a piped harness. Cold start is therefore inside the exit wait.
 ///
 /// Hence the sum: [`COLD_START_TIMEOUT`] for `exec`, dynamic linking, config
 /// parse and credential resolution, plus [`SHUTDOWN_TIMEOUT`] for the exit slice
-/// that follows the failed envelope write. Issue #638 recorded an 8.826 s
-/// envelope under `nextest` contention charged against `SHUTDOWN_TIMEOUT`
-/// alone — a constant scoped to the post-EOF exit of an *already-serving*
-/// child — which failed while an isolated re-run passed.
+/// that follows the failed envelope write.
+///
+/// What #638 actually establishes about the size: the child had **not** exited
+/// 5 s after the request write, and `nextest` reported 8.826 s for the whole
+/// case — of which 5 s was that elapsed timeout and the rest was untimed
+/// parent-side work (tempdir, config write, `cargo_bin`, spawn, the write) plus
+/// teardown. The child's true exit time was never observed, so the run bounds
+/// the envelope from below and no further. The size argument is therefore the
+/// cost model, not that log line: start-up here is the same cost class #621
+/// measured taking >9x its unloaded cost under contention, which is what
+/// [`COLD_START_TIMEOUT`] is calibrated for, and the exit slice that follows it
+/// is what [`SHUTDOWN_TIMEOUT`] is calibrated for.
 ///
 /// Composed from the two named constants rather than hand-tuned to a third
 /// number so each cost stays individually documented and tunable. Widening
 /// `SHUTDOWN_TIMEOUT` to cover this instead would also loosen the two waits
 /// that are correctly scoped today (`response_or_close` and
 /// [`Harness::shutdown_and_wait`]), whose callers have already paid start-up.
+///
+/// **Considered and rejected:** the child fsyncs a `process_start` audit record
+/// during boot and this harness already holds `audit_path`, so polling that file
+/// under `COLD_START_TIMEOUT` *would* give a readiness handshake off stdout and
+/// let the exit wait keep the tight `SHUTDOWN_TIMEOUT`. Not built: a polling
+/// loop is materially more code than a summed constant, and all it buys is ~10 s
+/// of fail-faster latency on a genuine post-start hang in one test.
 pub const DETACHED_EXIT_TIMEOUT: Duration = COLD_START_TIMEOUT.saturating_add(SHUTDOWN_TIMEOUT);
 
 /// Deadline to apply to one stdout read: the caller's `requested` budget,
@@ -375,6 +390,7 @@ allowed_base_dir = "{}"
             stdin,
             stderr_log,
             audit_path,
+            spawned_at: Instant::now(),
             _tempdir: tempdir,
         }
     }
@@ -773,6 +789,11 @@ pub struct DetachedStdoutHarness {
     pub stdin: ChildStdin,
     stderr_log: PathBuf,
     audit_path: PathBuf,
+    // When the child was spawned. Only read on the `wait_for_exit` timeout
+    // path, to separate parent-side setup from the wait itself — #638 was hard
+    // to attribute precisely because the failing run reported one wall-clock
+    // number covering both.
+    spawned_at: Instant,
     // Held until drop so the audit log path stays valid.
     _tempdir: TempDir,
 }
@@ -798,12 +819,23 @@ impl DetachedStdoutHarness {
     ///
     /// Panics if the child has not exited within the budget (a genuine hang) or
     /// if the wait itself fails, reporting captured stderr either way.
+    ///
+    /// The timeout message separates the budgeted wait from the parent-side
+    /// setup that precedes it, because the budget starts here — at the call —
+    /// not at spawn. #638's log conflated the two, which is what made the
+    /// failure read as an 8.8 s child lifetime when 5 s of it was the elapsed
+    /// timeout and the rest was unbudgeted parent work.
     pub async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let wait_began = Instant::now();
         let waited = timeout(DETACHED_EXIT_TIMEOUT, self.child.wait()).await;
         let Ok(reaped) = waited else {
+            let before_wait = wait_began.saturating_duration_since(self.spawned_at);
             panic!(
-                "child did not exit within {DETACHED_EXIT_TIMEOUT:?} of spawn\n\
+                "child did not exit within {DETACHED_EXIT_TIMEOUT:?} of the exit wait \
+                 ({before_wait:?} of parent-side setup preceded it, so the child had \
+                 been running for {:?} in total)\n\
                  --- captured stderr ---\n{}",
+                self.spawned_at.elapsed(),
                 self.captured_stderr(),
             );
         };
@@ -855,32 +887,20 @@ mod read_deadline_tests {
 
 #[cfg(test)]
 mod detached_exit_budget_tests {
-    use super::{COLD_START_TIMEOUT, DETACHED_EXIT_TIMEOUT, Duration, SHUTDOWN_TIMEOUT};
+    use super::{COLD_START_TIMEOUT, DETACHED_EXIT_TIMEOUT, SHUTDOWN_TIMEOUT};
 
     /// The flake in #638. `spawn_with_closed_stdout` drops the stdout read end,
-    /// so no readiness handshake can pay for start-up separately the way
-    /// `read_deadline` does for a piped harness: one `child.wait()` spans both
-    /// cost classes. The budget must therefore be their sum, not either one.
+    /// so no readiness handshake off stdout can pay for start-up separately the
+    /// way `read_deadline` does for a piped harness: one `child.wait()` spans
+    /// both cost classes. The budget must therefore be their sum, not either
+    /// one — in particular, not `SHUTDOWN_TIMEOUT`, which is scoped to the exit
+    /// of an already-serving child.
     #[test]
     fn budget_is_the_sum_of_both_cost_classes() {
         assert_eq!(
             DETACHED_EXIT_TIMEOUT,
             COLD_START_TIMEOUT + SHUTDOWN_TIMEOUT,
-            "the detached wait spans spawn-to-exit, so it gets both budgets",
-        );
-    }
-
-    /// Issue #638 recorded an 8.826 s spawn-to-exit envelope under `nextest`
-    /// contention against the 5 s `SHUTDOWN_TIMEOUT`. A budget that merely
-    /// clears that measurement reproduces the flake on the next slower run, so
-    /// require half again as much headroom.
-    #[test]
-    fn budget_clears_the_observed_flake_with_headroom() {
-        let observed = Duration::from_millis(8_826);
-        assert!(
-            DETACHED_EXIT_TIMEOUT >= observed * 3 / 2,
-            "budget {DETACHED_EXIT_TIMEOUT:?} leaves under 1.5x headroom over \
-             the {observed:?} envelope measured in #638",
+            "the detached wait spans start-up and exit, so it gets both budgets",
         );
     }
 }
