@@ -1700,6 +1700,22 @@ mod tool_call_ceiling_tests {
 
         let tool_end = records_of_kind(&path, "tool_end");
         assert_eq!(tool_end.len(), 1, "one tool call, one tool_end");
+
+        // Writing the guard's record synchronously rather than deferring it is
+        // what puts it inside its own call's window. A deferred write could
+        // land after the `tool_end`, or after a later call's `tool_start`,
+        // which is what `count_auth_failures_between` scopes by.
+        let tool_start = records_of_kind(&path, "tool_start");
+        assert_eq!(tool_start.len(), 1, "one tool call, one tool_start");
+        let seq = |r: &serde_json::Value| r["seq"].as_u64().expect("record seq");
+        assert!(
+            seq(&tool_start[0]) < seq(&auth[0]) && seq(&auth[0]) < seq(&tool_end[0]),
+            "the cut connect's auth record must be sequenced inside its own \
+             tool call: tool_start={}, auth={}, tool_end={}",
+            seq(&tool_start[0]),
+            seq(&auth[0]),
+            seq(&tool_end[0]),
+        );
         assert_eq!(
             tool_end[0]["error_code"], "ERR_TIMEOUT",
             "a fired ceiling must be audited as ERR_TIMEOUT: {:?}",

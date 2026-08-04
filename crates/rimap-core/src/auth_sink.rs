@@ -8,6 +8,11 @@
 //! takes the writer's mutex and writes one JSONL line) and MUST NOT
 //! be invoked from an async context without that wrapping.
 //!
+//! One caller is exempt because it has no async context to defer from:
+//! `rimap-imap`'s drop guard for a connect that was cut calls this
+//! synchronously, since a `Drop` cannot await. That is what the
+//! no-panic requirement on [`AuthEventSink::emit_auth`] exists for.
+//!
 //! Implementations live downstream:
 //! - `rimap-audit::AuditWriter` records to the rotated, locked
 //!   on-disk log.
@@ -98,4 +103,25 @@ pub trait AuthEventSink: Send + Sync + std::fmt::Debug {
     /// Returns [`AuthSinkError`] if the underlying sink rejects the
     /// event (e.g., disk full, lock poisoned, file rotated mid-write).
     fn emit_auth(&self, event: AuthEvent) -> Result<(), AuthSinkError>;
+
+    /// Note that an [`AuthEvent`] was lost — [`Self::emit_auth`] rejected
+    /// it on a path with no caller to return the error to.
+    ///
+    /// Two such paths exist in `rimap-imap`, and both call this. The
+    /// `AuthEmitGuard` for a cut connect runs in a `Drop`, which has no
+    /// caller at all. `connect_inner`'s auth-failure branch has one, but
+    /// deliberately preserves the connect's own error rather than
+    /// replacing it with the audit failure. Swallowing is right in both
+    /// cases; going *uncounted* is not, so this makes the loss countable
+    /// where it cannot be returnable.
+    ///
+    /// Implementations that keep a failure counter should increment it
+    /// here. The production `AuditWriter` folds this into the same
+    /// counter it uses for `fail_open` suppressions, so under either
+    /// setting a lost record is accounted for exactly once — the
+    /// `fail_open = true` branch counts internally and returns `Ok`, so
+    /// this is not also called for it.
+    ///
+    /// The default is a no-op, for sinks with no counter to keep.
+    fn note_auth_write_lost(&self) {}
 }

@@ -41,7 +41,9 @@ tokio::task::spawn_blocking(move || audit.log_auth(record))
 ```
 
 `rimap_imap::Connection::ensure_connected` is the canonical example.
-Every `Auth` audit record passes through this pattern.
+Every `Auth` audit record written from an async context passes through
+this pattern. One is not written from an async context — see the
+deliberate exception under the session lock below.
 
 ## The connection session lock (`tokio::sync::Mutex`)
 
@@ -109,4 +111,10 @@ connection limits).
 
 Future contributors who add new audit emission paths from async code:
 follow the `spawn_blocking` pattern in
-`crates/rimap-imap/src/connection.rs::Connection::emit_auth`.
+`crates/rimap-imap/src/connection/login.rs::Connection::emit_auth`.
+
+The single exception is `Connection::emit_auth_blocking` in the same
+file, which writes synchronously because its caller is a `Drop` and
+cannot await. Do not copy it without reading the trade-off argument on
+it: it is justified only where there is no async context to defer from,
+and it makes `audit.path` a local-storage requirement.

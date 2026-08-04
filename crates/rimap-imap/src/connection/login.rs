@@ -218,17 +218,28 @@ impl Connection {
     /// * **It also puts a panic inside a `Drop`.** `spawn_blocking` panics
     ///   when the OS refuses a thread, and a panic escaping a `Drop` that runs
     ///   during an unwind aborts the process.
-    /// * **The cost is rare, and bounded by the filesystem.** Usually one
-    ///   JSONL line plus an fsync; when the file is due to rotate, also a
+    /// * **The cost is rare, and — state this plainly — unbounded.** Usually
+    ///   one JSONL line plus an fsync; when the file is due to rotate, also a
     ///   rename, an open, and — with retention configured — a `read_dir` and a
     ///   `remove_file` per pruned file, all under the audit mutex. It runs only
     ///   when a connect was cut, which at the shipped ceiling means the connect
-    ///   was already pathological. It stalls the dropping worker, and
-    ///   `dispatch::attempt` still holds the account's session lock, so a peer
-    ///   queued on that account waits out the write — long enough, on a
-    ///   pathological `audit.path` (a stalled network mount, say), to spend
-    ///   that peer's own `command_timeout`. Against a hole in an append-only
-    ///   security log, that is still the better half of the trade.
+    ///   was already pathological.
+    ///
+    ///   No deadline covers that write. On an `audit.path` that stops
+    ///   responding — a hung NFS or SMB mount — it never returns: the runtime
+    ///   worker is pinned for the life of the process, and `dispatch::attempt`
+    ///   still holds the account's session lock, so a peer queued on that
+    ///   account waits forever rather than merely spending its
+    ///   `command_timeout`. The runtime is multi-threaded, so enough
+    ///   concurrent cut connects against such a mount wedge the scheduler
+    ///   itself, including the stdio MCP wire. This is a genuinely new failure
+    ///   mode: the same stall on the blocking pool lands against its
+    ///   512-thread cap and cannot starve the scheduler.
+    ///
+    ///   It does not change the choice — a deferred write on that mount loses
+    ///   the record *and* still pins a pool thread — but it does make
+    ///   `audit.path` a local-storage requirement rather than a preference.
+    ///   `docs/audit-log.md` says so to operators.
     ///
     /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
     /// file I/O, nothing inside its critical section calls back into this
@@ -253,6 +264,7 @@ impl Connection {
     /// would escape a `Drop`.
     pub(super) fn emit_auth_blocking(&self, event: AuthEvent) {
         if let Err(err) = self.inner.audit.emit_auth(event) {
+            self.inner.audit.note_auth_write_lost();
             tracing::error!(
                 error = %err,
                 "AuthEventSink::emit_auth failed for a connect that was cut \

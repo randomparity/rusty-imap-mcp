@@ -172,16 +172,25 @@ impl AuditWriter {
         self.process_id
     }
 
-    /// Number of write/flush/fsync failures suppressed by `fail_open = true`
-    /// since this writer was opened. Accumulated via `Relaxed` atomic
-    /// increments inside `write_record`.
+    /// Number of records this writer failed to persist and told no caller
+    /// about, since it was opened. Accumulated via `Relaxed` atomic
+    /// increments. Two sources, counted once each:
+    ///
+    /// - a write/flush/fsync failure suppressed by `fail_open = true`,
+    ///   incremented inside `write_record`;
+    /// - a caller that had nowhere to return the failure to, reporting it
+    ///   through [`rimap_core::auth_sink::AuthEventSink::note_auth_write_lost`]
+    ///   — `rimap-imap`'s cut-connect `Drop` guard, and its auth-failure
+    ///   branch, which keeps the connect's own error instead. These reach
+    ///   here only under `fail_open = false`, where `write_record` returned
+    ///   the error rather than counting it.
     ///
     /// ## Not yet wired into `process_end`
     ///
     /// The intent is for the shutdown `process_end` record to read this
     /// counter and persist it as `audit_write_failures_suppressed` so
-    /// operators running `fail_open = true` can see how many records
-    /// were dropped in the process's lifetime. That wiring depends on
+    /// operators can see how many records were dropped in the process's
+    /// lifetime, under either `fail_open` setting. That wiring depends on
     /// the audit lifecycle glue (`process_start`/`process_end` emission)
     /// tracked in issue #8 and is not yet in place. Today this accessor
     /// is available for ad-hoc inspection and tests; the persistent

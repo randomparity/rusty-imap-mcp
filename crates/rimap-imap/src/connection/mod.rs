@@ -260,14 +260,21 @@ impl ConnectProgress {
 /// `connect_inner` documents one `auth` record per connect attempt, and the
 /// audit log it feeds is append-only and security-relevant: an attempt that was
 /// initiated and recorded nothing is a gap an operator cannot tell from an
-/// attempt that never happened. Three cuts reach that gap, none of which the
+/// attempt that never happened. Four cuts reach that gap, none of which the
 /// connect can see coming — the per-tool-call ceiling (#594, ADR-0012), a
-/// client cancellation, and a runtime shutdown. All three drop the dispatch
-/// future, and a `Drop` impl is the only thing that still runs.
+/// client cancellation, a runtime shutdown, and a panic unwinding through the
+/// connect. All four drop the frame, and a `Drop` impl is the only thing that
+/// still runs.
 ///
-/// Deterministic for the first two. On a runtime shutdown it is best-effort:
-/// `Runtime::shutdown_background` waits for nothing, so the process can exit
-/// before the worker dropping this future reaches the write.
+/// So [`rimap_core::ErrorCode::Cancelled`] on an `auth` record reads as *the
+/// attempt was cut*, which is wider than the word "cancelled" suggests. It is
+/// still the right code: none of the four is a verdict the connect reached,
+/// and the alternative is a code per cause that no consumer would branch on.
+///
+/// Deterministic for the ceiling and for a client cancellation. On a runtime
+/// shutdown it is best-effort: `Runtime::shutdown_background` waits for
+/// nothing, so the process can exit before the worker dropping this future
+/// reaches the write.
 ///
 /// Armed for the whole connect rather than from the first socket write, so a
 /// cut parked in `TcpStream::connect` is recorded too. That is deliberate: the
@@ -597,12 +604,16 @@ impl Connection {
                 // ImapError::TlsHandshake, ImapError::Connect, ...) is what the
                 // caller and monitoring need to see. Replacing it with
                 // ImapError::Audit would mask brute-force signals from
-                // whatever observed ERR_AUTH before. Audit-write failures
-                // on this path are still visible via tracing; operators
-                // running fail_open=false will additionally see the
-                // suppressed_failures counter in process_end once #8
-                // lands.
+                // whatever observed ERR_AUTH before.
+                //
+                // Swallowed, but not uncounted: `note_auth_write_lost` folds
+                // the loss into the sink's own counter, which is what an
+                // operator running `fail_open = false` has to go on when the
+                // only other trace is a stderr line. (That counter reaches
+                // `process_end` when #8 wires it; today it is readable via
+                // `AuditWriter::suppressed_failures`.)
                 if let Err(audit_err) = self.emit_auth(auth_failure(&ctx, err.code())).await {
+                    self.inner.audit.note_auth_write_lost();
                     tracing::error!(
                         original_error = %err,
                         audit_error = %audit_err,
@@ -713,6 +724,84 @@ mod tests {
                 .push(event);
             Ok(())
         }
+    }
+
+    /// Rejects every event and counts how many losses the caller reported.
+    /// Models the production sink under `fail_open = false` with a full disk.
+    #[derive(Debug, Default)]
+    struct RejectingSink {
+        losses: std::sync::atomic::AtomicUsize,
+    }
+
+    impl rimap_core::auth_sink::AuthEventSink for RejectingSink {
+        fn emit_auth(
+            &self,
+            _event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            Err(rimap_core::auth_sink::AuthSinkError::new(
+                rimap_core::ErrorCode::Internal,
+                "sink rejects everything",
+                Box::new(std::io::Error::other("disk full (test)")),
+            ))
+        }
+
+        fn note_auth_write_lost(&self) {
+            self.losses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// A record the guard could not write must still be *counted*. The guard
+    /// runs in a `Drop`, so swallowing the error is forced — but under the
+    /// default `fail_open = false` the writer returns the error rather than
+    /// counting it itself, so without this call the loss would leave nothing
+    /// behind but a stderr line. That would make the stricter setting yield
+    /// less evidence than the laxer one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_the_guard_cannot_write_is_still_counted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let accepted = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let sink = std::sync::Arc::new(RejectingSink::default());
+        let cfg = super::ConnectionConfig {
+            account: None,
+            account_id: rimap_core::account::AccountId::default_account(),
+            host: "127.0.0.1".to_string(),
+            port,
+            encryption: super::ImapEncryption::Tls,
+            username: "alice@example.com".to_string(),
+            pinned_fingerprint: None,
+            connect_timeout: std::time::Duration::from_secs(30),
+            command_timeout: std::time::Duration::from_secs(30),
+            max_fetch_body_bytes: 4096,
+            max_append_bytes: 1024,
+        };
+        let conn = super::Connection::new(
+            cfg,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+            std::sync::Arc::new(UnusedResolver),
+        );
+
+        let cut =
+            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
+        assert!(cut.is_err(), "the caller deadline must elapse first");
+
+        assert_eq!(
+            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a rejected guard write must be reported as a lost record",
+        );
+
+        accepted.abort();
     }
 
     /// A connection aimed at `127.0.0.1:port` whose sink records every event.
@@ -970,10 +1059,39 @@ mod tests {
         assert_eq!(conn.max_fetch_body_bytes(), 4096);
     }
 
+    /// No `ImapError` maps to [`rimap_core::ErrorCode::Cancelled`], and that
+    /// is what makes `kind=auth` + `ERR_CANCELLED` uniquely identify a record
+    /// written by [`super::AuthEmitGuard`] rather than by a connect that
+    /// reached its own verdict.
+    ///
+    /// Consumers rely on that: `docs/audit-log.md` tells operators to exclude
+    /// the code from failed-login counts, and the chaos harness's
+    /// `count_auth_failures_between` does the same. A future variant mapping
+    /// to `Cancelled` would collide with the guard's placeholder and be
+    /// silently dropped from both. The list is the one
+    /// `error_code_for_covers_every_variant` maintains; this asserts the
+    /// property over it.
     #[test]
-    fn error_code_for_covers_every_variant() {
+    fn no_imap_error_maps_to_the_guards_cancelled_placeholder() {
+        for (err, _expected) in error_code_cases() {
+            // Read the real mapping, not the expected-value column: asserting
+            // over the table would only pin that the table says no such thing.
+            assert_ne!(
+                err.code(),
+                rimap_core::ErrorCode::Cancelled,
+                "{err:?} maps to ERR_CANCELLED, which the cut-connect drop \
+                 guard reserves; give it a code of its own or the two become \
+                 indistinguishable in the audit log",
+            );
+        }
+    }
+
+    /// Every `ImapError` variant paired with the audit code it must map to.
+    /// Shared by the mapping test and by the ERR_CANCELLED-reservation test,
+    /// so a new variant is covered by both from one edit.
+    fn error_code_cases() -> Vec<(ImapError, &'static str)> {
         use crate::error::StarttlsFailure;
-        let cases: Vec<(ImapError, &str)> = vec![
+        vec![
             (
                 ImapError::Tls {
                     observed: fp_zeros(),
@@ -1053,8 +1171,12 @@ mod tests {
                 },
                 "ERR_INTERNAL",
             ),
-        ];
-        for (err, expected) in &cases {
+        ]
+    }
+
+    #[test]
+    fn error_code_for_covers_every_variant() {
+        for (err, expected) in &error_code_cases() {
             assert_eq!(err.code().as_str(), *expected, "for {err:?}");
         }
     }
