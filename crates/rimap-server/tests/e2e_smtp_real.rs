@@ -132,6 +132,9 @@ fn build_server_real(
         folder_guard,
         download_dir: Arc::from(download_dir.path().to_path_buf().into_boxed_path()),
         special_use,
+        tool_call_timeout: std::time::Duration::from_secs(u64::from(
+            account_cfg.limits.tool_call_timeout_seconds,
+        )),
     };
     let mut accounts = BTreeMap::new();
     accounts.insert(id, state);

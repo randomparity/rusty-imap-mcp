@@ -131,6 +131,7 @@ fn build_single_account_server() -> (ImapMcpServer, TempDir) {
         folder_guard: rimap_authz::FolderGuard::new(&[], &[]),
         download_dir,
         special_use: SpecialUseMap::default(),
+        tool_call_timeout: std::time::Duration::from_secs(300),
     };
     let mut accounts = BTreeMap::new();
     accounts.insert(id, state);

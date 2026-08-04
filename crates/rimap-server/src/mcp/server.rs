@@ -26,7 +26,7 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 
 use crate::boot::registry::{AccountRegistry, AccountState};
-use crate::mcp::dispatch::{PostureContext, rimap_error_to_breaker_reason};
+use crate::mcp::dispatch::{PostureContext, rimap_error_to_breaker_reason, with_tool_call_ceiling};
 use crate::mcp::tool_catalog::TOOL_DEFS;
 use crate::mcp::tool_name::{
     is_legacy_single_account, refine_tool_name, split_tool_name, validate_bare_tool_namespace,
@@ -167,7 +167,20 @@ impl ImapMcpServer {
 
         self.run_with_audit_envelope(tool, audit_account, posture, args, |ticket| async move {
             account.guard.pre_dispatch(tool)?;
-            let result = Box::pin(self.dispatch_tool(ticket, account, tool, args)).await;
+            let result = with_tool_call_ceiling(
+                account.tool_call_timeout,
+                Box::pin(self.dispatch_tool(ticket, account, tool, args)),
+                || {
+                    // The ceiling dropped the dispatch mid-command, so the
+                    // cached session may hold an unread server response.
+                    // Detached, not awaited: `invalidate` takes the session
+                    // lock, and waiting for a peer call to release it would
+                    // push this call past the ceiling that just fired.
+                    let imap = account.imap.clone();
+                    tokio::spawn(async move { imap.invalidate().await });
+                },
+            )
+            .await;
             match &result {
                 Ok(_) => account.guard.on_success(),
                 Err(e) => {

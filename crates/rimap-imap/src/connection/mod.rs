@@ -198,8 +198,13 @@ impl Connection {
         self.inner.has_uidplus.load(Ordering::Relaxed)
     }
 
-    /// Drop any current session. Called by ops on connection-lost errors.
-    pub(crate) async fn invalidate(&self) {
+    /// Drop any current session, so the next command lazy-reconnects.
+    ///
+    /// Called by ops on connection-lost errors, and by the server when a
+    /// tool call is cut off above this crate (#594): a dispatch future
+    /// dropped mid-command leaves the cached session holding an unread
+    /// server response that the next command would misparse as its own.
+    pub async fn invalidate(&self) {
         let mut guard = self.inner.session.lock().await;
         *guard = None;
         self.inner.has_move.store(false, Ordering::Relaxed);

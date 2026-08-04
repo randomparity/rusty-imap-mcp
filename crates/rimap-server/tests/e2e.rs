@@ -109,6 +109,9 @@ fn build_test_env(harness: DovecotHarness) -> TestEnv {
         folder_guard,
         download_dir: std::sync::Arc::from(download_dir.path().to_path_buf().into_boxed_path()),
         special_use: rimap_imap::SpecialUseMap::default(),
+        tool_call_timeout: std::time::Duration::from_secs(u64::from(
+            account_cfg.limits.tool_call_timeout_seconds,
+        )),
     };
     let mut accounts = BTreeMap::new();
     accounts.insert(id, state);

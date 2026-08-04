@@ -511,6 +511,9 @@ async fn build_registry(
             folder_guard,
             download_dir: Arc::clone(download_dir),
             special_use,
+            tool_call_timeout: Duration::from_secs(u64::from(
+                acfg.limits.tool_call_timeout_seconds,
+            )),
         };
         account_states.insert(id.clone(), state);
     }

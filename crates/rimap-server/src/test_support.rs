@@ -111,5 +111,6 @@ pub(crate) fn make_test_account_state(name: &str) -> AccountState {
         folder_guard,
         download_dir: Arc::from(std::path::PathBuf::from("/tmp").into_boxed_path()),
         special_use: SpecialUseMap::default(),
+        tool_call_timeout: Duration::from_secs(300),
     }
 }

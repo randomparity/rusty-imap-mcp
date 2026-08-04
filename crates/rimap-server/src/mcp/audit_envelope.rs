@@ -479,6 +479,82 @@ mod tests {
         );
     }
 
+    /// The per-tool-call ceiling (#594) fires inside the envelope's body,
+    /// so the envelope disarms normally and the durable `tool_end` record
+    /// carries `status: "error"` + `ERR_TIMEOUT`.
+    ///
+    /// The negative half is the point: `AuditEnvelopeGuard` synthesizes an
+    /// `ERR_CANCELLED` `tool_end` whenever the envelope future is dropped,
+    /// so a ceiling applied *around* `run_with_audit_envelope` would
+    /// mis-record an operator-configured timeout as a client cancellation.
+    /// This asserts on the record written to disk, not on the returned
+    /// error, because only the record distinguishes the two.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fired_ceiling_records_err_timeout_not_cancellation() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use rimap_core::tool::ToolName;
+
+        use crate::mcp::dispatch::{PostureContext, with_tool_call_ceiling};
+        use crate::mcp::server::ImapMcpServer;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let writer = test_writer(path.clone());
+
+        let (tx, rx) = cancellation_channel();
+        let drainer = spawn_drainer(rx, writer.clone());
+        let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx.clone()));
+
+        let args = serde_json::Map::new();
+        let result = server
+            .run_with_audit_envelope(
+                ToolName::ListFolders,
+                Some("work".to_string()),
+                PostureContext::Account(rimap_core::Posture::Readonly),
+                &args,
+                |_ticket| {
+                    with_tool_call_ceiling(
+                        Duration::from_millis(50),
+                        std::future::pending::<Result<serde_json::Value, rimap_core::RimapError>>(),
+                        || {},
+                    )
+                },
+            )
+            .await;
+
+        // A tool-execution failure surfaces as Ok(CallToolResult{is_error}) (#402).
+        let call = result.expect("a fired ceiling is a tool-execution failure, not a protocol one");
+        assert_eq!(call.is_error, Some(true));
+
+        drop(tx);
+        drop(server);
+        drainer.await.unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected exactly 2 records (tool_start + tool_end), got:\n{contents}",
+        );
+        assert!(
+            lines[1].contains(r#""status":"error""#),
+            "tool_end must record an error status: {}",
+            lines[1],
+        );
+        assert!(
+            lines[1].contains(r#""error_code":"ERR_TIMEOUT""#),
+            "the audit record must attribute a fired ceiling to ERR_TIMEOUT: {}",
+            lines[1],
+        );
+        assert!(
+            !contents.contains("ERR_CANCELLED") && !contents.contains(r#""cancelled""#),
+            "a fired ceiling must not be recorded as a cancellation:\n{contents}",
+        );
+    }
+
     /// A disarmed guard's drop is a no-op: no cancellation record is written.
     #[tokio::test]
     async fn disarmed_guard_does_not_enqueue() {
