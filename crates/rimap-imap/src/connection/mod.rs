@@ -537,11 +537,19 @@ impl Connection {
     /// `ops::expunge::fallback_uses_folder_wide_expunge`), which purges every
     /// `\Deleted` message in the folder rather than the requested UIDs.
     ///
-    /// No command can observe that window, because the reset and the reconnect
-    /// that follows it both happen under this lock, and the two capability
-    /// readers run inside the `with_session` body — after `dispatch::attempt`
-    /// has populated the slot (#634). The reset is therefore bookkeeping for
-    /// the public accessors, not a value any protocol selection is built from.
+    /// No command can observe **that** window, because the reset and the
+    /// reconnect that follows it both happen under this lock, and the two
+    /// capability readers run inside the `with_session` body — after
+    /// `dispatch::attempt` has populated the slot (#634). The reset is
+    /// therefore bookkeeping for the public accessors, not a value any
+    /// protocol selection is built from.
+    ///
+    /// That statement is about this window only. The same `false`/`false` also
+    /// arises from *inside* a completed login, when the post-login CAPABILITY
+    /// probe fails and `login::imap_login` encodes "unknown" as "absent" — and
+    /// a command does observe that one, by design, because it describes the
+    /// session it just got. Tracked as #649; the reconnect this function
+    /// triggers is one of the paths that reaches it.
     ///
     /// The other way out of the slot is `dispatch::attempt`'s `insert`, and
     /// that follows a login, which stores the fresh values.
