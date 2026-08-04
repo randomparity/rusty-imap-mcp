@@ -144,7 +144,9 @@ pub(super) fn rimap_error_to_breaker_reason(
 /// server response, which the next command would misparse as its own, so
 /// the caller uses it to mark the connection unusable. An inner
 /// `ERR_TIMEOUT` is returned verbatim and does *not* run it — that path
-/// stayed inside its stage budget and `with_session` invalidated already.
+/// stayed inside its stage budget, where a stalled command body has
+/// already poisoned under the session lock and a stalled *wait* for that
+/// lock never reached a session to desync.
 ///
 /// **The callback runs while `dispatch` is still alive**, which is why
 /// `dispatch` is pinned to a local rather than moved into `timeout`. The
@@ -472,7 +474,7 @@ mod tests {
     }
 
     /// An inner failure — including a per-stage `ERR_TIMEOUT` that
-    /// `with_session` already handled and invalidated for — is returned
+    /// `with_session` already handled under the session lock — is returned
     /// verbatim, and does NOT trigger the ceiling's cleanup.
     #[tokio::test]
     async fn inner_error_passes_through_without_cleanup() {
@@ -495,7 +497,7 @@ mod tests {
         assert_eq!(err.to_string(), "ERR_TIMEOUT: list timed out");
         assert!(
             !cleaned.load(Ordering::SeqCst),
-            "a stage timeout is not a ceiling timeout; with_session already invalidated",
+            "a stage timeout is not a ceiling timeout; with_session handled it already",
         );
     }
 
