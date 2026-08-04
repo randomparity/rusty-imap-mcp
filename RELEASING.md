@@ -67,6 +67,17 @@ them all. Run it locally with `just semver-checks` (`just ci` includes it).
 "Public API" here means the API of the 8 publishable crates. `rimap-fake-imap`
 and `xtask` are `publish = false` and are skipped.
 
+**Adding a new publishable crate.** A tag baseline errors on a crate that does
+not exist at the baseline tag — `package <name> not found`, which reads as a
+tooling failure rather than a SemVer verdict. The PR that introduces the crate
+must skip it for that one PR:
+
+```bash
+cargo semver-checks check-release --workspace --baseline-rev v0.1.0 --exclude <new-crate>
+```
+
+From the next tag onward it has a baseline and needs no exclusion.
+
 Two limits worth knowing before you trust a green result:
 
 - The gate is only as good as `cargo-semver-checks`' lint set. It catches

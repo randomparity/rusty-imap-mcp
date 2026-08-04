@@ -311,7 +311,8 @@ are the ones that trip people up or aren't obvious from the lint set.
   the contexts list above it cannot block a merge — treat a red one as blocking
   by hand. It fails when a PR breaks the public API of a publishable crate
   without bumping the planned version; the fix is
-  `cargo set-version --workspace 0.2.0-dev`, not an override. See
+  `cargo set-version --workspace 0.2.0-dev` (from `cargo-edit`), not an
+  override. See
   [RELEASING.md](RELEASING.md), "Breaking a public API".
 - **`semver-checks` is red on `main` right now** — its first run found a break
   that predates it: `LimitsConfig` gained a `pub` field after `v0.1.0`. Issue

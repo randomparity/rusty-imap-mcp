@@ -397,12 +397,20 @@ publish-dry-run:
 # a break reddens here until the planned version moves to `0.2.0-dev`. Multiple
 # breaking PRs in one release cycle all diff against the same tag, so that one
 # bump covers all of them. See RELEASING.md, "Breaking a public API".
+#
+# A tag baseline has one sharp edge a registry baseline does not: a crate that
+# does not exist at the baseline tag is an error ("package not found"), not a
+# skip. A PR adding a new publishable crate must pass `--exclude <crate>` for
+# that one PR — see RELEASING.md.
 semver-checks:
     #!/usr/bin/env bash
     set -euo pipefail
-    baseline="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)"
-    if [ -z "$baseline" ]; then
-        echo "error: no vX.Y.Z tag reachable from HEAD, so there is no SemVer baseline" >&2
+    # Capture stderr rather than discarding it: "no tag found" and "not a git
+    # repo" both exit non-zero, and only the first deserves the fetch hint.
+    if ! baseline="$(git describe --tags --abbrev=0 \
+        --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' 2>&1)"; then
+        echo "error: no vX.Y.Z tag found, so there is no SemVer baseline" >&2
+        echo "  git describe: $baseline" >&2
         echo "hint: run 'git fetch --tags' (a shallow or tagless clone hides them)" >&2
         exit 1
     fi

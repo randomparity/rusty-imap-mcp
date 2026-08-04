@@ -237,11 +237,19 @@ jobs:
   semver-checks:
     name: semver-checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Two full workspace builds plus rustdoc, and the baseline tree is extracted
+    # under target/semver-checks/, which rust-cache prunes before saving — so
+    # the baseline half is always cold however warm the cache is.
+    timeout-minutes: 45
     # `-D warnings` from the workflow env would apply to the *baseline* rustdoc
     # build too, failing this job on lints that a newer toolchain emits against
     # already-released code — a red gate that says nothing about SemVer. The
     # branch's own lint coverage is the `clippy` job's, not this one's.
+    #
+    # An empty value also overrides `build.rustflags` from a `.cargo/config.toml`
+    # rather than merging with it. There is no such file today; if one is added,
+    # this job stops honouring it. Same applies to RUSTDOCFLAGS, which no
+    # workflow sets — a workflow-level one would need a matching override here.
     env:
       RUSTFLAGS: ""
     steps:
