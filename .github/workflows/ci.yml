@@ -90,7 +90,10 @@ jobs:
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --locked --no-tests=pass
+      # --profile ci selects the bounded max-fail policy in
+      # .config/nextest.toml (#625): an unrelated flake or container hiccup
+      # no longer suppresses every other test's result.
+      - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
       # The main --workspace pass above runs with the default silent-skip
       # posture: container-gated e2e tests return early when no docker/podman
       # runtime is present, so a runtime hiccup would let them all vanish while
@@ -100,6 +103,14 @@ jobs:
       # hard failure. --no-tests=fail additionally guards against a binary being
       # renamed or dropped (zero tests selected). The binary regex auto-covers
       # any future e2e* binary without another CI edit.
+      #
+      # Deliberately NOT --profile ci (#625): this step runs only
+      # container-backed e2e binaries, so under a dead or contended Docker
+      # daemon every one of the 20 failures that profile would budget is
+      # itself a slow container-boot timeout, not a fast in-process
+      # assertion. Bounded-but-large is worse than aborting fast for this
+      # specific arm — keep nextest's built-in fail-fast = true here so a
+      # daemon outage fails this step in seconds instead of minutes.
       - name: e2e suites — fail if container runtime unavailable or zero tests selected
         run: |
           cargo nextest run -p rimap-server \
@@ -128,7 +139,7 @@ jobs:
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --locked --no-tests=pass
+      - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
 
   tool-schema-drift:
     name: tool-schema drift
