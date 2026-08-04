@@ -877,7 +877,8 @@ impl DetachedStdoutHarness {
     /// setup that precedes it, because the budget starts here — at the call —
     /// not at spawn. #638's log conflated the two, which is what made the
     /// failure read as an 8.8 s child lifetime when 5 s of it was the elapsed
-    /// timeout and the rest was unbudgeted parent work.
+    /// timeout; see [`DETACHED_EXIT_TIMEOUT`] for why the remainder is
+    /// unattributed.
     pub async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
         let wait_began = Instant::now();
         let waited = timeout(DETACHED_EXIT_TIMEOUT, self.child.wait()).await;
