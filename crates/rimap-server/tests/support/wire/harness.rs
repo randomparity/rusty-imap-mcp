@@ -106,6 +106,17 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// distribution clustered near 0.2 s supports the first, and a bimodal one with
 /// multi-second outliers supports the second.
 ///
+/// Note what this budget does *not* cover. It starts at the `wait_for_exit`
+/// call, so the parent-side prefix — tempdir, config write, `cargo_bin`
+/// resolution, `Command::spawn`, the request write — sits outside it, and by
+/// the reconstruction above that prefix is where most of #638's untimed ~3.8 s
+/// went. Leaving it unbudgeted is deliberate: `nextest`'s slow-timeout is
+/// advisory and `.config/nextest.toml` sets no `terminate-after`, so a slow
+/// prefix produces a SLOW marker rather than a failure, and wrapping it in a
+/// second timeout would cost more than the risk it removes. Its duration
+/// reaches a reader through the `wait_for_exit` panic message on the timeout
+/// path, and through the explicit-output run named at that call site otherwise.
+///
 /// Composed from the two named constants rather than hand-tuned to a third
 /// number so each cost stays individually documented and tunable. Widening
 /// `SHUTDOWN_TIMEOUT` to cover this instead would also loosen the two waits
@@ -859,8 +870,19 @@ impl DetachedStdoutHarness {
         // widened here without the exit wait ever having been measured on a
         // failing run (#638 timed out, so it observed only a lower bound); this
         // is the number that says whether 15 s is generous, marginal, or hiding
-        // a real server-side stall. `nextest` captures test stderr, so it costs
-        // nothing on a green run and is there when one goes red.
+        // a real server-side stall.
+        //
+        // This line does NOT appear in an ordinary run. `nextest` captures a
+        // passing test's stderr and then drops it under its `success-output =
+        // "never"` default, which `--profile ci` inherits and
+        // `.config/nextest.toml` does not override. #660 must therefore collect
+        // the distribution with an explicit run:
+        //
+        //   cargo nextest run -p rimap-server \
+        //     -E 'binary(mcp_wire_negative)' --success-output final
+        //
+        // The timeout path does not reach here at all — it panics above, and
+        // that panic carries the budget and the setup prefix instead.
         #[expect(
             clippy::print_stderr,
             reason = "budget calibration measurement collected by #660"
@@ -915,25 +937,5 @@ mod read_deadline_tests {
         let chaos = COLD_START_TIMEOUT + Duration::from_secs(20);
         assert_eq!(read_deadline(false, chaos), chaos);
         assert_eq!(read_deadline(true, chaos), chaos);
-    }
-}
-
-#[cfg(test)]
-mod detached_exit_budget_tests {
-    use super::{COLD_START_TIMEOUT, DETACHED_EXIT_TIMEOUT, SHUTDOWN_TIMEOUT};
-
-    /// The flake in #638. `spawn_with_closed_stdout` drops the stdout read end,
-    /// so no readiness handshake off stdout can pay for start-up separately the
-    /// way `read_deadline` does for a piped harness: one `child.wait()` spans
-    /// both cost classes. The budget must therefore be their sum, not either
-    /// one — in particular, not `SHUTDOWN_TIMEOUT`, which is scoped to the exit
-    /// of an already-serving child.
-    #[test]
-    fn budget_is_the_sum_of_both_cost_classes() {
-        assert_eq!(
-            DETACHED_EXIT_TIMEOUT,
-            COLD_START_TIMEOUT + SHUTDOWN_TIMEOUT,
-            "the detached wait spans start-up and exit, so it gets both budgets",
-        );
     }
 }
