@@ -7,6 +7,15 @@ set shell := ["bash", "-uc"]
 
 MSRV := "1.88.0"
 
+# cargo-nextest version floor, stated once and enforced by `setup` below.
+# 0.9.95 is the first release supporting the leak-timeout table form
+# (`{ period = "...", result = "fail" }`, nextest changelog 2025-04-30),
+# which #642 will add to .config/nextest.toml; it also covers the
+# profile.ci `fail-fast = { max-fail = N }` table form already in use here
+# (0.9.89+, #625/#637). An older nextest hits a bare config-parse error on
+# either table form with no hint that upgrading nextest is the fix (#639).
+NEXTEST_MIN := "0.9.95"
+
 # Default: print available targets.
 default:
     @just --list
@@ -146,7 +155,17 @@ setup:
     rustup component add clippy rustfmt
     # Cargo subcommands — check then optionally install.
     cargo deny --version >/dev/null 2>&1 || cargo install --locked cargo-deny
-    cargo nextest --version >/dev/null 2>&1 || cargo install --locked cargo-nextest
+    # `cargo install`, unlike the `--version >/dev/null || install` pattern
+    # above, upgrades an existing binary in place — needed here since an
+    # installed-but-too-old nextest passes the bare existence check but not
+    # the version floor. `head -1`: `cargo nextest --version` prints five
+    # lines (release/commit-hash/commit-date/host besides the version line);
+    # without it awk emits $2 of every line instead of just the version.
+    nextest_ver="$(cargo nextest --version 2>/dev/null | head -1 | awk '{print $2}')"
+    if [ -z "$nextest_ver" ] || ! printf '%s\n%s\n' "{{NEXTEST_MIN}}" "$nextest_ver" | sort -V -C; then
+        echo "installing/upgrading cargo-nextest to >= {{NEXTEST_MIN}} (have: ${nextest_ver:-none})"
+        cargo install --locked cargo-nextest
+    fi
     cargo msrv --version >/dev/null 2>&1 || cargo install --locked cargo-msrv
     # Pinned to the version the CI `semver-checks` job installs, so a local
     # `just ci` and the gate agree on which lints are in force.
@@ -253,7 +272,10 @@ test-msrv:
 mutants *args:
     cargo mutants --in-place {{args}}
 
-# Proton Bridge integration suite (gated on PROTON_BRIDGE_TEST=1).
+# Proton Bridge integration suite (gated on PROTON_BRIDGE_TEST=1). --profile
+# ci for the same reason as `test`/`test-msrv` (#639): this is a
+# container-backed suite, so an unrelated flake or a Bridge-container hiccup
+# should not cancel every other result still in flight.
 test-integration:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -261,11 +283,13 @@ test-integration:
         echo "set PROTON_BRIDGE_TEST=1 to run Proton Bridge integration tests"
         exit 1
     fi
-    cargo nextest run --workspace --locked --features proton-bridge-tests
+    cargo nextest run --workspace --locked --features proton-bridge-tests --profile ci
 
-# Adversarial email corpus against the content pipeline.
+# Adversarial email corpus against the content pipeline. --profile ci (#639)
+# for consistency with the other non-inner-loop suites above: a corpus
+# regression shouldn't cancel the run before the rest of the binary reports.
 test-injection:
-    cargo nextest run -p rimap-content --locked --test injection_corpus
+    cargo nextest run -p rimap-content --locked --test injection_corpus --profile ci
 
 # Run a single fuzz target for a fixed time budget. Requires nightly.
 # Example: just fuzz content_mime

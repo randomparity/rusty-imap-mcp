@@ -57,10 +57,14 @@ jobs:
           tool: cargo-nextest
 
       - name: Run wire-chaos suite
+        # --profile ci (#639): this suite runs unattended overnight, so losing
+        # every result after the first failure — the built-in fail-fast
+        # default — is more expensive here than anywhere fail-fast stays on,
+        # since nobody is watching to re-run it for the rest of the picture.
         run: |
           set -o pipefail
           cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' \
-            --no-tests=fail --no-capture 2>&1 | tee chaos.log
+            --no-tests=fail --no-capture --profile ci 2>&1 | tee chaos.log
 
       - name: Assert every scenario actually ran (vacuous-green guard)
         # An early-return counts as a nextest PASS, and `--no-tests=fail` only
