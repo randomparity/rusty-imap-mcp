@@ -108,9 +108,10 @@ of exactly this kind produced #512.
 - **Deleting the tracked fuzz lockfile** so the build always resolves fresh.
   Rejected: it converts a detectable divergence into an undetectable one. The
   ClusterFuzzLite build would silently instrument a different dependency set on
-  every run, with nothing to compare against. This is the shape the root
-  `fuzz/` directory is in today (its lockfile is gitignored) and is the weaker
-  of the two conventions, not the one to standardize on.
+  every run, with nothing to compare against. This was the shape the root
+  `fuzz/` directory was in when this was decided (its lockfile was gitignored)
+  and is the weaker of the two conventions, not the one to standardize on. It
+  no longer describes any directory in the repo — see the Amendment below.
 
 - **Comparing the two lockfiles for exact equality.** Rejected on the data: the
   fuzz graph is a strict subgraph, so equality is not the invariant and the
@@ -151,4 +152,33 @@ of exactly this kind produced #512.
 - The root `fuzz/` directory's own lockfile remains untracked, so the two fuzz
   directories still follow different conventions. Normalizing that is tracked
   separately; the gate already covers it automatically if the lockfile is ever
-  committed.
+  committed. **Discharged — see the Amendment below.**
+
+## Amendment · 2026-08-03 · issue [#611](https://github.com/randomparity/rusty-imap-mcp/issues/611)
+
+The last consequence above is now discharged. `fuzz/Cargo.lock` is tracked:
+the `Cargo.lock` line is gone from `fuzz/.gitignore`, and the lockfile was
+realigned with `just realign-fuzz-locks` before its first commit (445 workspace
+packages pruned to the 194 the fuzz graph reaches, plus `libfuzzer-sys`,
+`arbitrary`, and `jobserver`). All five root targets — `content_mime`,
+`content_html`, `content_rfc2047`, `content_charset`, `audit_jsonl` — build
+against it with `cargo +nightly fuzz build -O`.
+
+Nothing was edited to make this happen. Both mechanisms the decision above
+describes picked the new lockfile up on their own, which is the property they
+were built for:
+
+- `check-fuzz-lock-parity.sh` discovers its inputs with `git ls-files`, so
+  committing the lockfile took it from reporting one lockfile in parity to
+  two. No script change.
+- `.clusterfuzzlite/build.sh` guards with `cargo metadata --locked` in any
+  fuzz directory that *has* a lockfile, so the root fuzz build is now pinned
+  too. No workflow change.
+
+The two fuzz directories now follow one convention, and the weaker of the two
+— the untracked lockfile rejected under *Alternatives considered* as converting
+detectable divergence into undetectable — is no longer in use anywhere in the
+repo. The cost noted under Consequences doubles in the obvious way: a workspace
+bump touching a shared package now needs both fuzz lockfiles realigned, which
+is still the same single `just realign-fuzz-locks` invocation because it too
+discovers its inputs from git.
