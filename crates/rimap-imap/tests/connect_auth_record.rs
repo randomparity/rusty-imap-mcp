@@ -111,29 +111,33 @@ async fn a_successful_connect_emits_one_auth_record_naming_the_credential_source
 /// A completed connect's `auth` record must not depend on tokio's blocking
 /// pool (#643).
 ///
-/// The loss this pins is a runtime shutdown reaching the pool before the pool
-/// reaches `connect_inner`'s queued emit — tokio drops a queued non-mandatory
-/// task on the shutdown drain, and `rimap-server` shuts down with
-/// `Runtime::shutdown_background`, which waits for nothing.
+/// The loss this pins is `rimap-server` shutting down with
+/// `Runtime::shutdown_background` — which waits for nothing — while
+/// `connect_inner`'s emit is still owed to the blocking pool. ADR-0014 has the
+/// exact tokio mechanics; they are subtler than they look, and a test that
+/// depended on them would pass against the bug whenever the lucky path was
+/// taken.
 ///
-/// Racing a real shutdown against a real queue would be a flake in both
-/// directions, so the assertion rests on the weaker, fully deterministic
-/// condition that subsumes it: **the pool never runs another task at all.**
-/// One pool thread, occupied for the whole test, and the sink read while it is
-/// still occupied. A `connect_inner` that defers its emit cannot have
-/// recorded — its closure is provably still on the queue at the moment of the
-/// read — and one that writes inline is unaffected. Shutdown semantics are
-/// then not load-bearing here at all, which is deliberate: they are subtler
-/// than they look (a worker that is *busy* when shutdown begins drains and
-/// runs its queue without rechecking the flag), and a test that depended on
-/// them would pass against the bug whenever that path was taken.
+/// So the assertion rests instead on the weaker, fully deterministic condition
+/// that subsumes them: **the pool never runs another task at all.** One
+/// unclaimed pool thread, occupied for the whole test, and the sink read while
+/// it is still occupied. A `connect_inner` that defers its emit cannot have
+/// recorded — its closure is provably still on the queue at that moment — and
+/// one that writes inline is unaffected. Verified at 40/40 green against the
+/// inline emit and 0/40 against the deferred one.
 ///
-/// One implicit dependency worth naming: with the pool's only thread occupied,
-/// *any* `spawn_blocking` on the connect path would hang this test rather than
-/// fail it informatively. The connect avoids one only because the fake binds
-/// `127.0.0.1` and `TcpStream::connect` short-circuits a literal address
-/// instead of resolving it on the pool. A harness that moved to a hostname
-/// would surface here as a timeout, not as an `emit_auth` regression.
+/// Two implicit dependencies worth naming, both load-bearing and invisible:
+///
+/// * `max_blocking_threads` counts threads *available to `spawn_blocking`*,
+///   over and above the runtime's own workers — which are themselves pool
+///   tasks. So `worker_threads(2)` + `max_blocking_threads(1)` leaves exactly
+///   one thread for the occupier to take, which is what saturates the pool.
+/// * With that thread taken, *any* `spawn_blocking` on the connect path would
+///   hang this test rather than fail it informatively. The connect avoids one
+///   only because the fake binds `127.0.0.1` and `TcpStream::connect`
+///   short-circuits a literal address instead of resolving it on the pool. A
+///   harness that moved to a hostname would surface here as a timeout, not as
+///   an `emit_auth` regression.
 #[test]
 fn a_completed_connect_records_its_auth_event_without_the_blocking_pool() {
     /// Bounds the occupier thread's own wait, so a failed assertion cannot

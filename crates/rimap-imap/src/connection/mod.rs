@@ -593,8 +593,10 @@ impl Connection {
     /// onwards, including the paths on which this function never returns at
     /// all.
     ///
-    /// One carve-out, narrow and stated where it arises: `build_tls_config`
-    /// failing exits earlier than the attempt itself and records nothing.
+    /// Two carve-outs, both narrow and both stated where they arise:
+    /// `build_tls_config` failing exits earlier than the attempt itself and
+    /// records nothing, and the record [`AuthEmitGuard`] writes for a cut
+    /// connect can still lose a race with process exit — see its rustdoc.
     ///
     /// A caller *may* wrap this in a deadline shorter than `connect_timeout` —
     /// the per-tool-call ceiling (#594, ADR-0012) does. Cutting the future

@@ -48,13 +48,16 @@ releases the audit lock *inline, on the calling thread*. That still
 satisfies the rule above (the lock is not held across an `.await`; there
 is no `.await`).
 
-For the completed connect that is what makes the record survive a
-runtime shutdown, because a deferred write would be dropped by the
-blocking pool's shutdown drain and `rimap-server` shuts down with
-`Runtime::shutdown_background`, which waits for nothing. **It does not
-give the guard's record the same guarantee**: a `Drop` running during a
-shutdown can still lose the race with process exit, so that path stays
-best-effort, exactly as `AuthEmitGuard`'s own rustdoc says. See
+For the completed connect that is what makes the record no longer depend
+on the blocking pool being drained — a deferred write is refused
+outright when it is submitted after the shutdown flag, and merely racing
+process exit when it was already queued, and `rimap-server` shuts down
+with `Runtime::shutdown_background`, which waits for nothing. It is
+**not** an unconditional survival guarantee, for either emitter: a
+thread still inside the write when the process exits loses the record
+whichever emitter it is, and the guard writes from a `Drop` that can
+lose that race outright, so that path stays best-effort exactly as
+`AuthEmitGuard`'s own rustdoc says. See
 [ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md) for the
 decision, the tokio shutdown semantics it actually rests on, the
 measured cost, and the bound on how many runtime workers this can

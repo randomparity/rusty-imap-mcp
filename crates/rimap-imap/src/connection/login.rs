@@ -5,7 +5,9 @@
 //! [`AuthEvent`] through the injected [`AuthEventSink`] synchronously,
 //! on the calling thread: the sink's internal `std::sync::Mutex` is
 //! taken and released without an `.await` in between, so no record can
-//! be stranded by a cut or a runtime shutdown (ADR-0014).
+//! be stranded *on the blocking pool's queue* by a cut or a runtime
+//! shutdown (ADR-0014). The guard's record can still lose a race with
+//! process exit; see `AuthEmitGuard`.
 
 use std::sync::atomic::Ordering;
 
@@ -160,24 +162,22 @@ impl Connection {
     /// short form:
     ///
     /// * **`spawn_blocking` loses the record on a shutdown.** Read against
-    ///   tokio 1.53's `runtime::blocking::pool`, a deferred closure survives a
-    ///   shutdown only by luck. Submitted after `Runtime::shutdown_background`
-    ///   has set the flag, `Spawner::spawn_task` shuts the task down and
-    ///   returns `SpawnError::ShuttingDown`; the caller still gets a
-    ///   `JoinHandle`, which resolves immediately with a *cancelled*
-    ///   `JoinError`, so the closure never runs and the old code turned a
-    ///   successful connect into `ImapError::Audit`. Already queued with the
-    ///   pool idle — the ordinary case, since the pool has nothing else to do —
-    ///   the worker wakes on the shutdown notify and drains through
-    ///   `Task::shutdown_or_run_if_mandatory`, which *drops* a non-mandatory
-    ///   task rather than running it, and `spawn_blocking` produces exactly
-    ///   those. Only a closure queued behind a worker that happened to be busy
-    ///   at that instant is run, by a `BUSY` loop that does not recheck the
-    ///   flag — and `rimap-server`'s `main` returns straight after
-    ///   `shutdown_background`, which waits for nothing, so the process
-    ///   usually exits first anyway. Writing inline removes the whole question:
-    ///   there is no longer an `.await` between the guard's disarm and the
-    ///   write (#643).
+    ///   tokio 1.53, a deferred closure survives a shutdown only by luck.
+    ///   Submitted after `Runtime::shutdown_background` has set the flag,
+    ///   `Spawner::spawn_task` shuts the task down and returns
+    ///   `SpawnError::ShuttingDown`; the caller still gets a `JoinHandle`,
+    ///   which resolves immediately with a *cancelled* `JoinError`, so the
+    ///   closure never runs and the old code turned a successful connect into
+    ///   `ImapError::Audit`. Already queued, it is a race against process exit
+    ///   rather than against the drain: the scheduler's own workers are pool
+    ///   tasks, so when the scheduler closes they fall back into the pool's
+    ///   `BUSY` loop and run the queue without rechecking the flag — but
+    ///   `rimap-server`'s `main` returns straight after `shutdown_background`,
+    ///   which waits for nothing, so the process usually exits first. (A third,
+    ///   narrower path drops the task outright on the shutdown drain.)
+    ///   ADR-0014 has all three with the measurements. Writing inline removes
+    ///   the whole question: there is no longer an `.await` between the guard's
+    ///   disarm and the write (#643).
     /// * **`spawn_blocking` cannot be called from a `Drop` at all.**
     ///   [`super::AuthEmitGuard`] has no caller to await for it, and
     ///   `spawn_blocking` panics when the OS refuses a thread — a panic
@@ -210,8 +210,9 @@ impl Connection {
     ///   MCP wire stops being served. The same stall on the blocking pool lands
     ///   against its 512-thread cap instead and cannot starve the scheduler, so
     ///   this makes `audit.path` a local-storage requirement rather than a
-    ///   preference. `docs/audit-log.md` still scopes that warning to the cut
-    ///   path only; widening it is tracked in #667.
+    ///   preference — and one nothing currently enforces: `docs/audit-log.md`
+    ///   still scopes the warning to the cut path (#667), and detecting a
+    ///   non-local `audit.path` at startup is #668.
     ///
     /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
     /// file I/O, nothing inside its critical section calls back into this

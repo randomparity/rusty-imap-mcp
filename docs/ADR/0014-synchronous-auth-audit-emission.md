@@ -29,35 +29,49 @@ resulting window knowingly open and track it as #643.
 The rustdoc #623 left behind said the blocking pool "refuses new work once the
 runtime begins shutting down — the returned handle never resolves, and even an
 already-queued closure is discarded rather than run." Read against
-`tokio-1.53.1/src/runtime/blocking/pool.rs`, that is two-thirds right and the
-wrong third is load-bearing enough to state properly. There are three cases:
+`tokio-1.53.1`, most of that is wrong, and the corrected version still supports
+the fix — so it is worth stating properly rather than inheriting.
 
-1. **Submitted after the shutdown flag is set.** `Spawner::spawn_task` sees
-   `shared.shutdown`, calls `task.task.shutdown()`, and returns
-   `SpawnError::ShuttingDown`. `spawn_blocking` maps that to
-   `Err(SpawnError::ShuttingDown) => join_handle` — so the handle *does*
-   resolve, immediately, with a cancelled `JoinError`. The closure never runs.
-   The old `emit_auth` had a join-error arm, so this case turned a successful
-   connect into `ImapError::Audit { message: "tokio join error during audit
-   write" }` — the record lost *and* the caller handed a spurious failure.
+The fact that shapes everything else: **the multi-thread scheduler's own workers
+are blocking-pool tasks.** `Launch::launch` runs each as
+`runtime::spawn_blocking(move || run(worker))`
+(`src/runtime/scheduler/multi_thread/worker.rs:514`), so at any instant there
+are `worker_threads` pool threads sitting inside the pool's `BUSY` loop. Three
+cases follow:
 
-2. **Already queued, every pool worker idle.** This is the ordinary case: the
-   pool has nothing else to do. The worker wakes on the shutdown notify, enters
-   the shutdown drain, and empties the queue through
-   `Task::shutdown_or_run_if_mandatory`, which for `Mandatory::NonMandatory`
-   calls `task.shutdown()` — dropped, not run. `spawn_blocking` produces
-   non-mandatory tasks. This is the case that loses the record silently.
+1. **Submitted after the shutdown flag is set — lost unconditionally.**
+   `Spawner::spawn_task` sees `shared.shutdown`, calls `task.task.shutdown()`,
+   and returns `SpawnError::ShuttingDown`. `spawn_blocking` maps that to
+   `Err(SpawnError::ShuttingDown) => join_handle`, so the handle *does* resolve
+   — immediately, with a cancelled `JoinError`. (Tokio's own inline comment at
+   `pool.rs:322` still says "it will never resolve"; it is stale, and it is
+   where the inherited claim came from.) The closure never runs. The old
+   `emit_auth` had a join-error arm, so this turned a successful connect into
+   `ImapError::Audit { message: "tokio join error during audit write" }` — the
+   record lost *and* the caller handed a spurious failure. **No shutdown tuning
+   fixes this case.**
 
-3. **Already queued behind a worker that is busy at that instant.** The `BUSY`
-   loop drains with `task.run()` and never rechecks the flag, so this closure
-   *does* run — if the process lives long enough. `rimap-server`'s `main`
-   returns immediately after `shutdown_background`, which waits for nothing, so
-   usually it does not.
+2. **Already queued when the flag is set — a race against process exit, not
+   against the drain.** When the scheduler closes, `run(worker)` returns and
+   those threads fall back into the `BUSY` loop, which drains with `task.run()`
+   and never rechecks the shutdown flag. So the closure does run, given a few
+   milliseconds. `rimap-server`'s `main` returns immediately after
+   `shutdown_background`, which waits for nothing. Measured on the development
+   host over 50 trials: the closure had run by the time `shutdown_background`
+   returned in 5, and within 100 ms in all 50. Whether the record survives is
+   therefore whether the process outlives its own teardown by a few
+   milliseconds.
 
-So the loss is real, via cases 1 and 2, and it is case 2 that is silent. The
-window is small — microseconds on a healthy host — but it is a hole in an
-append-only security log, on the record that says a credential was used against
-a remote server.
+3. **Dropped by the shutdown drain.** `Task::shutdown_or_run_if_mandatory` drops
+   a `Mandatory::NonMandatory` task, which is what `spawn_blocking` produces —
+   but reaching that path needs `BlockingPool::shutdown` to take `shared.lock()`
+   in the window between the push and the notified worker re-acquiring it. Real,
+   narrow, and not the dominant case.
+
+So the loss is real and only partly a matter of timing: case 1 is
+unconditional, and case 2 is lost whenever the process exits promptly, which is
+what it does. It is a hole in an append-only security log, on the record that
+says a credential was used against a remote server.
 
 ## Decision
 
@@ -142,11 +156,19 @@ Bounding the worker occupancy that buys:
 The one unbounded case is unchanged from #623 and is now reachable on every
 connect rather than only on a cut one: an `audit.path` that stops responding — a
 hung NFS or SMB mount — pins the worker for the life of the process, with the
-account's session lock still held. `audit.path` on local storage is a
-requirement, not a preference; `emit_auth`'s rustdoc states this to
-contributors, and widening `docs/audit-log.md`'s statement of it — today still
-scoped to the cut path — is tracked in
-[#667](https://github.com/randomparity/rusty-imap-mcp/issues/667).
+account's session lock still held, and with every worker so pinned the time
+driver stops advancing, so the deadlines that would otherwise bound it —
+`command_timeout`, the ADR-0012 ceiling — stop firing too.
+
+`audit.path` on local storage is therefore a requirement, not a preference. It
+is also, today, an unenforced one: `emit_auth`'s rustdoc states it to
+contributors, widening `docs/audit-log.md`'s statement of it is tracked in
+[#667](https://github.com/randomparity/rusty-imap-mcp/issues/667), and
+detecting a non-local path at startup is
+[#668](https://github.com/randomparity/rusty-imap-mcp/issues/668). Accepting
+this ADR accepts that gap in the interim; it is a widening of a pre-existing
+exposure, not a new one, since the guard's write had the same property from
+#623.
 
 ### The measurement harness
 
@@ -208,16 +230,20 @@ fn main() {
 ## Alternatives considered
 
 - **Bound the shutdown instead: `Runtime::shutdown_timeout` before
-  `emit_process_end` in `rimap-server`.** Rejected, and note it is weaker than
-  it first appears. A timeout waits for blocking tasks that are already
-  *running*; a task still *queued* is drained by the same
-  `shutdown_or_run_if_mandatory` path as case 2 above and dropped regardless of
-  how long the timeout is. So it would help only when the write had already
-  started — which is the case that was never at risk. It also makes the
-  durability of an `auth` record depend on a value configured in a different
-  crate from the one that writes it, and leaves the two halves of
-  `connect_inner` on different mechanisms, which is the condition that produced
-  this bug in the first place.
+  `emit_process_end` in `rimap-server`.** Rejected, but be honest about what it
+  would and would not buy. It **would** rescue case 2: holding the process open
+  gives the scheduler's own pool threads the few milliseconds they need to fall
+  into the `BUSY` drain and run the queued write — measured directly, a queued
+  closure ran under `shutdown_timeout(2s)`. It does **nothing** for case 1,
+  where `spawn_task` refuses the submission before any timeout is consulted. So
+  it is a partial fix by construction, not merely a narrower one.
+
+  The grounds for rejecting it are the other two, and they are enough. It makes
+  the durability of an `auth` record depend on a value configured in a different
+  crate from the one that writes it. And it leaves the two halves of
+  `connect_inner` on different mechanisms — which is precisely the condition
+  that produced this bug, and the thing a fix should remove rather than
+  re-tune.
 
 - **Disarm `AuthEmitGuard` *after* the emit rather than before.** Rejected in
   #643's own analysis and still wrong: with a deferred write it trades a rare
@@ -310,7 +336,8 @@ fn main() {
   is `a_completed_connect_records_its_auth_event_without_the_blocking_pool` in
   `crates/rimap-imap/tests/connect_auth_record.rs`, which asserts the outcome: a
   completed connect leaves its record even when the blocking pool will never run
-  another task. It reads the sink while the pool's only thread is still occupied,
+  another task. It reads the sink while the pool's one unclaimed thread — the
+  runtime's own workers hold the rest — is still occupied,
   so it is deterministic in both directions rather than resting on shutdown
   timing — verified at 40/40 green against this change and 0/40 against the
   deferred emit.
