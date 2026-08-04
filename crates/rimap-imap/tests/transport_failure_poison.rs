@@ -10,13 +10,16 @@
 //!
 //! ## Why the peer has to be queued
 //!
-//! `with_session` already calls `invalidate().await` for exactly these errors,
-//! so any command arriving after `with_session` returns finds an empty slot and
-//! reconnects whether or not the fix exists. A test built on that shape would
-//! pass either way. The defect is only observable in the window `invalidate`
-//! cannot cover: it must RE-ACQUIRE the session lock, and `tokio::sync::Mutex`
-//! is FIFO-fair, so a peer that queued while the failing command held the lock
-//! is served *first*. That peer is the read-out.
+//! Poisoning under the lock is what the last two tests here read out, and a
+//! command arriving after the failing one has returned cannot see the
+//! difference: it finds either a poisoned slot or (under the discarded
+//! alternative, a re-acquire-the-lock-and-clear-it cleanup) an empty one, and
+//! reconnects either way. A test built on that shape would pass whatever the
+//! implementation. The distinguishing window belongs to the peer that queued
+//! while the failing command held the lock: `tokio::sync::Mutex` is FIFO-fair,
+//! so it is served *first* — before any cleanup that has to wait for the lock
+//! again. That peer is the read-out, for both the session it inherits (#620)
+//! and the one it goes on to reconnect (#629).
 //!
 //! ## Budget arithmetic
 //!
@@ -74,7 +77,15 @@ fn uids(values: &[u32]) -> Vec<Uid> {
         .collect()
 }
 
-fn search_exchange() -> Vec<Step> {
+/// One read-only search exchange (`EXAMINE` then `UID SEARCH`) whose SEARCH
+/// answers `found`. Scripts that must prove *which* connection served a call
+/// give each connection a distinct answer.
+fn search_exchange_returning(found: &[u32]) -> Vec<Step> {
+    let list = found
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
     vec![
         Step::Expect { verb: "EXAMINE" },
         Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
@@ -82,11 +93,15 @@ fn search_exchange() -> Vec<Step> {
             text: "OK [READ-ONLY] EXAMINE completed",
         },
         Step::Expect { verb: "UID SEARCH" },
-        Step::Send(b"* SEARCH 5 7 9\r\n".to_vec()),
+        Step::Send(format!("* SEARCH {list}\r\n").into_bytes()),
         Step::Reply {
             text: "OK SEARCH completed",
         },
     ]
+}
+
+fn search_exchange() -> Vec<Step> {
+    search_exchange_returning(&[5, 7, 9])
 }
 
 fn store_exchange() -> Vec<Step> {
@@ -261,5 +276,128 @@ async fn peer_queued_behind_an_in_sync_failure_reuses_the_session() {
         1,
         "exactly one LOGIN — a failure that left the session in sync must not \
          cost a reconnect, so the second script is never reached: {dialog:?}",
+    );
+}
+
+/// The #629 guard. Once the peer has consumed the poison and reconnected, the
+/// cached session belongs to *it*. The failing command's own cleanup runs after
+/// that — it has to re-acquire the session lock, and the peer was ahead of it —
+/// so a cleanup that discards whatever it finds discards a healthy session that
+/// was never the one it failed on.
+///
+/// Read-out: a third command issued once both have finished. If the peer's
+/// session survived, it is still cached and the third command completes on the
+/// peer's connection, whose script carries a further search for exactly that
+/// purpose — two LOGINs. If the cleanup wiped it, the third command reconnects
+/// against the third script and there are three.
+#[tokio::test]
+async fn peers_reconnected_session_survives_the_failing_commands_cleanup() {
+    let mut stalled = login_preamble("IMAP4rev1 UIDPLUS");
+    stalled.push(Step::Expect { verb: "EXAMINE" });
+    stalled.push(Step::Stall(STALL));
+
+    // The peer's reconnect: its STORE, then a search left unserved so the
+    // session is still usable when the peer is done.
+    let mut reconnect = login_preamble("IMAP4rev1 UIDPLUS");
+    reconnect.extend(store_exchange());
+    reconnect.extend(search_exchange());
+
+    // Reached only if the peer's healthy session was discarded.
+    let mut third = login_preamble("IMAP4rev1 UIDPLUS");
+    third.extend(search_exchange());
+
+    let server = FakeImapServer::start_sequence(vec![stalled, reconnect, third]).await;
+    let conn = server.connection_timeout("user@example.com", TIMEOUT);
+
+    let failing = tokio::spawn({
+        let conn = conn.clone();
+        async move { search(&conn).await }
+    });
+    wait_for_recorded(&server, "EXAMINE").await;
+
+    tokio::time::sleep(PEER_DELAY).await;
+    let peer = tokio::spawn({
+        let conn = conn.clone();
+        async move { store(&conn, None).await }
+    });
+
+    let err = failing
+        .await
+        .expect("the failing task must not panic")
+        .expect_err("the stalled search must trip its command deadline");
+    assert!(
+        matches!(err, ImapError::Timeout { .. }),
+        "the discriminator is a stage timeout, not some other failure: {err:?}",
+    );
+
+    let updated = peer
+        .await
+        .expect("the peer task must not panic")
+        .expect("the peer must consume the poison, reconnect, and complete");
+    assert_eq!(updated, uids(&[5]), "the reconnected STORE result");
+
+    // Joining `failing` above is what makes this deterministic: any cleanup the
+    // failing command performs happens before it returns, so it has already
+    // run — and, because the peer held the lock, it ran last.
+    let found = search(&conn)
+        .await
+        .expect("the third command must complete, on whichever session it finds");
+    assert_eq!(found, uids(&[5, 7, 9]), "the third search result");
+
+    let dialog = server.recorded();
+    assert_eq!(
+        count(&dialog, "LOGIN"),
+        2,
+        "exactly two LOGINs — the failing command's cleanup must not have \
+         discarded the session the peer reconnected: {dialog:?}",
+    );
+}
+
+/// The #565 / #567 retry policy, end-to-end, with nothing but the poison left
+/// to clear the dead session between the two attempts: a read-only op that
+/// finds its cached session closed must reconnect and retry once, and the
+/// caller must never see the `ConnectionLost`.
+///
+/// The two connections answer SEARCH with *different* UIDs, so the recovered
+/// result identifies the connection that served it — a retry that somehow
+/// replayed against the first session could not return 11/13. The follow-up
+/// call then pins that the retry leaves its reconnected session cached rather
+/// than discarding what it just built.
+#[tokio::test]
+async fn read_only_connection_lost_retries_against_a_reconnected_session() {
+    let mut first_connection = login_preamble("IMAP4rev1 UIDPLUS");
+    first_connection.extend(search_exchange_returning(&[5, 7, 9]));
+    first_connection.push(Step::Disconnect);
+
+    let mut second_connection = login_preamble("IMAP4rev1 UIDPLUS");
+    second_connection.extend(search_exchange_returning(&[11, 13]));
+    second_connection.extend(search_exchange_returning(&[11, 13]));
+
+    let server = FakeImapServer::start_sequence(vec![first_connection, second_connection]).await;
+    let conn = server.connection_timeout("user@example.com", BACKSTOP);
+
+    let found = search(&conn).await.expect("the first search is scripted");
+    assert_eq!(found, uids(&[5, 7, 9]), "served by the first connection");
+
+    // The cached session is now closed. Attempt one fails `ConnectionLost`,
+    // poisons, and attempt two consumes that and reconnects.
+    let recovered = search(&conn)
+        .await
+        .expect("a read-only ConnectionLost must recover transparently");
+    assert_eq!(
+        recovered,
+        uids(&[11, 13]),
+        "the retry ran against the reconnected session, not the dead one",
+    );
+
+    let reused = search(&conn).await.expect("the recovered session is live");
+    assert_eq!(reused, uids(&[11, 13]), "still the second connection");
+
+    let dialog = server.recorded();
+    assert_eq!(
+        count(&dialog, "LOGIN"),
+        2,
+        "exactly two LOGINs — one reconnect for the retry, and no further one \
+         for a call that reuses what the retry left cached: {dialog:?}",
     );
 }

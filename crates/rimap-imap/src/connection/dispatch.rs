@@ -59,7 +59,16 @@ impl Connection {
     ///
     /// The closure receives a mutable reference to the live `Session`. On a
     /// transport-level failure (`ConnectionLost`, `SizeLimit`, or `Timeout`)
-    /// the cached session is dropped so the next call lazy-reconnects.
+    /// the cached session is dropped so the next call lazy-reconnects. That
+    /// discard happens in [`Self::attempt`], where [`super::SessionGuard`]
+    /// still holds the session lock, and nothing here re-acquires the lock to
+    /// repeat it. A command that has released the lock no longer knows whose
+    /// session is in the slot: `tokio::sync::Mutex` is FIFO-fair, so the peer
+    /// queued behind it is served first, and that peer consumes the poison and
+    /// reconnects — leaving its own healthy session there to be discarded
+    /// (#629). The retry below is the one exception, and it is safe precisely
+    /// because it goes back through `attempt` and reads the flag under the
+    /// lock rather than clearing the slot from outside.
     ///
     /// When `idempotency` is [`Idempotency::ReadOnly`] and the failure is
     /// [`ImapError::ConnectionLost`] — the signature of a session the server
@@ -78,8 +87,8 @@ impl Connection {
     /// `AsyncFnOnce` bound on the body.
     ///
     /// The control flow here mirrors the test-only `with_reconnect` helper; the
-    /// two share the [`should_reconnect`] / [`is_transport_failure`] predicates
-    /// that carry all the retry-policy logic.
+    /// two share the [`should_reconnect`] predicate that carries all the
+    /// retry-policy logic.
     pub(super) async fn with_session<T, Mk, B>(
         &self,
         op_name: &'static str,
@@ -91,17 +100,10 @@ impl Connection {
         B: for<'s> AsyncFnOnce(&'s mut ImapSession) -> Result<T, ImapError>,
     {
         let first = self.attempt(op_name, make_body()).await;
-        if is_transport_failure(&first) {
-            self.invalidate().await;
-        }
         if !should_reconnect(idempotency, &first) {
             return first;
         }
-        let second = self.attempt(op_name, make_body()).await;
-        if is_transport_failure(&second) {
-            self.invalidate().await;
-        }
-        second
+        self.attempt(op_name, make_body()).await
     }
 
     /// A single timeout-guarded run of `body` against the live session.
@@ -160,14 +162,14 @@ impl Connection {
         // A body that RETURNED can still have ended mid-response, and that
         // reaches the same desync a cancellation does with nothing cancelled:
         // `with_timeout` elapsing drops the body future exactly as a cut would,
-        // and `SizeLimit` aborts a fetch mid-stream (see `is_transport_failure`,
-        // which is the same judgement `with_session` makes three lines up).
+        // and `SizeLimit` aborts a fetch mid-stream (see `is_transport_failure`).
         //
         // Leaving the guard armed for those hands the flag to the next holder
-        // of the lock. Disarming and relying on `with_session`'s
-        // `invalidate().await` instead would not: that has to RE-ACQUIRE the
-        // lock, so a FIFO peer queued behind this command takes the desynced
-        // session first.
+        // of the lock, which is the only placement that works. Disarming and
+        // clearing the slot after this function returns would not: that has to
+        // RE-ACQUIRE the lock, so a FIFO peer queued behind this command takes
+        // the desynced session first — and then it is that peer's *replacement*
+        // session sitting in the slot when the lock finally comes back (#629).
         if !is_transport_failure(&outcome) {
             guard.disarm();
         }
@@ -636,34 +638,28 @@ mod tests {
     use crate::error::ImapError;
 
     /// Mirror of [`Connection::with_session`]'s retry loop, decoupled from a
-    /// live session so the loop behavior can be exercised with scripted
-    /// `attempt` / `invalidate` closures. It shares the exact
-    /// [`should_reconnect`] / [`is_transport_failure`] predicates the real loop
-    /// uses, so the retry *policy* is verified against the same code the
-    /// production path runs; only the four direct method calls are stand-ins.
-    /// (The production loop cannot itself be generic over these closures —
-    /// doing so trips an `AsyncFn` lifetime error at the real call sites.)
-    async fn with_reconnect<T, A, I>(
-        idempotency: Idempotency,
-        attempt: A,
-        invalidate: I,
-    ) -> Result<T, ImapError>
+    /// live session so the loop behavior can be exercised with a scripted
+    /// `attempt` closure. It shares the exact [`should_reconnect`] predicate
+    /// the real loop uses, so the retry *policy* is verified against the same
+    /// code the production path runs; only the attempt itself is a stand-in.
+    /// (The production loop cannot itself be generic over the closure — doing
+    /// so trips an `AsyncFn` lifetime error at the real call sites.)
+    ///
+    /// What these tests can decide is how many attempts each
+    /// (idempotency, error) pair earns and which result is returned.
+    /// *Discarding* the dead session is no longer part of this loop — it
+    /// happens inside `attempt`, under the session lock, and is pinned
+    /// end-to-end by `tests/transport_failure_poison.rs` and
+    /// `tests/reconnect_recovery.rs`.
+    async fn with_reconnect<T, A>(idempotency: Idempotency, attempt: A) -> Result<T, ImapError>
     where
         A: AsyncFn() -> Result<T, ImapError>,
-        I: AsyncFn(),
     {
         let first = attempt().await;
-        if is_transport_failure(&first) {
-            invalidate().await;
-        }
         if !should_reconnect(idempotency, &first) {
             return first;
         }
-        let second = attempt().await;
-        if is_transport_failure(&second) {
-            invalidate().await;
-        }
-        second
+        attempt().await
     }
 
     fn protocol_err() -> ImapError {
@@ -711,32 +707,26 @@ mod tests {
     }
 
     /// Drive `with_reconnect` with a scripted `attempt` (indexed by call
-    /// count) and count attempts + invalidations. Returns
-    /// `(result, attempts, invalidations)`.
+    /// count) and count the attempts. Returns `(result, attempts)`.
     async fn run(
         idempotency: Idempotency,
         script: impl Fn(usize) -> Result<u8, ImapError>,
-    ) -> (Result<u8, ImapError>, usize, usize) {
+    ) -> (Result<u8, ImapError>, usize) {
         let attempts = Cell::new(0usize);
-        let invalidations = Cell::new(0usize);
-        let out = with_reconnect(
-            idempotency,
-            async || {
-                let n = attempts.get();
-                attempts.set(n + 1);
-                script(n)
-            },
-            async || invalidations.set(invalidations.get() + 1),
-        )
+        let out = with_reconnect(idempotency, async || {
+            let n = attempts.get();
+            attempts.set(n + 1);
+            script(n)
+        })
         .await;
-        (out, attempts.get(), invalidations.get())
+        (out, attempts.get())
     }
 
     #[tokio::test]
     async fn read_op_recovers_transparently_after_idle_disconnect() {
         // First resumed call hits a stale session (ConnectionLost); the retry
         // against a fresh session succeeds — the caller never sees the error.
-        let (out, attempts, invalidations) = run(Idempotency::ReadOnly, |n| {
+        let (out, attempts) = run(Idempotency::ReadOnly, |n| {
             if n == 0 {
                 Err(ImapError::ConnectionLost)
             } else {
@@ -746,14 +736,13 @@ mod tests {
         .await;
         assert!(matches!(out, Ok(7)), "retry should recover, got {out:?}");
         assert_eq!(attempts, 2, "one retry after the lost connection");
-        assert_eq!(invalidations, 1, "stale session dropped before the retry");
     }
 
     #[tokio::test]
     async fn mutating_op_does_not_auto_retry() {
         // A write that loses its connection must surface the error, not
         // re-send (which could double-apply). Only one attempt is made.
-        let (out, attempts, invalidations) = run(Idempotency::Mutating, |n| {
+        let (out, attempts) = run(Idempotency::Mutating, |n| {
             if n == 0 {
                 Err(ImapError::ConnectionLost)
             } else {
@@ -766,40 +755,35 @@ mod tests {
             "write must propagate ConnectionLost, got {out:?}",
         );
         assert_eq!(attempts, 1, "write must not retry");
-        assert_eq!(invalidations, 1, "dead session still invalidated");
     }
 
     #[tokio::test]
     async fn read_op_retry_is_bounded_to_two_attempts() {
         // A persistently dead server must not storm: at most one retry.
-        let (out, attempts, invalidations) =
-            run(Idempotency::ReadOnly, |_| Err(ImapError::ConnectionLost)).await;
+        let (out, attempts) = run(Idempotency::ReadOnly, |_| Err(ImapError::ConnectionLost)).await;
         assert!(
             matches!(out, Err(ImapError::ConnectionLost)),
             "second failure propagates, got {out:?}",
         );
         assert_eq!(attempts, 2, "bounded to exactly two attempts");
-        assert_eq!(invalidations, 2, "invalidate after each failure");
     }
 
     #[tokio::test]
     async fn read_op_timeout_is_not_retried() {
         // A timeout may mean the command is still running server-side; do not
         // resend even for a read.
-        let (out, attempts, invalidations) = run(Idempotency::ReadOnly, |_| {
+        let (out, attempts) = run(Idempotency::ReadOnly, |_| {
             Err(ImapError::Timeout { op: "fetch" })
         })
         .await;
         assert!(matches!(out, Err(ImapError::Timeout { .. })), "got {out:?}");
         assert_eq!(attempts, 1, "timeout is not retried");
-        assert_eq!(invalidations, 1);
     }
 
     #[tokio::test]
-    async fn healthy_read_op_runs_once_without_invalidating() {
-        let (out, attempts, invalidations) = run(Idempotency::ReadOnly, |_| Ok(7)).await;
+    async fn healthy_read_op_runs_once() {
+        let (out, attempts) = run(Idempotency::ReadOnly, |_| Ok(7)).await;
         assert!(matches!(out, Ok(7)));
         assert_eq!(attempts, 1, "no retry on success");
-        assert_eq!(invalidations, 0, "healthy session is kept");
     }
 }

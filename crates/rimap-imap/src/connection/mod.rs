@@ -102,10 +102,12 @@ pub(super) struct ConnectionInner {
     /// `Some(_)` = live session ready for the next command.
     pub(super) session: Mutex<Option<ImapSession>>,
     /// Server advertised MOVE capability (RFC 6851) after login.
-    /// Reset to `false` on `invalidate()`.
+    /// Reset to `false` by [`Connection::take_poisoned`], which is what
+    /// discards a session; the next login re-reads the real value.
     pub(super) has_move: AtomicBool,
     /// Server advertised UIDPLUS capability (RFC 4315) after login.
-    /// Reset to `false` on `invalidate()`.
+    /// Reset to `false` by [`Connection::take_poisoned`], which is what
+    /// discards a session; the next login re-reads the real value.
     pub(super) has_uidplus: AtomicBool,
     /// Set by [`Connection::poison`] when a command was cut mid-flight.
     /// Consumed by `dispatch::attempt` under the session lock; see `poison`
@@ -320,11 +322,14 @@ impl Connection {
     ///   all — a client cancellation or a runtime shutdown dropping the
     ///   dispatch future (#620).
     ///
-    /// This is a flag rather than a call to [`Self::invalidate`] because
+    /// This is a flag rather than an await on the session lock because
     /// `tokio::sync::Mutex` is FIFO-fair: a peer command that queued on
     /// the lock while the cut command held it sits *ahead* of anything
     /// that starts waiting now, and would take the poisoned session
-    /// first.
+    /// first. Waiting for the lock in order to clear the slot directly
+    /// loses that race twice over — the peer takes the desynced session,
+    /// and what the waiter finally clears is the *replacement* the peer
+    /// reconnected (#629).
     ///
     /// The flag beats that waiter only if it is set **before** the cut
     /// command's guard is dropped, since dropping the guard is what wakes
@@ -356,6 +361,13 @@ impl Connection {
     /// discard a session poisoned before the first one already replaced
     /// it. `Relaxed` for the same reason as [`Self::poison`]: where an
     /// ordering edge is needed at all, the mutex carries it.
+    ///
+    /// This is the only path that empties the slot, so the capability
+    /// atomics are reset here rather than anywhere else: a `has_move` left
+    /// over from a discarded session would let the next command issue
+    /// `MOVE` against a server that never advertised it. The other way out
+    /// of the slot is `dispatch::attempt`'s `insert`, and that follows a
+    /// login, which stores the fresh values.
     pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
         if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
             return false;
@@ -364,14 +376,6 @@ impl Connection {
         self.inner.has_move.store(false, Ordering::Relaxed);
         self.inner.has_uidplus.store(false, Ordering::Relaxed);
         true
-    }
-
-    /// Drop any current session. Called by ops on connection-lost errors.
-    pub(crate) async fn invalidate(&self) {
-        let mut guard = self.inner.session.lock().await;
-        *guard = None;
-        self.inner.has_move.store(false, Ordering::Relaxed);
-        self.inner.has_uidplus.store(false, Ordering::Relaxed);
     }
 
     /// The full connect/handshake/login/CAPABILITY flow. Emits exactly one
