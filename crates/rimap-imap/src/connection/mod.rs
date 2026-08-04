@@ -585,7 +585,7 @@ impl Connection {
         // closure, so a connect that completed and then lost its emit to a
         // shutdown records nothing — the guard is disarmed by then. Closing it
         // would mean making this emit synchronous too, which is a wider change
-        // than #623; tracked separately. Disarming *after* would not fix it
+        // than #623; tracked in #643. Disarming *after* would not fix it
         // either, only trade a rare gap for a rare duplicate at the same await.
         emit_guard.disarm();
 

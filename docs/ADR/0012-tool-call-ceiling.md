@@ -301,6 +301,7 @@ an MCP client's own request timeout fires long before the server gives up.
     path keeps its own residual shutdown window for the same reason — its emit
     still routes through `spawn_blocking` — and closing that would mean making
     every auth emit synchronous, which is a wider change than #623 warrants.
+    Tracked in [#643](https://github.com/randomparity/rusty-imap-mcp/issues/643).
 
   - Facts the connect learns partway through — the observed TLS fingerprint,
     the credential source — are published to cells (`ConnectProgress` and
