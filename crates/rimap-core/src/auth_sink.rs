@@ -81,9 +81,18 @@ impl AuthSinkError {
 ///
 /// The single method is sync; async callers must invoke it inside
 /// `tokio::task::spawn_blocking` if the implementation performs
-/// blocking I/O (the production `AuditWriter` impl does).
+/// blocking I/O (the production `AuditWriter` impl does). One caller
+/// deliberately does not — `rimap-imap`'s `AuthEmitGuard` records a
+/// connect that was cut, from a `Drop`, which cannot await at all.
+/// That caller is why implementations must not panic (below).
 pub trait AuthEventSink: Send + Sync + std::fmt::Debug {
     /// Record `event`. Returns the implementation's error on failure.
+    ///
+    /// **Implementations must not panic.** Report every failure —
+    /// including a poisoned lock — as an [`AuthSinkError`]; the
+    /// production `AuditWriter` impl does. One caller invokes this
+    /// synchronously from a `Drop`, and a panic escaping a `Drop` that
+    /// runs during an unwind aborts the process.
     ///
     /// # Errors
     /// Returns [`AuthSinkError`] if the underlying sink rejects the

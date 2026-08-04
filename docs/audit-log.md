@@ -55,8 +55,9 @@ recently flushed.
 
 ### `auth`
 
-IMAP authentication attempt. Exactly one record per attempt, whether or not
-the attempt ran to a conclusion.
+IMAP authentication attempt. One record per attempt that reached the network
+stage, on every termination path — including attempts cut off before they
+concluded — subject to `audit.fail_open` (see below).
 
 | Field | Description |
 |---|---|

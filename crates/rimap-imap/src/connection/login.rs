@@ -208,28 +208,37 @@ impl Connection {
     /// deliberately does not, and the exception is narrow enough to state
     /// exactly:
     ///
-    /// * **`spawn_blocking` loses the record on the path this guard exists to
-    ///   cover.** Tokio's blocking pool refuses new work once the runtime
-    ///   begins shutting down: the returned handle never resolves and the
-    ///   closure is dropped unrun. `rimap-server` shuts down with
-    ///   `Runtime::shutdown_background`, which does not wait for blocking
-    ///   tasks, and it writes `process_end` *before* that. So a runtime
-    ///   shutdown — one of the three cuts this guard covers, alongside the
-    ///   tool-call ceiling and a client cancellation — would silently drop the
-    ///   very record the guard was added to stop losing.
+    /// * **`spawn_blocking` is strictly worse on the shutdown cut.** Tokio's
+    ///   blocking pool refuses new work once the runtime begins shutting down —
+    ///   the returned handle never resolves, and even an already-queued closure
+    ///   is discarded rather than run. `rimap-server` shuts down with
+    ///   `Runtime::shutdown_background`, which waits for nothing, and writes
+    ///   `process_end` before it. Writing inline at least gives the record a
+    ///   chance; deferring it guarantees the loss.
     /// * **It also puts a panic inside a `Drop`.** `spawn_blocking` panics
     ///   when the OS refuses a thread, and a panic escaping a `Drop` that runs
     ///   during an unwind aborts the process.
-    /// * **The cost is bounded and rare.** One JSONL line plus an fsync, on a
-    ///   path that only runs when a connect was cut — which at the shipped
-    ///   ceiling means the connect was already pathological. It does stall the
-    ///   dropping worker, and the caller (`dispatch::attempt`) still holds the
-    ///   account's session lock, so a peer queued on that account waits out the
-    ///   sync. Making a queued peer wait for one fsync is the better half of
-    ///   the trade against a hole in an append-only security log.
+    /// * **The cost is rare, and bounded by the filesystem.** Usually one
+    ///   JSONL line plus an fsync; when the file is due to rotate, also a
+    ///   rename, an open, and — with retention configured — a `read_dir` and a
+    ///   `remove_file` per pruned file, all under the audit mutex. It runs only
+    ///   when a connect was cut, which at the shipped ceiling means the connect
+    ///   was already pathological. It stalls the dropping worker, and
+    ///   `dispatch::attempt` still holds the account's session lock, so a peer
+    ///   queued on that account waits out the write — long enough, on a
+    ///   pathological `audit.path` (a stalled network mount, say), to spend
+    ///   that peer's own `command_timeout`. Against a hole in an append-only
+    ///   security log, that is still the better half of the trade.
     ///
-    /// There is no lock-order hazard: the audit mutex is a leaf, and nothing
-    /// that holds it ever reaches for a session lock.
+    /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
+    /// file I/O, nothing inside its critical section calls back into this
+    /// crate, and the advisory file lock is taken once at open rather than per
+    /// write, so it cannot block on another process either.
+    ///
+    /// This makes the guard **deterministic** for the two cuts that have a
+    /// caller — the tool-call ceiling and a client cancellation, both pinned by
+    /// tests — and best-effort for a runtime shutdown, where the process may
+    /// exit before the dropping worker reaches the write.
     ///
     /// ## Failure handling
     ///

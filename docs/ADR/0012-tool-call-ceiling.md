@@ -280,24 +280,31 @@ an MCP client's own request timeout fires long before the server gives up.
     `ERR_TIMEOUT` rather than the guard's placeholder.
 
   - `Drop` cannot await, so the guard writes the record **synchronously, on the
-    dropping thread**, and is the one emitter in the codebase that does not
-    route through `spawn_blocking`. Deferring it was tried and rejected: tokio's
-    blocking pool refuses work once the runtime begins shutting down, dropping
-    the closure unrun, and `rimap-server` shuts down with
-    `Runtime::shutdown_background` — so a runtime shutdown, one of the three
-    cuts this guard covers, would silently lose the record it was added to stop
-    losing. `spawn_blocking` also panics when the OS refuses a thread, and a
-    panic escaping a `Drop` that runs during an unwind aborts the process. The
-    cost of writing inline is one JSONL line plus an fsync, on a path that only
-    runs when a connect was cut, with the account's session lock still held —
-    so a peer queued on that account waits out the sync. That is the better half
-    of the trade against a hole in an append-only security log. Writing inline
-    also puts the record in its own tool call's `seq` window, ahead of the
+    dropping thread** — the only emitter that writes synchronously from an
+    async context. Deferring it was tried and rejected: tokio's blocking pool
+    refuses work once the runtime begins shutting down and discards even a
+    queued closure, and `rimap-server` shuts down with
+    `Runtime::shutdown_background`, which waits for nothing — so on the
+    shutdown cut a deferred write guarantees the loss, where an inline one at
+    least has a chance. `spawn_blocking` also panics when the OS refuses a
+    thread, and a panic escaping a `Drop` that runs during an unwind aborts the
+    process. The cost is a JSONL line, an fsync, and — when the file is due to
+    rotate — the rotation, all with the account's session lock still held, so a
+    peer queued on that account waits it out. That is the better half of the
+    trade against a hole in an append-only security log. Writing inline also
+    puts the record in its own tool call's `seq` window, ahead of the
     `tool_end`, which a deferred write could not guarantee.
 
+  - The guard is **deterministic for the ceiling and for a client
+    cancellation**, and best-effort on a runtime shutdown, where the process
+    may exit before the dropping worker reaches the write. The completed-connect
+    path keeps its own residual shutdown window for the same reason — its emit
+    still routes through `spawn_blocking` — and closing that would mean making
+    every auth emit synchronous, which is a wider change than #623 warrants.
+
   - Facts the connect learns partway through — the observed TLS fingerprint,
-    the credential source — are published to cells (`TlsConfigBundle::
-    last_observed`, `ConnectProgress`) as they become known rather than
+    the credential source — are published to cells (`ConnectProgress` and
+    `TlsConfigBundle::last_observed`) as they become known rather than
     returned up the stack, because a cut connect never returns. One reader,
     `Connection::auth_context`, builds both the guard's record and
     `connect_inner`'s, so the two cannot disagree about the attempt they

@@ -174,6 +174,13 @@ pub(super) fn rimap_error_to_breaker_reason(
 /// `impl FnOnce()` rules out an `.await`, but not a `block_on` or a
 /// `std::sync::Mutex` acquisition — either would self-deadlock against
 /// the guard the cut dispatch is holding and pin a worker thread.
+///
+/// Returning from here drops the pinned `dispatch`, which does take a
+/// `std::sync::Mutex` and fsync on this thread: `AuthEmitGuard` records a cut
+/// connect from its `Drop` (#623). That is not the hazard the paragraph above
+/// forbids — the audit mutex is a leaf, so there is nothing to self-deadlock
+/// against — but it does mean the worker is briefly blocked on disk after the
+/// callback returns.
 pub(super) async fn with_tool_call_ceiling<T, F>(
     ceiling: std::time::Duration,
     dispatch: F,

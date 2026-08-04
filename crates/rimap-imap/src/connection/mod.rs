@@ -9,7 +9,7 @@
 //!   `std::sync::Mutex` (the production `rimap-audit::AuditWriter`
 //!   does). That lock is NEVER held across an `.await`. Every call
 //!   from an async context goes through `tokio::task::spawn_blocking`;
-//!   the one call from a synchronous context — [`AuthEmitGuard`]'s
+//!   the one call from a synchronous context — `AuthEmitGuard`'s
 //!   `Drop`, which cannot await at all — takes and releases the lock
 //!   inline. Both shapes satisfy the rule; only the second blocks the
 //!   thread it runs on, and `Connection::emit_auth_blocking` argues why
@@ -265,6 +265,10 @@ impl ConnectProgress {
 /// client cancellation, and a runtime shutdown. All three drop the dispatch
 /// future, and a `Drop` impl is the only thing that still runs.
 ///
+/// Deterministic for the first two. On a runtime shutdown it is best-effort:
+/// `Runtime::shutdown_background` waits for nothing, so the process can exit
+/// before the worker dropping this future reaches the write.
+///
 /// Armed for the whole connect rather than from the first socket write, so a
 /// cut parked in `TcpStream::connect` is recorded too. That is deliberate: the
 /// attempt is what the log is about, and an operator reading a gap cannot know
@@ -293,10 +297,10 @@ impl ConnectProgress {
 /// carry no fingerprint and no credential source, which is the same shape a
 /// pre-resolve failure already produces.
 ///
-/// The write is synchronous, on the dropping thread. `Connection::
-/// emit_auth_blocking` states why that is the right trade here and nowhere
-/// else; the short version is that deferring it to the blocking pool loses the
-/// record during a runtime shutdown, which is one of the three cuts above.
+/// The write is synchronous, on the dropping thread. `emit_auth_blocking`
+/// states why that is the right trade here and nowhere else; the short version
+/// is that deferring it to the blocking pool guarantees the loss during a
+/// runtime shutdown, where writing inline at least has a chance.
 struct AuthEmitGuard<'a> {
     conn: &'a Connection,
     bundle: &'a TlsConfigBundle,
@@ -540,8 +544,12 @@ impl Connection {
     /// The full connect/handshake/login/CAPABILITY flow. Emits exactly one
     /// `Auth` audit record on every termination path from the TLS config
     /// onwards, including the paths on which this function never returns at
-    /// all. The one earlier exit — `build_tls_config` failing, which needs no
-    /// network and no server — predates the attempt and records nothing.
+    /// all.
+    ///
+    /// Two carve-outs, both narrow and both stated where they arise:
+    /// `build_tls_config` failing exits earlier than the attempt itself and
+    /// records nothing, and a runtime shutdown can discard the completed
+    /// path's queued write — see the comment on the disarm below.
     ///
     /// A caller *may* wrap this in a deadline shorter than `connect_timeout` —
     /// the per-tool-call ceiling (#594, ADR-0012) does. Cutting the future
@@ -568,10 +576,17 @@ impl Connection {
 
         // Disarm BEFORE the emit, not after. `emit_auth` dispatches the write
         // to `spawn_blocking` on its first poll, and tokio does not cancel a
-        // blocking task when its `JoinHandle` is dropped, so once either arm
-        // below is reached the record is already on its way. A cut at that
-        // `.await` therefore still lands exactly one record; disarming
-        // afterwards would let the guard add a second.
+        // blocking task when its `JoinHandle` is dropped, so a cut at that
+        // `.await` still lands the record. Disarming afterwards would let the
+        // guard add a second one.
+        //
+        // One exception, and it is a gap rather than a duplicate: a runtime
+        // that starts shutting down discards even an already-queued blocking
+        // closure, so a connect that completed and then lost its emit to a
+        // shutdown records nothing — the guard is disarmed by then. Closing it
+        // would mean making this emit synchronous too, which is a wider change
+        // than #623; tracked separately. Disarming *after* would not fix it
+        // either, only trade a rare gap for a rare duplicate at the same await.
         emit_guard.disarm();
 
         match &outcome {
@@ -631,7 +646,9 @@ mod tests {
     impl rimap_core::credential::CredentialResolver for UnusedResolver {
         #[expect(
             clippy::panic_in_result_fn,
-            reason = "accessor test builds a Connection but never opens a session"
+            reason = "no test in this module reaches credential resolution: the \
+                      accessor tests never open a session, and the connect tests \
+                      are cut or refused before login"
         )]
         fn resolve(
             &self,
@@ -645,7 +662,7 @@ mod tests {
             ),
             rimap_core::credential::CredentialResolverError,
         > {
-            panic!("credential resolver must not be invoked by an accessor test");
+            panic!("credential resolver must not be invoked by these tests");
         }
     }
 
@@ -742,6 +759,11 @@ mod tests {
     /// thread, so `timeout(..).await` returning means the record is already
     /// in the sink. A test that had to poll for it would also pass with the
     /// count assertion racing a second record it never saw.
+    ///
+    /// The 150ms budget has to stay well clear of `build_tls_config`, which
+    /// runs *before* the guard is armed and builds a ~150-anchor root store on
+    /// every connect. That costs single-digit milliseconds today; a cut landing
+    /// inside it would record nothing and fail here.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connect_cut_by_a_caller_deadline_still_emits_one_auth_record() {
         use rimap_core::auth_event::AuthResult;
