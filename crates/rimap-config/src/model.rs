@@ -444,21 +444,28 @@ pub struct RawAccountConfig {
     /// [`AccountLimitsOverrides`].
     #[serde(default)]
     pub limits: Option<AccountLimitsOverrides>,
-    /// Per-account credential policy; `None` inherits from `[defaults.credentials]`.
+    /// Per-account `[accounts.credentials]` overrides. Every key the account
+    /// omits inherits from `[defaults.credentials]`; see
+    /// [`AccountCredentialsOverrides`].
     #[serde(default)]
-    pub credentials: Option<CredentialsConfig>,
+    pub credentials: Option<AccountCredentialsOverrides>,
 }
 
 // ---------------------------------------------------------------------------
 // Per-account overrides (#624, ADR-0014)
 //
-// These mirror `SecurityConfig` / `LimitsConfig` / `LookalikeConfig` with
-// every field `Option<T>` and no `#[serde(default = "...")]` value function,
-// so `None` means "the account did not write this key" rather than "the
-// account wrote the built-in default". Deserializing an account block into
-// the concrete struct erases that distinction — serde has already filled the
-// omitted fields by the time composition runs — which is why the merge needs
-// its own type rather than a smarter `unwrap_or_else`.
+// These mirror `SecurityConfig` / `LimitsConfig` / `LookalikeConfig` /
+// `CredentialsConfig` with every field `Option<T>` and no
+// `#[serde(default = "...")]` value function, so `None` means "the account did
+// not write this key" rather than "the account wrote the built-in default".
+// Deserializing an account block into the concrete struct erases that
+// distinction — serde has already filled the omitted fields by the time
+// composition runs — which is why the merge needs its own type rather than a
+// smarter `unwrap_or_else`.
+//
+// Each `merge_onto` destructures its concrete base exhaustively. Adding a
+// field to one of the concrete configs without adding it here is then a
+// compile error rather than another silently-dropped default.
 // ---------------------------------------------------------------------------
 
 /// `[accounts.limits]` — the subset of `[limits]` one account overrides.
@@ -468,37 +475,26 @@ pub struct RawAccountConfig {
 #[serde(deny_unknown_fields)]
 pub struct AccountLimitsOverrides {
     /// Overrides [`LimitsConfig::max_search_results`].
-    #[serde(default)]
     pub max_search_results: Option<u32>,
     /// Overrides [`LimitsConfig::max_search_results_cap`].
-    #[serde(default)]
     pub max_search_results_cap: Option<u32>,
     /// Overrides [`LimitsConfig::max_fetch_body_bytes`].
-    #[serde(default)]
     pub max_fetch_body_bytes: Option<u64>,
     /// Overrides [`LimitsConfig::max_attachment_bytes`].
-    #[serde(default)]
     pub max_attachment_bytes: Option<u64>,
     /// Overrides [`LimitsConfig::max_append_bytes`].
-    #[serde(default)]
     pub max_append_bytes: Option<u64>,
     /// Overrides [`LimitsConfig::commands_per_second`].
-    #[serde(default)]
     pub commands_per_second: Option<u32>,
     /// Overrides [`LimitsConfig::drafts_per_minute`].
-    #[serde(default)]
     pub drafts_per_minute: Option<u32>,
     /// Overrides [`LimitsConfig::sends_per_minute`].
-    #[serde(default)]
     pub sends_per_minute: Option<u32>,
     /// Overrides [`LimitsConfig::circuit_breaker_error_threshold`].
-    #[serde(default)]
     pub circuit_breaker_error_threshold: Option<u32>,
     /// Overrides [`LimitsConfig::circuit_breaker_window_seconds`].
-    #[serde(default)]
     pub circuit_breaker_window_seconds: Option<u32>,
     /// Overrides [`LimitsConfig::tool_call_timeout_seconds`].
-    #[serde(default)]
     pub tool_call_timeout_seconds: Option<u32>,
 }
 
@@ -506,34 +502,48 @@ impl AccountLimitsOverrides {
     /// Apply these overrides to `base`, returning the account's effective
     /// limits. Every field the account left unset keeps its `base` value.
     #[must_use]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "every `merge_onto` consumes its base and yields the merged \
+                  config; `LimitsConfig`'s fields all happen to be `Copy`, so \
+                  only this one could take a reference, and doing so would \
+                  split the shared signature for no behavioural gain"
+    )]
     pub fn merge_onto(self, base: LimitsConfig) -> LimitsConfig {
-        let mut merged = base;
-        merged.max_search_results = self.max_search_results.unwrap_or(merged.max_search_results);
-        merged.max_search_results_cap = self
-            .max_search_results_cap
-            .unwrap_or(merged.max_search_results_cap);
-        merged.max_fetch_body_bytes = self
-            .max_fetch_body_bytes
-            .unwrap_or(merged.max_fetch_body_bytes);
-        merged.max_attachment_bytes = self
-            .max_attachment_bytes
-            .unwrap_or(merged.max_attachment_bytes);
-        merged.max_append_bytes = self.max_append_bytes.unwrap_or(merged.max_append_bytes);
-        merged.commands_per_second = self
-            .commands_per_second
-            .unwrap_or(merged.commands_per_second);
-        merged.drafts_per_minute = self.drafts_per_minute.unwrap_or(merged.drafts_per_minute);
-        merged.sends_per_minute = self.sends_per_minute.unwrap_or(merged.sends_per_minute);
-        merged.circuit_breaker_error_threshold = self
-            .circuit_breaker_error_threshold
-            .unwrap_or(merged.circuit_breaker_error_threshold);
-        merged.circuit_breaker_window_seconds = self
-            .circuit_breaker_window_seconds
-            .unwrap_or(merged.circuit_breaker_window_seconds);
-        merged.tool_call_timeout_seconds = self
-            .tool_call_timeout_seconds
-            .unwrap_or(merged.tool_call_timeout_seconds);
-        merged
+        let LimitsConfig {
+            max_search_results,
+            max_search_results_cap,
+            max_fetch_body_bytes,
+            max_attachment_bytes,
+            max_append_bytes,
+            commands_per_second,
+            drafts_per_minute,
+            sends_per_minute,
+            circuit_breaker_error_threshold,
+            circuit_breaker_window_seconds,
+            tool_call_timeout_seconds,
+        } = base;
+        LimitsConfig {
+            max_search_results: self.max_search_results.unwrap_or(max_search_results),
+            max_search_results_cap: self
+                .max_search_results_cap
+                .unwrap_or(max_search_results_cap),
+            max_fetch_body_bytes: self.max_fetch_body_bytes.unwrap_or(max_fetch_body_bytes),
+            max_attachment_bytes: self.max_attachment_bytes.unwrap_or(max_attachment_bytes),
+            max_append_bytes: self.max_append_bytes.unwrap_or(max_append_bytes),
+            commands_per_second: self.commands_per_second.unwrap_or(commands_per_second),
+            drafts_per_minute: self.drafts_per_minute.unwrap_or(drafts_per_minute),
+            sends_per_minute: self.sends_per_minute.unwrap_or(sends_per_minute),
+            circuit_breaker_error_threshold: self
+                .circuit_breaker_error_threshold
+                .unwrap_or(circuit_breaker_error_threshold),
+            circuit_breaker_window_seconds: self
+                .circuit_breaker_window_seconds
+                .unwrap_or(circuit_breaker_window_seconds),
+            tool_call_timeout_seconds: self
+                .tool_call_timeout_seconds
+                .unwrap_or(tool_call_timeout_seconds),
+        }
     }
 }
 
@@ -545,24 +555,19 @@ impl AccountLimitsOverrides {
 #[serde(deny_unknown_fields)]
 pub struct AccountSecurityOverrides {
     /// Overrides [`SecurityConfig::posture`].
-    #[serde(default)]
     pub posture: Option<Posture>,
     /// Per-tool overrides merged **per key** onto `[defaults.security.tools]`:
     /// an entry here replaces the default's verdict for that tool and leaves
     /// every other inherited entry standing. An account cannot erase an
     /// inherited entry, only restate its verdict.
-    #[serde(default)]
     pub tools: Option<BTreeMap<String, Verdict>>,
     /// Overrides [`SecurityConfig::protected_folders`]. Replaces the
     /// inherited list outright rather than unioning with it.
-    #[serde(default)]
     pub protected_folders: Option<Vec<String>>,
     /// Overrides [`SecurityConfig::expunge_folders`]. Replaces the inherited
     /// list outright rather than unioning with it.
-    #[serde(default)]
     pub expunge_folders: Option<Vec<String>>,
     /// Overrides [`SecurityConfig::lookalike`], itself merged per key.
-    #[serde(default)]
     pub lookalike: Option<AccountLookalikeOverrides>,
 }
 
@@ -572,17 +577,25 @@ impl AccountSecurityOverrides {
     /// value; `tools` and `lookalike` merge per key.
     #[must_use]
     pub fn merge_onto(self, base: SecurityConfig) -> SecurityConfig {
-        let mut merged = base;
-        merged.posture = self.posture.unwrap_or(merged.posture);
-        if let Some(tools) = self.tools {
-            merged.tools.extend(tools);
+        let SecurityConfig {
+            posture,
+            mut tools,
+            protected_folders,
+            expunge_folders,
+            lookalike,
+        } = base;
+        if let Some(overriding) = self.tools {
+            tools.extend(overriding);
         }
-        merged.protected_folders = self.protected_folders.unwrap_or(merged.protected_folders);
-        merged.expunge_folders = self.expunge_folders.unwrap_or(merged.expunge_folders);
-        if let Some(lookalike) = self.lookalike {
-            merged.lookalike = lookalike.merge_onto(merged.lookalike);
+        SecurityConfig {
+            posture: self.posture.unwrap_or(posture),
+            tools,
+            protected_folders: self.protected_folders.unwrap_or(protected_folders),
+            expunge_folders: self.expunge_folders.unwrap_or(expunge_folders),
+            lookalike: self
+                .lookalike
+                .map_or(lookalike.clone(), |o| o.merge_onto(lookalike)),
         }
-        merged
     }
 }
 
@@ -592,14 +605,11 @@ impl AccountSecurityOverrides {
 #[serde(deny_unknown_fields)]
 pub struct AccountLookalikeOverrides {
     /// Overrides [`LookalikeConfig::enabled`].
-    #[serde(default)]
     pub enabled: Option<bool>,
     /// Overrides [`LookalikeConfig::known_domains`]. Replaces the inherited
     /// list outright rather than unioning with it.
-    #[serde(default)]
     pub known_domains: Option<Vec<String>>,
     /// Overrides [`LookalikeConfig::warn_on_any_non_ascii_domain`].
-    #[serde(default)]
     pub warn_on_any_non_ascii_domain: Option<bool>,
 }
 
@@ -609,13 +619,46 @@ impl AccountLookalikeOverrides {
     /// `base` value.
     #[must_use]
     pub fn merge_onto(self, base: LookalikeConfig) -> LookalikeConfig {
-        let mut merged = base;
-        merged.enabled = self.enabled.unwrap_or(merged.enabled);
-        merged.known_domains = self.known_domains.unwrap_or(merged.known_domains);
-        merged.warn_on_any_non_ascii_domain = self
-            .warn_on_any_non_ascii_domain
-            .unwrap_or(merged.warn_on_any_non_ascii_domain);
-        merged
+        let LookalikeConfig {
+            enabled,
+            known_domains,
+            warn_on_any_non_ascii_domain,
+        } = base;
+        LookalikeConfig {
+            enabled: self.enabled.unwrap_or(enabled),
+            known_domains: self.known_domains.unwrap_or(known_domains),
+            warn_on_any_non_ascii_domain: self
+                .warn_on_any_non_ascii_domain
+                .unwrap_or(warn_on_any_non_ascii_domain),
+        }
+    }
+}
+
+/// `[accounts.credentials]` — the subset of `[credentials]` one account
+/// overrides.
+///
+/// `CredentialsConfig::fallback` carries `#[serde(default)]`, so an empty
+/// `[accounts.credentials]` table deserializes into a fully-populated
+/// `CredentialsConfig` — the same erasure #624 describes, and in the more
+/// dangerous direction: it would silently restore the shared env-var
+/// fallback that `keyring-only` exists to prevent (#78).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCredentialsOverrides {
+    /// Overrides [`CredentialsConfig::fallback`].
+    pub fallback: Option<FallbackMode>,
+}
+
+impl AccountCredentialsOverrides {
+    /// Apply these overrides to `base`, returning the account's effective
+    /// credential policy. Every field the account left unset keeps its
+    /// `base` value.
+    #[must_use]
+    pub fn merge_onto(self, base: CredentialsConfig) -> CredentialsConfig {
+        let CredentialsConfig { fallback } = base;
+        CredentialsConfig {
+            fallback: self.fallback.unwrap_or(fallback),
+        }
     }
 }
 
@@ -843,6 +886,26 @@ mod tests {
         let value = toml::Value::try_from(&populated).unwrap();
         let overrides: AccountLookalikeOverrides = value.try_into().unwrap();
         assert_eq!(overrides.merge_onto(LookalikeConfig::default()), populated);
+    }
+
+    #[test]
+    fn credentials_overrides_cover_every_credentials_field() {
+        let populated = CredentialsConfig {
+            fallback: FallbackMode::KeyringOnly,
+        };
+        let value = toml::Value::try_from(populated).unwrap();
+        let overrides: AccountCredentialsOverrides = value.try_into().unwrap();
+        let merged = overrides.merge_onto(CredentialsConfig::default());
+        assert_eq!(merged.fallback, FallbackMode::KeyringOnly);
+    }
+
+    #[test]
+    fn empty_credentials_overrides_keep_the_base_fallback() {
+        let base = CredentialsConfig {
+            fallback: FallbackMode::KeyringOnly,
+        };
+        let merged = AccountCredentialsOverrides::default().merge_onto(base);
+        assert_eq!(merged.fallback, FallbackMode::KeyringOnly);
     }
 
     #[test]

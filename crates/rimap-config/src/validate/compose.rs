@@ -94,7 +94,8 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
         // Per-field merge, not wholesale replacement: an account that writes
         // one key of `[accounts.limits]` inherits every other key from
         // `[defaults.limits]` rather than reverting it to the built-in
-        // default (#624, ADR-0014). Same for `[accounts.security]`.
+        // default (#624, ADR-0014). Same for `[accounts.security]` and
+        // `[accounts.credentials]`.
         let security = raw.security.map_or_else(
             || config.defaults.security.clone(),
             |overrides| overrides.merge_onto(config.defaults.security.clone()),
@@ -103,9 +104,10 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
             || config.defaults.limits.clone(),
             |overrides| overrides.merge_onto(config.defaults.limits.clone()),
         );
-        let fallback_mode = raw
-            .credentials
-            .map_or(config.defaults.credentials.fallback, |c| c.fallback);
+        let credentials = raw.credentials.map_or(config.defaults.credentials, |o| {
+            o.merge_onto(config.defaults.credentials)
+        });
+        let fallback_mode = credentials.fallback;
 
         let validated = validate_account(ValidateAccountInputs {
             id: id.clone(),
@@ -240,8 +242,8 @@ mod tests {
 
     use crate::error::ConfigError;
     use crate::model::{
-        AttachmentsConfig, AuditConfig, Config, CredentialsConfig, FallbackMode, ImapConfig,
-        ImapEncryption, LimitsConfig, SecurityConfig, SmtpEncryption, Verdict,
+        AttachmentsConfig, AuditConfig, Config, FallbackMode, ImapConfig, ImapEncryption,
+        LimitsConfig, SecurityConfig, SmtpEncryption, Verdict,
     };
     use crate::validate::{ValidatedAccountConfig, validate_legacy_as_multi};
     use rimap_core::account::AccountId;
@@ -791,8 +793,8 @@ path = "/tmp/audit.jsonl"
     // -----------------------------------------------------------------------
 
     use crate::model::{
-        AccountLimitsOverrides, AccountSecurityOverrides, DefaultsConfig, MultiAccountConfig,
-        RawAccountConfig,
+        AccountCredentialsOverrides, AccountLimitsOverrides, AccountSecurityOverrides,
+        DefaultsConfig, MultiAccountConfig, RawAccountConfig,
     };
     use crate::validate::validate_multi;
     #[cfg(feature = "test-support")]
@@ -979,8 +981,8 @@ allowed_base_dir = "{}"
     fn multi_account_override_beats_defaults_fallback() {
         let dir = TempDir::new().unwrap();
         let mut acct = raw_account("work");
-        acct.credentials = Some(CredentialsConfig {
-            fallback: FallbackMode::KeyringOnly,
+        acct.credentials = Some(AccountCredentialsOverrides {
+            fallback: Some(FallbackMode::KeyringOnly),
         });
         let mut cfg = base_multi_config(dir.path(), vec![acct]);
         cfg.defaults.credentials.fallback = FallbackMode::KeyringThenEnv;
@@ -1155,8 +1157,8 @@ expunge_folders = ["Junk"]
     }
 
     #[test]
-    fn account_limits_setting_every_field_wins_outright() {
-        // The all-fields-set case still overrides — the merge must not
+    fn account_limits_override_beats_defaults_for_each_written_key() {
+        // The all-keys-written case still overrides — the merge must not
         // resurrect a default the account explicitly restated.
         let dir = TempDir::new().unwrap();
         let cfg = multi_toml(
@@ -1297,7 +1299,7 @@ port = 993
 username = "alice@work.test"
 
 [accounts.limits]
-commands_per_secnod = 7
+no_such_key = 7
 
 [audit]
 path = "{d}/audit.jsonl"
@@ -1307,8 +1309,8 @@ allowed_base_dir = "{d}"
         );
         let err = toml::from_str::<MultiAccountConfig>(&doc).unwrap_err();
         assert!(
-            err.to_string().contains("commands_per_secnod"),
-            "diagnostic should name the misspelled key: {err}",
+            err.to_string().contains("no_such_key"),
+            "diagnostic should name the offending key: {err}",
         );
     }
 
@@ -1326,7 +1328,7 @@ port = 993
 username = "alice@work.test"
 
 [accounts.security]
-postrue = "readonly"
+no_such_key = "readonly"
 
 [audit]
 path = "{d}/audit.jsonl"
@@ -1336,8 +1338,8 @@ allowed_base_dir = "{d}"
         );
         let err = toml::from_str::<MultiAccountConfig>(&doc).unwrap_err();
         assert!(
-            err.to_string().contains("postrue"),
-            "diagnostic should name the misspelled key: {err}",
+            err.to_string().contains("no_such_key"),
+            "diagnostic should name the offending key: {err}",
         );
     }
 
@@ -1365,6 +1367,186 @@ max_search_results = 50
             panic!("expected InvalidLimit, got {err:?}");
         };
         assert_eq!(*field, "limits.tool_call_timeout_seconds");
+    }
+
+    #[test]
+    fn empty_account_credentials_table_inherits_defaults_fallback() {
+        // Same defect as #624 in the third override block, and the dangerous
+        // direction: `CredentialsConfig::fallback` carries `#[serde(default)]`,
+        // so an empty `[accounts.credentials]` table used to deserialize to
+        // `Some(keyring-then-env)` and silently re-enable the shared env-var
+        // fallback that `keyring-only` exists to prevent (#78).
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.credentials]
+fallback = "keyring-only"
+"#,
+            "[accounts.credentials]",
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.fallback_mode, FallbackMode::KeyringOnly);
+    }
+
+    #[test]
+    fn account_credentials_override_still_beats_defaults() {
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.credentials]
+fallback = "keyring-only"
+"#,
+            r#"
+[accounts.credentials]
+fallback = "keyring-then-env"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.fallback_mode, FallbackMode::KeyringThenEnv);
+    }
+
+    #[test]
+    fn account_security_without_tools_key_inherits_default_tool_verdicts() {
+        // The account writes `[accounts.security]` for an unrelated reason.
+        // Every `[defaults.security.tools]` verdict must survive — including
+        // the denies, which are the ones with safety weight.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security]
+posture = "draft-safe"
+
+[defaults.security.tools]
+mark_read = "deny"
+search = "allow"
+"#,
+            r#"
+[accounts.security]
+posture = "readonly"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.security.posture, Posture::Readonly);
+        assert_eq!(
+            acct.tool_overrides.get(&ToolName::MarkRead),
+            Some(&Verdict::Deny),
+        );
+        assert_eq!(
+            acct.tool_overrides.get(&ToolName::Search),
+            Some(&Verdict::Allow),
+        );
+    }
+
+    #[test]
+    fn account_security_without_lookalike_key_inherits_default_lookalike() {
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security]
+posture = "draft-safe"
+
+[defaults.security.lookalike]
+enabled = false
+known_domains = ["work.test"]
+warn_on_any_non_ascii_domain = true
+"#,
+            r#"
+[accounts.security]
+posture = "readonly"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert!(!acct.security.lookalike.enabled);
+        assert_eq!(
+            acct.security.lookalike.known_domains,
+            vec!["work.test".to_string()],
+        );
+        assert!(acct.security.lookalike.warn_on_any_non_ascii_domain);
+    }
+
+    #[test]
+    fn inherited_send_email_allow_still_requires_account_smtp() {
+        // Inheriting an `allow` verdict pulls the account into the checks that
+        // verdict triggers: `send_email` needs `[accounts.smtp]`, and the
+        // account here has none. Failing loud at startup is the point.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security.tools]
+send_email = "allow"
+"#,
+            r#"
+[accounts.security]
+posture = "readonly"
+"#,
+        );
+        let err = validate_multi(cfg).unwrap_err();
+        let ConfigError::SmtpRequiredByOverride { .. } = &err else {
+            panic!("expected SmtpRequiredByOverride, got {err:?}");
+        };
+    }
+
+    #[test]
+    fn unknown_key_in_account_lookalike_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let doc = format!(
+            r#"
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "imap.work.test"
+port = 993
+username = "alice@work.test"
+
+[accounts.security.lookalike]
+no_such_key = false
+
+[audit]
+path = "{d}/audit.jsonl"
+allowed_base_dir = "{d}"
+"#,
+            d = dir.path().display(),
+        );
+        let err = toml::from_str::<MultiAccountConfig>(&doc).unwrap_err();
+        assert!(
+            err.to_string().contains("no_such_key"),
+            "diagnostic should name the offending key: {err}",
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_account_credentials_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let doc = format!(
+            r#"
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "imap.work.test"
+port = 993
+username = "alice@work.test"
+
+[accounts.credentials]
+no_such_key = "keyring-only"
+
+[audit]
+path = "{d}/audit.jsonl"
+allowed_base_dir = "{d}"
+"#,
+            d = dir.path().display(),
+        );
+        let err = toml::from_str::<MultiAccountConfig>(&doc).unwrap_err();
+        assert!(
+            err.to_string().contains("no_such_key"),
+            "diagnostic should name the offending key: {err}",
+        );
     }
 
     #[test]

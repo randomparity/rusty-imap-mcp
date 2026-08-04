@@ -83,21 +83,55 @@ any account that wrote the enclosing table.
   against each other for overlap — a silent union could manufacture the
   conflict that check exists to reject.
 
-- **`credentials` keeps its existing shape.** `CredentialsConfig` has one
-  field, so `Option<CredentialsConfig>` and a one-field partial are the same
-  thing; adding a mirror struct for it would be duplication with no behaviour
-  attached. Growing a second field is what would make it a defect, and the
-  merge tests here are the place that would catch it.
+- **`credentials` gets a mirror struct too**, despite having one field.
+  `CredentialsConfig::fallback` carries `#[serde(default)]`, so an empty
+  `[accounts.credentials]` table deserialized to
+  `Some(CredentialsConfig { fallback: KeyringThenEnv })` — not `None` — and
+  `map_or` then returned the built-in fallback rather than the operator's
+  `[defaults.credentials]` value. That is the same defect, in the more
+  dangerous direction: it silently restores the shared env-var fallback that
+  `keyring-only` exists to prevent (#78).
 
 ## Consequences
 
-- An account's effective `limits`/`security` is now `[defaults]` overlaid with
-  exactly the keys that account wrote. This is a behaviour change for any
-  existing config where an account writes a partial block: fields it omits now
-  resolve to the operator's `[defaults]` value instead of the built-in one.
-  That is the fix, but it does move values under a running deployment — an
-  operator who worked around #624 by relying on the revert-to-built-in
-  behaviour will see their accounts pick up the `[defaults]` values.
+- An account's effective `limits`/`security`/`credentials` is now `[defaults]`
+  overlaid with exactly the keys that account wrote. This is a behaviour change
+  for any existing config where an account writes a partial block: fields it
+  omits now resolve to the operator's `[defaults]` value instead of the
+  built-in one.
+
+- **The movement is not symmetric — three of these directions widen what an
+  account may do**, because the built-in default an account used to fall back
+  to is the restrictive end of each range. On upgrade, an account carrying a
+  partial `[accounts.security]` block gains:
+
+  - every `[defaults.security.tools]` verdict, including the `allow` entries.
+    `EffectiveMatrix` treats an explicit `Allow` as permitting the tool
+    *regardless of posture*, so an account the operator marked
+    `posture = "readonly"` can acquire `delete_message`, `export_messages`, or
+    `send_email` from a default block it previously ignored;
+  - the deployment's `expunge_folders` list in place of the built-in empty
+    one — the one path by which a folder the operator believed unexpungeable
+    becomes expungeable, since `expunge` is allowlist-gated;
+  - the deployment's `protected_folders` list in place of the built-in
+    `INBOX`/`Sent`/`Drafts`/`Trash`, which is a *narrowing* of protection
+    whenever the default list is shorter.
+
+  This is the documented semantics finally taking effect rather than a new
+  policy, but it re-grants silently. Operators upgrading a multi-account
+  config should run `rusty-imap-mcp --dry-run`, which prints each
+  account's effective matrix, and diff it against the previous release.
+  Accepting the widening rather than adding a compatibility mode is
+  deliberate: a mode that preserved the old behaviour would preserve the
+  defect, and "replace, don't deprecate" leaves no second resolution path to
+  reason about.
+
+- Some configs that previously started will now fail validation, all in the
+  fail-closed direction: an inherited `send_email = "allow"` requires
+  `[accounts.smtp]`, an inherited `export_messages = "allow"` requires a
+  server-private `[attachments].download_dir`, and an inherited
+  `protected_folders` can now overlap an account's own `expunge_folders`.
+  A startup error naming the account is the correct outcome for each.
 
 - Per-account validation is unchanged and still runs on the merged result, so a
   merge that produces an out-of-range combination (an inherited

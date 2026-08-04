@@ -538,7 +538,9 @@ per-account table does not discard the rest of the default block:
   written — it is not unioned with the default list, so an account that
   wants the default entries plus one more must restate them all.
 - **`[accounts.credentials]`** likewise overrides `fallback` only when
-  the account writes it.
+  the account writes it. An empty `[accounts.credentials]` table keeps the
+  `[defaults.credentials]` policy rather than reverting to
+  `keyring-then-env`.
 
 So this account raises the search limit and keeps the deployment's 600s
 ceiling and 25/s rate:
@@ -564,6 +566,16 @@ Validation runs on the merged result, per account. An inherited
 `tool_call_timeout_seconds` that is too small for an account's own
 `[accounts.imap]` budgets is still rejected at startup, naming that
 account.
+
+> **Upgrading from a release before this merge model (#624):** an account
+> that writes a partial `[accounts.security]` block used to fall back to
+> the *built-in* defaults for everything it omitted, and those are the
+> restrictive end of each range. It now inherits your `[defaults]` values
+> instead — so it picks up your `[defaults.security.tools]` verdicts
+> (including `allow` entries, which permit a tool regardless of posture),
+> your `expunge_folders`, and your `protected_folders`. Run
+> `rusty-imap-mcp --dry-run` before and after upgrading and diff the
+> per-account effective matrix it prints.
 
 ## Credential resolution
 
