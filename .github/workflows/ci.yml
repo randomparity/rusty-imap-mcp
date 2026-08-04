@@ -103,6 +103,14 @@ jobs:
       # hard failure. --no-tests=fail additionally guards against a binary being
       # renamed or dropped (zero tests selected). The binary regex auto-covers
       # any future e2e* binary without another CI edit.
+      #
+      # Deliberately NOT --profile ci (#625): this step runs only
+      # container-backed e2e binaries, so under a dead or contended Docker
+      # daemon every one of the 20 failures that profile would budget is
+      # itself a slow container-boot timeout, not a fast in-process
+      # assertion. Bounded-but-large is worse than aborting fast for this
+      # specific arm — keep nextest's built-in fail-fast = true here so a
+      # daemon outage fails this step in seconds instead of minutes.
       - name: e2e suites — fail if container runtime unavailable or zero tests selected
         run: |
           cargo nextest run -p rimap-server \
