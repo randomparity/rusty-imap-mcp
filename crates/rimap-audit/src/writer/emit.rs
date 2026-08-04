@@ -247,6 +247,7 @@ mod tests {
         Payload::ProcessEnd(ProcessEnd {
             reason: ProcessEndReason::Eof,
             total_tool_calls: 0,
+            records_lost: 0,
         })
     }
 

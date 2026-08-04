@@ -21,6 +21,7 @@ fn record(seq: u64) -> AuditRecord {
         payload: Payload::ProcessEnd(ProcessEnd {
             reason: ProcessEndReason::Eof,
             total_tool_calls: seq,
+            records_lost: 0,
         }),
     }
 }
