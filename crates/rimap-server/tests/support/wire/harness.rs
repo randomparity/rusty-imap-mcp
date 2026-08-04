@@ -11,7 +11,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 use rmcp::model::ProtocolVersion;
@@ -66,6 +66,94 @@ pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 // tight enough to fail-fast on a real hang while absorbing scheduling
 // jitter when other tests are spawning binaries / parsers concurrently.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Budget for reaping a [`DetachedStdoutHarness`] child, which is the only wait
+/// in this harness that spans the process's **entire** lifetime — spawn, the
+/// request, and exit — in a single call.
+///
+/// [`Harness::spawn_with_closed_stdout`] drops the stdout read end before the
+/// child writes anything, which is the whole point of that variant. So there is
+/// no *stdout* readiness handshake, and [`read_deadline`] — which keys off
+/// stdout output — cannot pay for start-up on a separate read the way it does
+/// for a piped harness. Cold start is therefore inside the exit wait.
+///
+/// Hence the sum: [`COLD_START_TIMEOUT`] for `exec`, dynamic linking, config
+/// parse and credential resolution, plus [`SHUTDOWN_TIMEOUT`] for the exit slice
+/// that follows the failed envelope write.
+///
+/// What #638 actually establishes about the size: the child had **not** exited
+/// 5 s after the request write, and `nextest` reported 8.826 s for the whole
+/// case — of which 5 s was that elapsed timeout. The child's true exit time was
+/// never observed, so the run bounds the envelope from below and no further.
+/// The size argument is therefore the cost model, not that log line: start-up
+/// is the cost class [`COLD_START_TIMEOUT`] is calibrated for, and the exit
+/// slice that follows it is what [`SHUTDOWN_TIMEOUT`] is calibrated for.
+///
+/// The remaining ~3.8 s of that case is **unattributed**, and worth resisting
+/// the urge to assign. It is not the parent-side prefix: measured with the
+/// instrument `wait_for_exit` now prints, that prefix is single-digit
+/// milliseconds (6.7 ms observed), which even at the ~20x amplification below
+/// reaches ~0.13 s. Two costs inside `nextest`'s per-case number sit outside
+/// this harness's own clock entirely and are the plausible homes for it:
+/// `nextest`'s spawn of the debug test binary, and post-panic teardown —
+/// unwinding, then the `kill_on_drop` SIGKILL and reap of a child that by
+/// construction had *not* exited, then tempdir removal. If the residue is
+/// teardown, that is seconds spent reaping a live child, which is weak
+/// affirmative evidence for the stall hypothesis below rather than for
+/// contention. #660 carries that.
+///
+/// Be precise about how far that model goes, because it does not go all the
+/// way. Measured here, this case costs 0.22-0.28 s end to end across 12 samples
+/// at host load 20-119, so a 5 s timeout implies roughly 20x amplification —
+/// more than the >9x #621 recorded. This harness is also cheaper at boot than
+/// the ones #621 measured: `accounts = []` with `--allow-empty-accounts` skips
+/// credential resolution and the IMAP boot entirely, so it pays only `exec`,
+/// dynamic linking and config parse. The budget is sized on the assumption that
+/// the failing runner was contended well past anything reproduced locally. The
+/// competing explanation — an intermittent stall in the server's own
+/// broken-pipe shutdown path, which a wider budget would mask rather than fix —
+/// is *not* excluded by anything here; it is tracked in #660.
+///
+/// The discriminator is the distribution of the exit wait: clustered near 0.2 s
+/// supports contention, bimodal with multi-second outliers supports a stall.
+/// `wait_for_exit` prints that number — but **CI cannot supply the
+/// distribution** under the current profile, because `nextest` drops a passing
+/// test's stderr by default (see the call site). Collecting it takes a
+/// deliberate instrumented run on a contended host, not passive accumulation
+/// over green CI, and #660 says so.
+///
+/// Note what this budget does *not* cover. It starts at the `wait_for_exit`
+/// call, so the parent-side prefix — tempdir, config write, `cargo_bin`
+/// resolution, `Command::spawn`, the request write — sits outside it. That
+/// prefix is small (single-digit ms measured), and leaving it unbudgeted is
+/// deliberate: `nextest`'s slow-timeout is
+/// advisory and `.config/nextest.toml` sets no `terminate-after`, so a slow
+/// prefix produces a SLOW marker rather than a failure, and wrapping it in a
+/// second timeout would cost more than the risk it removes. Its duration
+/// reaches a reader through the `wait_for_exit` panic message on the timeout
+/// path, and through the explicit-output run named at that call site otherwise.
+///
+/// Composed from the two named constants rather than hand-tuned to a third
+/// number so each cost stays individually documented and tunable. Widening
+/// `SHUTDOWN_TIMEOUT` to cover this instead would also loosen the two waits
+/// that are correctly scoped today (`response_or_close` and
+/// [`Harness::shutdown_and_wait`]), whose callers have already paid start-up.
+///
+/// **Considered and rejected:** the child fsyncs a `process_start` audit record
+/// during boot and this harness already holds `audit_path`, so polling that file
+/// under `COLD_START_TIMEOUT` *would* give a readiness handshake off stdout and
+/// let the exit wait keep the tight `SHUTDOWN_TIMEOUT`.
+///
+/// State its benefit accurately, because it is not mainly about latency: with
+/// the exit slice back on `SHUTDOWN_TIMEOUT`, a 5-15 s stall between the failed
+/// envelope write and process exit stays a *test failure*, whereas a summed
+/// budget cannot fail one. That is the cost being accepted here — the summed
+/// budget masks the very hypothesis #660 is open on, and the printed
+/// measurement is a weaker substitute for a failing assertion. Not built
+/// anyway: a polling loop is materially more code than a summed constant, and
+/// #660 is the place to weigh it once the distribution is known. Revisit this
+/// if that distribution turns out bimodal.
+pub const DETACHED_EXIT_TIMEOUT: Duration = COLD_START_TIMEOUT.saturating_add(SHUTDOWN_TIMEOUT);
 
 /// Deadline to apply to one stdout read: the caller's `requested` budget,
 /// widened to [`COLD_START_TIMEOUT`] while the child has not yet produced any
@@ -196,13 +284,13 @@ fn force_use_for_dead_code_link() {
     // test), not by other binaries.
     let _ = Harness::spawn_with_closed_stdout;
     // DetachedStdoutHarness methods used by mcp_wire_negative, not by
-    // other binaries. The pub `child` / `stdin` fields are read by the
-    // pre-initialize write-failure test only; reference them here so
-    // every test-binary compilation sees them as used.
+    // other binaries. The pub `stdin` field is written by the
+    // pre-initialize write-failure test only; reference it here so
+    // every test-binary compilation sees it as used.
     let _ = DetachedStdoutHarness::audit_path;
     let _ = DetachedStdoutHarness::captured_stderr;
+    let _ = DetachedStdoutHarness::wait_for_exit;
     let _ = |h: &DetachedStdoutHarness| {
-        let _ = &h.child;
         let _ = &h.stdin;
     };
     // Methods used by mcp_wire_negative and e2e_wire_cancellation, not
@@ -310,6 +398,9 @@ allowed_base_dir = "{}"
     /// to exercise the propagated-error path on transport failure.
     #[expect(clippy::unused_async, reason = "uniform async surface")]
     pub async fn spawn_with_closed_stdout() -> DetachedStdoutHarness {
+        // Before the tempdir, so `setup_began` covers every parent-side item
+        // the #638 log lumped in with the child's lifetime.
+        let setup_began = Instant::now();
         let tempdir = TempDir::new().expect("tempdir");
         let config_path = tempdir.path().join("config.toml");
         let audit_path = tempdir.path().join("audit.jsonl");
@@ -351,6 +442,7 @@ allowed_base_dir = "{}"
             stdin,
             stderr_log,
             audit_path,
+            setup_began,
             _tempdir: tempdir,
         }
     }
@@ -745,10 +837,16 @@ allowed_base_dir = "{}"
 /// it exists only to drive stdin, wait for the child exit, and read
 /// the resulting audit log + captured stderr.
 pub struct DetachedStdoutHarness {
-    pub child: Child,
+    child: Child,
     pub stdin: ChildStdin,
     stderr_log: PathBuf,
     audit_path: PathBuf,
+    // Start of `spawn_with_closed_stdout`, i.e. before the tempdir, config
+    // write, `cargo_bin` resolution and `Command::spawn`. Read on the
+    // `wait_for_exit` timeout path to separate that parent-side setup from the
+    // budgeted wait — #638 was hard to attribute precisely because the failing
+    // run reported one wall-clock number covering both.
+    setup_began: Instant,
     // Held until drop so the audit log path stays valid.
     _tempdir: TempDir,
 }
@@ -762,6 +860,72 @@ impl DetachedStdoutHarness {
     /// Read the captured stderr file. Empty string on read failure.
     pub fn captured_stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_log).unwrap_or_default()
+    }
+
+    /// Await the child's exit on the whole-lifetime budget
+    /// ([`DETACHED_EXIT_TIMEOUT`]) and return its status.
+    ///
+    /// The wait lives here rather than at the call site so the budget is chosen
+    /// next to the rationale for its size — a caller reaching for a bare
+    /// `timeout(.., child.wait())` has no way to see that this harness has no
+    /// readiness handshake and so pays start-up inside the exit wait.
+    ///
+    /// Panics if the child has not exited within the budget (a genuine hang) or
+    /// if the wait itself fails, reporting captured stderr either way.
+    ///
+    /// The timeout message separates the budgeted wait from the parent-side
+    /// setup that precedes it, because the budget starts here — at the call —
+    /// not at spawn. #638's log conflated the two, which is what made the
+    /// failure read as an 8.8 s child lifetime when 5 s of it was the elapsed
+    /// timeout; see [`DETACHED_EXIT_TIMEOUT`] for why the remainder is
+    /// unattributed.
+    pub async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let wait_began = Instant::now();
+        let waited = timeout(DETACHED_EXIT_TIMEOUT, self.child.wait()).await;
+        let setup = wait_began.saturating_duration_since(self.setup_began);
+        let Ok(reaped) = waited else {
+            panic!(
+                "child did not exit within {DETACHED_EXIT_TIMEOUT:?} of the exit wait; \
+                 harness setup and the request write took {setup:?} before it\n\
+                 --- captured stderr ---\n{}",
+                self.captured_stderr(),
+            );
+        };
+        // Record the distribution on the success path too. The budget was
+        // widened here without the exit wait ever having been measured on a
+        // failing run (#638 timed out, so it observed only a lower bound); this
+        // is the number that says whether 15 s is generous, marginal, or hiding
+        // a real server-side stall.
+        //
+        // This line does NOT appear in an ordinary run. `nextest` captures a
+        // passing test's stderr and then drops it under its `success-output =
+        // "never"` default, which `--profile ci` inherits and
+        // `.config/nextest.toml` does not override. #660 must therefore collect
+        // the distribution with an explicit run:
+        //
+        //   cargo nextest run -p rimap-server \
+        //     -E 'binary(mcp_wire_negative)' --success-output final
+        //
+        // The timeout path does not reach here at all — it panics above, and
+        // that panic carries the budget and the setup prefix instead.
+        #[expect(
+            clippy::print_stderr,
+            reason = "budget calibration measurement collected by #660"
+        )]
+        {
+            eprintln!(
+                "detached child exited after {:?} of exit wait ({setup:?} of setup before it, \
+                 budget {DETACHED_EXIT_TIMEOUT:?})",
+                wait_began.elapsed(),
+            );
+        }
+        reaped.unwrap_or_else(|err| {
+            panic!(
+                "wait for child exit failed: {err}\n\
+                 --- captured stderr ---\n{}",
+                self.captured_stderr(),
+            )
+        })
     }
 }
 
