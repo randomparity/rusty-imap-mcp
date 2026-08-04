@@ -264,6 +264,13 @@ pub struct LimitsConfig {
     /// Circuit breaker window in seconds.
     #[serde(default = "default_breaker_window")]
     pub circuit_breaker_window_seconds: u32,
+    /// Wall-clock ceiling on one account-scoped tool call, covering the
+    /// session-lock wait, the lazy connect, the command, and the one
+    /// read-only retry — the budgets `[imap]` bounds only stage by stage
+    /// (#594, ADR-0012). Must be at least the worst case those stages can
+    /// add up to; see `validate::limits::validate_tool_call_ceiling`.
+    #[serde(default = "default_tool_call_timeout")]
+    pub tool_call_timeout_seconds: u32,
 }
 
 impl Default for LimitsConfig {
@@ -279,6 +286,7 @@ impl Default for LimitsConfig {
             sends_per_minute: default_sends_per_min(),
             circuit_breaker_error_threshold: default_breaker_threshold(),
             circuit_breaker_window_seconds: default_breaker_window(),
+            tool_call_timeout_seconds: default_tool_call_timeout(),
         }
     }
 }
@@ -312,6 +320,12 @@ fn default_breaker_threshold() -> u32 {
 }
 fn default_breaker_window() -> u32 {
     30
+}
+/// 300s: above the 140s worst case one IMAP operation can reach at the
+/// shipped `[imap]` defaults (a stock config must not self-reject), with
+/// room for tools that issue several operations per call.
+fn default_tool_call_timeout() -> u32 {
+    300
 }
 
 /// `[audit]` block.

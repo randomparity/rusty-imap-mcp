@@ -56,6 +56,55 @@ pub(super) fn validate_timeouts(
     Ok(())
 }
 
+/// Worst-case seconds one IMAP operation can spend inside its own
+/// `[imap]` budgets, as `rimap_imap::connection::dispatch` spends them:
+/// each `attempt` waits up to `command_timeout` for the session lock,
+/// then up to `connect_timeout` on the lazy connect (which runs outside
+/// the command deadline by design — #592), then up to `command_timeout`
+/// on the command body; `with_session` runs a second `attempt` when a
+/// read-only op fails with `ConnectionLost`.
+///
+/// Computed in `u64` so `u32::MAX` budgets cannot wrap into a value that
+/// passes the comparison in [`validate_tool_call_ceiling`].
+fn imap_operation_worst_case_seconds(imap: &ImapConfig) -> u64 {
+    const ATTEMPTS: u64 = 2;
+    const COMMAND_STAGES_PER_ATTEMPT: u64 = 2;
+    COMMAND_STAGES_PER_ATTEMPT
+        .saturating_mul(u64::from(imap.command_timeout_seconds))
+        .saturating_add(u64::from(imap.connect_timeout_seconds))
+        .saturating_mul(ATTEMPTS)
+}
+
+/// Reject a per-tool-call ceiling that cannot cover a single IMAP
+/// operation running fully inside its own `[imap]` budgets (#594,
+/// ADR-0012).
+///
+/// A ceiling below that worst case would cut off calls that every
+/// per-stage deadline considers healthy, so it is an operator mistake
+/// worth failing at startup rather than intermittently at runtime. Both
+/// blocks resolve per account, so this is checked per account.
+pub(super) fn validate_tool_call_ceiling(
+    imap: &ImapConfig,
+    limits: &LimitsConfig,
+) -> Result<(), ConfigError> {
+    let worst_case = imap_operation_worst_case_seconds(imap);
+    if u64::from(limits.tool_call_timeout_seconds) < worst_case {
+        return Err(ConfigError::InvalidLimit {
+            field: "limits.tool_call_timeout_seconds",
+            reason: format!(
+                "{}s is below the {worst_case}s worst case for one IMAP operation \
+                 (2 attempts x (2 x imap.command_timeout_seconds {}s + \
+                 imap.connect_timeout_seconds {}s)); raise the ceiling or lower \
+                 the IMAP timeouts",
+                limits.tool_call_timeout_seconds,
+                imap.command_timeout_seconds,
+                imap.connect_timeout_seconds,
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn validate_limits(limits: &LimitsConfig) -> Result<(), ConfigError> {
     /// Table of `(field_name, accessor)` for zero-value checks. New limits
     /// that must be `> 0` get added here rather than as another `if` block.
@@ -79,6 +128,9 @@ pub(super) fn validate_limits(limits: &LimitsConfig) -> Result<(), ConfigError> 
         ("limits.max_fetch_body_bytes", |l| l.max_fetch_body_bytes),
         ("limits.max_attachment_bytes", |l| l.max_attachment_bytes),
         ("limits.max_append_bytes", |l| l.max_append_bytes),
+        ("limits.tool_call_timeout_seconds", |l| {
+            u64::from(l.tool_call_timeout_seconds)
+        }),
     ];
     reject_zero(limits, ZERO_CHECKS)?;
     if limits.max_search_results > limits.max_search_results_cap {
@@ -217,6 +269,92 @@ username = "alice@example.test"
         assert!(
             matches!(&err, ConfigError::InvalidLimit { field, .. } if *field == "imap.command_timeout_seconds"),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn shipped_ceiling_default_covers_shipped_timeout_defaults() {
+        // The stock config must not self-reject: 300 >= 2 x (2 x 30 + 10).
+        let imap = imap_config();
+        let limits = LimitsConfig::default();
+        assert_eq!(limits.tool_call_timeout_seconds, 300);
+        assert!(validate_tool_call_ceiling(&imap, &limits).is_ok());
+    }
+
+    #[test]
+    fn ceiling_exactly_at_worst_case_accepted() {
+        let imap = imap_config();
+        let limits = LimitsConfig {
+            tool_call_timeout_seconds: 140,
+            ..LimitsConfig::default()
+        };
+        assert!(validate_tool_call_ceiling(&imap, &limits).is_ok());
+    }
+
+    #[test]
+    fn ceiling_below_worst_case_rejected_naming_the_arithmetic() {
+        let imap = imap_config();
+        let limits = LimitsConfig {
+            tool_call_timeout_seconds: 139,
+            ..LimitsConfig::default()
+        };
+        let err = validate_tool_call_ceiling(&imap, &limits).unwrap_err();
+        let ConfigError::InvalidLimit { field, reason } = &err else {
+            panic!("expected InvalidLimit, got {err:?}");
+        };
+        assert_eq!(*field, "limits.tool_call_timeout_seconds");
+        assert!(
+            reason.contains("140"),
+            "reason must state the minimum: {reason}"
+        );
+        assert!(
+            reason.contains("command_timeout_seconds")
+                && reason.contains("connect_timeout_seconds"),
+            "reason must name both IMAP budgets: {reason}",
+        );
+    }
+
+    #[test]
+    fn raised_command_timeout_requires_a_raised_ceiling() {
+        // 2 x (2 x 120 + 10) = 500 > the 300s default, so the stock ceiling
+        // no longer covers a single operation and the config is rejected.
+        let imap = ImapConfig {
+            command_timeout_seconds: 120,
+            ..imap_config()
+        };
+        let limits = LimitsConfig::default();
+        let err = validate_tool_call_ceiling(&imap, &limits).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidLimit { field, .. } if *field == "limits.tool_call_timeout_seconds"),
+            "unexpected error: {err:?}",
+        );
+    }
+
+    #[test]
+    fn worst_case_math_does_not_overflow_on_max_budgets() {
+        // u32::MAX on both budgets must not wrap into a passing comparison.
+        let imap = ImapConfig {
+            command_timeout_seconds: u32::MAX,
+            connect_timeout_seconds: u32::MAX,
+            ..imap_config()
+        };
+        let limits = LimitsConfig {
+            tool_call_timeout_seconds: u32::MAX,
+            ..LimitsConfig::default()
+        };
+        assert!(validate_tool_call_ceiling(&imap, &limits).is_err());
+    }
+
+    #[test]
+    fn zero_tool_call_timeout_rejected() {
+        let limits = LimitsConfig {
+            tool_call_timeout_seconds: 0,
+            ..LimitsConfig::default()
+        };
+        let err = validate_limits(&limits).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidLimit { field, .. } if *field == "limits.tool_call_timeout_seconds"),
+            "unexpected error: {err:?}",
         );
     }
 
