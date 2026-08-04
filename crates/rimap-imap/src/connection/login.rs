@@ -243,21 +243,49 @@ impl Connection {
     /// covers both callers, and it covers the mutex-poisoning half — which the
     /// completed-connect path has too — rather than only the abort half.
     /// [`Self::note_auth_write_lost`] is contained for the same reason; a
-    /// defaulted trait method can panic just as easily, and without its own
-    /// wrapper the abort would merely move one frame.
+    /// defaulted trait method can panic just as easily, and it is what this
+    /// function's own failure handler calls next, so without its own wrapper
+    /// the abort would merely move one frame.
     ///
-    /// `AssertUnwindSafe` is required because `&Connection` is not
-    /// `UnwindSafe` — it holds `Arc`s and `AtomicBool`s. It is justified by
-    /// what a caught panic here can actually have broken: nothing of ours. The
-    /// `AuthEvent` was moved into the sink and is gone either way, and the only
-    /// state that can be left inconsistent belongs to the sink itself, which is
-    /// behind a `&dyn` we can only reach through this trait. A sink that
-    /// corrupts itself keeps returning errors afterwards — the production one
-    /// makes that explicit by poisoning its mutex — so the failure a broken
-    /// invariant produces downstream is a lost record, which is exactly what
-    /// this function reports. Nothing reads a value the panic could have
-    /// half-written. On the guard's path the point is sharper still: the guard
-    /// is dropped immediately after, so nothing observes it again at all.
+    /// ### What is contained, and what is not
+    ///
+    /// Every frame between [`super::AuthEmitGuard`]'s `Drop` and the sink is
+    /// covered, and the two that are not wrapped are covered by being
+    /// panic-free rather than by luck: `auth_context` reads config fields and
+    /// two `OnceLock::get`s, and `auth_failure` is `to_string` plus
+    /// `hex::encode` — allocation only, and an allocation failure aborts
+    /// whatever wraps it.
+    ///
+    /// The residual is `tracing::error!`, which both failure handlers call
+    /// after the contained call and which is deliberately left bare. Under the
+    /// subscriber `rimap-server` installs it cannot panic, and wrapping it
+    /// would put a second containment mechanism on the same path as this one —
+    /// two mechanisms for one job, with the second one's own logging then
+    /// unwrappable in turn. Named here so the guarantee is not read as wider
+    /// than it is: **a panicking *sink* cannot abort the process; a panicking
+    /// *subscriber* is a separate problem with a separate owner.**
+    ///
+    /// ### `AssertUnwindSafe`
+    ///
+    /// Required, because `&Connection` is not `UnwindSafe` — it holds `Arc`s
+    /// and `AtomicBool`s. Justified by what a caught panic here can have
+    /// broken. Nothing of `rimap-imap`'s: the closure captures `&self` and the
+    /// event, its body is a single dynamic call, and no field of
+    /// `ConnectionInner` is reachable from inside it. The `AuthEvent` was moved
+    /// into the sink and is gone on either outcome.
+    ///
+    /// What a panic *can* leave inconsistent is the sink's own state — and the
+    /// sink is shared process-wide, so that damage is not confined to this
+    /// call. That is the point rather than a gap in the argument: the
+    /// production `AuditWriter` makes it explicit by poisoning its mutex, after
+    /// which every user of it — `tool_start`, `tool_end`, `process_end` — gets
+    /// a typed `AuditError` rather than a bad value. A sink that corrupts
+    /// itself therefore surfaces as lost records, which is exactly what this
+    /// function reports, and the alternative to catching is not a healthy sink
+    /// but the same damage plus an aborted process.
+    ///
+    /// On the guard's path the argument is simpler still: the guard is dropped
+    /// immediately after, so nothing observes it again at all.
     ///
     /// **This containment depends on unwinding.** No profile in this workspace
     /// sets `panic = "abort"`; under it `catch_unwind` never returns, the
@@ -275,6 +303,13 @@ impl Connection {
     /// dropped unread rather than formatted: it is an arbitrary `Any` a sink
     /// built from its own state, and `ImapError::Audit`'s `message` reaches the
     /// MCP wire.
+    ///
+    /// Dropping it keeps the payload off the wire, not out of the process.
+    /// `catch_unwind` runs *after* the panic hook, and nothing here installs
+    /// one, so std's default has already written the payload and its location
+    /// to stderr by the time this arm runs — and, for a panic raised while
+    /// another unwind is in flight, a full backtrace regardless of
+    /// `RUST_BACKTRACE`. stdout, which carries the MCP protocol, is untouched.
     pub(super) fn emit_auth(&self, event: AuthEvent) -> Result<(), ImapError> {
         match catch_unwind(AssertUnwindSafe(|| self.inner.audit.emit_auth(event))) {
             Ok(Ok(())) => Ok(()),

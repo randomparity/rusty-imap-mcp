@@ -827,7 +827,11 @@ mod tests {
     /// the one that proves the abort was removed rather than moved one frame
     /// down the stack.
     #[derive(Debug, Default)]
-    struct WhollyPanickingSink;
+    struct WhollyPanickingSink {
+        /// Bumped *before* the panic, so a test can prove the second
+        /// containment was actually exercised rather than merely present.
+        notes: std::sync::atomic::AtomicUsize,
+    }
 
     impl rimap_core::auth_sink::AuthEventSink for WhollyPanickingSink {
         #[expect(
@@ -843,6 +847,8 @@ mod tests {
         }
 
         fn note_auth_write_lost(&self) {
+            self.notes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             panic!("sink violates the no-panic contract on note (test)");
         }
     }
@@ -914,14 +920,16 @@ mod tests {
     /// Containment used to be a side effect of `spawn_blocking`: a panicking
     /// sink came back as a `JoinError`. #643 deleted that hop to stop losing
     /// records on shutdown (ADR-0014), which left the no-panic contract
-    /// enforced by documentation alone — and the two in-tree test sinks were
+    /// enforced by documentation alone — and three in-tree test sinks were
     /// already violating it. `Connection::emit_auth` now contains the panic
     /// deliberately.
     ///
-    /// The guard's `Drop` is the shape that matters. On the ordinary path a
-    /// panic here merely unwinds; on a `Drop` that is itself running during an
-    /// unwind it aborts the process outright, leaving nothing for a test to
-    /// observe. Reaching this assertion at all is the assertion.
+    /// This is the ordinary-drop half: the panic escapes into a normal unwind,
+    /// so an uncontained sink fails this test rather than killing the binary.
+    /// The lost record must still be *counted*, which is what distinguishes a
+    /// contained panic from one that skipped the failure handler entirely.
+    /// [`a_guard_dropped_during_an_unwind_does_not_abort`] covers the shape
+    /// that aborts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_panicking_sink_cannot_abort_the_process_through_the_guard() {
         let (port, accepted) = silent_listener().await;
@@ -949,20 +957,67 @@ mod tests {
     /// sink can panic inside just as easily. Without its own containment the
     /// abort would move one frame rather than disappear.
     ///
-    /// Nothing to count here — the counter is the thing that panics — so, as
-    /// above, returning from this test is the assertion.
+    /// The counter is bumped before the panic rather than after, so the
+    /// assertion pins both halves at once — that the second containment was
+    /// *reached*, and that it held. Surviving alone would go vacuously green if
+    /// a later change stopped calling `note_auth_write_lost` from this path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_sink_that_panics_in_note_auth_write_lost_cannot_abort_either() {
         let (port, accepted) = silent_listener().await;
+        let sink = std::sync::Arc::new(WhollyPanickingSink::default());
         let conn = connection_with_sink(
             port,
-            std::sync::Arc::new(WhollyPanickingSink)
+            std::sync::Arc::clone(&sink)
                 as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
         );
 
         connect_then_cut(&conn).await;
 
+        assert_eq!(
+            sink.notes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the emit's containment must still run the failure handler, so the \
+             second panic is reached and contained rather than never raised",
+        );
+
         accepted.abort();
+    }
+
+    /// The shape that actually aborts: [`AuthEmitGuard`]'s `Drop` running while
+    /// an outer unwind is already in flight. Rust treats a panic escaping a
+    /// destructor during cleanup as unrecoverable and calls `abort` — no second
+    /// unwind, no `process_end` record, no test failure to read, just SIGABRT
+    /// on the whole binary.
+    ///
+    /// The two tests above drive the guard from a cancelled `timeout`, which is
+    /// an ordinary drop; they prove containment but not that *this* case was
+    /// closed. `AuthEmitGuard`'s own rustdoc lists a panic unwinding through
+    /// the connect among the cuts it exists for, so the case is reachable.
+    ///
+    /// Constructed directly rather than through a connect: a real unwind has to
+    /// pass through the guard's frame, and no network is needed to make the
+    /// guard write — it is armed at construction. Removing either `catch_unwind`
+    /// turns this from a pass into an aborted test process.
+    #[test]
+    fn a_guard_dropped_during_an_unwind_does_not_abort() {
+        let conn = connection_with_sink(
+            0,
+            std::sync::Arc::new(WhollyPanickingSink::default())
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+        );
+        let bundle = crate::tls::build_tls_config(None).expect("build a TLS bundle");
+        let progress = super::ConnectProgress::default();
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = super::AuthEmitGuard::new(&conn, &bundle, &progress);
+            panic!("an unwind passing through the connect");
+        }));
+
+        assert!(
+            caught.is_err(),
+            "the outer panic must unwind normally; reaching this line at all \
+             means the guard's own panic did not abort the process",
+        );
     }
 
     /// A record the guard could not write must still be *counted*. The guard

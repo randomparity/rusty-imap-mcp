@@ -9,9 +9,9 @@
 //! one fsynced JSONL line), and they should assume the thread they
 //! block is a runtime worker.
 //!
-//! That is deliberate and is not the workspace's general rule: every
-//! other blocking call from async code here routes through
-//! `tokio::task::spawn_blocking`, and this one used to as well. It
+//! That is deliberate, and it is an exception: `rimap-audit`'s other
+//! writes — the `tool_start` / `tool_end` pair — are driven through
+//! `tokio::task::spawn_blocking`, and this one used to be too. It
 //! stopped because a deferred `auth` record is lost when the runtime
 //! shuts down, and because `rimap-imap`'s drop guard for a connect that
 //! was cut has no async context to defer from at all — a `Drop` cannot
