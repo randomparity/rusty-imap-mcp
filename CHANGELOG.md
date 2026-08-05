@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The number of tool dispatches that outlived the shutdown drain now reaches
+  the audit trail, as `process_end.undrained_dispatches`. It used to go to a
+  `tracing::warn!` and nowhere else — and stderr is the channel an MCP client
+  routinely discards, so a reader holding only the audit file could not tell a
+  run that drained cleanly from one that left dispatches running past
+  `process_end`. A non-zero count is the record stating that terminality was
+  not met for its own run. `process_end` records written before this field
+  parse unchanged, and a clean run states its zero explicitly rather than
+  omitting it. See #680, #645 / ADR-0015, and `docs/audit-log.md`.
 - `process_end` is now the terminal audit record of its process. The server
   cancels and drains in-flight tool dispatches before writing it, so a connect
   the shutdown cuts records its `auth` entry (`ERR_CANCELLED`) *before*
@@ -42,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: `rimap_audit::record::ProcessEnd::new` takes a fourth argument
+  (#680).** The signature is now
+  `new(reason, total_tool_calls, records_lost, undrained_dispatches)`. Adding
+  the field itself is additive — `ProcessEnd` is `#[non_exhaustive]` (#706) and
+  the field is `#[serde(default)]` — but the constructor's arity is not, and it
+  is the only way a downstream crate can build the type. It is a required
+  parameter rather than a defaulted setter for the reason `records_lost` is: a
+  zero is an affirmative, durable claim that no dispatch outlived the drain,
+  and a caller that never assigned it would publish that claim without
+  measuring it. Absorbed by the planned `0.2.0`; no version bump.
 - **API break: every `pub` struct in `rimap_config::model` is now
   `#[non_exhaustive]` (#665).** All 16 of them — `Config`, `ImapConfig`,
   `SmtpConfig`, `SecurityConfig`, `LookalikeConfig`, `LimitsConfig`,
