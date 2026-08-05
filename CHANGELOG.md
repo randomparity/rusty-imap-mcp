@@ -92,6 +92,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validator resolves for an omitted key, leaving the remainder to field
   assignment. They sit behind the same gate as `validate_multi_allowing_empty`
   so the production surface keeps offering exactly one way in.
+- **API break: every `pub` struct in `rimap_audit::record` is now
+  `#[non_exhaustive]`, along with the three writer-input structs (#706).** The
+  12 record types — `AuditRecord`, `ProcessStart`, `ProcessEnd`, `ToolStart`,
+  `ToolEnd`, `ConfigEvent`, `ResultSummary`, `Provenance`,
+  `AttachmentProvenance`, `AccountSummary`, `AccountToolMatrix`, `ToolVerdict`
+  — plus `ProcessStartInputs`, `ToolStartInputs`, and `ToolEndInputs`. These
+  broke twice in one week: #647 added `ProcessEnd::records_lost` and #632 added
+  `tool_matrix` to `ProcessStart` and `ProcessStartInputs`. Both were genuine
+  breaking changes that `cargo semver-checks` reported as clean, because it
+  baselines on `v0.1.0` and a declared `0.2.0-dev` major bump permits any break
+  (`0 checks: 0 pass, 253 skip`). Third and last of the `#[non_exhaustive]`
+  siblings, after #665 and #707.
+
+  Downstream impact: the struct literal is no longer available outside the
+  crate, and **that includes functional-update syntax** — `..Default::default()`
+  is still a struct expression, so rustc rejects it too (E0639). Construct via
+  the new constructors and reach the rest by field assignment — the fields stay
+  `pub` — as in `let mut i = ToolStartInputs::new(tool, args, hash);
+  i.account = …;`. Pattern matches need a trailing `..`.
+
+  Constructors were added only where something outside `rimap-audit` actually
+  builds the type: `AuditRecord::new`, `ProcessEnd::new`, `ToolVerdict::new`,
+  `AccountToolMatrix::new`, `AttachmentProvenance::new`, `Provenance::new`, and
+  one on each of the three `*Inputs` (`AccountSummary::new` already existed).
+  `ProcessStart`, `ToolStart`,
+  `ToolEnd`, and `ConfigEvent` get none — the writer alone builds them — and
+  `ResultSummary` keeps `Default` as its only constructor, since every field is
+  `#[serde(default)]`. The `ids` newtypes (`Seq`, `ProcessId`, `Timestamp`) and
+  every enum are deliberately left exhaustive; the module docs say why.
+
+  `ProcessEnd::new` takes `records_lost` even though the field is
+  `#[serde(default)]`, departing from the rule the two sibling changes
+  followed. A zero there is not an absent value but a durable claim that the
+  process lost no records, and a caller that never assigned the field would
+  publish that claim without measuring it.
+
+  **No on-disk change.** `#[non_exhaustive]` is a Rust-visibility construct and
+  does not reach serde; an unchanged record serializes to the same bytes it did
+  before. `crates/rimap-audit/tests/non_exhaustive_record.rs` holds that as
+  byte-exact golden lines, and `docs/audit-log.md` ("Compatibility contract")
+  now states what "additive" means for a record on disk, which the Rust-level
+  guarantee does not by itself provide.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after
