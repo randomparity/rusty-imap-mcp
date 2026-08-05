@@ -52,6 +52,7 @@ fn audit_merge_round_trips_synthetic_log() {
                 git_commit: String::new(),
                 posture: Some(rimap_core::Posture::Readonly),
                 accounts: None,
+                tool_matrix: Vec::new(),
                 config_path: config_path.clone(),
                 config_hash_sha256: String::new(),
                 trailing,

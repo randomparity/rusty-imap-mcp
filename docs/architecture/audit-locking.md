@@ -31,14 +31,26 @@ Why:
 
 ### How async code calls into the audit writer
 
-From any async function that needs to emit an audit record, use
-`tokio::task::spawn_blocking`:
+From any async function that needs to emit an audit record, offload it —
+but through `DispatchDrain::spawn_blocking_tracked`, not
+`tokio::task::spawn_blocking` directly:
 
 ```rust
 let audit = self.audit.clone();   // AuditWriter is cheaply cloneable
-tokio::task::spawn_blocking(move || audit.log_tool_end(record))
+self.drain
+    .spawn_blocking_tracked(move || audit.log_tool_end(record))
     .await??;
 ```
+
+The wrapper takes a drain registration before it submits the closure and
+moves the registration into it. That matters because `spawn_blocking` is
+not cancellable: dropping the `JoinHandle` — which is what dropping the
+future that awaits it does, and therefore what a shutdown cutting the
+dispatch does — *detaches* the closure rather than stopping it. A bare
+`spawn_blocking` therefore let the write land after `process_end`, and
+silently, because the drain saw the dispatch's own registration released
+and reported a clean drain (#672). Registered, the write is either waited
+for or counted in the residue the shutdown warning reports.
 
 **`auth` records are the exception, and they are the exception on
 purpose.** Every `auth` record — `connect_inner`'s own on a completed
@@ -89,7 +101,7 @@ Why this is fine:
   command at a time per RFC 3501.
 - The audit lock is a leaf: nothing that holds it reaches for a session
   lock, so no ordering between the two can deadlock.
-- Audit writes other than `auth` run on a `spawn_blocking` thread, so
+- Audit writes other than `auth` run on a blocking-pool thread, so
   the session lock is never held while a runtime worker is parked on
   disk I/O for those.
 - **The `auth` emitters are deliberately different**, both of them
@@ -143,7 +155,8 @@ connection limits).
 | Connection session | `tokio::sync::Mutex` | **YES** | async-imap commands are async |
 
 Future contributors who add new audit emission paths from async code:
-follow the `spawn_blocking` pattern above.
+follow the `spawn_blocking_tracked` pattern above. A bare
+`tokio::task::spawn_blocking` is the shape that reintroduces #672.
 
 The exception is the `auth` pair in
 `crates/rimap-imap/src/connection/login.rs` — `Connection::emit_auth`
