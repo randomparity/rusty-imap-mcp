@@ -31,6 +31,7 @@ use core::num::NonZeroU32;
 use std::time::Duration;
 
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
+use rimap_imap::ServerCapabilities;
 use rimap_imap::types::Uid;
 
 /// Generous command timeout so the loopback dialog cannot race a `Timeout`
@@ -86,9 +87,15 @@ async fn move_after_reconnect_uses_the_serving_sessions_capabilities() {
     let conn = server.connection_timeout("user@example.com", BACKSTOP);
 
     conn.list_folders("*").await.expect("warm-up list");
-    assert!(
-        !conn.has_move_capability() && !conn.has_uidplus_capability(),
-        "the first session's IMAP4rev1-only advertisement must leave both flags off",
+    assert_eq!(
+        conn.capabilities(),
+        ServerCapabilities::Known {
+            has_move: false,
+            has_uidplus: false,
+        },
+        "the first session's IMAP4rev1-only advertisement is an affirmative \
+         `neither` — not `Unknown`, which is what an unreadable probe yields \
+         (#649)",
     );
 
     // What the per-tool-call ceiling does when it cuts a command mid-flight:
@@ -155,8 +162,12 @@ async fn delete_after_reconnect_does_not_issue_an_unadvertised_move() {
     let conn = server.connection_timeout("user@example.com", BACKSTOP);
 
     conn.list_folders("*").await.expect("warm-up list");
-    assert!(
-        conn.has_move_capability() && conn.has_uidplus_capability(),
+    assert_eq!(
+        conn.capabilities(),
+        ServerCapabilities::Known {
+            has_move: true,
+            has_uidplus: true,
+        },
         "the first session advertised MOVE and UIDPLUS, so both flags must be on",
     );
 
