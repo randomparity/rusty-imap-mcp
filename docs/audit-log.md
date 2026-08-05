@@ -62,8 +62,16 @@ the file.
   dispatches running past `process_end`, and either wrote the fact to stderr
   and no field. An alerting rule keyed on `> 0` must therefore treat a line
   that omits the field as **unknown**, not as clean -- which is the ordinary
-  state of a log spanning an upgrade, and of any merged or rotated set that
-  reaches back across one.
+  state of a log spanning an upgrade, and of any rotated set that reaches back
+  across one.
+
+  **Absence is readable only in the original file.**
+  [`audit merge`](#audit-merge-subcommand) re-serializes every line it copies,
+  and a `#[serde(default)]` field with no `skip_serializing_if` is materialized
+  on the way out -- so a pre-field line leaves the merge carrying a literal
+  `"undrained_dispatches":0`, indistinguishable from a measured zero. An
+  alerting pipeline must therefore read the un-merged source, or accept that it
+  cannot tell not-measured from measured-clean on merged output.
 - Fields it does find keep their spelling, their type, and their position on
   the line. Records already on disk are never rewritten in place.
 
@@ -90,11 +98,21 @@ written and are append-only by design.
 `crates/rimap-audit/tests/non_exhaustive_record.rs` holds this contract as
 byte-exact golden lines. A diff there means the format moved.
 
-**One known asymmetry.** A record whose `ts` lands exactly on a second boundary
-is rewritten as `12:00:00Z` rather than `12:00:00.000Z` when it passes through
-[`audit merge`](#audit-merge-subcommand): the RFC 3339 formatter elides a zero
-subsecond. Both forms parse to the same instant, and the value is stable under
-further rewrites. No other field is altered by a merge.
+**Two known asymmetries**, both of them rewrites that
+[`audit merge`](#audit-merge-subcommand) performs because it re-serializes
+every line it copies.
+
+1. A record whose `ts` lands exactly on a second boundary is rewritten as
+   `12:00:00Z` rather than `12:00:00.000Z`: the RFC 3339 formatter elides a
+   zero subsecond. Both forms parse to the same instant, and the value is
+   stable under further rewrites.
+2. A `#[serde(default)]` field the line predates is **materialized at its
+   default** -- `records_lost` and `undrained_dispatches` as `0`, `tool_matrix`
+   as `[]`. The value is the one a reader was already told to substitute, so
+   nothing is misread as a *record*; what is lost is the ability to tell
+   not-measured from measured, which the counters' own note above depends on.
+
+No field's existing value is altered by a merge.
 
 ## Record types
 
