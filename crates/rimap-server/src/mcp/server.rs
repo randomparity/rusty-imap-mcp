@@ -2320,12 +2320,13 @@ mod dispatch_drain_tests {
 
     /// Exactly what `run_server` writes, immediately after the drain returns.
     fn log_process_end(writer: &AuditWriter) {
+        let end = rimap_audit::record::ProcessEnd::new(
+            rimap_audit::record::ProcessEndReason::Eof,
+            1,
+            writer.suppressed_failures(),
+        );
         writer
-            .log_process_end(rimap_audit::record::ProcessEnd {
-                reason: rimap_audit::record::ProcessEndReason::Eof,
-                total_tool_calls: 1,
-                records_lost: writer.suppressed_failures(),
-            })
+            .log_process_end(end)
             .expect("process_end write succeeds");
     }
 

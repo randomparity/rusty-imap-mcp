@@ -175,7 +175,12 @@ impl AuditWriter {
 }
 
 /// Inputs to [`AuditWriter::log_tool_end`].
+///
+/// `#[non_exhaustive]` for the same reason the record it builds is: this is
+/// the seam a new `tool_end` field arrives through, and #632 showed that
+/// widening only the record leaves the inputs struct as a second break.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ToolEndInputs {
     /// Seq returned by the paired [`AuditWriter::log_tool_start`].
     pub start_seq: crate::record::ids::Seq,
@@ -193,6 +198,34 @@ pub struct ToolEndInputs {
     pub result_summary: crate::record::ResultSummary,
     /// Recently-read message IDs and window.
     pub provenance: crate::record::Provenance,
+}
+
+impl ToolEndInputs {
+    /// Describe a completed tool call.
+    ///
+    /// `account` and `error_code` start `None` (an infrastructure tool has no
+    /// account; a success has no error code) and `result_summary` starts
+    /// empty, which is the correct record for a tool that returned nothing.
+    /// Assign whichever apply.
+    #[must_use]
+    pub fn new(
+        start_seq: crate::record::ids::Seq,
+        tool: rimap_core::tool::ToolName,
+        status: crate::record::ToolStatus,
+        duration_ms: u64,
+        provenance: crate::record::Provenance,
+    ) -> Self {
+        Self {
+            start_seq,
+            tool,
+            account: None,
+            status,
+            error_code: None,
+            duration_ms,
+            result_summary: crate::record::ResultSummary::default(),
+            provenance,
+        }
+    }
 }
 
 impl From<ToolEndInputs> for crate::record::ToolEnd {
@@ -215,6 +248,7 @@ impl From<ToolEndInputs> for crate::record::ToolEnd {
 /// Mirrors [`ToolEndInputs`] so the call sites use a consistent
 /// construction shape instead of a long positional argument list.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ToolStartInputs {
     /// Which tool is being dispatched.
     pub tool: rimap_core::tool::ToolName,
@@ -230,6 +264,28 @@ pub struct ToolStartInputs {
     /// SHA-256 of the canonical JSON serialization of the *unredacted*
     /// payload, hex-encoded.
     pub arguments_hash_sha256: String,
+}
+
+impl ToolStartInputs {
+    /// Describe a tool call entering dispatch.
+    ///
+    /// `account` and `posture_effective` start `None`, which is exactly the
+    /// infrastructure-tool case (`use_account`, `list_accounts`); an
+    /// account-scoped dispatch assigns both.
+    #[must_use]
+    pub fn new(
+        tool: rimap_core::tool::ToolName,
+        arguments_redacted: serde_json::Value,
+        arguments_hash_sha256: String,
+    ) -> Self {
+        Self {
+            tool,
+            account: None,
+            posture_effective: None,
+            arguments_redacted,
+            arguments_hash_sha256,
+        }
+    }
 }
 
 impl From<ToolStartInputs> for crate::record::ToolStart {
@@ -249,6 +305,7 @@ impl From<ToolStartInputs> for crate::record::ToolStart {
 /// [`crate::writer::self_check::read_trailing_state`] (run before `open`) and the
 /// current inode (run after `open`, via [`crate::writer::self_check::current_inode`]).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ProcessStartInputs {
     /// `CARGO_PKG_VERSION` of the running binary.
     pub version: String,
@@ -275,6 +332,36 @@ pub struct ProcessStartInputs {
     /// Inode of the audit file as observed AFTER this writer was opened
     /// (call `crate::writer::self_check::current_inode` on the path).
     pub current_inode: u64,
+}
+
+impl ProcessStartInputs {
+    /// Describe a starting process.
+    ///
+    /// `posture`, `accounts` and `tool_matrix` start empty: they are the
+    /// mode-dependent fields (`posture` for single-account, `accounts` for
+    /// multi-account, `tool_matrix` for both), and boot assigns whichever it
+    /// resolved. The six parameters are the ones every start has.
+    #[must_use]
+    pub fn new(
+        version: String,
+        git_commit: String,
+        config_path: std::path::PathBuf,
+        config_hash_sha256: String,
+        trailing: crate::writer::self_check::TrailingState,
+        current_inode: u64,
+    ) -> Self {
+        Self {
+            version,
+            git_commit,
+            posture: None,
+            accounts: None,
+            tool_matrix: Vec::new(),
+            config_path,
+            config_hash_sha256,
+            trailing,
+            current_inode,
+        }
+    }
 }
 
 #[cfg(test)]

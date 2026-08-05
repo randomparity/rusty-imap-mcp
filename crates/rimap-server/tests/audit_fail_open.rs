@@ -11,6 +11,17 @@ use rimap_audit::{AuditOptions, AuditWriter, Seq, ToolStartInputs};
 use rimap_core::tool::ToolName;
 use tempfile::tempdir;
 
+fn tool_start_inputs() -> ToolStartInputs {
+    let mut inputs = ToolStartInputs::new(
+        ToolName::Search,
+        serde_json::Value::Object(serde_json::Map::new()),
+        "0".repeat(64),
+    );
+    inputs.account = Some("test".to_string());
+    inputs.posture_effective = Some(rimap_core::Posture::Readonly);
+    inputs
+}
+
 #[test]
 fn fail_open_suppresses_write_failure_and_increments_counter() {
     let dir = tempdir().unwrap();
@@ -29,13 +40,7 @@ fn fail_open_suppresses_write_failure_and_increments_counter() {
     // incrementing suppressed_failures.
     writer.force_next_write_failure();
 
-    let result = writer.log_tool_start(ToolStartInputs {
-        tool: ToolName::Search,
-        account: Some("test".to_string()),
-        posture_effective: Some(rimap_core::Posture::Readonly),
-        arguments_redacted: serde_json::Value::Object(serde_json::Map::new()),
-        arguments_hash_sha256: "0".repeat(64),
-    });
+    let result = writer.log_tool_start(tool_start_inputs());
 
     assert!(
         result.is_ok(),
@@ -67,13 +72,7 @@ fn fail_open_false_propagates_write_failure() {
 
     writer.force_next_write_failure();
 
-    let result = writer.log_tool_start(ToolStartInputs {
-        tool: ToolName::Search,
-        account: Some("test".to_string()),
-        posture_effective: Some(rimap_core::Posture::Readonly),
-        arguments_redacted: serde_json::Value::Object(serde_json::Map::new()),
-        arguments_hash_sha256: "0".repeat(64),
-    });
+    let result = writer.log_tool_start(tool_start_inputs());
 
     assert!(
         result.is_err(),

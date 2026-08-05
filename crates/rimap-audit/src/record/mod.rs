@@ -2,6 +2,36 @@
 //! header (`seq`, `ts`, `process_id`, `kind`) plus a kind-specific payload.
 //! Serialization uses `#[serde(tag = "kind")]` to produce a flat JSON object
 //! per line (JSONL).
+//!
+//! # Adding a field
+//!
+//! Every payload struct here is `#[non_exhaustive]`, so adding a field is
+//! additive at the Rust API level: no downstream crate can name the full set
+//! of fields in a struct expression, and none has to be recompiled against a
+//! wider one. It is additive on disk too, because readers tolerate an absent
+//! field via `#[serde(default)]`. Both halves are required — see
+//! `docs/audit-log.md` ("Compatibility contract"), which is the normative
+//! statement of what a reader may assume.
+//!
+//! `#[non_exhaustive]` is a Rust-visibility construct only. It does not touch
+//! serde, so an unchanged record serializes to byte-identical JSONL. The
+//! golden lines in `tests/non_exhaustive_record.rs` hold that, and are the
+//! reason this change is safe to make against an append-only file.
+//!
+//! Because the attribute rejects *every* cross-crate struct expression —
+//! functional-update syntax included (rustc E0639) — types something outside
+//! this crate constructs carry a `new` taking the fields with no meaningful
+//! default. Reach the rest by assignment: the fields stay `pub`.
+//! [`ProcessEnd::new`] is the one deliberate exception to "no meaningful
+//! default"; see it for why.
+//!
+//! The newtypes in [`ids`] are deliberately left exhaustive; see that module.
+//! So are the enums here ([`Payload`], [`ProcessEndReason`], [`ToolStatus`],
+//! [`VerdictSource`], [`PostureEffective`]), matching #665's treatment of
+//! `rimap_config::model`. A new variant is a new `kind` or a new value of an
+//! existing one — a reader that does not know it cannot do anything useful
+//! with the record, so forcing downstream matches through a wildcard arm
+//! would convert a compile error into a silently ignored record.
 
 use std::path::PathBuf;
 
@@ -90,6 +120,7 @@ pub enum ProcessEndReason {
 /// which matches [`rimap_core::Posture::as_str`] byte-for-byte so the
 /// on-disk form is identical to the prior string-typed field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AccountSummary {
     /// Account name from config.
     pub name: String,
@@ -127,6 +158,7 @@ pub enum VerdictSource {
 
 /// One explicit per-tool verdict and the config layer that wrote it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolVerdict {
     /// The tool the verdict names. Serializes via [`ToolName::as_str`].
     pub tool: ToolName,
@@ -141,9 +173,23 @@ pub struct ToolVerdict {
     pub source: VerdictSource,
 }
 
+impl ToolVerdict {
+    /// Construct a verdict. Every field is load-bearing, so all three are
+    /// parameters.
+    #[must_use]
+    pub fn new(tool: ToolName, allow: bool, source: VerdictSource) -> Self {
+        Self {
+            tool,
+            allow,
+            source,
+        }
+    }
+}
+
 /// One account's effective posture and its explicit per-tool verdicts, as
 /// resolved at boot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AccountToolMatrix {
     /// Account name from config.
     pub account: String,
@@ -157,9 +203,28 @@ pub struct AccountToolMatrix {
     pub tools: Vec<ToolVerdict>,
 }
 
+impl AccountToolMatrix {
+    /// Construct a matrix with no explicit verdicts. `tools` is
+    /// `#[serde(default)]` — an account that overrides nothing has an empty
+    /// list — so callers with verdicts assign the field.
+    #[must_use]
+    pub fn new(account: String, posture: Posture) -> Self {
+        Self {
+            account,
+            posture,
+            tools: Vec::new(),
+        }
+    }
+}
+
 /// Payload of the `process_start` kind. Fields chosen to chain history across
 /// restarts (see spec §10 startup self-check).
+///
+/// Nothing outside this crate constructs a `ProcessStart` directly — the
+/// writer builds it from [`crate::ProcessStartInputs`] — so it carries no
+/// constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProcessStart {
     /// Semver of the running binary.
     pub version: String,
@@ -200,6 +265,7 @@ pub struct ProcessStart {
 
 /// Payload of the `process_end` kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProcessEnd {
     /// Why the process exited.
     pub reason: ProcessEndReason,
@@ -218,10 +284,33 @@ pub struct ProcessEnd {
     pub records_lost: u64,
 }
 
+impl ProcessEnd {
+    /// Construct a `process_end` payload.
+    ///
+    /// `records_lost` is a parameter rather than a defaulted field, which is
+    /// the one place this crate departs from #665's rule that a constructor
+    /// takes exactly the fields serde treats as required. A zero here is not
+    /// an absent value: it is an affirmative, durable claim that this
+    /// process's record stream has no hole in it. A caller that never
+    /// assigned the field would publish that claim without measuring it.
+    /// Production reads it from
+    /// [`AuditWriter::suppressed_failures`](crate::AuditWriter::suppressed_failures)
+    /// (#647); a synthetic record passes the count it means to assert.
+    #[must_use]
+    pub fn new(reason: ProcessEndReason, total_tool_calls: u64, records_lost: u64) -> Self {
+        Self {
+            reason,
+            total_tool_calls,
+            records_lost,
+        }
+    }
+}
+
 /// Top-level audit record enum. One variant per `kind` discriminator.
 /// Serialized as a flat JSON object per line with `seq`, `ts`, `process_id`,
 /// `kind`, and the kind-specific fields merged in via `#[serde(flatten)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuditRecord {
     /// Per-process monotonic sequence number.
     pub seq: Seq,
@@ -235,6 +324,20 @@ pub struct AuditRecord {
     pub payload: Payload,
 }
 
+impl AuditRecord {
+    /// Assemble a record from its header and payload. Every field is part of
+    /// the header contract, so all four are parameters.
+    #[must_use]
+    pub fn new(seq: Seq, ts: Timestamp, process_id: ProcessId, payload: Payload) -> Self {
+        Self {
+            seq,
+            ts,
+            process_id,
+            payload,
+        }
+    }
+}
+
 // `AuthEvent` and `AuthResult` live in `rimap_core::auth_event` so
 // `rimap-imap` can construct them without depending on this crate.
 // Re-exported here under their canonical names for ergonomic access
@@ -243,7 +346,11 @@ pub use rimap_core::auth_event::{AuthEvent, AuthResult};
 
 /// Payload of the `tool_start` kind. Recorded before dispatch begins so a
 /// crash mid-call still leaves a breadcrumb.
+///
+/// Built by the writer from [`crate::ToolStartInputs`]; no external
+/// construction site, so no constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolStart {
     /// Account name this tool call targets.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,7 +389,12 @@ pub enum ToolStatus {
 /// (e.g. raw `message_ids_returned`). Any field added here therefore bypasses
 /// the argument redaction schema and MUST be consciously reviewed for
 /// sensitivity before being recorded durably.
+///
+/// Every field is `#[serde(default)]`, so `Default` is the whole constructor
+/// this type needs: build with `ResultSummary::default()` and assign what the
+/// tool actually produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct ResultSummary {
     /// RFC 822 `Message-ID` values returned to the caller.
     #[serde(default)]
@@ -333,6 +445,7 @@ pub struct ResultSummary {
 /// Basename and byte count of one attachment recorded in a `tool_end`
 /// [`ResultSummary`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AttachmentProvenance {
     /// Basename of the attached sandbox file (never a full path).
     pub filename: String,
@@ -340,8 +453,17 @@ pub struct AttachmentProvenance {
     pub bytes: u64,
 }
 
+impl AttachmentProvenance {
+    /// Record one attachment. Both fields are required to identify it.
+    #[must_use]
+    pub fn new(filename: String, bytes: u64) -> Self {
+        Self { filename, bytes }
+    }
+}
+
 /// Snapshot of the provenance ring buffer at `tool_end` time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Provenance {
     /// Configured window in seconds.
     pub window_seconds: u32,
@@ -349,8 +471,25 @@ pub struct Provenance {
     pub message_ids_recently_read: Vec<String>,
 }
 
+impl Provenance {
+    /// Snapshot the ring buffer. `message_ids_recently_read` has no
+    /// `#[serde(default)]`: an empty list and an absent one mean different
+    /// things to a reader, so the caller states which it has.
+    #[must_use]
+    pub fn new(window_seconds: u32, message_ids_recently_read: Vec<String>) -> Self {
+        Self {
+            window_seconds,
+            message_ids_recently_read,
+        }
+    }
+}
+
 /// Payload of the `tool_end` kind.
+///
+/// Built by the writer from [`crate::ToolEndInputs`]; no external
+/// construction site, so no constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolEnd {
     /// Account name this tool call targeted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -372,8 +511,10 @@ pub struct ToolEnd {
 }
 
 /// Payload of the `config` kind. Declared now so Sprint 5 can emit it; no
-/// code path writes it yet.
+/// code path writes it yet — and so no external construction site, and no
+/// constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ConfigEvent {
     /// Path the config was loaded from.
     pub path: PathBuf,

@@ -34,13 +34,14 @@ fn open_writer(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
 }
 
 fn tool_start_inputs() -> ToolStartInputs {
-    ToolStartInputs {
-        tool: ToolName::Search,
-        account: Some("test".to_string()),
-        posture_effective: Some(rimap_core::Posture::Readonly),
-        arguments_redacted: serde_json::Value::Object(serde_json::Map::new()),
-        arguments_hash_sha256: "0".repeat(64),
-    }
+    let mut inputs = ToolStartInputs::new(
+        ToolName::Search,
+        serde_json::Value::Object(serde_json::Map::new()),
+        "0".repeat(64),
+    );
+    inputs.account = Some("test".to_string());
+    inputs.posture_effective = Some(rimap_core::Posture::Readonly);
+    inputs
 }
 
 /// The one `process_end` line in `path`, as raw text.
@@ -57,13 +58,12 @@ fn process_end_line(path: &std::path::Path) -> String {
 /// Mirrors `rimap-server`'s `emit_process_end`: the counters are read off the
 /// writer at shutdown and stamped into the record.
 fn emit_process_end(writer: &AuditWriter) {
-    writer
-        .log_process_end(ProcessEnd {
-            reason: ProcessEndReason::Eof,
-            total_tool_calls: writer.total_tool_calls(),
-            records_lost: writer.suppressed_failures(),
-        })
-        .unwrap();
+    let end = ProcessEnd::new(
+        ProcessEndReason::Eof,
+        writer.total_tool_calls(),
+        writer.suppressed_failures(),
+    );
+    writer.log_process_end(end).unwrap();
 }
 
 #[test]

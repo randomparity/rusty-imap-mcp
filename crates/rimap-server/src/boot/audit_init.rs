@@ -73,17 +73,18 @@ pub fn init_audit_writer_multi(
         .map(crate::boot::tool_matrix::account_tool_matrix)
         .collect();
 
-    writer.log_process_start(ProcessStartInputs {
-        version: rimap_core::version::version().to_string(),
-        git_commit: rimap_core::version::commit().to_string(),
-        posture,
-        accounts,
-        tool_matrix,
-        config_path: config_file_path.to_path_buf(),
-        config_hash_sha256: config_hash,
+    let mut inputs = ProcessStartInputs::new(
+        rimap_core::version::version().to_string(),
+        rimap_core::version::commit().to_string(),
+        config_file_path.to_path_buf(),
+        config_hash,
         trailing,
-        current_inode: current,
-    })?;
+        current,
+    );
+    inputs.posture = posture;
+    inputs.accounts = accounts;
+    inputs.tool_matrix = tool_matrix;
+    writer.log_process_start(inputs)?;
 
     Ok(writer)
 }
@@ -301,11 +302,7 @@ allowed_base_dir = "{base}"
         {
             let writer = init_audit_writer_multi(&validated, &config_path).unwrap();
             writer
-                .log_process_end(ProcessEnd {
-                    reason: ProcessEndReason::Eof,
-                    total_tool_calls: 0,
-                    records_lost: 0,
-                })
+                .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0))
                 .unwrap();
         }
 
@@ -347,16 +344,12 @@ allowed_base_dir = "{base}"
             .unwrap();
             let pid = ProcessId::new_now();
             writer
-                .write_record(&AuditRecord {
-                    seq: Seq(1),
-                    ts: Timestamp::now(),
-                    process_id: pid,
-                    payload: Payload::ProcessEnd(ProcessEnd {
-                        reason: ProcessEndReason::Eof,
-                        total_tool_calls: 0,
-                        records_lost: 0,
-                    }),
-                })
+                .write_record(&AuditRecord::new(
+                    Seq(1),
+                    Timestamp::now(),
+                    pid,
+                    Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 0, 0)),
+                ))
                 .unwrap();
         }
 

@@ -24,22 +24,20 @@ pub fn account_tool_matrix(acfg: &ValidatedAccountConfig) -> AccountToolMatrix {
         .into_iter()
         .filter_map(|tool| {
             let verdict = acfg.tool_overrides.get(&tool)?;
-            Some(ToolVerdict {
+            Some(ToolVerdict::new(
                 tool,
-                allow: matches!(*verdict, Verdict::Allow),
-                source: if acfg.account_written_tools.contains(&tool) {
+                matches!(*verdict, Verdict::Allow),
+                if acfg.account_written_tools.contains(&tool) {
                     VerdictSource::Account
                 } else {
                     VerdictSource::Inherited
                 },
-            })
+            ))
         })
         .collect();
-    AccountToolMatrix {
-        account: acfg.id.as_str().to_string(),
-        posture: acfg.security.posture,
-        tools,
-    }
+    let mut matrix = AccountToolMatrix::new(acfg.id.as_str().to_string(), acfg.security.posture);
+    matrix.tools = tools;
+    matrix
 }
 
 /// Render one verdict as `<tool>=<allow|deny>(<account|inherited>)`.
