@@ -65,7 +65,8 @@ impl AuthEventSink for AuditWriter {
     /// "a record that should be on disk is not, and no caller was told".
     /// Distinguishing them would need a second counter for no decision an
     /// operator makes differently — either way the audit trail has a hole and
-    /// the cause is in the logs.
+    /// the cause is in the logs. That merged count is what `process_end`
+    /// persists as `records_lost` (#647).
     fn note_auth_write_lost(&self) {
         self.count_suppressed_failure();
     }
