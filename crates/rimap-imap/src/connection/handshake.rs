@@ -495,18 +495,26 @@ mod tests {
     /// one, and a test routed through it would pass whatever this sink did.
     #[test]
     fn a_poisoned_recording_sink_written_during_an_unwind_does_not_abort() {
-        struct EmitOnDrop<'a>(&'a RecordingAudit);
+        struct EmitOnDrop<'a> {
+            audit: &'a RecordingAudit,
+            rejected: &'a std::cell::Cell<bool>,
+        }
 
         impl Drop for EmitOnDrop<'_> {
             fn drop(&mut self) {
-                let _lost = self.0.emit_auth(any_auth_event());
+                let lost = self.audit.emit_auth(any_auth_event());
+                self.rejected.set(lost.is_err());
             }
         }
 
         let audit = poisoned_recording_audit();
+        let rejected = std::cell::Cell::new(false);
 
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _emitter = EmitOnDrop(&audit);
+            let _emitter = EmitOnDrop {
+                audit: &audit,
+                rejected: &rejected,
+            };
             panic!("an unwind passing through the connect");
         }));
 
@@ -514,6 +522,13 @@ mod tests {
             caught.is_err(),
             "the outer panic must unwind normally; reaching this line at all \
              means the sink's write did not abort the process",
+        );
+        assert!(
+            rejected.get(),
+            "the drop must have reached the sink and had its write rejected — \
+             surviving the unwind proves nothing if nothing was emitted, and \
+             the flag is set after the call so it also pins that `emit_auth` \
+             returned rather than diverged",
         );
     }
 
