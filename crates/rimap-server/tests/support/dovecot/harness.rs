@@ -74,22 +74,92 @@ fn gate(tool: &str, probe: RuntimeProbe, require_runtime: bool) -> Result<(), Ha
     }
 }
 
-fn runtime() -> &'static str {
-    static TOOL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    TOOL.get_or_init(|| {
-        match std::env::var("RIMAP_CONTAINER_TOOL").as_deref() {
-            Ok("docker") => return "docker",
-            Ok("podman") => return "podman",
-            _ => {}
-        }
-        if binary_present("docker") {
-            "docker"
-        } else if binary_present("podman") {
-            "podman"
-        } else {
-            "docker"
-        }
+/// Runtimes tried, in order, when `RIMAP_CONTAINER_TOOL` is unset.
+const AUTODETECT_ORDER: [&str; 2] = ["docker", "podman"];
+
+/// The runtime this process uses and what probing it found. A single cache for
+/// both: `runtime()` and `probe_runtime()` must agree on the selected tool, and
+/// the probes are process-wide — the eleven container test binaries must not
+/// each re-run them.
+fn selection() -> (&'static str, RuntimeProbe) {
+    static SELECTION: std::sync::OnceLock<(&'static str, RuntimeProbe)> =
+        std::sync::OnceLock::new();
+    *SELECTION.get_or_init(|| {
+        select_runtime(
+            std::env::var("RIMAP_CONTAINER_TOOL").ok().as_deref(),
+            &probe_tool,
+        )
     })
+}
+
+/// Name of the container runtime binary to invoke (`docker` or `podman`).
+/// Falls back to `"docker"` even when nothing is usable — callers gate on
+/// [`probe_runtime`] before using it.
+fn runtime() -> &'static str {
+    selection().0
+}
+
+/// Pick the runtime to use and report what probing it found.
+///
+/// An explicit `RIMAP_CONTAINER_TOOL` is honoured verbatim: only that runtime
+/// is probed and no alternative is tried, so a typo'd or deliberately-unusable
+/// override fails on its own terms instead of silently running elsewhere.
+/// Otherwise each runtime in [`AUTODETECT_ORDER`] is probed in turn and the
+/// first usable one wins — selecting on binary presence alone let a stopped
+/// Docker Desktop mask a working podman (#674). Probing stops at the first
+/// `Ready`, so the common docker-is-up case costs exactly what it did before.
+///
+/// `probe` is a parameter so the whole decision is unit-testable without a
+/// container runtime on the host.
+fn select_runtime(
+    override_tool: Option<&str>,
+    probe: &dyn Fn(&str) -> RuntimeProbe,
+) -> (&'static str, RuntimeProbe) {
+    if let Some(tool) = explicit_tool(override_tool) {
+        return (tool, probe(tool));
+    }
+    let mut verdict: Option<(&'static str, RuntimeProbe)> = None;
+    for tool in AUTODETECT_ORDER {
+        let probed = probe(tool);
+        if probed == RuntimeProbe::Ready {
+            return (tool, probed);
+        }
+        if verdict.is_none_or(|(_, seen)| failure_rank(probed) > failure_rank(seen)) {
+            verdict = Some((tool, probed));
+        }
+    }
+    verdict.unwrap_or((AUTODETECT_ORDER[0], RuntimeProbe::NoBinary))
+}
+
+/// Normalize an explicit `RIMAP_CONTAINER_TOOL` value. Unrecognized values are
+/// not overrides and fall through to autodetect silently — the harness has no
+/// logger available and `print_stderr` is denied by the workspace lint policy.
+fn explicit_tool(value: Option<&str>) -> Option<&'static str> {
+    match value {
+        Some("docker") => Some("docker"),
+        Some("podman") => Some("podman"),
+        _ => None,
+    }
+}
+
+/// How useful a failed probe is as a report. `DaemonDown` outranks `NoBinary`:
+/// "podman is installed but its daemon is unreachable" tells an operator what
+/// to start, where "docker is not installed" does not.
+fn failure_rank(probe: RuntimeProbe) -> u8 {
+    match probe {
+        RuntimeProbe::DaemonDown => 1,
+        RuntimeProbe::Ready | RuntimeProbe::NoBinary => 0,
+    }
+}
+
+/// Probe one runtime: an absent CLI is `NoBinary`, otherwise `<tool> info`
+/// decides. Two spawns, and only for runtimes selection actually reaches.
+fn probe_tool(tool: &str) -> RuntimeProbe {
+    if binary_present(tool) {
+        classify_probe(run_daemon_probe(tool, DAEMON_PROBE_TIMEOUT))
+    } else {
+        RuntimeProbe::NoBinary
+    }
 }
 
 fn binary_present(bin: &str) -> bool {
@@ -116,21 +186,12 @@ enum RuntimeProbe {
 /// never answer, so the probe needs a deadline of its own.
 const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// State of the runtime `runtime()` selected — probing both binaries would
-/// ignore a `RIMAP_CONTAINER_TOOL` override pointing at the unusable one.
-/// Cached because the verdict cannot usefully change within one test process:
-/// a daemon that dies after the probe surfaces at `compose up`, which is a hard
-/// error at every posture.
+/// State of the runtime `runtime()` selected. Cached alongside that choice in
+/// [`selection`], because the verdict cannot usefully change within one test
+/// process: a daemon that dies after the probe surfaces at `compose up`, which
+/// is a hard error at every posture.
 fn probe_runtime() -> RuntimeProbe {
-    static PROBE: std::sync::OnceLock<RuntimeProbe> = std::sync::OnceLock::new();
-    *PROBE.get_or_init(|| {
-        let tool = runtime();
-        if binary_present(tool) {
-            classify_probe(run_daemon_probe(tool, DAEMON_PROBE_TIMEOUT))
-        } else {
-            RuntimeProbe::NoBinary
-        }
-    })
+    selection().1
 }
 
 /// Decide what a finished probe means. Only a stderr naming an unreachable
@@ -543,7 +604,11 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::time::Duration;
 
-    use super::{HarnessError, RuntimeProbe, classify_probe, gate, wait_until_port_refused};
+    use std::cell::RefCell;
+
+    use super::{
+        HarnessError, RuntimeProbe, classify_probe, gate, select_runtime, wait_until_port_refused,
+    };
 
     /// Verbatim stderr from `docker info` against a socket with nothing behind
     /// it — the shape of the outage in #636.
@@ -583,6 +648,89 @@ mod tests {
         );
         // Probe outlived its budget: too busy to answer is busy, not absent.
         assert_eq!(classify_probe(None), RuntimeProbe::Ready);
+    }
+
+    /// #674: selection must not stop at the first runtime *installed*. A
+    /// stopped Docker Desktop masked a working podman, and after #636 that
+    /// turned the whole container suite into a silent skip.
+    #[test]
+    fn autodetect_falls_through_a_down_runtime_to_a_working_one() {
+        let asked = RefCell::new(Vec::new());
+        let selected = select_runtime(None, &|tool| {
+            asked.borrow_mut().push(tool.to_owned());
+            if tool == "docker" {
+                RuntimeProbe::DaemonDown
+            } else {
+                RuntimeProbe::Ready
+            }
+        });
+        assert_eq!(selected, ("podman", RuntimeProbe::Ready));
+        assert_eq!(asked.into_inner(), ["docker", "podman"]);
+    }
+
+    /// A working docker is still used first, and podman is never probed — the
+    /// fall-through must not double the probe cost in the common case.
+    #[test]
+    fn autodetect_stops_at_the_first_working_runtime() {
+        let asked = RefCell::new(Vec::new());
+        let selected = select_runtime(None, &|tool| {
+            asked.borrow_mut().push(tool.to_owned());
+            RuntimeProbe::Ready
+        });
+        assert_eq!(selected, ("docker", RuntimeProbe::Ready));
+        assert_eq!(asked.into_inner(), ["docker"]);
+    }
+
+    /// With nothing usable the harness still has to name a runtime in its skip
+    /// or hard-failure message.
+    #[test]
+    fn autodetect_reports_the_most_actionable_failure() {
+        assert_eq!(
+            select_runtime(None, &|_| RuntimeProbe::DaemonDown),
+            ("docker", RuntimeProbe::DaemonDown),
+            "both daemons down reports the first runtime tried"
+        );
+        assert_eq!(
+            select_runtime(None, &|tool| if tool == "docker" {
+                RuntimeProbe::NoBinary
+            } else {
+                RuntimeProbe::DaemonDown
+            }),
+            ("podman", RuntimeProbe::DaemonDown),
+            "an installed-but-down runtime outranks an absent one"
+        );
+        assert_eq!(
+            select_runtime(None, &|_| RuntimeProbe::NoBinary),
+            ("docker", RuntimeProbe::NoBinary),
+            "nothing installed still names a runtime"
+        );
+    }
+
+    /// An override is honoured without probing alternatives, so a typo'd or
+    /// unusable choice fails on its own terms rather than silently running
+    /// somewhere else.
+    #[test]
+    fn an_explicit_override_probes_only_the_named_runtime() {
+        let asked = RefCell::new(Vec::new());
+        let selected = select_runtime(Some("podman"), &|tool| {
+            asked.borrow_mut().push(tool.to_owned());
+            RuntimeProbe::DaemonDown
+        });
+        assert_eq!(selected, ("podman", RuntimeProbe::DaemonDown));
+        assert_eq!(
+            asked.into_inner(),
+            ["podman"],
+            "an override must not fall through to another runtime"
+        );
+    }
+
+    /// A value naming no known runtime is not an override at all.
+    #[test]
+    fn an_unrecognized_override_falls_back_to_autodetect() {
+        assert_eq!(
+            select_runtime(Some("containerd"), &|_| RuntimeProbe::Ready),
+            ("docker", RuntimeProbe::Ready)
+        );
     }
 
     /// A reachable binary with a dead daemon must skip, not hard-fail (#636).
