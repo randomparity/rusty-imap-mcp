@@ -406,6 +406,7 @@ mod tests {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
                 records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
         writer.write_record(&rec).unwrap();
@@ -445,6 +446,7 @@ mod tests {
                     reason: ProcessEndReason::Eof,
                     total_tool_calls: seq,
                     records_lost: 0,
+                    undrained_dispatches: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -481,6 +483,7 @@ mod tests {
                     reason: ProcessEndReason::Eof,
                     total_tool_calls: seq,
                     records_lost: 0,
+                    undrained_dispatches: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -552,6 +555,7 @@ mod tests {
                     reason: ProcessEndReason::Eof,
                     total_tool_calls: seq,
                     records_lost: 0,
+                    undrained_dispatches: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -782,6 +786,7 @@ mod tests {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 42,
                 records_lost: 0,
+                undrained_dispatches: 0,
             })
             .unwrap();
         assert_eq!(seq, crate::record::ids::Seq::FIRST);
@@ -828,6 +833,7 @@ mod tests {
                 reason: crate::record::ProcessEndReason::Eof,
                 total_tool_calls: writer.total_tool_calls(),
                 records_lost: 0,
+                undrained_dispatches: 0,
             })
             .unwrap();
         assert_eq!(writer.total_tool_calls(), 2);
@@ -858,6 +864,7 @@ mod tests {
                 reason: ProcessEndReason::SignalTerm,
                 total_tool_calls: 7,
                 records_lost: 0,
+                undrained_dispatches: 0,
             })
             .unwrap();
         drop(writer);
@@ -955,6 +962,7 @@ mod tests {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
                 records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
 
@@ -1000,6 +1008,7 @@ mod tests {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
                 records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
 

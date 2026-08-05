@@ -94,6 +94,14 @@ jobs:
       # .config/nextest.toml (#625): an unrelated flake or container hiccup
       # no longer suppresses every other test's result.
       - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
+      # nextest does not run doctests (upstream limitation), so the step above
+      # skips every one silently. The `compile_fail,E0639` blocks that enforce
+      # `#[non_exhaustive]` on `rimap_config::model::ImapConfig` (#665) and
+      # `rimap_audit::record::ProcessEnd` (#706) are doctests -- a doctest
+      # compiles as its own crate, which is the only place the attribute is in
+      # force. Mirrors `just test-doc`; without it, dropping an attribute in a
+      # conflict resolution leaves CI green.
+      - run: cargo test --workspace --doc --locked
       # The main --workspace pass above runs with the default silent-skip
       # posture: container-gated e2e tests return early when no docker/podman
       # runtime is present, so a runtime hiccup would let them all vanish while
@@ -390,9 +398,52 @@ jobs:
           key: sonarqube
       - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-nextest
+      # Driven through `nextest`, not the bare `cargo llvm-cov` that runs
+      # `cargo test` (#693). That default put this job three differences away
+      # from "test (stable)" at once — instrumented, different runner, and
+      # `.config/nextest.toml` applying to nothing here — so a flake seen only
+      # on this arm read as an instrumentation cost when instrumentation was
+      # measured at 1.02-1.27x and is the smallest of the three (#671, #692).
+      # With nextest, each test gets its own process and the shared config
+      # applies: `profile.ci`'s `fail-fast = { max-fail = 20 }` now bounds this
+      # arm the same way it bounds the test jobs, and the `container-backed` /
+      # `chaos-backed` groups and the 5s advisory `leak-timeout` now cover it.
+      #
+      # `--all-features` stays, and is deliberately NOT mirrored into "test
+      # (stable)": it is what makes the feature-gated code (`test-support`,
+      # `fuzzing`, `test-injection`, `vendored-keyring`) compile and count
+      # toward coverage at all, and the one suite it additionally selects
+      # (`proton-bridge-tests`) self-skips with no Proton Bridge to reach. The
+      # required test arm should not be made to carry that suite just to match.
+      #
+      # `--no-tests=pass` matches "test (stable)" — a workspace member with no
+      # tests is not a failure. nextest does not run doctests, and neither did
+      # the `cargo test` this replaces: cargo-llvm-cov excludes them unless
+      # `--doctests` is passed, so nothing is lost here (relevant to #708).
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --all-features --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov nextest --locked --workspace --all-features \
+            --no-tests=pass --profile ci \
+            --lcov --output-path lcov.info
+      # The scanner treats an empty or truncated lcov.info as "no coverage
+      # data" and still exits 0, so a report that silently stopped being
+      # produced would land as a green job with the quality gate reading
+      # whatever it read last. Fail on zero records instead, and print the
+      # totals so a later change to this arm can be diffed against them.
+      - name: Verify lcov.info is non-empty and report totals
+        run: |
+          awk -F: '
+            /^LF:/ { found += $2 }
+            /^LH:/ { hit += $2 }
+            END {
+              if (found == 0) {
+                print "::error::lcov.info records no instrumented lines — the coverage report is empty"
+                exit 1
+              }
+              printf "lcov.info: %d/%d lines covered (%.2f%%)\n", hit, found, 100 * hit / found
+            }
+          ' lcov.info
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f  # v8.2.1
         env:

@@ -149,13 +149,8 @@ impl ImapMcpServer {
         let join = self
             .drain
             .spawn_blocking_tracked(move || {
-                audit.log_tool_start(ToolStartInputs {
-                    tool,
-                    account,
-                    posture_effective,
-                    arguments_redacted: redacted,
-                    arguments_hash_sha256: hash,
-                })
+                let inputs = ToolStartInputs::new(tool, account, posture_effective, redacted, hash);
+                audit.log_tool_start(inputs)
             })
             .await;
         match join {
@@ -192,20 +187,17 @@ impl ImapMcpServer {
         // The provenance ring buffer is not yet wired for multi-account.
         // Record an empty snapshot with the window placeholder until a
         // per-account buffer lands.
-        let provenance = Provenance {
-            window_seconds: 60,
-            message_ids_recently_read: Vec::new(),
-        };
-        let inputs = rimap_audit::ToolEndInputs {
+        let provenance = Provenance::new(60, Vec::new());
+        let mut inputs = rimap_audit::ToolEndInputs::new(
             start_seq,
             tool,
-            account,
-            status: outcome.status,
-            error_code: outcome.error_code,
+            outcome.status,
+            outcome.error_code,
             duration_ms,
-            result_summary: outcome.result_summary,
             provenance,
-        };
+        );
+        inputs.account = account;
+        inputs.result_summary = outcome.result_summary;
         let join = self
             .drain
             .spawn_blocking_tracked(move || audit.log_tool_end(inputs))
@@ -278,19 +270,15 @@ impl Drop for AuditEnvelopeGuard {
         // ToolName is Copy; capture it for the warning log before try_send
         // consumes the payload.
         let tool = inner.tool;
-        let cancellation = ToolEndInputs {
-            start_seq: inner.start_seq,
+        let mut cancellation = ToolEndInputs::new(
+            inner.start_seq,
             tool,
-            account: inner.account,
-            status: rimap_audit::record::ToolStatus::Cancelled,
-            error_code: Some(rimap_core::ErrorCode::Cancelled),
+            rimap_audit::record::ToolStatus::Cancelled,
+            Some(rimap_core::ErrorCode::Cancelled),
             duration_ms,
-            result_summary: rimap_audit::record::ResultSummary::default(),
-            provenance: Provenance {
-                window_seconds: 60,
-                message_ids_recently_read: Vec::new(),
-            },
-        };
+            Provenance::new(60, Vec::new()),
+        );
+        cancellation.account = inner.account;
         if let Err(e) = inner.sender.try_send(cancellation) {
             tracing::warn!(
                 error = %e,
@@ -312,15 +300,50 @@ mod tests {
     use super::AuditEnvelopeGuard;
 
     fn test_writer(path: std::path::PathBuf) -> AuditWriter {
+        test_writer_from_seq(path, Seq::FIRST)
+    }
+
+    /// Like [`test_writer`] but starting the sequence at `initial_seq`. A test
+    /// that joins two records on `seq` needs this: with the default start the
+    /// record under test is always seq 1, so the join also holds for a bug
+    /// that hardcoded [`Seq::FIRST`] instead of carrying the real seq.
+    fn test_writer_from_seq(path: std::path::PathBuf, initial_seq: Seq) -> AuditWriter {
         AuditWriter::open(&AuditOptions {
             path,
             rotate_bytes: 10 * 1024 * 1024,
             rotate_keep: 5,
             retention_seconds: None,
             fail_open: false,
-            initial_seq: Seq::FIRST,
+            initial_seq,
         })
         .unwrap()
+    }
+
+    /// A never-completing tool body that signals `entered` on its first poll.
+    ///
+    /// This is the barrier for "the envelope is ready to be cancelled".
+    /// `run_with_audit_envelope` awaits `emit_tool_start`, constructs the
+    /// `AuditEnvelopeGuard`, and only *then* polls the body — so observing the
+    /// first poll proves the `tool_start` write finished and the guard is
+    /// armed. Nothing else polls this future, so the signal cannot arrive
+    /// early, which makes it an exact ordering barrier rather than a timing
+    /// window.
+    ///
+    /// Kept in sync with the copy in `tests/dispatch_ticket.rs`, which cannot
+    /// reach this one from an integration-test binary.
+    fn body_signalling_first_poll(
+        entered: tokio::sync::oneshot::Sender<()>,
+    ) -> impl std::future::Future<Output = Result<serde_json::Value, rimap_core::RimapError>> {
+        let mut entered = Some(entered);
+        std::future::poll_fn(move |_cx| {
+            if let Some(entered) = entered.take() {
+                // A dropped receiver means the test already gave up; the
+                // assertions report that, so the send result is not actionable.
+                let _ = entered.send(());
+            }
+            // Never resolve: the abort must land while the body is suspended.
+            std::task::Poll::Pending
+        })
     }
 
     fn test_writer_fail_open(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
@@ -346,15 +369,14 @@ mod tests {
         let writer = test_writer(path.clone());
 
         // Prime a tool_start so the resulting tool_end references a real seq.
-        let start_seq = writer
-            .log_tool_start(ToolStartInputs {
-                tool: ToolName::Search,
-                account: Some("test".to_string()),
-                posture_effective: Some(rimap_core::Posture::Readonly),
-                arguments_redacted: serde_json::Value::Object(serde_json::Map::new()),
-                arguments_hash_sha256: "0".repeat(64),
-            })
-            .unwrap();
+        let inputs = ToolStartInputs::new(
+            ToolName::Search,
+            Some("test".to_string()),
+            Some(rimap_core::Posture::Readonly),
+            serde_json::Value::Object(serde_json::Map::new()),
+            "0".repeat(64),
+        );
+        let start_seq = writer.log_tool_start(inputs).unwrap();
 
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());
@@ -367,7 +389,9 @@ mod tests {
                 std::time::Instant::now(),
                 tx.clone(),
             );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            // No sleep: the implicit drop of `_guard` below is synchronous and
+            // so is its `try_send`, so the record is queued before this scope
+            // ends. `drainer.await` is the only barrier this test needs.
             // Implicit drop of `_guard` here — undisarmed, so cancellation fires.
         }
 
@@ -417,7 +441,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropped_run_with_audit_envelope_emits_exactly_one_cancellation() {
         use std::sync::Arc;
-        use std::time::Duration;
 
         use rimap_core::tool::ToolName;
 
@@ -426,7 +449,9 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
-        let writer = test_writer(path.clone());
+        // Not `Seq::FIRST` — see `test_writer_from_seq`; the `start_seq` join
+        // at the end of this test is only meaningful off the default start.
+        let writer = test_writer_from_seq(path.clone(), Seq(41));
 
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());
@@ -434,9 +459,11 @@ mod tests {
         let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx.clone()));
 
         // Spawn `run_with_audit_envelope` with a body that pends forever.
-        // After `emit_tool_start` has had time to fire, `abort()` the
-        // task; the wrapper future is dropped between `tool_start` and
-        // `emit_tool_end`, exercising the guard's `Drop` path.
+        // Once the body has been polled — which proves `tool_start` is
+        // written and the guard is armed — `abort()` the task; the wrapper
+        // future is dropped between `tool_start` and `emit_tool_end`,
+        // exercising the guard's `Drop` path.
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let server_clone = Arc::clone(&server);
         let task = tokio::spawn(async move {
             let args = serde_json::Map::new();
@@ -446,23 +473,28 @@ mod tests {
                     None,
                     PostureContext::Infrastructure,
                     &args,
-                    |_ticket| {
-                        std::future::pending::<Result<serde_json::Value, rimap_core::RimapError>>()
-                    },
+                    |_ticket| body_signalling_first_poll(entered_tx),
                 )
                 .await
         });
 
-        // Give the envelope time to emit `tool_start` and enter the
-        // body's pending await before aborting. 50ms matches the
-        // headroom used by `dispatch_ticket::drop_during_body_*`.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for the body's first poll rather than for a clock: the abort
+        // is then strictly ordered after the guard is armed, whatever the
+        // host load (#684 — the previous 50ms sleep was a race window).
+        //
+        // A dropped sender (e.g. `emit_tool_start` returned `Err`) already
+        // fails this fast. The outer timeout only covers the envelope
+        // *hanging* before the body, so unlike the old sleep it cannot
+        // expire during a healthy run.
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .expect("tool body was never polled within 30s")
+            .expect("envelope dropped the body without ever polling it");
         task.abort();
         let _ = task.await; // wait for the abort to settle
 
-        // Give the drainer time to flush the queued cancellation record.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        // Drop the last sender so the drainer task can exit.
+        // No sleep before the drain: closing every cancellation sender makes
+        // `drainer.await` itself the flush barrier.
         drop(tx);
         drop(server);
         drainer.await.unwrap();
@@ -475,21 +507,28 @@ mod tests {
             "expected exactly 2 records (tool_start + cancellation tool_end), got {} records:\n{contents}",
             lines.len(),
         );
-        assert!(
-            lines[0].contains(r#""tool_start""#),
-            "first record must be tool_start: {}",
-            lines[0],
+        // Assert on parsed fields rather than substrings: `contains` would
+        // also match the same text appearing in some other field's value.
+        let start: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let end: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(start["kind"], "tool_start", "first record: {contents}");
+        assert_eq!(end["kind"], "tool_end", "second record: {contents}");
+        assert_eq!(
+            end["status"], "cancelled",
+            "tool_end must record the cancellation, not a completion: {contents}",
         );
-        assert!(
-            lines[1].contains(r#""status":"cancelled""#),
-            "second record must be cancellation tool_end: {}",
-            lines[1],
+        assert_eq!(
+            end["error_code"], "ERR_CANCELLED",
+            "cancellation tool_end must carry ERR_CANCELLED: {contents}",
         );
-        assert!(
-            lines[1].contains(r#""error_code":"ERR_CANCELLED""#),
-            "second record must carry ERR_CANCELLED: {}",
-            lines[1],
+        // Join the two records so the cancellation is provably the one this
+        // dispatch opened, rather than any `tool_end` reaching the drainer.
+        assert_eq!(
+            end["start_seq"], start["seq"],
+            "tool_end.start_seq must reference this dispatch's tool_start.seq: {contents}",
         );
+        assert_eq!(start["tool"], "list_accounts", "start tool: {contents}");
+        assert_eq!(end["tool"], "list_accounts", "end tool: {contents}");
     }
 
     /// The per-tool-call ceiling (#594) fires inside the envelope's body,

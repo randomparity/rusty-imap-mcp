@@ -227,6 +227,18 @@ test-installer:
 test: prune-containers
     cargo nextest run --workspace --locked --no-tests=pass --profile ci
 
+# Doctests. Separate from `test` because nextest does not run doctests at all
+# (upstream limitation), so `cargo nextest run` above silently skips every one
+# of them. That gap is not cosmetic: the `compile_fail,E0639` blocks that
+# enforce `#[non_exhaustive]` on `rimap_config::model::ImapConfig` (#665) and
+# `rimap_audit::record::ProcessEnd` (#706) are doctests, because a doctest
+# compiles as its own crate and is therefore the only place in the workspace
+# where the attribute is in force at compile time. Without this recipe those
+# blocks never execute, and dropping an attribute in a conflict resolution
+# would leave CI green. Part of `ci`.
+test-doc:
+    cargo test --workspace --doc --locked
+
 # Inner-loop unit tests. Skips the five heaviest test binaries
 # (dovecot integration, e2e/e2e_wire MCP suites, and the slow HTML
 # lookalike proptest). Use this between `cargo check` cycles during
@@ -433,7 +445,7 @@ test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer test-prune-containers semver-checks
+ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer test-prune-containers semver-checks
     typos
 
 # Re-run pre-commit hooks across all files.

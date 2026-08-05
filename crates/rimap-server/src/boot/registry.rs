@@ -458,18 +458,11 @@ mod tests {
         use rimap_core::account::AccountId;
         use rimap_core::posture::Posture;
 
-        let mut acfg = ValidatedAccountConfig::new_for_tests(
-            AccountId::default_account(),
-            ImapConfig {
-                host: "imap.example.com".into(),
-                port: 993,
-                username: "u@example.com".into(),
-                encryption: ImapEncryption::Tls,
-                tls_fingerprint_sha256: None,
-                connect_timeout_seconds: 10,
-                command_timeout_seconds: 30,
-            },
-        );
+        let mut acfg = ValidatedAccountConfig::new_for_tests(AccountId::default_account(), {
+            let mut imap = ImapConfig::new("imap.example.com".into(), 993, "u@example.com".into());
+            imap.encryption = ImapEncryption::Tls;
+            imap
+        });
         acfg.security.posture = Posture::DraftSafe;
 
         let default_id = AccountId::new(rimap_core::account::DEFAULT_ACCOUNT_NAME).unwrap();

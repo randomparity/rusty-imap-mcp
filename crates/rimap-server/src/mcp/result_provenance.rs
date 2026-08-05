@@ -69,16 +69,17 @@ fn compose_provenance(value: &serde_json::Value) -> ResultSummary {
                 let filename = string_field(entry, "filename");
                 let bytes = entry.get("bytes").and_then(serde_json::Value::as_u64);
                 if let (Some(filename), Some(bytes)) = (filename, bytes) {
-                    out.push(rimap_audit::record::AttachmentProvenance { filename, bytes });
+                    out.push(rimap_audit::record::AttachmentProvenance::new(
+                        filename, bytes,
+                    ));
                 }
             }
             out
         })
         .unwrap_or_default();
-    ResultSummary {
-        attachments_sent: attachments,
-        ..ResultSummary::default()
-    }
+    let mut summary = ResultSummary::default();
+    summary.attachments_sent = attachments;
+    summary
 }
 
 /// `export_messages`: a complete export reports `path`, a partial reports
@@ -92,14 +93,14 @@ fn export_provenance(value: &serde_json::Value) -> ResultSummary {
     let Some(meta) = value.get("meta") else {
         return ResultSummary::default();
     };
-    ResultSummary {
-        artifact_path: string_field(meta, "path").or_else(|| string_field(meta, "partial_path")),
-        artifact_sha256: string_field(meta, "sha256"),
-        artifact_bytes: meta.get("total_bytes").and_then(serde_json::Value::as_u64),
-        uids_exported: uid_list(meta, "succeeded"),
-        uids_failed: uid_list(meta, "failed"),
-        ..ResultSummary::default()
-    }
+    let mut summary = ResultSummary::default();
+    summary.artifact_path =
+        string_field(meta, "path").or_else(|| string_field(meta, "partial_path"));
+    summary.artifact_sha256 = string_field(meta, "sha256");
+    summary.artifact_bytes = meta.get("total_bytes").and_then(serde_json::Value::as_u64);
+    summary.uids_exported = uid_list(meta, "succeeded");
+    summary.uids_failed = uid_list(meta, "failed");
+    summary
 }
 
 /// `download_attachment`: always writes exactly one artifact on success.
@@ -110,12 +111,11 @@ fn download_provenance(value: &serde_json::Value) -> ResultSummary {
     let Some(meta) = value.get("meta") else {
         return ResultSummary::default();
     };
-    ResultSummary {
-        artifact_path: string_field(meta, "path"),
-        artifact_sha256: string_field(meta, "sha256"),
-        artifact_bytes: meta.get("size_bytes").and_then(serde_json::Value::as_u64),
-        ..ResultSummary::default()
-    }
+    let mut summary = ResultSummary::default();
+    summary.artifact_path = string_field(meta, "path");
+    summary.artifact_sha256 = string_field(meta, "sha256");
+    summary.artifact_bytes = meta.get("size_bytes").and_then(serde_json::Value::as_u64);
+    summary
 }
 
 fn string_field(meta: &serde_json::Value, key: &str) -> Option<String> {

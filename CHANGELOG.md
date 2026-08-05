@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The number of tool dispatches that outlived the shutdown drain now reaches
+  the audit trail, as `process_end.undrained_dispatches`. It used to go to a
+  `tracing::warn!` and nowhere else — and stderr is the channel an MCP client
+  routinely discards, so a reader holding only the audit file could not tell a
+  run that drained cleanly from one that left dispatches running past
+  `process_end`. A non-zero count is the record stating that terminality is
+  *unverified* for its own run — it measures an exceeded bound, not a sighting
+  of a record following `process_end`. Records written before this field parse
+  unchanged, and a clean run states its zero explicitly rather than omitting
+  it. See #680, #645 / ADR-0015, and `docs/audit-log.md`.
 - `process_end` is now the terminal audit record of its process. The server
   cancels and drains in-flight tool dispatches before writing it, so a connect
   the shutdown cuts records its `auth` entry (`ERR_CANCELLED`) *before*
@@ -42,6 +52,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: `rimap_audit::record::ProcessEnd::new` takes a fourth argument
+  (#680).** The signature is now
+  `new(reason, total_tool_calls, records_lost, undrained_dispatches)`. Adding
+  the field itself is additive — `ProcessEnd` is `#[non_exhaustive]` (#706) and
+  the field is `#[serde(default)]` — but the constructor's arity is not, and it
+  is the only way a downstream crate can build the type. It is a required
+  parameter rather than a defaulted setter for the reason `records_lost` is: a
+  zero is an affirmative, durable claim that no dispatch outlived the drain,
+  and a caller that never assigned it would publish that claim without
+  measuring it. Absorbed by the planned `0.2.0`; no version bump.
+- **API break: every `pub` struct in `rimap_config::model` is now
+  `#[non_exhaustive]` (#665).** All 16 of them — `Config`, `ImapConfig`,
+  `SmtpConfig`, `SecurityConfig`, `LookalikeConfig`, `LimitsConfig`,
+  `AuditConfig`, `AttachmentsConfig`, `CredentialsConfig`,
+  `MultiAccountConfig`, `DefaultsConfig`, `RawAccountConfig`, and the four
+  `Account*Overrides` types. Adding a config field is no longer a breaking
+  change, which is the failure #648 hit when one new `LimitsConfig` field
+  forced the workspace to `0.2.0`. This aligns `rimap-config` with
+  `rimap_content::output`, which has carried the same policy since Sprint 4b.
+
+  Downstream impact: the struct literal is no longer available outside the
+  crate, and **that includes functional-update syntax** — `..Default::default()`
+  is still a struct expression, so rustc rejects it too (E0639). Construct
+  these types as `let mut c = T::default(); c.field = …;`, or via the new
+  constructors below. Pattern matches need a trailing `..`.
+
+  `ImapConfig`, `SmtpConfig`, and `AuditConfig` have no `Default` and gain
+  `ImapConfig::new(host, port, username)`,
+  `SmtpConfig::new(host, port, encryption, username)`, and
+  `AuditConfig::new(path)`. Each takes exactly the fields the TOML schema
+  requires and fills the rest with the value the loader applies for an omitted
+  key. `Config`, `MultiAccountConfig`, and `RawAccountConfig` deliberately gain
+  neither a `Default` nor a constructor: they are file-load roots from
+  `load_and_validate` / `load_from_path`, and a `Default` for them would mint a
+  config with an empty `host` and `username` — the invalid state validation
+  exists to reject.
 - **API break: `rimap_config::validate::ValidatedAccountConfig` and
   `ValidatedMultiConfig` are now `#[non_exhaustive]` (#707).** These are the
   two `pub` structs the validation pipeline outputs, and both are still
@@ -66,6 +112,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validator resolves for an omitted key, leaving the remainder to field
   assignment. They sit behind the same gate as `validate_multi_allowing_empty`
   so the production surface keeps offering exactly one way in.
+- **API break: every `pub` struct *defined in* `rimap_audit::record` is now
+  `#[non_exhaustive]`, along with the three writer-input structs (#706).** The
+  12 record types — `AuditRecord`, `ProcessStart`, `ProcessEnd`, `ToolStart`,
+  `ToolEnd`, `ConfigEvent`, `ResultSummary`, `Provenance`,
+  `AttachmentProvenance`, `AccountSummary`, `AccountToolMatrix`, `ToolVerdict`
+  — plus `ProcessStartInputs`, `ToolStartInputs`, and `ToolEndInputs`. These
+  broke twice in one week: #647 added `ProcessEnd::records_lost` and #632 added
+  `tool_matrix` to `ProcessStart` and `ProcessStartInputs`. Both were genuine
+  breaking changes that `cargo semver-checks` reported as clean, because it
+  baselines on `v0.1.0` and a declared `0.2.0-dev` major bump permits any break
+  (`0 checks: 0 pass, 253 skip`). Third of the `#[non_exhaustive]` siblings,
+  after #665 and #707; #715 (`AuditOptions`, `Filter`, `TrailingState`) and
+  #716 (`AuthEvent`) carry the remainder, both before `v0.2.0` is tagged.
+
+  **Two record-adjacent types are deliberately not covered.** `AuthEvent`
+  backs the `auth` kind but is defined in `rimap_core::auth_event` and only
+  re-exported from `rimap_audit::record`, because `rimap-imap` constructs it
+  without depending on `rimap-audit`; marking it needs a constructor in
+  `rimap-core` and a sweep of `rimap-imap`, so it is #716. Adding a field to
+  `AuthEvent` therefore remains a breaking change, and it has already grown
+  one that way (`credential_source`, #78). `AuditOptions` and `Filter` are
+  #715. Until both land, `auth` records and the writer's configuration
+  surface keep the hazard this entry describes removing everywhere else.
+
+  Downstream impact: the struct literal is no longer available outside the
+  crate, and **that includes functional-update syntax** — `..Default::default()`
+  is still a struct expression, so rustc rejects it too (E0639). Construct via
+  the new constructors, which take the fields that have no safe default:
+  `ToolStartInputs::new(tool, account, posture_effective, redacted, hash)`.
+  Reach the remaining fields by assignment — they stay `pub` — as in
+  `let mut i = ToolEndInputs::new(start_seq, tool, status, duration_ms,
+  provenance); i.account = …;`, which is the type where `account` genuinely is
+  defaulted. Pattern matches need a trailing `..`.
+
+  Constructors were added only where something outside `rimap-audit` actually
+  builds the type: `AuditRecord::new`, `ProcessEnd::new`, `ToolVerdict::new`,
+  `AccountToolMatrix::new`, `AttachmentProvenance::new`, `Provenance::new`, and
+  one on each of the three `*Inputs` (`AccountSummary::new` already existed).
+  `ProcessStart`, `ToolStart`,
+  `ToolEnd`, and `ConfigEvent` get none — the writer alone builds them — and
+  `ResultSummary` keeps `Default` as its only constructor, since every field is
+  `#[serde(default)]`. The `ids` newtypes (`Seq`, `ProcessId`, `Timestamp`) and
+  every enum are deliberately left exhaustive; the module docs say why.
+
+  Two constructors depart from the rule the sibling changes followed, that a
+  constructor takes exactly the fields serde treats as required. Both are
+  fields whose default is an affirmative claim rather than an absent value,
+  which a caller who never assigned them would publish without measuring:
+  `ProcessEnd::new` takes `records_lost`, a zero there being a durable claim
+  that the process lost no records; and `ToolStartInputs::new` takes `account`
+  and `posture_effective`, where a `None` posture is written to disk as
+  `"infrastructure"` — the record that a dispatch bypassed per-account posture
+  gating by design. `ToolEndInputs::new` keeps defaulting its `account`,
+  because `start_seq` names the paired `tool_start` that carries it.
+
+  **No on-disk change.** `#[non_exhaustive]` is a Rust-visibility construct and
+  does not reach serde; an unchanged record serializes to the same bytes it did
+  before. `crates/rimap-audit/tests/non_exhaustive_record.rs` holds that as
+  byte-exact golden lines, and `docs/audit-log.md` ("Compatibility contract")
+  now states what "additive" means for a record on disk, which the Rust-level
+  guarantee does not by itself provide.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after

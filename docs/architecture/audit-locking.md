@@ -83,6 +83,42 @@ with a residual shutdown window tracked as
 window is closed. ADR-0012 is immutable and its own decision stands; this
 document is the live description.
 
+### The cancellation drainer is a second exception, for a different reason
+
+`rimap_audit::cancellation::spawn_drainer` (`crates/rimap-audit/src/cancellation.rs`)
+also writes through a bare `tokio::task::spawn_blocking`, not
+`DispatchDrain::spawn_blocking_tracked`. This is not an oversight, and it
+cannot be brought into line with the pattern above by editing it:
+`spawn_blocking_tracked` is a method on `DispatchDrain`, which lives in
+`rimap-server`. `rimap-audit` is a lower-level crate that `rimap-server`
+depends on, not the reverse, so `rimap-audit` cannot reach for a type
+defined downstream of it without inverting the crate graph. The tracked
+pattern is structurally unreachable from this file.
+
+What bounds this path instead is a join budget on the drainer task, not a
+per-write registration. `spawn_drainer` is a long-running tokio task, not
+a one-shot spawn: it owns the receive end of a bounded channel that
+`Drop` implementations feed through `CancelledToolEndSender::try_send`,
+and it writes each queued record with its own `spawn_blocking` inside the
+drain loop as records arrive. At shutdown, `rimap-server/src/main.rs`
+awaits the drainer's `JoinHandle` under a one-second `DRAINER_JOIN_BUDGET`
+timeout; if the drainer has not finished by then, the handle is
+`abort()`-ed and the shutdown path logs a warning that any still-queued
+cancellation records — and any write already handed to the blocking pool
+— are lost and may land after `process_end`. That is the same class of
+loss #672 fixed for the tool-call dispatch path, left open here
+deliberately and announced rather than silent, because closing it would
+require either giving `rimap-audit` a dependency on `rimap-server` (wrong
+direction) or relocating `DispatchDrain` to a crate both can depend on
+(not done today — that would need its own issue, not a workaround bare
+`spawn_blocking` somewhere else).
+
+So: a bare `spawn_blocking` writing an audit record is a bug *unless* it
+is one of exactly two sanctioned exceptions — the `auth` pair described
+above, or the cancellation drainer described here. Anywhere else in the
+workspace, a new audit emission path from async code follows
+`spawn_blocking_tracked`.
+
 ## The connection session lock (`tokio::sync::Mutex`)
 
 `rimap_imap::Connection` wraps its `Option<async_imap::Session>` in a
@@ -158,12 +194,23 @@ Future contributors who add new audit emission paths from async code:
 follow the `spawn_blocking_tracked` pattern above. A bare
 `tokio::task::spawn_blocking` is the shape that reintroduces #672.
 
-The exception is the `auth` pair in
-`crates/rimap-imap/src/connection/login.rs` — `Connection::emit_auth`
-and `Connection::emit_auth_blocking`, which delegates to it — both of
-which write synchronously. Do not copy them without reading the
-trade-off argument on `emit_auth` and
-[ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md): it is
-justified only for a record that must survive the runtime that would
-otherwise defer it, and it makes `audit.path` a local-storage
-requirement.
+There are exactly two exceptions, and both are argued in full where they
+are introduced above rather than repeated here:
+
+- The `auth` pair in `crates/rimap-imap/src/connection/login.rs` —
+  `Connection::emit_auth` and `Connection::emit_auth_blocking`, which
+  delegates to it — both of which write synchronously. Do not copy them
+  without reading the trade-off argument on `emit_auth` and
+  [ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md): it is
+  justified only for a record that must survive the runtime that would
+  otherwise defer it, and it makes `audit.path` a local-storage
+  requirement.
+- The cancellation drainer in `crates/rimap-audit/src/cancellation.rs`,
+  which cannot reach `spawn_blocking_tracked` at all because of the
+  direction of the crate graph — see "The cancellation drainer is a
+  second exception" above for why, and for the join-budget-and-`abort`
+  mechanism that bounds it instead.
+
+A bare `spawn_blocking` writing an audit record anywhere else is a bug:
+file an issue rather than living with the gap or inventing a third
+mechanism.
