@@ -162,6 +162,7 @@ impl AuditWriter {
             git_commit: inputs.git_commit,
             posture: inputs.posture,
             accounts: inputs.accounts,
+            tool_matrix: inputs.tool_matrix,
             config_path: inputs.config_path,
             config_hash_sha256: inputs.config_hash_sha256,
             previous_last_seq: inputs.trailing.last_seq,
@@ -261,6 +262,10 @@ pub struct ProcessStartInputs {
     pub posture: Option<rimap_core::Posture>,
     /// Per-account summaries (multi-account mode).
     pub accounts: Option<Vec<crate::record::AccountSummary>>,
+    /// Per-account posture and explicit per-tool verdicts with provenance
+    /// (#632). One entry per account regardless of single- or
+    /// multi-account mode.
+    pub tool_matrix: Vec<crate::record::AccountToolMatrix>,
     /// Absolute path of the loaded config file.
     pub config_path: std::path::PathBuf,
     /// SHA-256 of the config file contents at load time, hex-encoded.

@@ -34,13 +34,53 @@ First record of every process invocation.
 |---|---|
 | `version` | Semver of the running binary |
 | `git_commit` | Build-time git SHA (empty until wired) |
-| `posture` | Effective base posture at startup |
+| `posture` | Effective base posture at startup (single-account mode only) |
+| `accounts` | Per-account name/posture/IMAP host (multi-account mode only) |
+| `tool_matrix` | Per-account posture and explicit per-tool verdicts with provenance (absent on records written before this field existed; read as an empty list) |
 | `config_path` | Absolute path of the loaded config file |
 | `config_hash_sha256` | SHA-256 hex of the config file contents at load time |
 | `previous_last_seq` | Last `seq` found in the file at startup (null if empty) |
 | `previous_process_id` | Process ID of the previous run (null if empty) |
 | `previous_file_inode` | Inode of the audit file as observed at open time |
 | `audit_file_inode_changed` | True if the inode differs from the prior `process_start`'s inode (tamper signal) |
+
+#### `tool_matrix`
+
+One entry per account, in both single- and multi-account mode -- unlike
+`posture` / `accounts`, which are mutually exclusive, so nothing reading
+`tool_matrix` has to branch on account count.
+
+```json
+"tool_matrix": [
+  {
+    "account": "work",
+    "posture": "readonly",
+    "tools": [
+      {"tool": "delete_message", "allow": true,  "source": "inherited"},
+      {"tool": "search",         "allow": false, "source": "account"}
+    ]
+  }
+]
+```
+
+| Field | Description |
+|---|---|
+| `account` | Account name from config (`default` for a flat config) |
+| `posture` | Effective base posture for this account |
+| `tools[].tool` | The tool the verdict names |
+| `tools[].allow` | `true` for an explicit `allow`, `false` for an explicit `deny` |
+| `tools[].source` | `account` if the account's own `[accounts.security.tools]` wrote it, `inherited` if it came from `[defaults.security.tools]` |
+
+`tools` lists **explicit verdicts only**. A tool with no override follows
+`posture` through the posture table, which the record's `version` and
+`git_commit` already identify.
+
+**`"allow": true` with `"source": "inherited"` is the line to look for.** An
+account tightened to `posture = "readonly"` still holds every `allow` it
+inherited from `[defaults.security.tools]` -- that is the documented merge
+semantics (ADR-0014), and this is where it becomes visible. The same rows are
+printed by `rusty-imap-mcp --dry-run` and logged at `info` level at boot under
+the message `effective tool matrix`.
 
 ### `process_end`
 

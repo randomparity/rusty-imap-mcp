@@ -234,6 +234,7 @@ mod tests {
             git_commit: String::new(),
             posture: None,
             accounts: None,
+            tool_matrix: Vec::new(),
             config_path: std::path::PathBuf::from("/tmp/c"),
             config_hash_sha256: "00".repeat(32),
             previous_last_seq: None,
