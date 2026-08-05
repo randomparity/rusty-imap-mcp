@@ -207,6 +207,13 @@ impl ToolEndInputs {
     /// account; a success has no error code) and `result_summary` starts
     /// empty, which is the correct record for a tool that returned nothing.
     /// Assign whichever apply.
+    ///
+    /// Unlike [`ToolStartInputs::new`], `account` is defaulted here rather
+    /// than required: `start_seq` names the paired `tool_start`, which carries
+    /// the account and the posture that governed the dispatch, so a `tool_end`
+    /// that omits it is recoverable rather than misleading. It is duplicated
+    /// onto this record only so a single line reads on its own. Nothing on a
+    /// `tool_end` makes a security claim the way `posture_effective` does.
     #[must_use]
     pub fn new(
         start_seq: crate::record::ids::Seq,
@@ -269,19 +276,28 @@ pub struct ToolStartInputs {
 impl ToolStartInputs {
     /// Describe a tool call entering dispatch.
     ///
-    /// `account` and `posture_effective` start `None`, which is exactly the
-    /// infrastructure-tool case (`use_account`, `list_accounts`); an
-    /// account-scoped dispatch assigns both.
+    /// `account` and `posture_effective` are parameters rather than defaulted
+    /// fields, for the reason [`crate::record::ProcessEnd::new`] takes
+    /// `records_lost`: `None` is not an absent value here. It is rendered on
+    /// disk as the literal `"infrastructure"`, whose documented meaning is
+    /// that this dispatch bypassed per-account posture gating by design
+    /// (`use_account`, `list_accounts`). A caller that left the field to a
+    /// default would record an account-scoped, posture-gated call as exempt
+    /// from gating. They travel together -- an infrastructure tool has
+    /// neither, an account-scoped dispatch has both -- so passing
+    /// `(None, None)` is the explicit way to say "infrastructure".
     #[must_use]
     pub fn new(
         tool: rimap_core::tool::ToolName,
+        account: Option<String>,
+        posture_effective: Option<rimap_core::Posture>,
         arguments_redacted: serde_json::Value,
         arguments_hash_sha256: String,
     ) -> Self {
         Self {
             tool,
-            account: None,
-            posture_effective: None,
+            account,
+            posture_effective,
             arguments_redacted,
             arguments_hash_sha256,
         }

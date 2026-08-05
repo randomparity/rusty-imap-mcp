@@ -149,9 +149,7 @@ impl ImapMcpServer {
         let join = self
             .drain
             .spawn_blocking_tracked(move || {
-                let mut inputs = ToolStartInputs::new(tool, redacted, hash);
-                inputs.account = account;
-                inputs.posture_effective = posture_effective;
+                let inputs = ToolStartInputs::new(tool, account, posture_effective, redacted, hash);
                 audit.log_tool_start(inputs)
             })
             .await;
@@ -336,13 +334,13 @@ mod tests {
         let writer = test_writer(path.clone());
 
         // Prime a tool_start so the resulting tool_end references a real seq.
-        let mut inputs = ToolStartInputs::new(
+        let inputs = ToolStartInputs::new(
             ToolName::Search,
+            Some("test".to_string()),
+            Some(rimap_core::Posture::Readonly),
             serde_json::Value::Object(serde_json::Map::new()),
             "0".repeat(64),
         );
-        inputs.account = Some("test".to_string());
-        inputs.posture_effective = Some(rimap_core::Posture::Readonly);
         let start_seq = writer.log_tool_start(inputs).unwrap();
 
         let (tx, rx) = cancellation_channel();

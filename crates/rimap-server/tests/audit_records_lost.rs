@@ -34,14 +34,13 @@ fn open_writer(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
 }
 
 fn tool_start_inputs() -> ToolStartInputs {
-    let mut inputs = ToolStartInputs::new(
+    ToolStartInputs::new(
         ToolName::Search,
+        Some("test".to_string()),
+        Some(rimap_core::Posture::Readonly),
         serde_json::Value::Object(serde_json::Map::new()),
         "0".repeat(64),
-    );
-    inputs.account = Some("test".to_string());
-    inputs.posture_effective = Some(rimap_core::Posture::Readonly);
-    inputs
+    )
 }
 
 /// The one `process_end` line in `path`, as raw text.

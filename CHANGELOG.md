@@ -122,11 +122,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#[serde(default)]`. The `ids` newtypes (`Seq`, `ProcessId`, `Timestamp`) and
   every enum are deliberately left exhaustive; the module docs say why.
 
-  `ProcessEnd::new` takes `records_lost` even though the field is
-  `#[serde(default)]`, departing from the rule the two sibling changes
-  followed. A zero there is not an absent value but a durable claim that the
-  process lost no records, and a caller that never assigned the field would
-  publish that claim without measuring it.
+  Two constructors depart from the rule the sibling changes followed, that a
+  constructor takes exactly the fields serde treats as required. Both are
+  fields whose default is an affirmative claim rather than an absent value,
+  which a caller who never assigned them would publish without measuring:
+  `ProcessEnd::new` takes `records_lost`, a zero there being a durable claim
+  that the process lost no records; and `ToolStartInputs::new` takes `account`
+  and `posture_effective`, where a `None` posture is written to disk as
+  `"infrastructure"` — the record that a dispatch bypassed per-account posture
+  gating by design. `ToolEndInputs::new` keeps defaulting its `account`,
+  because `start_seq` names the paired `tool_start` that carries it.
 
   **No on-disk change.** `#[non_exhaustive]` is a Rust-visibility construct and
   does not reach serde; an unchanged record serializes to the same bytes it did

@@ -12,14 +12,13 @@ use rimap_core::tool::ToolName;
 use tempfile::tempdir;
 
 fn tool_start_inputs() -> ToolStartInputs {
-    let mut inputs = ToolStartInputs::new(
+    ToolStartInputs::new(
         ToolName::Search,
+        Some("test".to_string()),
+        Some(rimap_core::Posture::Readonly),
         serde_json::Value::Object(serde_json::Map::new()),
         "0".repeat(64),
-    );
-    inputs.account = Some("test".to_string());
-    inputs.posture_effective = Some(rimap_core::Posture::Readonly);
-    inputs
+    )
 }
 
 #[test]
