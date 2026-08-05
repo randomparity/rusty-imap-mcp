@@ -460,19 +460,17 @@ mod tests {
 
         let acfg = ValidatedAccountConfig {
             id: AccountId::default_account(),
-            imap: ImapConfig {
-                host: "imap.example.com".into(),
-                port: 993,
-                username: "u@example.com".into(),
-                encryption: ImapEncryption::Tls,
-                tls_fingerprint_sha256: None,
-                connect_timeout_seconds: 10,
-                command_timeout_seconds: 30,
+            imap: {
+                let mut imap =
+                    ImapConfig::new("imap.example.com".into(), 993, "u@example.com".into());
+                imap.encryption = ImapEncryption::Tls;
+                imap
             },
             smtp: None,
-            security: SecurityConfig {
-                posture: Posture::DraftSafe,
-                ..SecurityConfig::default()
+            security: {
+                let mut security = SecurityConfig::default();
+                security.posture = Posture::DraftSafe;
+                security
             },
             limits: LimitsConfig::default(),
             tool_overrides: BTreeMap::new(),

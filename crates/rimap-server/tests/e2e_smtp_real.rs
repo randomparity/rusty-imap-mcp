@@ -113,13 +113,12 @@ fn build_server_real(
         &account_cfg.security.expunge_folders,
     );
 
-    let smtp_cfg = SmtpConfig {
-        host: "127.0.0.1".into(),
-        port: mailpit.smtp_port(),
-        encryption: SmtpEncryption::None,
-        username: ACCOUNT_USERNAME.into(),
-        command_timeout_seconds: 30,
-    };
+    let smtp_cfg = SmtpConfig::new(
+        "127.0.0.1".into(),
+        mailpit.smtp_port(),
+        SmtpEncryption::None,
+        ACCOUNT_USERNAME.into(),
+    );
     let smtp = rimap_smtp::SmtpClient::new(&smtp_cfg, "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2")
         .expect("smtp client");
 
@@ -153,25 +152,24 @@ fn build_server_real(
 fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
     ValidatedAccountConfig {
         id: AccountId::default_account(),
-        imap: ImapConfig {
-            host: "127.0.0.1".into(),
-            port: harness.port(),
-            username: ACCOUNT_USERNAME.into(),
-            encryption: ImapEncryption::Tls,
-            tls_fingerprint_sha256: None,
-            connect_timeout_seconds: 10,
-            command_timeout_seconds: 30,
+        imap: {
+            let mut imap =
+                ImapConfig::new("127.0.0.1".into(), harness.port(), ACCOUNT_USERNAME.into());
+            imap.encryption = ImapEncryption::Tls;
+            imap
         },
         smtp: None,
-        security: SecurityConfig {
-            posture: Posture::Full,
-            ..SecurityConfig::default()
+        security: {
+            let mut security = SecurityConfig::default();
+            security.posture = Posture::Full;
+            security
         },
-        limits: LimitsConfig {
-            commands_per_second: 1000,
-            drafts_per_minute: 1000,
-            sends_per_minute: 1000,
-            ..LimitsConfig::default()
+        limits: {
+            let mut limits = LimitsConfig::default();
+            limits.commands_per_second = 1000;
+            limits.drafts_per_minute = 1000;
+            limits.sends_per_minute = 1000;
+            limits
         },
         tool_overrides: BTreeMap::new(),
         tls_fingerprint: Some(*harness.fingerprint()),

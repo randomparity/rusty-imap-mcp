@@ -32,6 +32,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: every `pub` struct in `rimap_config::model` is now
+  `#[non_exhaustive]` (#665).** All 16 of them — `Config`, `ImapConfig`,
+  `SmtpConfig`, `SecurityConfig`, `LookalikeConfig`, `LimitsConfig`,
+  `AuditConfig`, `AttachmentsConfig`, `CredentialsConfig`,
+  `MultiAccountConfig`, `DefaultsConfig`, `RawAccountConfig`, and the four
+  `Account*Overrides` types. Adding a config field is no longer a breaking
+  change, which is the failure #648 hit when one new `LimitsConfig` field
+  forced the workspace to `0.2.0`. This aligns `rimap-config` with
+  `rimap_content::output`, which has carried the same policy since Sprint 4b.
+
+  Downstream impact: the struct literal is no longer available outside the
+  crate, and **that includes functional-update syntax** — `..Default::default()`
+  is still a struct expression, so rustc rejects it too (E0639). Construct
+  these types as `let mut c = T::default(); c.field = …;`, or via the new
+  constructors below. Pattern matches need a trailing `..`.
+
+  `ImapConfig`, `SmtpConfig`, and `AuditConfig` have no `Default` and gain
+  `ImapConfig::new(host, port, username)`,
+  `SmtpConfig::new(host, port, encryption, username)`, and
+  `AuditConfig::new(path)`. Each takes exactly the fields the TOML schema
+  requires and fills the rest with the value the loader applies for an omitted
+  key. `Config`, `MultiAccountConfig`, and `RawAccountConfig` deliberately gain
+  neither a `Default` nor a constructor: they are file-load roots from
+  `load_and_validate` / `load_from_path`, and a `Default` for them would mint a
+  config with an empty `host` and `username` — the invalid state validation
+  exists to reject.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after
