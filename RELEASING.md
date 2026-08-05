@@ -64,8 +64,8 @@ same PR. Once the planned version is already `0.2.0-dev`, further breaks in the
 same cycle are free — they all diff against the same tag, and one bump covers
 them all. Run it locally with `just semver-checks` (`just ci` includes it).
 
-"Public API" here means the API of the 8 publishable crates. `rimap-fake-imap`
-and `xtask` are `publish = false` and are skipped.
+"Public API" here means the API of the 8 publishable crates. `rimap-fake-imap`,
+`rimap-container-gate`, and `xtask` are `publish = false` and are skipped.
 
 **Adding a new publishable crate.** A tag baseline errors on a crate that does
 not exist at the baseline tag — `package <name> not found`, which reads as a
