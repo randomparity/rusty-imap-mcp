@@ -258,6 +258,12 @@ struct ScenarioRun {
     raw: String,
     /// The fake's recorded IMAP dialog at the moment stdin closed.
     recorded: Vec<String>,
+    /// The child's stderr. Carried because the audit log alone cannot separate
+    /// a residue caused by a regression from one caused by a slow host: the
+    /// `tool dispatches outlived the shutdown drain` warning lands here, and a
+    /// failing assertion that prints only the JSONL costs a second run to
+    /// diagnose.
+    stderr: String,
     password: String,
 }
 
@@ -359,10 +365,12 @@ async fn run_parked_dispatch_scenario(extra_env: &[(&str, &str)]) -> ScenarioRun
     );
 
     let raw = std::fs::read_to_string(base.join("audit.jsonl")).expect("read audit log");
+    let stderr = read_stderr();
     ScenarioRun {
         tempdir,
         raw,
         recorded,
+        stderr,
         password,
     }
 }
@@ -387,11 +395,18 @@ fn process_end_record(raw: &str) -> Value {
 /// widening the budget here would make the assertion unfailable and delete the
 /// coverage in the same stroke.
 ///
-/// The contention worry that would argue for widening does not apply: a budget
-/// the runtime cannot drive to time *overruns*, and by the time `shutdown`'s
-/// timeout is finally polled the fsync has landed and `inflight` is zero, so it
-/// returns zero and this passes. Only a driven timer that genuinely expires
-/// with a dispatch still registered reddens it — which is the signal, not noise.
+/// Two mechanisms could make the drain report a residue here, and only one is
+/// ruled out. A budget the runtime cannot drive to time *overruns*: by the time
+/// `shutdown`'s timeout is finally polled the fsync has landed and `inflight` is
+/// zero, so it returns zero and this passes. What is **not** ruled out is a
+/// driven timer that genuinely expires — workers available, `audit.path` on a
+/// filesystem where the cut path's synchronous fsync exceeds two seconds. That
+/// is a real, accepted flake risk on a slow host, taken deliberately: widening
+/// the budget would make this assertion unfailable and delete the shipped
+/// constant's only end-to-end coverage in the same stroke. The assertion
+/// therefore prints the child's stderr, where the
+/// `tool dispatches outlived the shutdown drain` warning distinguishes a slow
+/// disk from a regression on the first run rather than the second.
 #[tokio::test]
 async fn shutdown_cut_auth_record_precedes_process_end() {
     let run = run_parked_dispatch_scenario(&[]).await;
@@ -402,8 +417,10 @@ async fn shutdown_cut_auth_record_precedes_process_end() {
     assert_eq!(
         process_end_record(&run.raw)["undrained_dispatches"],
         0,
-        "a run whose dispatch was cut in time must state a zero residue:\n{}",
+        "a run whose dispatch was cut in time must state a zero residue.\n\
+         audit log:\n{}\nserver stderr:\n{}",
         run.raw,
+        run.stderr,
     );
 
     canary::assert_login_frame_only(&run.password, &run.recorded);
@@ -412,17 +429,23 @@ async fn shutdown_cut_auth_record_precedes_process_end() {
 
 /// The other half of the same guarantee: when the drain budget expires with a
 /// dispatch still registered, `process_end.undrained_dispatches` says so, so a
-/// reader holding only the audit file can tell that the terminal-record rule
-/// was not met for this run (#680).
+/// reader holding only the audit file can tell that the terminal-record rule is
+/// not backed for this run (#680).
 ///
 /// Before this, the count went to `tracing::warn!` and nowhere else — and
 /// stderr is the one channel an MCP client routinely discards.
 ///
-/// The budget is driven to zero rather than raced against a slow dispatch: the
-/// parked `LOGIN` reconnect holds its registration for the whole test (the fake
-/// stalls 120s), so the drain's `wait_for(inflight == 0)` cannot be satisfied
-/// and the timeout is the only thing that resolves. That makes the non-zero
-/// deterministic on a contended host instead of wall-clock dependent.
+/// **Why the budget must be zero, and not merely small.** The parked `LOGIN`
+/// dispatch is *cancellable*: `DispatchDrain::shutdown` sets the cancel flag and
+/// the dispatch unwinds promptly, writing its `ERR_CANCELLED` `auth` record —
+/// which is exactly what the sibling test above asserts happens inside two
+/// seconds. So the 120s stall keeps the dispatch in flight until the drain
+/// *starts*; it does nothing to stop `inflight` reaching zero once it has. Any
+/// small-but-non-zero budget would therefore be a wall-clock race against that
+/// unwind. At zero there is no race: `tokio::time::timeout` polls `wait_for`
+/// once — Pending, because `inflight` is still 1 — then an already-elapsed
+/// sleep, so it returns the pre-cancel count. That is what the `test-support`
+/// env lever buys and why passing "a short budget" instead would not do.
 #[tokio::test]
 async fn a_dispatch_outliving_the_drain_budget_is_reported_in_process_end() {
     let run = run_parked_dispatch_scenario(&[("RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS", "0")]).await;

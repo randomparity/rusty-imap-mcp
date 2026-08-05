@@ -389,22 +389,31 @@ async fn serve_mcp(
 
     let service = match init_result {
         Ok(svc) => svc,
+        // Both init-failure arms drain *before* touching the supervisor, so all
+        // three exits share the one order this function's doc calls
+        // load-bearing. Init never completed on these paths, so rmcp spawned no
+        // handler and the drain finds nothing to cancel — but that exemption is
+        // a fact about today's code, not a property of the arm, and keeping the
+        // order uniform means a dispatch that later becomes reachable before
+        // init returns is counted rather than silently affirmed as zero.
         Err(InitOutcome::Bridge(bridge_result)) => {
             let primary = bridge_result.err().map_or_else(
                 || anyhow::anyhow!("validator bridges exited before init completed"),
                 |e| anyhow::anyhow!("validator bridge during init: {e}"),
             );
+            let undrained_dispatches = drain_dispatches(&dispatch_drain).await;
             let _ = supervisor.shutdown_after_failure().await;
             return ServeOutcome {
                 result: Err(primary),
-                undrained_dispatches: drain_dispatches(&dispatch_drain).await,
+                undrained_dispatches,
             };
         }
         Err(InitOutcome::Rmcp(boxed)) => {
+            let undrained_dispatches = drain_dispatches(&dispatch_drain).await;
             let result = handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
             return ServeOutcome {
                 result,
-                undrained_dispatches: drain_dispatches(&dispatch_drain).await,
+                undrained_dispatches,
             };
         }
     };
@@ -466,17 +475,29 @@ async fn serve_mcp(
         (Ok(()), Ok(())) => Ok(()),
     };
 
-    // All senders dropped above. Wait for the drainer to flush any
-    // remaining queued cancellation records before the runtime exits.
-    // Bounded: an undrained dispatch still owns a sender clone, and an
-    // unbounded join would then hold the whole process exit for that
-    // command's timeout.
-    //
-    // `abort` on expiry, not just a dropped handle: dropping a `JoinHandle`
-    // *detaches* the task, so the drainer would keep looping and keep appending
-    // `tool_end` records — after `process_end`, which is the ordering this
-    // whole path exists to establish.
-    let mut drainer_handle = drainer_handle;
+    join_drainer(drainer_handle, undrained).await;
+    ServeOutcome {
+        result: mcp_result,
+        undrained_dispatches: undrained,
+    }
+}
+
+/// Wait, bounded, for the cancellation drainer to flush its queue.
+///
+/// Every cancellation sender has dropped by the time this runs, so on the clean
+/// path the join returns at once. The bound only matters when the dispatch drain
+/// timed out: an undrained dispatch still owns a sender clone, and an unbounded
+/// join would hold the whole process exit for that command's timeout.
+///
+/// `abort` on expiry, not just a dropped handle: dropping a `JoinHandle`
+/// *detaches* the task, so the drainer would keep looping and keep appending
+/// `tool_end` records — after `process_end`, which is the ordering this whole
+/// path exists to establish.
+///
+/// The records an abort drops reach no counter on `process_end`; `undrained` is
+/// already latched by now and the drainer's own write is untracked. That hole is
+/// stderr-only and tracked in #725 — see `docs/audit-log.md`.
+async fn join_drainer(mut drainer_handle: tokio::task::JoinHandle<()>, undrained: u64) {
     match tokio::time::timeout(DRAINER_JOIN_BUDGET, &mut drainer_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::error!(error = %e, "cancellation drainer join error"),
@@ -489,10 +510,6 @@ async fn serve_mcp(
                  handed to the blocking pool is sequenced after process_end",
             );
         }
-    }
-    ServeOutcome {
-        result: mcp_result,
-        undrained_dispatches: undrained,
     }
 }
 

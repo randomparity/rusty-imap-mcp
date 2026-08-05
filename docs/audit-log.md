@@ -182,7 +182,7 @@ recently flushed.
 |---|---|
 | `reason` | One of `signal_int`, `signal_term`, `eof`, `error` |
 | `total_tool_calls` | Number of tool calls dispatched in this process |
-| `records_lost` | Number of records this process failed to persist and told no caller about (absent on records written before this field existed; read as `0`) |
+| `records_lost` | Number of records this process failed to persist and told no caller about (absent on records written before this field existed, where it means *not measured* rather than zero) |
 | `undrained_dispatches` | Tool dispatches -- or audit writes one of them offloaded -- still registered when the shutdown drain's budget expired (absent on records written before this field existed, where it means *not measured* rather than zero) |
 
 **A non-zero `records_lost` means this file has a hole in it.** Some event
