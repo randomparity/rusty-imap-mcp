@@ -5,8 +5,11 @@
 //! emits a `tool_end` record with the resulting status and error code.
 //! The helpers [`ImapMcpServer::emit_tool_start`] and
 //! [`ImapMcpServer::emit_tool_end`] offload the blocking writer calls
-//! onto `spawn_blocking` and surface panics/join errors as
-//! `RimapError::Internal`.
+//! onto the blocking pool and surface panics/join errors as
+//! `RimapError::Internal`. Both offload through
+//! `DispatchDrain::spawn_blocking_tracked` rather than `spawn_blocking`
+//! directly, so a write the shutdown detaches still cannot append after
+//! `process_end` (#672).
 //!
 //! [`AuditEnvelopeGuard`] is a drop-guard that synthesizes a cancellation
 //! `tool_end` if the enclosing future is dropped between `tool_start`
@@ -122,9 +125,12 @@ impl ImapMcpServer {
         Redactor::new(&tool.redaction_schema(), self.redaction_salt.as_ref()).apply(args)
     }
 
-    /// Emit a `tool_start` audit record via `spawn_blocking`. Returns the
-    /// allocated `seq` on success; on audit failure emits a `warn!` and
-    /// returns a synthetic `Seq::FIRST` so the call can proceed.
+    /// Emit a `tool_start` audit record on the blocking pool, registered with
+    /// the server's `DispatchDrain` for the write's own lifetime (#672) — a
+    /// shutdown that cuts this dispatch detaches the closure rather than
+    /// stopping it, so the drain has to wait on the write, not on the await.
+    /// Returns the allocated `seq` on success; on audit failure emits a `warn!`
+    /// and returns a synthetic `Seq::FIRST` so the call can proceed.
     ///
     /// Errors bubble up only when `fail_open = false` AND the write fails:
     /// in that case the tool call MUST fail because the audit trail is
@@ -140,16 +146,18 @@ impl ImapMcpServer {
     ) -> Result<rimap_audit::Seq, ErrorData> {
         let audit = self.audit.clone();
         let posture_effective = posture.posture();
-        let join = tokio::task::spawn_blocking(move || {
-            audit.log_tool_start(ToolStartInputs {
-                tool,
-                account,
-                posture_effective,
-                arguments_redacted: redacted,
-                arguments_hash_sha256: hash,
+        let join = self
+            .drain
+            .spawn_blocking_tracked(move || {
+                audit.log_tool_start(ToolStartInputs {
+                    tool,
+                    account,
+                    posture_effective,
+                    arguments_redacted: redacted,
+                    arguments_hash_sha256: hash,
+                })
             })
-        })
-        .await;
+            .await;
         match join {
             Ok(Ok(seq)) => Ok(seq),
             Ok(Err(audit_err)) => {
@@ -167,9 +175,11 @@ impl ImapMcpServer {
         }
     }
 
-    /// Emit a `tool_end` audit record via `spawn_blocking`. Failures are
-    /// logged but not propagated — at end-of-call the tool has already
-    /// finished and the caller sees its original result.
+    /// Emit a `tool_end` audit record on the blocking pool, registered with the
+    /// server's `DispatchDrain` for the write's own lifetime (#672), for the
+    /// same reason as `emit_tool_start`. Failures are logged but not propagated
+    /// — at end-of-call the tool has already finished and the caller sees its
+    /// original result.
     async fn emit_tool_end(
         &self,
         start_seq: rimap_audit::Seq,
@@ -196,7 +206,10 @@ impl ImapMcpServer {
             result_summary: outcome.result_summary,
             provenance,
         };
-        let join = tokio::task::spawn_blocking(move || audit.log_tool_end(inputs)).await;
+        let join = self
+            .drain
+            .spawn_blocking_tracked(move || audit.log_tool_end(inputs))
+            .await;
         match join {
             Ok(Ok(_)) => {}
             Ok(Err(audit_err)) => {
