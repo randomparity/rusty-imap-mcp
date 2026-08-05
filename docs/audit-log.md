@@ -247,8 +247,8 @@ Read the exception before building on the rule.
   it is not a sighting of a record following `process_end`. Alert on it anyway:
   an unverified integrity claim is the thing worth looking at.
 
-  Three things the field does not cover, so a zero is narrower than "this run
-  was clean":
+  Two things the field does not cover, so a zero is narrower than "this run was
+  clean":
 
   - A run that never reaches `process_end` at all -- a hard crash, a `SIGKILL`
     -- reports nothing, neither a count nor a zero. A non-zero count is
@@ -264,15 +264,6 @@ Read the exception before building on the rule.
     nothing was ever written to fail. The warning
     `cancellation drainer did not finish within the join budget` on stderr is
     the only signal. Tracked in #725.
-  - **The count describes whatever budget that run used.** A binary built with
-    the `test-support` feature honours `RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS`,
-    which replaces the two-second budget entirely. Driven to zero, the drain
-    cannot wait at all, and a run with nothing registered at that instant still
-    writes an affirmative `0`. The record carries no marker of this, so a log
-    is interpretable only once you know the producing binary was a
-    default-feature build. Released binaries are: `test-support` is off by
-    default and no release build enables it. What does produce logs under it is
-    the Node conformance harness and local `cargo test` runs.
 
 Separately, and not an exception to *ordering*: a record may be missing
 entirely. Loss on shutdown is expected and documented (best-effort). Terminality

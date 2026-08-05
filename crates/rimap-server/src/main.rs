@@ -134,48 +134,6 @@ const DISPATCH_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 /// timeout (#645).
 const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
 
-/// The dispatch drain's budget for this process.
-///
-/// Under `test-support` only, `RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS` *replaces*
-/// it. One suite sets it, to zero: a non-zero
-/// `process_end.undrained_dispatches` is otherwise unreachable from the wire,
-/// because every dispatch a test can park is cancellable and unwinds well
-/// inside two seconds, so the test pinning that count would only ever observe
-/// the vacuous case. Same shape and same gating as
-/// `RIMAP_TEST_FORCE_NEXT_AUDIT_WRITE_FAILURE`; a malformed value is ignored in
-/// favour of the production budget.
-///
-/// [`DISPATCH_DRAIN_BUDGET`] keeps its end-to-end coverage:
-/// `shutdown_cut_auth_record_precedes_process_end` sets no override, so it
-/// drives the shipped constant and asserts a zero residue under it.
-#[cfg(feature = "test-support")]
-fn dispatch_drain_budget() -> Duration {
-    budget_from_override(
-        std::env::var("RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS")
-            .ok()
-            .as_deref(),
-    )
-}
-
-/// The dispatch drain's budget for this process. Without `test-support` there
-/// is no override to read, so this is [`DISPATCH_DRAIN_BUDGET`] unconditionally.
-#[cfg(not(feature = "test-support"))]
-fn dispatch_drain_budget() -> Duration {
-    DISPATCH_DRAIN_BUDGET
-}
-
-/// Map a raw `RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS` value onto a budget:
-/// absent or unparseable yields [`DISPATCH_DRAIN_BUDGET`].
-///
-/// Split out from [`dispatch_drain_budget`] so the mapping is testable without
-/// touching the process environment — `set_var` is `unsafe` in edition 2024 and
-/// would race every other test in this binary.
-#[cfg(feature = "test-support")]
-fn budget_from_override(raw: Option<&str>) -> Duration {
-    raw.and_then(|v| v.parse::<u64>().ok())
-        .map_or(DISPATCH_DRAIN_BUDGET, Duration::from_millis)
-}
-
 /// Cancel every in-flight tool dispatch, wait out the drain budget, and report
 /// the residue.
 ///
@@ -183,27 +141,12 @@ fn budget_from_override(raw: Option<&str>) -> Duration {
 /// that never reached a dispatch: an idle drain returns `0` without parking, so
 /// the zero those paths record is measured rather than assumed. That matters
 /// because `ProcessEnd::new` treats a zero as an affirmative durable claim.
-///
-/// A shortened budget makes that claim cheap — at zero the drain cannot wait at
-/// all, so a run with nothing registered at that instant reports `0` for a
-/// guarantee it never attempted. The override is `test-support`-only, but it is
-/// the one carve-out around this record that would otherwise leave a reader
-/// nothing, so it announces itself.
 async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
-    let budget = dispatch_drain_budget();
-    if budget != DISPATCH_DRAIN_BUDGET {
-        tracing::warn!(
-            budget = ?budget,
-            production_budget = ?DISPATCH_DRAIN_BUDGET,
-            "dispatch drain budget overridden; process_end.undrained_dispatches \
-             describes this budget, not the shipped one",
-        );
-    }
-    let undrained = dispatch_drain.shutdown(budget).await;
+    let undrained = dispatch_drain.shutdown(DISPATCH_DRAIN_BUDGET).await;
     if undrained > 0 {
         tracing::warn!(
             undrained,
-            budget = ?budget,
+            budget = ?DISPATCH_DRAIN_BUDGET,
             "tool dispatches outlived the shutdown drain; any audit record they \
              still write is sequenced after process_end or lost",
         );
@@ -962,46 +905,49 @@ mod resolve_download_dir_tests {
     }
 }
 
-#[cfg(all(test, feature = "test-support"))]
-mod dispatch_drain_budget_tests {
-    use std::time::Duration;
+#[cfg(test)]
+mod process_end_tests {
+    #![expect(clippy::expect_used, reason = "unit tests")]
 
-    use super::{DISPATCH_DRAIN_BUDGET, budget_from_override};
+    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::{AuditWriter, Seq};
 
-    /// Every `test-support` build that does not set the variable — which is
-    /// every test in the workspace but one, plus the Node conformance harness —
-    /// resolves its budget through this call. A production build compiles the
-    /// `cfg(not(test-support))` body instead and never reaches here; the
-    /// end-to-end coverage of the shipped constant is
-    /// `shutdown_cut_auth_record_precedes_process_end`, which sets no override.
+    use super::emit_process_end;
+
+    /// The undrained count `serve_mcp` measured must land on the record
+    /// verbatim. `emit_process_end` is the last hop and the only production
+    /// `ProcessEnd::new` call site, so an argument dropped here is a durable
+    /// zero claiming a clean drain that was never observed (#680).
     ///
-    /// What this catches is the override branch being taken unconditionally: a
-    /// drain that no longer waits is the inversion #645 / ADR-0015 exist to
-    /// prevent, and it would stamp a spurious non-zero `undrained_dispatches`
-    /// into the trail operators are told to alert on.
+    /// A distinctive value, not `1`: the constructor takes three adjacent
+    /// `u64`s and this is the pin that the fourth reaches the fourth field.
     #[test]
-    fn an_absent_override_leaves_the_production_budget_in_place() {
-        assert_eq!(budget_from_override(None), DISPATCH_DRAIN_BUDGET);
-    }
+    fn the_undrained_count_reaches_the_record_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let writer = AuditWriter::open(&AuditOptions {
+            path: path.clone(),
+            rotate_bytes: 10 * 1024 * 1024,
+            rotate_keep: 5,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: Seq::FIRST,
+        })
+        .expect("audit writer opens");
 
-    /// A garbled value is not a zero budget. Treating it as one would silently
-    /// disable the drain on a typo'd export.
-    #[test]
-    fn a_malformed_override_falls_back_rather_than_zeroing_the_drain() {
-        for raw in ["", "  ", "2s", "-1", "1.5", "99999999999999999999999"] {
-            assert_eq!(
-                budget_from_override(Some(raw)),
-                DISPATCH_DRAIN_BUDGET,
-                "{raw:?} must fall back, not parse",
-            );
-        }
-    }
+        emit_process_end(&writer, &Ok(()), 7);
 
-    /// Both directions, since the two suites use one each.
-    #[test]
-    fn a_well_formed_override_replaces_the_budget_either_way() {
-        assert_eq!(budget_from_override(Some("0")), Duration::ZERO);
-        assert_eq!(budget_from_override(Some("30000")), Duration::from_secs(30));
+        let line = std::fs::read_to_string(&path).expect("audit file readable");
+        assert!(
+            line.contains(r#""undrained_dispatches":7"#),
+            "the count passed in must be the count on disk; got: {line}",
+        );
+        // Pinned together so a transposition of the two counters fails here
+        // rather than silently swapping which one an operator alerts on.
+        assert!(
+            line.contains(r#""records_lost":0"#),
+            "records_lost must stay its own field; got: {line}",
+        );
     }
 }
 
