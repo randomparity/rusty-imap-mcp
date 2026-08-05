@@ -147,13 +147,22 @@ const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
 /// favour of the production budget.
 ///
 /// Because both wire scenarios override it, no test measures
-/// [`DISPATCH_DRAIN_BUDGET`] end to end. [`budget_from_override`] and its tests
-/// pin the mapping instead, so the production constant stays wired.
+/// [`DISPATCH_DRAIN_BUDGET`] end to end. The absent case is routed through
+/// [`budget_from_override`] rather than returned separately, so the branch every
+/// production run takes is the branch that function's tests pin.
+#[cfg(feature = "test-support")]
 fn dispatch_drain_budget() -> Duration {
-    #[cfg(feature = "test-support")]
-    if let Ok(raw) = std::env::var("RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS") {
-        return budget_from_override(Some(&raw));
-    }
+    budget_from_override(
+        std::env::var("RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The dispatch drain's budget for this process. Without `test-support` there
+/// is no override to read, so this is [`DISPATCH_DRAIN_BUDGET`] unconditionally.
+#[cfg(not(feature = "test-support"))]
+fn dispatch_drain_budget() -> Duration {
     DISPATCH_DRAIN_BUDGET
 }
 
@@ -930,9 +939,11 @@ mod dispatch_drain_budget_tests {
 
     use super::{DISPATCH_DRAIN_BUDGET, budget_from_override};
 
-    /// The only coverage the shipped budget has. Both wire scenarios in
-    /// `e2e_wire_shutdown_audit_ordering` override it — one to zero, one wide —
-    /// so nothing else would catch the override branch being taken
+    /// The only coverage the shipped budget has, and it covers the branch
+    /// production takes: `dispatch_drain_budget` passes the absent variable
+    /// straight through to this function. Both wire scenarios in
+    /// `e2e_wire_shutdown_audit_ordering` override the budget — one to zero,
+    /// one wide — so nothing else would catch the override branch being taken
     /// unconditionally. A drain that no longer waits is the inversion #645 /
     /// ADR-0015 exist to prevent, and it would also stamp a spurious non-zero
     /// `undrained_dispatches` into the trail operators are told to alert on.

@@ -231,19 +231,28 @@ Read the exception before building on the rule.
   proceeds. Anything those dispatches write afterwards keeps the old behaviour:
   sequenced after `process_end`, or lost to process exit. This one is
   **announced in the file**, as `process_end.undrained_dispatches`: a non-zero
-  count is the record saying that terminality was not met for its own run, so a
+  count is the record saying terminality is not backed for its own run, so a
   reader holding nothing but the audit log can tell. Treat such a run as
   suspect and alert on it. An audit write still queued on the blocking pool
   when the budget expires holds a registration of its own, so it is counted
   there too rather than silently absorbed. The same count is still logged to
   stderr, which is now the redundant copy rather than the only one.
 
+  **The count measures an exceeded bound, not an observed disorder.** Every
+  counted dispatch had already been cancelled when the count was read, and the
+  server then shuts down the transport supervisor and waits out its
+  drainer-join budget before writing `process_end` -- so a dispatch that missed
+  the drain by a millisecond may finish well inside that window and land in
+  order after all. A non-zero count means this run's ordering is *unverified*;
+  it is not a sighting of a record following `process_end`. Alert on it anyway:
+  an unverified integrity claim is the thing worth looking at.
+
   Two things the field does not cover, so a zero is narrower than "this run was
   clean":
 
   - A run that never reaches `process_end` at all -- a hard crash, a `SIGKILL`
     -- reports nothing, neither a count nor a zero. A non-zero count is
-    evidence that terminality was broken; a missing `process_end` is not
+    evidence that terminality is unverified; a missing `process_end` is not
     evidence that it held.
   - **The cancellation drainer's own join budget is a second, still
     stderr-only hole.** The residue is measured before that join, and a cut
