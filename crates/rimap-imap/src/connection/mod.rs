@@ -19,7 +19,7 @@
 //! `docs/architecture/audit-locking.md`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use async_imap::Session;
@@ -86,6 +86,105 @@ pub struct ConnectionConfig {
 /// underlying transport; we always use `TlsStream<TcpStream>`.
 pub(crate) type ImapSession = Session<TlsStream<TcpStream>>;
 
+/// What the last login's post-login `CAPABILITY` probe established about the
+/// two extensions this crate branches on.
+///
+/// ## Why this is not a `(bool, bool)` (#649)
+///
+/// It used to be. A probe that failed, or that came back without a capability
+/// listing in it, was recorded as `(false, false)` — the same value a server
+/// that affirmatively advertises neither extension produces. Those two states
+/// need different answers, because `(false, false)` is *exactly* the condition
+/// [`crate::ops::expunge::fallback_uses_folder_wide_expunge`] selects the RFC
+/// 3501 folder-wide `EXPUNGE` on, which removes every `\Deleted` message in the
+/// mailbox rather than the requested UIDs. Encoding "we do not know" as "the
+/// server does not have it" therefore failed *open*, into the most destructive
+/// branch available, on the strength of no evidence at all.
+///
+/// One tri-state rather than two, because the probe is one event: it either
+/// yielded a listing that describes both extensions, or it yielded nothing that
+/// describes either. There is no reachable state in which MOVE is known and
+/// UIDPLUS is not.
+///
+/// [`Self::require_known`] is the only way to get the pair back out, so a
+/// caller that wants to branch on a capability has to decide what `Unknown`
+/// means to it first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerCapabilities {
+    /// The probe returned a capability listing, and this is what it said.
+    Known {
+        /// Server advertised MOVE (RFC 6851).
+        has_move: bool,
+        /// Server advertised UIDPLUS (RFC 4315).
+        has_uidplus: bool,
+    },
+    /// No advertisement is on record for the current session: no login has run
+    /// yet, the session was discarded, or the probe came back unreadable.
+    ///
+    /// **Not a synonym for "the server lacks both."** Nothing may be inferred
+    /// about the server from this.
+    Unknown,
+}
+
+impl ServerCapabilities {
+    /// `Unknown`, plus MOVE in bit 1 and UIDPLUS in bit 2 once bit 0 marks the
+    /// pair as known. Encoding lives here rather than at the atomic so the
+    /// round trip is one type's business; see [`Self::from_bits`].
+    const KNOWN_BIT: u8 = 0b001;
+    const MOVE_BIT: u8 = 0b010;
+    const UIDPLUS_BIT: u8 = 0b100;
+
+    /// Pack into the `u8` [`ConnectionInner::capabilities`] stores.
+    fn to_bits(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Known {
+                has_move,
+                has_uidplus,
+            } => {
+                Self::KNOWN_BIT
+                    | if has_move { Self::MOVE_BIT } else { 0 }
+                    | if has_uidplus { Self::UIDPLUS_BIT } else { 0 }
+            }
+        }
+    }
+
+    /// Unpack a value written by [`Self::to_bits`].
+    ///
+    /// Total, deliberately: any bit pattern without `KNOWN_BIT` reads as
+    /// `Unknown`, so there is no way for a corrupt or future encoding to
+    /// materialize a `Known` — which is the direction that costs mail.
+    fn from_bits(bits: u8) -> Self {
+        if bits & Self::KNOWN_BIT == 0 {
+            return Self::Unknown;
+        }
+        Self::Known {
+            has_move: bits & Self::MOVE_BIT != 0,
+            has_uidplus: bits & Self::UIDPLUS_BIT != 0,
+        }
+    }
+
+    /// The advertised pair, or the typed refusal `op` must return instead of
+    /// guessing.
+    ///
+    /// The single accessor for the pair, and the single place `Unknown` turns
+    /// into an outcome. Callers pass their own `op` tag so the error names the
+    /// operation that stopped.
+    ///
+    /// # Errors
+    ///
+    /// [`ImapError::CapabilitiesUnknown`] when no advertisement is on record.
+    pub(crate) fn require_known(self, op: &'static str) -> Result<(bool, bool), ImapError> {
+        match self {
+            Self::Known {
+                has_move,
+                has_uidplus,
+            } => Ok((has_move, has_uidplus)),
+            Self::Unknown => Err(ImapError::CapabilitiesUnknown { op }),
+        }
+    }
+}
+
 /// Lazy-connect IMAP connection. Cheaply cloneable (`Arc` internally).
 #[derive(Clone)]
 pub struct Connection {
@@ -105,20 +204,18 @@ pub(super) struct ConnectionInner {
     /// `None` = never connected, or last command tore down the connection.
     /// `Some(_)` = live session ready for the next command.
     pub(super) session: Mutex<Option<ImapSession>>,
-    /// Server advertised MOVE capability (RFC 6851) after login.
-    /// Reset to `false` by [`Connection::take_poisoned`], which is what
-    /// discards a session; the next login re-reads the real value.
+    /// [`ServerCapabilities`] as written by the last login's post-login
+    /// `CAPABILITY` probe, packed by [`ServerCapabilities::to_bits`].
+    ///
+    /// Reset to `Unknown` by [`Connection::take_poisoned`], which is what
+    /// discards a session; the next login re-reads the real value. `Unknown`
+    /// is also the value a freshly-constructed `Connection` carries, so at no
+    /// point does an advertisement exist that no login produced.
     ///
     /// Only a read taken while `session` holds the session that will serve the
-    /// command describes that session — see [`Connection::has_move_capability`]
-    /// for what a read from outside the session scope can be, and #634.
-    pub(super) has_move: AtomicBool,
-    /// Server advertised UIDPLUS capability (RFC 4315) after login.
-    /// Reset to `false` by [`Connection::take_poisoned`], which is what
-    /// discards a session; the next login re-reads the real value.
-    ///
-    /// Same read-inside-the-session-scope rule as [`Self::has_move`].
-    pub(super) has_uidplus: AtomicBool,
+    /// command describes that session — see [`Connection::capabilities`] for
+    /// what a read from outside the session scope can be, and #634.
+    pub(super) capabilities: AtomicU8,
     /// Set by [`Connection::poison`] when a command was cut mid-flight.
     /// Consumed by `dispatch::attempt` under the session lock; see `poison`
     /// for why it is a flag and not a lock.
@@ -406,8 +503,7 @@ impl Connection {
                 audit,
                 credentials,
                 session: Mutex::new(None),
-                has_move: AtomicBool::new(false),
-                has_uidplus: AtomicBool::new(false),
+                capabilities: AtomicU8::new(ServerCapabilities::Unknown.to_bits()),
                 poisoned: AtomicBool::new(false),
             }),
         }
@@ -432,7 +528,8 @@ impl Connection {
         self.inner.cfg.max_fetch_body_bytes
     }
 
-    /// Whether the server advertised the MOVE capability (RFC 6851).
+    /// What the last login's post-login `CAPABILITY` probe established about
+    /// MOVE (RFC 6851) and UIDPLUS (RFC 4315).
     ///
     /// Reports the *last* login's advertisement, which describes the session
     /// currently in the slot only while there is one. A caller that reads this
@@ -447,24 +544,18 @@ impl Connection {
     /// takes the live session as a witness.
     ///
     /// Nothing stops a future caller reading this directly and hoisting it back
-    /// out — that is convention, not enforcement. #652 tracks moving the pair
+    /// out — that is convention, not enforcement. #652 tracks moving the value
     /// into the session slot, which would make the stale read unrepresentable.
+    /// What a stale read can no longer be is a *silent* one: outside a session
+    /// this returns [`ServerCapabilities::Unknown`], and every consumer has to
+    /// handle that arm.
     ///
     /// It stays `pub` because the integration tests live outside the crate and
     /// assert on what a completed command observed. There is no in-tree
     /// production caller.
     #[must_use]
-    pub fn has_move_capability(&self) -> bool {
-        self.inner.has_move.load(Ordering::Relaxed)
-    }
-
-    /// Whether the server advertised the UIDPLUS capability (RFC 4315).
-    ///
-    /// Same read-inside-the-session-scope rule as
-    /// [`Self::has_move_capability`].
-    #[must_use]
-    pub fn has_uidplus_capability(&self) -> bool {
-        self.inner.has_uidplus.load(Ordering::Relaxed)
+    pub fn capabilities(&self) -> ServerCapabilities {
+        ServerCapabilities::from_bits(self.inner.capabilities.load(Ordering::Relaxed))
     }
 
     /// Mark the cached session unusable without taking the session lock.
@@ -526,40 +617,35 @@ impl Connection {
     /// ordering edge is needed at all, the mutex carries it.
     ///
     /// This is the only path that empties the slot, so it is also the only
-    /// place the capability atomics are reset. That reset used to run in
+    /// place the capability record is reset. That reset used to run in
     /// `with_session` as well, the moment a transport failure returned;
     /// removing it from there (#629) moved the reset *later*, to whenever the
     /// next command takes the session lock. Either placement leaves a window
-    /// in which the atomics describe no session at all — the `false`/`false`
-    /// this store leaves behind, or the discarded session's values before it
-    /// runs — and `!has_move && !has_uidplus` is exactly what selects the
-    /// folder-wide EXPUNGE fallback (see
-    /// `ops::expunge::fallback_uses_folder_wide_expunge`), which purges every
-    /// `\Deleted` message in the folder rather than the requested UIDs.
+    /// in which the recorded value describes no session at all — what this
+    /// store leaves behind, or the discarded session's advertisement before it
+    /// runs — and [`ServerCapabilities::Unknown`] is what it must be, because
+    /// no session means no advertisement. Storing `(false, false)` here, as
+    /// this used to, would have been a claim about a server nobody asked
+    /// (#649): it is exactly the condition
+    /// `ops::expunge::fallback_uses_folder_wide_expunge` selects the
+    /// folder-wide `EXPUNGE` on, which purges every `\Deleted` message in the
+    /// folder rather than the requested UIDs.
     ///
-    /// No command can observe **that** window, because the reset and the
-    /// reconnect that follows it both happen under this lock, and the two
-    /// capability readers run inside the `with_session` body — after
-    /// `dispatch::attempt` has populated the slot (#634). The reset is
-    /// therefore bookkeeping for the public accessors, not a value any
-    /// protocol selection is built from.
-    ///
-    /// That statement is about this window only. The same `false`/`false` also
-    /// arises from *inside* a completed login, when the post-login CAPABILITY
-    /// probe fails and `login::imap_login` encodes "unknown" as "absent" — and
-    /// a command does observe that one, by design, because it describes the
-    /// session it just got. Tracked as #649; the reconnect this function
-    /// triggers is one of the paths that reaches it.
+    /// No command observes this window either way, because the reset and the
+    /// reconnect that follows it both happen under this lock, and the
+    /// capability reader runs inside the `with_session` body — after
+    /// `dispatch::attempt` has populated the slot (#634).
     ///
     /// The other way out of the slot is `dispatch::attempt`'s `insert`, and
-    /// that follows a login, which stores the fresh values.
+    /// that follows a login, which stores the fresh advertisement.
     pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
         if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
             return false;
         }
         *slot = None;
-        self.inner.has_move.store(false, Ordering::Relaxed);
-        self.inner.has_uidplus.store(false, Ordering::Relaxed);
+        self.inner
+            .capabilities
+            .store(ServerCapabilities::Unknown.to_bits(), Ordering::Relaxed);
         true
     }
 
@@ -1171,12 +1257,17 @@ mod tests {
     /// pinned separately by `tests/poison_reconnect.rs` over the scriptable
     /// fake, because deleting that call site leaves this test green.
     ///
-    /// The capability reset is asserted here because the atomics must not
-    /// keep describing a session that is gone: the public accessors read
-    /// them with no lock, and emptying the slot without clearing them is
-    /// what leaves a `true` over an empty slot. The commands themselves are
-    /// no longer at risk — they read the flags inside the `with_session`
-    /// body, after the reconnect has repopulated them (#634).
+    /// The capability reset is asserted here because the record must not
+    /// keep describing a session that is gone: the public accessor reads it
+    /// with no lock, and emptying the slot without clearing it is what leaves
+    /// an advertisement over an empty slot. The commands themselves are
+    /// no longer at risk — they read it inside the `with_session`
+    /// body, after the reconnect has repopulated it (#634).
+    ///
+    /// It must reset to `Unknown` specifically. `Known { false, false }` is a
+    /// claim that the server advertises neither MOVE nor UIDPLUS, and that is
+    /// the input that selects the folder-wide EXPUNGE — a discarded session is
+    /// no evidence for it (#649).
     #[test]
     fn poison_is_consumed_once_and_resets_capabilities() {
         use std::sync::atomic::Ordering;
@@ -1189,21 +1280,25 @@ mod tests {
             "an unpoisoned connection must not report a discard",
         );
 
-        conn.inner.has_move.store(true, Ordering::Relaxed);
-        conn.inner.has_uidplus.store(true, Ordering::Relaxed);
+        conn.inner.capabilities.store(
+            super::ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: true,
+            }
+            .to_bits(),
+            Ordering::Relaxed,
+        );
         conn.poison();
 
         assert!(
             conn.take_poisoned(&mut slot),
             "poison must be observed by the next holder of the session lock",
         );
-        assert!(
-            !conn.has_move_capability(),
-            "MOVE capability must not survive a poison",
-        );
-        assert!(
-            !conn.has_uidplus_capability(),
-            "UIDPLUS capability must not survive a poison",
+        assert_eq!(
+            conn.capabilities(),
+            super::ServerCapabilities::Unknown,
+            "a discarded session leaves no advertisement behind — and must not \
+             leave the `neither` that selects the folder-wide EXPUNGE",
         );
         assert!(
             !conn.take_poisoned(&mut slot),
@@ -1260,6 +1355,87 @@ mod tests {
             !conn.inner.poisoned.load(Ordering::Relaxed),
             "a cut before a session was cached must not poison: the next \
              command would discard an already-empty slot",
+        );
+    }
+
+    /// The packing is what lets one `AtomicU8` hold a tri-state, so every
+    /// value has to survive the round trip — a collision between `Unknown` and
+    /// any `Known` is the exact confusion #649 removed, reintroduced one layer
+    /// down.
+    #[test]
+    fn every_capability_state_survives_the_atomic_round_trip() {
+        use super::ServerCapabilities;
+
+        let states = [
+            ServerCapabilities::Unknown,
+            ServerCapabilities::Known {
+                has_move: false,
+                has_uidplus: false,
+            },
+            ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: false,
+            },
+            ServerCapabilities::Known {
+                has_move: false,
+                has_uidplus: true,
+            },
+            ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: true,
+            },
+        ];
+
+        for state in states {
+            assert_eq!(
+                ServerCapabilities::from_bits(state.to_bits()),
+                state,
+                "{state:?} did not survive the round trip",
+            );
+        }
+
+        // Distinctness, asserted over the encoding rather than the enum: the
+        // enum's own `PartialEq` would pass whatever `to_bits` collapsed.
+        let bits: Vec<u8> = states.iter().map(|s| s.to_bits()).collect();
+        for (i, a) in bits.iter().enumerate() {
+            for b in &bits[i.saturating_add(1)..] {
+                assert_ne!(a, b, "two capability states share one encoding");
+            }
+        }
+    }
+
+    /// A `Connection` that has never logged in holds no advertisement.
+    ///
+    /// This used to be `(false, false)`, which is bit-identical to "the server
+    /// advertises neither MOVE nor UIDPLUS" — so a test that probed an
+    /// `IMAP4rev1`-only server and asserted "neither" passed without the login
+    /// path running at all. Starting at `Unknown` makes the two states
+    /// distinguishable from construction onwards (#649).
+    #[test]
+    fn a_connection_that_never_logged_in_reports_unknown_capabilities() {
+        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
+        assert_eq!(conn.capabilities(), super::ServerCapabilities::Unknown);
+    }
+
+    /// `Unknown` has no pair to hand out, and the refusal names the caller's
+    /// operation so the error tells an operator which command stopped.
+    #[test]
+    fn require_known_refuses_unknown_and_names_the_operation() {
+        use super::ServerCapabilities;
+
+        match ServerCapabilities::Unknown.require_known("move") {
+            Err(ImapError::CapabilitiesUnknown { op }) => assert_eq!(op, "move"),
+            other => panic!("expected CapabilitiesUnknown, got {other:?}"),
+        }
+
+        assert_eq!(
+            ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: false,
+            }
+            .require_known("move")
+            .ok(),
+            Some((true, false)),
         );
     }
 
@@ -1343,6 +1519,10 @@ mod tests {
             ),
             (
                 ImapError::Protocol(async_imap::error::Error::Bad("x".into())),
+                "ERR_IMAP_PROTOCOL",
+            ),
+            (
+                ImapError::CapabilitiesUnknown { op: "move" },
                 "ERR_IMAP_PROTOCOL",
             ),
             (
