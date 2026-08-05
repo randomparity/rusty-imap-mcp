@@ -19,7 +19,7 @@
 //! `docs/architecture/audit-locking.md`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_imap::Session;
@@ -86,8 +86,12 @@ pub struct ConnectionConfig {
 /// underlying transport; we always use `TlsStream<TcpStream>`.
 pub(crate) type ImapSession = Session<TlsStream<TcpStream>>;
 
-/// What the last login's post-login `CAPABILITY` probe established about the
-/// two extensions this crate branches on.
+/// What one session's post-login `CAPABILITY` probe established about the two
+/// extensions this crate branches on.
+///
+/// Produced only by `imap_login`, and only as half of the [`SessionEntry`] it
+/// returns, so a value of this type always arrives attached to the session
+/// that answered the probe (#652).
 ///
 /// ## Why this is not a `(bool, bool)` (#649)
 ///
@@ -118,8 +122,11 @@ pub enum ServerCapabilities {
         /// Server advertised UIDPLUS (RFC 4315).
         has_uidplus: bool,
     },
-    /// No advertisement is on record for the current session: no login has run
-    /// yet, the session was discarded, or the probe came back unreadable.
+    /// The session's probe came back unreadable — it errored, or it "succeeded"
+    /// with no listing this client can read. Also what
+    /// [`Connection::capabilities`] reports when there is no session at all, a
+    /// case that has no advertisement to describe rather than an unreadable
+    /// one.
     ///
     /// **Not a synonym for "the server lacks both."** Nothing may be inferred
     /// about the server from this.
@@ -127,43 +134,6 @@ pub enum ServerCapabilities {
 }
 
 impl ServerCapabilities {
-    /// `Unknown`, plus MOVE in bit 1 and UIDPLUS in bit 2 once bit 0 marks the
-    /// pair as known. Encoding lives here rather than at the atomic so the
-    /// round trip is one type's business; see [`Self::from_bits`].
-    const KNOWN_BIT: u8 = 0b001;
-    const MOVE_BIT: u8 = 0b010;
-    const UIDPLUS_BIT: u8 = 0b100;
-
-    /// Pack into the `u8` [`ConnectionInner::capabilities`] stores.
-    fn to_bits(self) -> u8 {
-        match self {
-            Self::Unknown => 0,
-            Self::Known {
-                has_move,
-                has_uidplus,
-            } => {
-                Self::KNOWN_BIT
-                    | if has_move { Self::MOVE_BIT } else { 0 }
-                    | if has_uidplus { Self::UIDPLUS_BIT } else { 0 }
-            }
-        }
-    }
-
-    /// Unpack a value written by [`Self::to_bits`].
-    ///
-    /// Total, deliberately: any bit pattern without `KNOWN_BIT` reads as
-    /// `Unknown`, so there is no way for a corrupt or future encoding to
-    /// materialize a `Known` — which is the direction that costs mail.
-    fn from_bits(bits: u8) -> Self {
-        if bits & Self::KNOWN_BIT == 0 {
-            return Self::Unknown;
-        }
-        Self::Known {
-            has_move: bits & Self::MOVE_BIT != 0,
-            has_uidplus: bits & Self::UIDPLUS_BIT != 0,
-        }
-    }
-
     /// The advertised pair, or the typed refusal `op` must return instead of
     /// guessing.
     ///
@@ -191,31 +161,74 @@ pub struct Connection {
     pub(super) inner: Arc<ConnectionInner>,
 }
 
+/// A live IMAP session and what that session's own post-login `CAPABILITY`
+/// probe advertised, as one value (#652).
+///
+/// ## Why they are one value
+///
+/// The advertisement used to live in an atomic beside the session slot, with
+/// its lifetime decoupled from the session it described. Keeping the two in
+/// agreement was then everybody's job: [`Connection::take_poisoned`] had to
+/// reset the atomic whenever it emptied the slot, `imap_login` had to store
+/// into it whenever it produced a session, and every reader had to take its
+/// read at a moment when the slot held the session that would serve the
+/// command (#634).
+///
+/// Pairing them deletes all three obligations. There is one write — this
+/// struct's construction, in `imap_login`, from the probe that session
+/// answered — and emptying the slot drops the advertisement with the session
+/// because they are the same value. A connection with no session has nothing
+/// to read rather than a value someone had to remember to clear, so the two
+/// paths that used to leave an advertisement over an empty slot cannot: a
+/// discarded session, and a connect that logged in and then failed on its own
+/// audit write, which no reset covered at all.
+///
+/// What this does *not* buy is a compile error for reading
+/// [`Connection::capabilities`] outside a command and passing the result in.
+/// See that method.
+pub(super) struct SessionEntry {
+    session: ImapSession,
+    capabilities: ServerCapabilities,
+}
+
+impl SessionEntry {
+    /// Pair a freshly logged-in session with the advertisement it answered
+    /// with. `imap_login` is the only caller, and it is the only place a
+    /// [`ServerCapabilities`] value is produced.
+    pub(super) fn new(session: ImapSession, capabilities: ServerCapabilities) -> Self {
+        Self {
+            session,
+            capabilities,
+        }
+    }
+
+    /// The session itself, for the command about to run against it.
+    pub(super) fn session(&mut self) -> &mut ImapSession {
+        &mut self.session
+    }
+
+    /// What [`Self::session`] advertised at login. Read from the same value,
+    /// so it cannot describe a different session.
+    pub(super) fn capabilities(&self) -> ServerCapabilities {
+        self.capabilities
+    }
+}
+
 // Field order is drop-order-significant. Fields drop in declaration
 // order; reorder only with care. Today the order is: config scalars
 // first (cheap), then the Arc'd sink and resolver (refcount
 // decrements — the real destructors run wherever the last handle is
 // dropped), then the live IMAP session (so its teardown cannot observe
-// dropped audit/credential sinks), then the capability atomics.
+// dropped audit/credential sinks), then the poison flag.
 pub(super) struct ConnectionInner {
     pub(super) cfg: ConnectionConfig,
     pub(super) audit: Arc<dyn AuthEventSink>,
     pub(super) credentials: Arc<dyn CredentialResolver>,
     /// `None` = never connected, or last command tore down the connection.
-    /// `Some(_)` = live session ready for the next command.
-    pub(super) session: Mutex<Option<ImapSession>>,
-    /// [`ServerCapabilities`] as written by the last login's post-login
-    /// `CAPABILITY` probe, packed by [`ServerCapabilities::to_bits`].
-    ///
-    /// Reset to `Unknown` by [`Connection::take_poisoned`], which is what
-    /// discards a session; the next login re-reads the real value. `Unknown`
-    /// is also the value a freshly-constructed `Connection` carries, so at no
-    /// point does an advertisement exist that no login produced.
-    ///
-    /// Only a read taken while `session` holds the session that will serve the
-    /// command describes that session — see [`Connection::capabilities`] for
-    /// what a read from outside the session scope can be, and #634.
-    pub(super) capabilities: AtomicU8,
+    /// `Some(_)` = live session, and its advertisement, ready for the next
+    /// command. See [`SessionEntry`] for why the advertisement lives here
+    /// rather than in an atomic of its own.
+    pub(super) session: Mutex<Option<SessionEntry>>,
     /// Set by [`Connection::poison`] when a command was cut mid-flight.
     /// Consumed by `dispatch::attempt` under the session lock; see `poison`
     /// for why it is a flag and not a lock.
@@ -276,14 +289,14 @@ pub(super) struct SessionGuard<'a> {
     armed: bool,
     /// Field order is irrelevant to the ordering guarantee above — `Drop::drop`
     /// precedes *all* field drops — so this sits last purely for readability.
-    slot: tokio::sync::MutexGuard<'a, Option<ImapSession>>,
+    slot: tokio::sync::MutexGuard<'a, Option<SessionEntry>>,
 }
 
 impl<'a> SessionGuard<'a> {
     /// Take ownership of an acquired session lock, armed.
     pub(super) fn new(
         conn: &'a Connection,
-        slot: tokio::sync::MutexGuard<'a, Option<ImapSession>>,
+        slot: tokio::sync::MutexGuard<'a, Option<SessionEntry>>,
     ) -> Self {
         Self {
             conn,
@@ -300,7 +313,7 @@ impl<'a> SessionGuard<'a> {
 }
 
 impl std::ops::Deref for SessionGuard<'_> {
-    type Target = Option<ImapSession>;
+    type Target = Option<SessionEntry>;
 
     fn deref(&self) -> &Self::Target {
         &self.slot
@@ -503,7 +516,6 @@ impl Connection {
                 audit,
                 credentials,
                 session: Mutex::new(None),
-                capabilities: AtomicU8::new(ServerCapabilities::Unknown.to_bits()),
                 poisoned: AtomicBool::new(false),
             }),
         }
@@ -528,34 +540,50 @@ impl Connection {
         self.inner.cfg.max_fetch_body_bytes
     }
 
-    /// What the last login's post-login `CAPABILITY` probe established about
-    /// MOVE (RFC 6851) and UIDPLUS (RFC 4315).
+    /// What the session currently in the slot advertised about MOVE (RFC 6851)
+    /// and UIDPLUS (RFC 4315) at its own login, or
+    /// [`ServerCapabilities::Unknown`] when the slot is empty.
     ///
-    /// Reports the *last* login's advertisement, which describes the session
-    /// currently in the slot only while there is one. A caller that reads this
-    /// and then issues a command is not guaranteed both refer to the same
-    /// session: the command lazy-connects, and the connect it triggers can
-    /// replace the session — and the advertisement — in between. So code that
-    /// selects a protocol from a capability must read it from *inside* the
-    /// `with_session` body, where the slot is already populated with the
-    /// session that will serve the command (#634). `dispatch::move_messages`
-    /// and `dispatch::delete_message` are the only two that branch on a
-    /// capability, and both go through `dispatch::session_capabilities`, which
-    /// takes the live session as a witness.
+    /// A derived read over the slot rather than a stored value (#652), so the
+    /// empty case needs no reset to produce and no window in which a previous
+    /// session's advertisement survives it.
     ///
-    /// Nothing stops a future caller reading this directly and hoisting it back
-    /// out — that is convention, not enforcement. #652 tracks moving the value
-    /// into the session slot, which would make the stale read unrepresentable.
-    /// What a stale read can no longer be is a *silent* one: outside a session
-    /// this returns [`ServerCapabilities::Unknown`], and every consumer has to
-    /// handle that arm.
+    /// ## What this is for, and what it is not
     ///
-    /// It stays `pub` because the integration tests live outside the crate and
-    /// assert on what a completed command observed. There is no in-tree
-    /// production caller.
-    #[must_use]
-    pub fn capabilities(&self) -> ServerCapabilities {
-        ServerCapabilities::from_bits(self.inner.capabilities.load(Ordering::Relaxed))
+    /// **Observation.** The integration tests live outside the crate and assert
+    /// on what a completed command left behind; that is this method's only
+    /// caller. There is no in-tree production caller and there should not be
+    /// one.
+    ///
+    /// **Not a protocol input.** Code that selects a protocol from a capability
+    /// reads it from the [`SessionEntry`] `with_session` hands its body, where
+    /// the advertisement and the session that will serve the command are the
+    /// same value (#634, #652). `dispatch::move_messages` and
+    /// `dispatch::delete_message` are the only two that branch on a capability
+    /// and both do exactly that.
+    ///
+    /// Reading this and passing the result into a command still compiles: the
+    /// pair travels with the session, but [`ServerCapabilities`] is a plain
+    /// `Copy` value once extracted, and `ops::move_message::move_messages` and
+    /// `ops::delete::delete_message` take one as a parameter. So the value read
+    /// here can go stale in the usual way — the command lazy-connects, and the
+    /// connect it triggers replaces the session and its advertisement in
+    /// between. What #652 removed is the *inconsistent* pair; the *hoist* is
+    /// still convention.
+    ///
+    /// ## Do not call this from inside a `with_session` body
+    ///
+    /// It takes the session lock, which that body already holds, and
+    /// `tokio::sync::Mutex` is not reentrant — the call would deadlock the
+    /// account for good. Use the entry's own
+    /// [`SessionEntry::capabilities`] there; it is in scope and needs no lock.
+    pub async fn capabilities(&self) -> ServerCapabilities {
+        self.inner
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .map_or(ServerCapabilities::Unknown, SessionEntry::capabilities)
     }
 
     /// Mark the cached session unusable without taking the session lock.
@@ -616,36 +644,18 @@ impl Connection {
     /// it. `Relaxed` for the same reason as [`Self::poison`]: where an
     /// ordering edge is needed at all, the mutex carries it.
     ///
-    /// This is the only path that empties the slot, so it is also the only
-    /// place the capability record is reset. That reset used to run in
-    /// `with_session` as well, the moment a transport failure returned;
-    /// removing it from there (#629) moved the reset *later*, to whenever the
-    /// next command takes the session lock. Either placement leaves a window
-    /// in which the recorded value describes no session at all — what this
-    /// store leaves behind, or the discarded session's advertisement before it
-    /// runs — and [`ServerCapabilities::Unknown`] is what it must be, because
-    /// no session means no advertisement. Storing `(false, false)` here, as
-    /// this used to, would have been a claim about a server nobody asked
-    /// (#649): it is exactly the condition
-    /// `ops::expunge::fallback_uses_folder_wide_expunge` selects the
-    /// folder-wide `EXPUNGE` on, which purges every `\Deleted` message in the
-    /// folder rather than the requested UIDs.
-    ///
-    /// No command observes this window either way, because the reset and the
-    /// reconnect that follows it both happen under this lock, and the
-    /// capability reader runs inside the `with_session` body — after
-    /// `dispatch::attempt` has populated the slot (#634).
-    ///
-    /// The other way out of the slot is `dispatch::attempt`'s `insert`, and
-    /// that follows a login, which stores the fresh advertisement.
-    pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
+    /// Clearing the slot is the whole discard. It used to be half of one: the
+    /// capability advertisement lived in an atomic beside the slot, so this
+    /// had to reset that too, and the three paragraphs arguing why the window
+    /// between the two stores was unobservable were part of the cost. The
+    /// advertisement now travels *in* the slot ([`SessionEntry`]), so it is
+    /// dropped here with the session it described and there is no second store
+    /// to order against the first (#652).
+    pub(super) fn take_poisoned(&self, slot: &mut Option<SessionEntry>) -> bool {
         if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
             return false;
         }
         *slot = None;
-        self.inner
-            .capabilities
-            .store(ServerCapabilities::Unknown.to_bits(), Ordering::Relaxed);
         true
     }
 
@@ -690,7 +700,7 @@ impl Connection {
     /// after `connect_with_bundle` returns; [`AuthEmitGuard`] now writes it
     /// instead (#623). `dispatch::attempt` still runs this outside the command
     /// timeout, for the separate reason its own docs give.
-    pub(super) async fn connect_inner(&self) -> Result<ImapSession, ImapError> {
+    pub(super) async fn connect_inner(&self) -> Result<SessionEntry, ImapError> {
         let cfg = &self.inner.cfg;
         let bundle = build_tls_config(cfg.pinned_fingerprint)?;
         let progress = ConnectProgress::default();
@@ -714,6 +724,12 @@ impl Connection {
         emit_guard.disarm();
 
         match &outcome {
+            // A rejected audit write fails the whole connect, so a session that
+            // logged in successfully is dropped here rather than returned. It
+            // takes its advertisement with it because the two are one value
+            // ([`SessionEntry`]); while the advertisement lived in an atomic,
+            // this path left one behind for a session that never reached the
+            // slot and no reset covered it (#652).
             Ok(_) => self.emit_auth(auth_success(&ctx))?,
             Err(err) => {
                 // Deliberate: log but do NOT propagate emit_auth failures on
@@ -1257,21 +1273,18 @@ mod tests {
     /// pinned separately by `tests/poison_reconnect.rs` over the scriptable
     /// fake, because deleting that call site leaves this test green.
     ///
-    /// The capability reset is asserted here because the record must not
-    /// keep describing a session that is gone: the public accessor reads it
-    /// with no lock, and emptying the slot without clearing it is what leaves
-    /// an advertisement over an empty slot. The commands themselves are
-    /// no longer at risk — they read it inside the `with_session`
-    /// body, after the reconnect has repopulated it (#634).
-    ///
-    /// It must reset to `Unknown` specifically. `Known { false, false }` is a
-    /// claim that the server advertises neither MOVE nor UIDPLUS, and that is
-    /// the input that selects the folder-wide EXPUNGE — a discarded session is
-    /// no evidence for it (#649).
+    /// There is no capability assertion here any more, and its absence is the
+    /// point. The advertisement used to sit in an atomic beside the slot, so
+    /// this function had to reset it and a test had to pin that it did; the
+    /// pair now lives *in* the slot ([`super::SessionEntry`]), so clearing the
+    /// slot is the whole discard and there is nothing left that could keep
+    /// describing a session that is gone (#652). Asserting it here would mean
+    /// asserting that `None` has no capabilities — true by construction, and
+    /// therefore an assertion that cannot fail. What the pairing buys is pinned
+    /// by `tests/capability_slot_ownership.rs`, on the path where no reset ran
+    /// at all.
     #[test]
-    fn poison_is_consumed_once_and_resets_capabilities() {
-        use std::sync::atomic::Ordering;
-
+    fn poison_is_consumed_once() {
         let conn = connection_with("mail.example.com", "alice@example.com", 4096);
         let mut slot = None;
 
@@ -1280,25 +1293,11 @@ mod tests {
             "an unpoisoned connection must not report a discard",
         );
 
-        conn.inner.capabilities.store(
-            super::ServerCapabilities::Known {
-                has_move: true,
-                has_uidplus: true,
-            }
-            .to_bits(),
-            Ordering::Relaxed,
-        );
         conn.poison();
 
         assert!(
             conn.take_poisoned(&mut slot),
             "poison must be observed by the next holder of the session lock",
-        );
-        assert_eq!(
-            conn.capabilities(),
-            super::ServerCapabilities::Unknown,
-            "a discarded session leaves no advertisement behind — and must not \
-             leave the `neither` that selects the folder-wide EXPUNGE",
         );
         assert!(
             !conn.take_poisoned(&mut slot),
@@ -1358,63 +1357,20 @@ mod tests {
         );
     }
 
-    /// The packing is what lets one `AtomicU8` hold a tri-state, so every
-    /// value has to survive the round trip — a collision between `Unknown` and
-    /// any `Known` is the exact confusion #649 removed, reintroduced one layer
-    /// down.
-    #[test]
-    fn every_capability_state_survives_the_atomic_round_trip() {
-        use super::ServerCapabilities;
-
-        let states = [
-            ServerCapabilities::Unknown,
-            ServerCapabilities::Known {
-                has_move: false,
-                has_uidplus: false,
-            },
-            ServerCapabilities::Known {
-                has_move: true,
-                has_uidplus: false,
-            },
-            ServerCapabilities::Known {
-                has_move: false,
-                has_uidplus: true,
-            },
-            ServerCapabilities::Known {
-                has_move: true,
-                has_uidplus: true,
-            },
-        ];
-
-        for state in states {
-            assert_eq!(
-                ServerCapabilities::from_bits(state.to_bits()),
-                state,
-                "{state:?} did not survive the round trip",
-            );
-        }
-
-        // Distinctness, asserted over the encoding rather than the enum: the
-        // enum's own `PartialEq` would pass whatever `to_bits` collapsed.
-        let bits: Vec<u8> = states.iter().map(|s| s.to_bits()).collect();
-        for (i, a) in bits.iter().enumerate() {
-            for b in &bits[i.saturating_add(1)..] {
-                assert_ne!(a, b, "two capability states share one encoding");
-            }
-        }
-    }
-
     /// A `Connection` that has never logged in holds no advertisement.
     ///
     /// This used to be `(false, false)`, which is bit-identical to "the server
     /// advertises neither MOVE nor UIDPLUS" — so a test that probed an
     /// `IMAP4rev1`-only server and asserted "neither" passed without the login
-    /// path running at all. Starting at `Unknown` makes the two states
+    /// path running at all. Reporting `Unknown` makes the two states
     /// distinguishable from construction onwards (#649).
-    #[test]
-    fn a_connection_that_never_logged_in_reports_unknown_capabilities() {
+    #[tokio::test]
+    async fn a_connection_that_never_logged_in_reports_unknown_capabilities() {
         let conn = connection_with("mail.example.com", "alice@example.com", 4096);
-        assert_eq!(conn.capabilities(), super::ServerCapabilities::Unknown);
+        assert_eq!(
+            conn.capabilities().await,
+            super::ServerCapabilities::Unknown
+        );
     }
 
     /// `Unknown` has no pair to hand out, and the refusal names the caller's

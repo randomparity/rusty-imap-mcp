@@ -6,12 +6,12 @@
 //! `with_session` never retries them; the only reconnect they can see is the
 //! one `dispatch::attempt` performs when it consumes the poison flag under the
 //! session lock. That reconnect logs in again and re-reads CAPABILITY, so the
-//! capability atomics change value *during* the dispatch — after the point at
-//! which the command used to snapshot them.
+//! session slot carries a different advertisement *during* the dispatch —
+//! after the point at which the command used to snapshot it.
 //!
 //! Mechanism: `start_sequence` serves a different capability advertisement to
 //! each of the two connections. A warm-up `list_folders` establishes the first
-//! session and populates the atomics from its advertisement; `poison()` then
+//! session and its advertisement; `poison()` then
 //! forces the mutating op to reconnect to the second, which advertises the
 //! opposite set. Every step of the second connection's dialog is scripted for
 //! the *fresh* capabilities, so a command built from the stale ones desynchs
@@ -39,7 +39,7 @@ use rimap_imap::types::Uid;
 const BACKSTOP: Duration = Duration::from_secs(5);
 
 /// Login preamble advertising `caps`, followed by the boot-style `LIST` the
-/// tests use to establish a session and populate the capability atomics.
+/// tests use to establish a session and its capability advertisement.
 fn warm_up(caps: &str) -> Vec<Step> {
     let mut steps = login_preamble(caps);
     steps.extend([
@@ -88,7 +88,7 @@ async fn move_after_reconnect_uses_the_serving_sessions_capabilities() {
 
     conn.list_folders("*").await.expect("warm-up list");
     assert_eq!(
-        conn.capabilities(),
+        conn.capabilities().await,
         ServerCapabilities::Known {
             has_move: false,
             has_uidplus: false,
@@ -163,7 +163,7 @@ async fn delete_after_reconnect_does_not_issue_an_unadvertised_move() {
 
     conn.list_folders("*").await.expect("warm-up list");
     assert_eq!(
-        conn.capabilities(),
+        conn.capabilities().await,
         ServerCapabilities::Known {
             has_move: true,
             has_uidplus: true,
