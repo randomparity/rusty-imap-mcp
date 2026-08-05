@@ -265,7 +265,6 @@ struct ScenarioRun {
 
 /// Drive the whole scenario: boot the fake, park a `list_folders` reconnect on
 /// `LOGIN`, close stdin, and wait for the binary to exit.
-///
 async fn run_parked_dispatch_scenario() -> ScenarioRun {
     let server =
         FakeImapServer::start_sequence(vec![boot_then_disconnect(), park_on_login()]).await;
@@ -373,11 +372,13 @@ fn process_end_record(raw: &str) -> Value {
         .unwrap_or_else(|| panic!("no process_end record in:\n{raw}"))
 }
 
-/// Runs at the shipped `DISPATCH_DRAIN_BUDGET` — no override — and is the only
-/// thing in the repo that does. The `undrained_dispatches == 0` assertion is
-/// precisely the claim that two seconds covers this scenario's cut path, so
-/// widening the budget here would make the assertion unfailable and delete the
-/// coverage in the same stroke.
+/// The `undrained_dispatches == 0` assertion is the only end-to-end check on the
+/// shipped `DISPATCH_DRAIN_BUDGET`: every wire suite runs at that constant, but
+/// this is the one that parks a dispatch, cuts it, and then reads back what the
+/// drain reported — so the zero is precisely the claim that two seconds covers
+/// this scenario's cut path. The non-zero half of the pair is not reachable from
+/// the wire and lives in `mcp::server`'s `dispatch_drain_tests`, at a budget of
+/// its own.
 ///
 /// Two mechanisms could make the drain report a residue here, and only one is
 /// ruled out. A budget the runtime cannot drive to time *overruns*: by the time
@@ -411,14 +412,6 @@ async fn shutdown_cut_auth_record_precedes_process_end() {
     canary::assert_absent(&run.password, &[run.tempdir.path()], &[]);
 }
 
-/// The other half of the same guarantee: when the drain budget expires with a
-/// dispatch still registered, `process_end.undrained_dispatches` says so, so a
-/// reader holding only the audit file can tell that the terminal-record rule is
-/// not backed for this run (#680).
-///
-/// Before this, the count went to `tracing::warn!` and nowhere else — and
-/// stderr is the one channel an MCP client routinely discards.
-///
 /// Write one newline-delimited JSON-RPC frame to the child's stdin.
 async fn send(stdin: &mut tokio::process::ChildStdin, envelope: &Value) {
     let line = format!("{envelope}\n");

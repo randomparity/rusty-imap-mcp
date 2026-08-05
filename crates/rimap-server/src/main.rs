@@ -332,9 +332,11 @@ async fn serve_mcp(
 
     let service = match init_result {
         Ok(svc) => svc,
-        // Both init-failure arms drain *before* touching the supervisor, so all
-        // three exits share the one order this function's doc calls
-        // load-bearing. Init never completed on these paths, so rmcp spawned no
+        // Both init-failure arms drain *before* touching the supervisor, so the
+        // three exits that have a drain to order — these two and the normal one
+        // below — share the one order this function's doc calls load-bearing.
+        // The fourth exit, the registry failure above, returns before the drain
+        // exists. Init never completed on these paths, so rmcp spawned no
         // handler and the drain finds nothing to cancel — but that exemption is
         // a fact about today's code, not a property of the arm, and keeping the
         // order uniform means a dispatch that later becomes reachable before
