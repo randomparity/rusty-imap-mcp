@@ -42,6 +42,68 @@ forgotten `-dev` strip (tagging `v0.1.1` while the manifest still says
 **Prerelease tags are not supported** — `verify-tag` rejects any tag
 containing `-`.
 
+### Breaking a public API
+
+Under SemVer at `0.x`, the **minor** field is the breaking-change field: a break
+between `0.1.z` and the next release requires `0.2.0`, not `0.1.z+1`. So a PR
+that breaks the public API of a publishable workspace crate must move the
+planned version with it:
+
+```bash
+cargo set-version --workspace 0.2.0-dev   # from 0.1.1-dev
+```
+
+This is the PR author's job, not release-prep's. Release-prep chooses between
+patch and minor for *accumulated features*; it cannot retroactively discover
+that some merged PR removed a `pub fn`.
+
+The `semver-checks` CI job enforces this. It diffs the branch's public API
+against the last `vX.Y.Z` tag and fails when a break is not covered by the
+manifest version, so a breaking PR is red until the version bump lands in the
+same PR. Once the planned version is already `0.2.0-dev`, further breaks in the
+same cycle are free — they all diff against the same tag, and one bump covers
+them all. Run it locally with `just semver-checks` (`just ci` includes it).
+
+"Public API" here means the API of the 8 publishable crates. `rimap-fake-imap`
+and `xtask` are `publish = false` and are skipped.
+
+**Adding a new publishable crate.** A tag baseline errors on a crate that does
+not exist at the baseline tag — `package <name> not found`, which reads as a
+tooling failure rather than a SemVer verdict. The PR that introduces the crate
+must skip it for that one PR:
+
+```bash
+cargo semver-checks check-release --workspace --baseline-rev v0.1.0 --exclude <new-crate>
+```
+
+From the next tag onward it has a baseline and needs no exclusion. The release
+job below runs the same check with no way to pass `--exclude`, so that cycle's
+release stops at `publish-crates` — but not by surprise: `semver-checks` is red
+on every PR for the whole cycle first, and `publish-crates` is a leaf, so the
+GitHub Release still stands and `./scripts/publish-crates.sh` finishes the job
+by hand.
+
+**The release runs the same gate.** `release.yml`'s `publish-crates` job runs
+`just semver-checks` too, immediately before uploading to crates.io — one
+baseline definition, two callers (issue #650). It is not redundant with the PR
+job: the release triggers on a tag push and `verify-tag` only checks the tag
+against `Cargo.toml`, so a tag cut off a branch would otherwise publish a tree
+the PR gate never saw. And a crates.io version cannot be unpublished, only
+yanked, so this is the one gate in the repo standing in front of something
+irreversible.
+
+At release time HEAD *is* the tag being released, so the baseline has to be the
+tag before it. `scripts/semver-baseline.sh` resolves that — the most recent
+reachable `vX.Y.Z` tag that is not on HEAD — and fails loudly rather than
+returning nothing, because a self-comparison is green whatever it is handed.
+`scripts/semver-baseline.test.sh` (`just test-semver-baseline`, mirrored in the
+`publish checks` CI job) covers that case and the tag shapes around it.
+
+One limit worth knowing before you trust a green result: the gate is only as
+good as `cargo-semver-checks`' lint set. It catches removed and re-typed public
+items well; it does not model behavioral compatibility, and it cannot see
+through a re-export from a private module it declines to traverse.
+
 ## One-time setup (before the first release)
 
 1. Confirm `randomparity/homebrew-tap` exists with a `Formula/` directory.
@@ -115,6 +177,17 @@ containing `-`.
    does **not** trigger `pull_request` CI — push an empty commit to its branch
    (or run `just ci` locally) to get a green signal before merging. Edit the
    version on the PR first if the next release is a minor/major bump.
+
+   **If no PR appears,** the job refused to open a broken one rather than
+   failing quietly — read its log. `scripts/post-release-bump.sh` deliberately
+   fails, before the PR step, when: the version on `main` is not behind the
+   one it computed (a re-run of an older release's workflow, or a `main`
+   somebody bumped by hand); a cargo workspace exists that it does not know
+   how to re-resolve; `cargo metadata --locked` or `just check-fuzz-lock-parity`
+   disagrees with what it produced; or the bump dirtied something that is not
+   a manifest, a lockfile, or the changelog. Each names the cause. Reproduce
+   any of them locally with `./scripts/post-release-bump.sh vX.Y.Z` on a clean
+   checkout of `main`, fix the cause, and re-run the job.
 
 ## What automation does
 

@@ -2,10 +2,14 @@
 //!
 //! `imap_login` runs greeting + CAPABILITY + LOGIN over an already-
 //! established TLS stream. `emit_auth` ships the resulting
-//! [`AuthEvent`] through the injected [`AuthEventSink`] on a blocking
-//! thread so the sink's internal `std::sync::Mutex` is never held
-//! across an `.await`.
+//! [`AuthEvent`] through the injected [`AuthEventSink`] synchronously,
+//! on the calling thread: the sink's internal `std::sync::Mutex` is
+//! taken and released without an `.await` in between, so no record can
+//! be stranded *on the blocking pool's queue* by a cut or a runtime
+//! shutdown (ADR-0014). The guard's record can still lose a race with
+//! process exit; see `AuthEmitGuard`.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering;
 
 use async_imap::imap_proto::{Response, Status};
@@ -18,7 +22,7 @@ use tokio_rustls::client::TlsStream;
 use crate::error::{AuthFailure, ImapError};
 
 use super::handshake::drain_for_logindisabled;
-use super::{Connection, ImapSession};
+use super::{Connection, ImapSession, ServerCapabilities};
 
 impl Connection {
     /// Run the IMAP greeting + CAPABILITY probe + LOGIN sequence.
@@ -129,62 +133,255 @@ impl Connection {
 
         // Post-login: probe CAPABILITY for MOVE (RFC 6851) and
         // UIDPLUS (RFC 4315).
-        let (has_move, has_uidplus) = match session.capabilities().await {
-            Ok(caps) => (caps.has_str("MOVE"), caps.has_str("UIDPLUS")),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "post-login CAPABILITY probe failed; \
-                     assuming no MOVE/UIDPLUS support",
-                );
-                (false, false)
-            }
-        };
-        self.inner.has_move.store(has_move, Ordering::Relaxed);
-        self.inner.has_uidplus.store(has_uidplus, Ordering::Relaxed);
+        let capabilities = Self::read_capabilities(&mut session).await;
+        self.inner
+            .capabilities
+            .store(capabilities.to_bits(), Ordering::Relaxed);
 
         Ok(session)
     }
 
-    /// Emit an [`AuthEvent`] through the injected sink. Runs the
-    /// (sync) `emit_auth` call inside `spawn_blocking` so any
-    /// `std::sync::Mutex` the sink holds (the production
-    /// `AuditWriter` impl does) is never held across an `.await`
-    /// boundary.
+    /// Run the post-login `CAPABILITY` probe and classify what came back.
     ///
-    /// ## Cancellation behavior
+    /// ## Why an uninformative probe is `Unknown` and not `(false, false)`
     ///
-    /// If the caller future is cancelled at the `.await` below, the
-    /// `JoinHandle` is dropped but the `spawn_blocking` task runs to
-    /// completion — `tokio` does not kill blocking tasks on handle drop.
-    /// The audit record IS written in that case, but the `Result` is
-    /// lost: the caller sees neither a success nor an error. This is the
-    /// least-bad outcome (audit integrity preserved, caller just gets a
-    /// cancellation). Callers that MUST know whether the write succeeded
-    /// should not drop this future.
+    /// Reporting "the server advertises neither MOVE nor UIDPLUS" from a probe
+    /// that established nothing selects the folder-wide RFC 3501 `EXPUNGE` on
+    /// the next delete or move — see [`ServerCapabilities`] and #649. So this
+    /// returns [`ServerCapabilities::Known`] only when the reply was a
+    /// capability listing, and the operations that would otherwise guess refuse
+    /// instead.
+    ///
+    /// ## The two ways the probe tells us nothing
+    ///
+    /// Both reach the same `Unknown`, and only one of them is an `Err`:
+    ///
+    /// * **The command failed.** A torn connection or an unparseable response
+    ///   comes back as `Err`. Rare, and usually fatal to the session anyway.
+    /// * **The command "succeeded" with no listing in it.** This is the common
+    ///   one and it was invisible before. `async-imap`'s `parse_capabilities`
+    ///   (read against 0.11.3) accumulates `* CAPABILITY` lines until the
+    ///   tagged completion and then returns `Ok` **without inspecting the
+    ///   tagged status**, so a server answering `BAD` or `NO` — a load-shedding
+    ///   proxy, a mid-restart server — yields `Ok(<empty set>)`. That set is
+    ///   indistinguishable from a parsed listing by type alone.
+    ///
+    /// What separates them is `IMAP4rev1`: RFC 3501 §7.2.1 requires the
+    /// CAPABILITY response to include it, so a listing that lacks it is not a
+    /// listing this client can read. That check is what makes an
+    /// `IMAP4rev1`-only server (a genuine "neither extension") land on `Known {
+    /// false, false }` while a `BAD` lands on `Unknown`, which is the whole
+    /// distinction #649 is about.
+    ///
+    /// A server advertising only `IMAP4rev2` (RFC 9051) is therefore `Unknown`
+    /// too, and its deletes and moves are refused rather than served. That is
+    /// the safe side of a gap, not a fix for it: RFC 9051 folds MOVE and
+    /// UIDPLUS into the base protocol and stops advertising them, so reading
+    /// such a server as "advertises neither" would have selected the
+    /// folder-wide `EXPUNGE` against a server that in fact supports `UID
+    /// EXPUNGE`. Real `IMAP4rev2` support is #686.
+    async fn read_capabilities(session: &mut ImapSession) -> ServerCapabilities {
+        let caps = match session.capabilities().await {
+            Ok(caps) => caps,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "post-login CAPABILITY probe failed; MOVE/UIDPLUS support \
+                     is unknown for this session and operations that would \
+                     otherwise fall back to a folder-wide EXPUNGE will refuse",
+                );
+                return ServerCapabilities::Unknown;
+            }
+        };
+
+        if !caps.has_str("IMAP4rev1") {
+            tracing::warn!(
+                advertised = caps.len(),
+                "post-login CAPABILITY reply omitted IMAP4rev1, so it is not a \
+                 capability listing this client can read (RFC 3501 7.2.1); \
+                 MOVE/UIDPLUS support is unknown for this session and \
+                 operations that would otherwise fall back to a folder-wide \
+                 EXPUNGE will refuse",
+            );
+            return ServerCapabilities::Unknown;
+        }
+
+        ServerCapabilities::Known {
+            has_move: caps.has_str("MOVE"),
+            has_uidplus: caps.has_str("UIDPLUS"),
+        }
+    }
+
+    /// Emit an [`AuthEvent`] through the injected sink, synchronously, on the
+    /// calling thread. The single place any `auth` record is written; both
+    /// [`Connection::connect_inner`]'s own emits and
+    /// [`Self::emit_auth_blocking`] go through it.
+    ///
+    /// ## Why this blocks rather than deferring to the blocking pool
+    ///
+    /// `AuditWriter::write_record` fsyncs `auth` records, and its docs tell
+    /// async callers to route through `spawn_blocking` (RUST-ASYNC-04). This
+    /// emitter deliberately does not, and ADR-0014 records the decision. The
+    /// short form:
+    ///
+    /// * **`spawn_blocking` loses the record on a shutdown.** Read against
+    ///   tokio 1.53, a deferred closure survives a shutdown only by luck.
+    ///   Submitted after `Runtime::shutdown_background` has set the flag,
+    ///   `Spawner::spawn_task` shuts the task down and returns
+    ///   `SpawnError::ShuttingDown`; the caller still gets a `JoinHandle`,
+    ///   which resolves immediately with a *cancelled* `JoinError`, so the
+    ///   closure never runs and the old code turned a successful connect into
+    ///   `ImapError::Audit`. Already queued, it is a race against process exit
+    ///   rather than against the drain: the scheduler's own workers are pool
+    ///   tasks, so when the scheduler closes they fall back into the pool's
+    ///   `BUSY` loop and run the queue without rechecking the flag — but
+    ///   `rimap-server`'s `main` returns straight after `shutdown_background`,
+    ///   which waits for nothing, so the process usually exits first. (A third,
+    ///   narrower path drops the task outright on the shutdown drain.)
+    ///   ADR-0014 has all three with the measurements. Writing inline removes
+    ///   the whole question: there is no longer an `.await` between the guard's
+    ///   disarm and the write (#643).
+    /// * **`spawn_blocking` cannot be called from a `Drop` at all.**
+    ///   [`super::AuthEmitGuard`] has no caller to await for it, and
+    ///   `spawn_blocking` panics when the OS refuses a thread — a panic
+    ///   escaping a `Drop` that runs during an unwind aborts the process.
+    /// * **The cost is not new latency — it is a blocked runtime worker.**
+    ///   `connect_inner` already awaited this write to completion before
+    ///   returning, so the connect's wall time is unchanged; what moved is the
+    ///   thread that spends it, from the blocking pool to a runtime worker.
+    ///   Measured at 4.7 ms mean / 6.9 ms p95 / 16.9 ms max per record on
+    ///   APFS-on-NVMe (ADR-0014 has the harness and the caveats). Once per
+    ///   connect, and a connect is lazy and serialized per account by the
+    ///   session lock, so the workers blocked at once are bounded by
+    ///   `min(accounts, worker_threads)` — note the second term: `Runtime::new`
+    ///   sizes workers from `available_parallelism`, which is 1 under a
+    ///   one-vCPU quota, and there the bound is reached by a single account.
+    ///   The wait is also one fsync *plus* any contention on the audit mutex,
+    ///   which `tool_start`/`tool_end` take from the blocking pool. When the
+    ///   file is due to rotate the write additionally takes a rename, an open,
+    ///   and — with retention configured — a `read_dir` and a `remove_file`
+    ///   per pruned file, still under that mutex.
+    ///
+    ///   No deadline covers that write, and it is unbounded above. On an
+    ///   `audit.path` that stops responding — a hung NFS or SMB mount — it
+    ///   never returns: the runtime worker is pinned for the life of the
+    ///   process, and `dispatch::attempt` still holds the account's session
+    ///   lock, so a peer queued on that account waits forever rather than
+    ///   merely spending its `command_timeout`. With every worker so pinned the
+    ///   time driver stops advancing too, so no `tokio::time` deadline fires —
+    ///   `command_timeout` and the ADR-0012 ceiling included — and the stdio
+    ///   MCP wire stops being served. The same stall on the blocking pool lands
+    ///   against its 512-thread cap instead and cannot starve the scheduler, so
+    ///   this makes `audit.path` a local-storage requirement rather than a
+    ///   preference — and one nothing currently enforces: `docs/audit-log.md`
+    ///   still scopes the warning to the cut path (#667), and detecting a
+    ///   non-local `audit.path` at startup is #668.
+    ///
+    /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
+    /// file I/O, nothing inside its critical section calls back into this
+    /// crate, and the advisory file lock is taken once at open rather than per
+    /// write, so it cannot block on another process either.
+    ///
+    /// ## Why the sink call is wrapped in `catch_unwind` (#646)
+    ///
+    /// The [`AuthEventSink`](rimap_core::auth_sink::AuthEventSink) contract
+    /// forbids panicking, and the shipped `AuditWriter` honours it — even a
+    /// poisoned mutex comes back as a typed `AuditError`. Until #643 that
+    /// contract also had a structural backstop it was never credited for:
+    /// `spawn_blocking` turned a panicking sink into a `JoinError`, which the
+    /// old code surfaced as `ImapError::Audit`. Deleting the hop deleted the
+    /// backstop, and left two ways to lose more than one record:
+    ///
+    /// * From [`Self::emit_auth_blocking`] the unwind escapes
+    ///   [`super::AuthEmitGuard`]'s `Drop`. A panic escaping a `Drop` that is
+    ///   itself running during an unwind **aborts the process** — no unwinding,
+    ///   no `process_end` record, nothing to observe.
+    /// * From either caller it poisons the `AuditWriter`'s own mutex, which
+    ///   `lock_inner` maps to a permanent `AuditError`: one transient panic
+    ///   becomes a process-wide audit outage for the life of the process.
+    ///
+    /// So the sink call is contained here rather than at the `Drop`. This is
+    /// the crate's only call into `AuthEventSink::emit_auth`, so one wrapper
+    /// covers both callers — including the completed-connect path, where the
+    /// same panic poisons the writer's mutex without ever reaching a `Drop`.
+    /// Containing it cannot *un*-poison anything: the mutex is poisoned inside
+    /// the sink, before the unwind reaches us. What it buys there is that the
+    /// damage stays one lost record and a typed error rather than an unwind
+    /// through `connect_inner`.
+    /// [`Self::note_auth_write_lost`] is contained for the same reason; a
+    /// defaulted trait method can panic just as easily, and it is what this
+    /// function's own failure handler calls next, so without its own wrapper
+    /// the abort would merely move one frame.
+    ///
+    /// ### What is contained, and what is not
+    ///
+    /// Every frame between [`super::AuthEmitGuard`]'s `Drop` and the sink is
+    /// covered, and the two that are not wrapped are covered by being
+    /// panic-free rather than by luck: `auth_context` reads config fields and
+    /// two `OnceLock::get`s, and `auth_failure` is `to_string` plus
+    /// `hex::encode` — allocation only, and an allocation failure aborts
+    /// whatever wraps it.
+    ///
+    /// The residual is `tracing::error!`, which all three failure handlers on
+    /// this path call after the contained call — this function's panic arm,
+    /// [`Self::note_auth_write_lost`]'s, and [`Self::emit_auth_blocking`]'s —
+    /// and which is deliberately left bare in each. Under the
+    /// subscriber `rimap-server` installs it cannot panic, and wrapping it
+    /// would put a second containment mechanism on the same path as this one —
+    /// two mechanisms for one job, with the second one's own logging then
+    /// unwrappable in turn. Named here so the guarantee is not read as wider
+    /// than it is: **a panicking *sink* cannot abort the process; a panicking
+    /// *subscriber* is a separate problem with a separate owner.**
+    ///
+    /// ### `AssertUnwindSafe`
+    ///
+    /// Required, because `&Connection` is not `UnwindSafe` — it holds `Arc`s
+    /// and `AtomicBool`s. Justified by what a caught panic here can have
+    /// broken. Nothing of `rimap-imap`'s: the closure captures `&self` and the
+    /// event, its body is a single dynamic call, and no field of
+    /// `ConnectionInner` is reachable from inside it. The `AuthEvent` was moved
+    /// into the sink and is gone on either outcome.
+    ///
+    /// What a panic *can* leave inconsistent is the sink's own state — and the
+    /// sink is shared process-wide, so that damage is not confined to this
+    /// call. That is the point rather than a gap in the argument: the
+    /// production `AuditWriter` makes it explicit by poisoning its mutex, after
+    /// which every user of it — `tool_start`, `tool_end`, `process_end` — gets
+    /// a typed `AuditError` rather than a bad value. A sink that corrupts
+    /// itself therefore surfaces as lost records, which is exactly what this
+    /// function reports, and the alternative to catching is not a healthy sink
+    /// but the same damage plus an aborted process.
+    ///
+    /// On the guard's path the argument is simpler still: the guard is dropped
+    /// immediately after, so nothing observes it again at all.
+    ///
+    /// **This containment depends on unwinding.** No profile in this workspace
+    /// sets `panic = "abort"`; under it `catch_unwind` never returns, the
+    /// process dies at the panic, and this guarantee is silently gone. Treat
+    /// adding it as a decision about the audit trail, not a build-size tweak.
     ///
     /// ## `ImapError` message sanitization
     ///
-    /// The [`AuthEventSink`] contract requires implementations to
-    /// pre-sanitize the `message` field on [`rimap_core::AuthSinkError`]
-    /// (no filesystem paths or operator-configured layout). This
-    /// function forwards that `message` verbatim — the full
-    /// underlying error is preserved on the `source` chain for
-    /// observability.
-    pub(super) async fn emit_auth(&self, event: AuthEvent) -> Result<(), ImapError> {
-        let sink = self.inner.audit.clone();
-        let join_result = tokio::task::spawn_blocking(move || sink.emit_auth(event)).await;
-        match join_result {
-            Err(join_err) => Err(ImapError::Audit {
-                op: "emit_auth",
-                message: "tokio join error during audit write".to_string(),
-                source: Box::new(join_err),
-            }),
+    /// The [`AuthEventSink`](rimap_core::auth_sink::AuthEventSink) contract
+    /// requires implementations to pre-sanitize the `message` field on
+    /// [`rimap_core::AuthSinkError`] (no filesystem paths or
+    /// operator-configured layout). This function forwards that `message`
+    /// verbatim — the full underlying error is preserved on the `source` chain
+    /// for observability. A panic payload carries no such guarantee, so it is
+    /// dropped unread rather than formatted: it is an arbitrary `Any` a sink
+    /// built from its own state, and `ImapError::Audit`'s `message` reaches the
+    /// MCP wire.
+    ///
+    /// Dropping it keeps the payload off the wire, not out of the process.
+    /// `catch_unwind` runs *after* the panic hook, and nothing here installs
+    /// one, so std's default has already written the payload and its location
+    /// to stderr by the time this arm runs — and, for a panic raised while
+    /// another unwind is in flight, a full backtrace regardless of
+    /// `RUST_BACKTRACE`. stdout, which carries the MCP protocol, is untouched.
+    pub(super) fn emit_auth(&self, event: AuthEvent) -> Result<(), ImapError> {
+        match catch_unwind(AssertUnwindSafe(|| self.inner.audit.emit_auth(event))) {
+            Ok(Ok(())) => Ok(()),
             Ok(Err(sink_err)) => {
-                tracing::error!(
-                    error = %sink_err,
-                    "AuthEventSink::emit_auth failed; converting to ImapError::Audit",
-                );
                 let message = sink_err.message().to_string();
                 Err(ImapError::Audit {
                     op: "emit_auth",
@@ -192,202 +389,64 @@ impl Connection {
                     source: Box::new(sink_err),
                 })
             }
-            Ok(Ok(())) => Ok(()),
+            Err(_payload) => {
+                tracing::error!(
+                    "AuthEventSink::emit_auth panicked, violating the trait's \
+                     no-panic contract; the record is lost and the sink may be \
+                     unusable for the rest of the process",
+                );
+                Err(ImapError::Audit {
+                    op: "emit_auth",
+                    message: "auth-event sink panicked".to_string(),
+                    source: Box::new(std::io::Error::other("AuthEventSink::emit_auth panicked")),
+                })
+            }
         }
     }
 
-    /// Emit an [`AuthEvent`] synchronously, on the calling thread — the only
-    /// shape available to [`super::AuthEmitGuard`]'s `Drop`, which cannot
-    /// await and has no caller left to return a `Result` to.
+    /// Count a lost `auth` record through the sink, containing a panic the
+    /// same way [`Self::emit_auth`] does and for the same reasons — both of
+    /// this function's callers are the failure handler for an emit that
+    /// already failed, and one of them is [`super::AuthEmitGuard`]'s `Drop`.
     ///
-    /// ## Why this blocks rather than deferring to the blocking pool
+    /// A panic caught here leaves the loss uncounted, which is strictly worse
+    /// than the `error` log it is replaced by but strictly better than the
+    /// abort. There is no retry: calling the same broken method again would
+    /// panic again.
+    pub(super) fn note_auth_write_lost(&self) {
+        if catch_unwind(AssertUnwindSafe(|| self.inner.audit.note_auth_write_lost())).is_err() {
+            tracing::error!(
+                "AuthEventSink::note_auth_write_lost panicked, violating the \
+                 trait's no-panic contract; the lost auth record is uncounted",
+            );
+        }
+    }
+
+    /// Emit an [`AuthEvent`] for a connect that was cut before it reached its
+    /// own verdict — the shape [`super::AuthEmitGuard`]'s `Drop` needs, which
+    /// cannot await and has no caller left to return a `Result` to.
     ///
-    /// `AuditWriter::write_record` fsyncs `auth` records, and its docs tell
-    /// async callers to route through `spawn_blocking` (RUST-ASYNC-04). Every
-    /// other emitter obeys that, including [`Connection::emit_auth`]. This one
-    /// deliberately does not, and the exception is narrow enough to state
-    /// exactly:
-    ///
-    /// * **`spawn_blocking` is strictly worse on the shutdown cut.** Tokio's
-    ///   blocking pool refuses new work once the runtime begins shutting down —
-    ///   the returned handle never resolves, and even an already-queued closure
-    ///   is discarded rather than run. `rimap-server` shuts down with
-    ///   `Runtime::shutdown_background`, which waits for nothing, and writes
-    ///   `process_end` before it. Writing inline at least gives the record a
-    ///   chance; deferring it guarantees the loss.
-    /// * **It also puts a panic inside a `Drop`.** `spawn_blocking` panics
-    ///   when the OS refuses a thread, and a panic escaping a `Drop` that runs
-    ///   during an unwind aborts the process.
-    /// * **The cost is rare, and — state this plainly — unbounded.** Usually
-    ///   one JSONL line plus an fsync; when the file is due to rotate, also a
-    ///   rename, an open, and — with retention configured — a `read_dir` and a
-    ///   `remove_file` per pruned file, all under the audit mutex. It runs only
-    ///   when a connect was cut, which at the shipped ceiling means the connect
-    ///   was already pathological.
-    ///
-    ///   No deadline covers that write. On an `audit.path` that stops
-    ///   responding — a hung NFS or SMB mount — it never returns: the runtime
-    ///   worker is pinned for the life of the process, and `dispatch::attempt`
-    ///   still holds the account's session lock, so a peer queued on that
-    ///   account waits forever rather than merely spending its
-    ///   `command_timeout`. The runtime is multi-threaded, so enough
-    ///   concurrent cut connects against such a mount wedge the scheduler
-    ///   itself, including the stdio MCP wire. This is a genuinely new failure
-    ///   mode: the same stall on the blocking pool lands against its
-    ///   512-thread cap and cannot starve the scheduler.
-    ///
-    ///   It does not change the choice — a deferred write on that mount loses
-    ///   the record *and* still pins a pool thread — but it does make
-    ///   `audit.path` a local-storage requirement rather than a preference.
-    ///   `docs/audit-log.md` says so to operators.
-    ///
-    /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
-    /// file I/O, nothing inside its critical section calls back into this
-    /// crate, and the advisory file lock is taken once at open rather than per
-    /// write, so it cannot block on another process either.
-    ///
-    /// This makes the guard **deterministic** for the two cuts that have a
-    /// caller — the tool-call ceiling and a client cancellation, both pinned by
-    /// tests — and best-effort for a runtime shutdown, where the process may
-    /// exit before the dropping worker reaches the write.
-    ///
-    /// ## Failure handling
-    ///
-    /// Logged at `error` level when the sink rejects the event; there is
-    /// nowhere to propagate to from a `Drop`. This mirrors `connect_inner`'s
+    /// Identical to [`Self::emit_auth`] but for the failure handling: logged at
+    /// `error` level and counted through `note_auth_write_lost`, because there
+    /// is nowhere to propagate to from a `Drop`. This mirrors `connect_inner`'s
     /// auth-failure branch, which likewise preserves the original outcome and
     /// logs the audit failure rather than replacing one with the other.
     ///
-    /// Implementations of [`rimap_core::auth_sink::AuthEventSink`] must return
-    /// their failures rather than panicking — the production `AuditWriter`
-    /// maps even a poisoned mutex to an `AuditError` — because a panic here
-    /// would escape a `Drop`.
+    /// Implementations of [`rimap_core::auth_sink::AuthEventSink`] must still
+    /// return their failures rather than panicking — the production
+    /// `AuditWriter` maps even a poisoned mutex to an `AuditError`. A panic
+    /// here would escape a `Drop`, so neither call this makes goes to the sink
+    /// unwrapped: [`Self::emit_auth`] and [`Self::note_auth_write_lost`] each
+    /// contain one (#646). That is a backstop for a broken sink, not a licence
+    /// for one — a contained panic still costs the record.
     pub(super) fn emit_auth_blocking(&self, event: AuthEvent) {
-        if let Err(err) = self.inner.audit.emit_auth(event) {
-            self.inner.audit.note_auth_write_lost();
+        if let Err(err) = self.emit_auth(event) {
+            self.note_auth_write_lost();
             tracing::error!(
                 error = %err,
                 "AuthEventSink::emit_auth failed for a connect that was cut \
                  before it reached its own verdict; the attempt is unrecorded",
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    use rimap_core::auth_event::{AuthEvent, AuthResult};
-    use rimap_core::auth_sink::{AuthEventSink, AuthSinkError};
-    use rimap_core::credential::{CredentialResolver, CredentialResolverError, CredentialSource};
-    use secrecy::SecretString;
-
-    use super::super::{Connection, ConnectionConfig, ImapEncryption};
-
-    /// Regression test for the cancellation contract on
-    /// [`Connection::emit_auth`]: the sink still observes the event even
-    /// when the awaiting future is dropped before `spawn_blocking`
-    /// completes. The rustdoc on `emit_auth` documents this; if a future
-    /// refactor replaces `spawn_blocking` with a direct await or changes
-    /// the join-handle semantics, this test fails.
-    #[tokio::test]
-    async fn emit_auth_completes_despite_caller_cancellation() {
-        /// Blocks for `delay` inside `emit_auth`, then increments
-        /// `recorded`. Simulates a slow synchronous sink (the real
-        /// `AuditWriter` can block on fsync when the disk is slow).
-        struct BlockingSink {
-            delay: Duration,
-            recorded: Arc<AtomicUsize>,
-        }
-
-        impl std::fmt::Debug for BlockingSink {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("BlockingSink").finish()
-            }
-        }
-
-        impl AuthEventSink for BlockingSink {
-            fn emit_auth(&self, _event: AuthEvent) -> Result<(), AuthSinkError> {
-                std::thread::sleep(self.delay);
-                self.recorded.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-        }
-
-        /// Minimal resolver; never invoked in this test because we call
-        /// `emit_auth` directly, but `Connection::new` requires one.
-        #[derive(Debug)]
-        struct DummyResolver;
-
-        impl CredentialResolver for DummyResolver {
-            fn resolve(
-                &self,
-                _: &rimap_core::account::AccountId,
-                _: &str,
-                _: &str,
-            ) -> Result<(SecretString, CredentialSource), CredentialResolverError> {
-                Err(CredentialResolverError::new("dummy resolver"))
-            }
-        }
-
-        let recorded = Arc::new(AtomicUsize::new(0));
-        let sink: Arc<dyn AuthEventSink> = Arc::new(BlockingSink {
-            delay: Duration::from_millis(80),
-            recorded: Arc::clone(&recorded),
-        });
-        let resolver: Arc<dyn CredentialResolver> = Arc::new(DummyResolver);
-        let conn = Connection::new(
-            ConnectionConfig {
-                account: None,
-                account_id: rimap_core::account::AccountId::default_account(),
-                host: "127.0.0.1".into(),
-                port: 1,
-                encryption: ImapEncryption::Tls,
-                username: "test".into(),
-                pinned_fingerprint: None,
-                connect_timeout: Duration::from_secs(1),
-                command_timeout: Duration::from_secs(1),
-                max_fetch_body_bytes: 1024,
-                max_append_bytes: 1024,
-            },
-            sink,
-            resolver,
-        );
-
-        let event = AuthEvent {
-            account: None,
-            result: AuthResult::Success,
-            host: "127.0.0.1".into(),
-            port: 1,
-            username: "test".into(),
-            tls_fingerprint_sha256: None,
-            fingerprint_match: None,
-            error_code: None,
-            credential_source: None,
-        };
-
-        let handle = tokio::spawn(async move {
-            // Dropping this future between `spawn_blocking` dispatch and
-            // completion is the cancellation we want to exercise.
-            let _ = conn.emit_auth(event).await;
-        });
-
-        // Give the future just long enough to enter `spawn_blocking`
-        // (far less than the sink's 80ms delay). The abort then drops
-        // the JoinHandle mid-blocking-task.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        handle.abort();
-
-        // Wait past the sink's total blocking time, then verify the
-        // event was recorded even though the caller was cancelled.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(
-            recorded.load(Ordering::SeqCst),
-            1,
-            "sink must record the event even if the caller future was dropped",
-        );
     }
 }

@@ -52,6 +52,65 @@ recently flushed.
 |---|---|
 | `reason` | One of `signal_int`, `signal_term`, `eof`, `error` |
 | `total_tool_calls` | Number of tool calls dispatched in this process |
+| `records_lost` | Number of records this process failed to persist and told no caller about (absent on records written before this field existed; read as `0`) |
+
+**A non-zero `records_lost` means this file has a hole in it.** Some event
+happened and left no record — most often a disk that filled mid-run. The count
+merges its two sources on purpose, because no operator decision turns on which
+one it was:
+
+- a write, flush, or fsync failure that `fail_open = true` swallowed and
+  continued past;
+- a record whose caller had nowhere to return the failure to — `rimap-imap`'s
+  cut-connect `Drop` guard and its auth-failure branch, which keeps the
+  connect's own error. These reach the counter only under the default
+  `fail_open = false`, where the write error went back to a caller who could
+  not surface it.
+
+Either way the cause is on stderr at `error` level; the count is what survives
+in the file. Treat a run reporting a non-zero count as one whose record stream
+is incomplete, and alert on it.
+
+The reverse does not hold: a run that lost records to a hard crash writes no
+`process_end` at all. A non-zero count is evidence of loss; a missing record is
+not evidence of none.
+
+**`process_end` is terminal for its `process_id`, subject to the two exceptions
+below.** When a `process_end` record is present, no other record carrying the
+same `process_id` follows it anywhere in the file. A reader may treat it as
+closing that process, and may attribute every subsequent record to a later run.
+
+The rule is enforced, not incidental. Before writing `process_end` the server
+cancels every in-flight tool dispatch and waits, bounded, for each to unwind --
+so a connect the shutdown cuts writes its `auth` record (`ERR_CANCELLED`, see
+below) *before* the `process_end`, rather than racing it. The two states this
+rules out are a trailing `auth` record that a naive reader would attribute to the
+*next* process in the same file, and a half-written final line that makes the
+JSONL tail unparseable.
+
+Read the exceptions before building on the rule.
+
+- **A dispatch that outlived the drain budget.** If a dispatch cannot be
+  unwound in time -- it is inside an uncancelable blocking call, say -- the
+  server logs `tool dispatches outlived the shutdown drain` with the count and
+  proceeds. Anything those dispatches write afterwards keeps the old behaviour:
+  sequenced after `process_end`, or lost to process exit. This one is
+  **announced on stderr**, so a reader can tell: treat a run whose log carries
+  that warning as suspect, and alert on it.
+- **A `tool_start` or `tool_end` write already handed to the blocking pool.**
+  Those two are offloaded with `spawn_blocking`; every `auth` write is
+  synchronous (ADR-0014). Dropping the task that awaits the offloaded write
+  *detaches* it rather than cancelling it, so a dispatch cut in that narrow
+  window still appends its record, after `process_end`. This one is **not**
+  announced: the drain counts the dispatch as cleanly unwound. Tracked as
+  [#672](https://github.com/randomparity/rusty-imap-mcp/issues/672); until it
+  closes, the rule is "terminal except for a `tool_start`/`tool_end` that was
+  already mid-flight at the cut".
+
+Separately, and not an exception to *ordering*: a record may be missing
+entirely. Loss on shutdown is expected and documented (best-effort). Terminality
+says nothing about completeness -- only that what *is* present is correctly
+ordered.
 
 ### `auth`
 

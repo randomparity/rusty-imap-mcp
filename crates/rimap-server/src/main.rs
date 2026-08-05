@@ -98,6 +98,22 @@ enum InitOutcome {
     Rmcp(Box<ServerInitializeError>),
 }
 
+/// How long `serve_mcp` waits for in-flight tool dispatches to unwind after
+/// cancelling them. They are cancelled, not merely awaited, so the wait covers
+/// only the unwind — a synchronous `AuthEmitGuard` audit write and its `fsync`,
+/// plus any `spawn_blocking` call that has to return before its task can be
+/// polled again. Two seconds is well clear of that and still an order of
+/// magnitude below the point an operator would call the exit hung.
+const DISPATCH_DRAIN_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long `serve_mcp` waits for the cancellation drainer to finish after the
+/// dispatch drain. On the clean path every cancellation sender is already gone
+/// and the join returns at once; the bound only matters when the dispatch drain
+/// timed out, because a dispatch still holding a sender would otherwise keep
+/// the join — and so the whole process exit — waiting for that command's own
+/// timeout (#645).
+const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
+
 fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Some(result) = dispatch_subcommand(cli) {
         return result;
@@ -213,9 +229,12 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
 
 /// Build the account registry, wrap stdio with the #277 envelope
 /// validator, and drive the two-phase init/serve race against the
-/// validator bridges. The `select!` / `drop` / supervisor-shutdown /
-/// drainer-join ordering here is load-bearing (#277) and must not be
-/// reordered.
+/// validator bridges. The `select!` / `drop` / dispatch-drain /
+/// supervisor-shutdown / drainer-join ordering here is load-bearing
+/// (#277, #645) and must not be reordered. In particular the whole
+/// function must complete before `run_server` writes `process_end`,
+/// which is what makes that record terminal (see `docs/audit-log.md`
+/// and ADR-0015).
 async fn serve_mcp(
     multi: &rimap_config::validate::ValidatedMultiConfig,
     audit: &rimap_audit::AuditWriter,
@@ -230,6 +249,8 @@ async fn serve_mcp(
     let drainer_handle = rimap_audit::spawn_drainer(cancellation_rx, audit.clone());
 
     let mcp_server = server::ImapMcpServer::new(registry, audit.clone(), cancellation_tx);
+    // Taken before `rmcp::serve_server` consumes the server below.
+    let dispatch_drain = mcp_server.dispatch_drain();
     // Wrap stdio with #277 envelope validator: rejects malformed frames
     // before rmcp sees them. Destructure so `supervisor` is its own
     // binding (its methods take `&mut self` / consume `self`).
@@ -298,6 +319,25 @@ async fn serve_mcp(
     // client may keep stdin open while waiting for the error
     // response.
     drop(service_fut);
+
+    // rmcp spawns each request handler as a detached task, so the drop above
+    // released the transport but not the handlers. Cancel and drain them here,
+    // while the process is still inside `serve_mcp` — that is, before the
+    // drainer join below and before `run_server` writes `process_end`. Leaving
+    // them to `Runtime::shutdown_background` sequenced a shutdown-cut connect's
+    // `auth` record *after* the `process_end` of its own process (#645), and a
+    // dispatch still holding a cancellation sender kept the drainer join
+    // waiting for that command's full timeout.
+    let undrained = dispatch_drain.shutdown(DISPATCH_DRAIN_BUDGET).await;
+    if undrained > 0 {
+        tracing::warn!(
+            undrained,
+            budget = ?DISPATCH_DRAIN_BUDGET,
+            "tool dispatches outlived the shutdown drain; any audit record they \
+             still write is sequenced after process_end or lost",
+        );
+    }
+
     let shutdown_outcome = match &service_outcome {
         Ok(()) => supervisor.drain().await,
         Err(_) => supervisor.shutdown_after_failure().await,
@@ -314,8 +354,27 @@ async fn serve_mcp(
 
     // All senders dropped above. Wait for the drainer to flush any
     // remaining queued cancellation records before the runtime exits.
-    if let Err(e) = drainer_handle.await {
-        tracing::error!(error = %e, "cancellation drainer join error");
+    // Bounded: an undrained dispatch still owns a sender clone, and an
+    // unbounded join would then hold the whole process exit for that
+    // command's timeout.
+    //
+    // `abort` on expiry, not just a dropped handle: dropping a `JoinHandle`
+    // *detaches* the task, so the drainer would keep looping and keep appending
+    // `tool_end` records — after `process_end`, which is the ordering this
+    // whole path exists to establish.
+    let mut drainer_handle = drainer_handle;
+    match tokio::time::timeout(DRAINER_JOIN_BUDGET, &mut drainer_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(error = %e, "cancellation drainer join error"),
+        Err(_) => {
+            drainer_handle.abort();
+            tracing::warn!(
+                undrained,
+                "cancellation drainer did not finish within the join budget; \
+                 queued cancellation records are lost, and any write already \
+                 handed to the blocking pool is sequenced after process_end",
+            );
+        }
     }
     mcp_result
 }
@@ -332,6 +391,9 @@ fn emit_process_end(audit: &rimap_audit::AuditWriter, mcp_result: &anyhow::Resul
     let process_end = rimap_audit::ProcessEnd {
         reason,
         total_tool_calls: audit.total_tool_calls(),
+        // Last chance to state that this file has a hole in it: the counter
+        // lives only in memory, and the process is about to exit (#647).
+        records_lost: audit.suppressed_failures(),
     };
     match audit.log_process_end(process_end) {
         Ok(seq) => tracing::info!(seq = %seq, "process_end audit record written"),

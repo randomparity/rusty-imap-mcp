@@ -7,7 +7,7 @@
 
 use crate::error::ImapError;
 
-use super::{Connection, ImapSession};
+use super::{Connection, ImapSession, ServerCapabilities};
 
 /// Whether an operation may be transparently reconnected-and-retried after an
 /// idle disconnect.
@@ -181,7 +181,7 @@ impl Connection {
         outcome
     }
 
-    /// The serving session's `(has_move, has_uidplus)` advertisement.
+    /// The serving session's [`ServerCapabilities`].
     ///
     /// `session` is a witness, not an input — nothing is read from it. It is
     /// there because only [`Self::attempt`] can hand one out, and it does so
@@ -189,23 +189,25 @@ impl Connection {
     /// that session's CAPABILITY reply. So this helper cannot be hoisted above
     /// `with_session`: out there, there is no `&ImapSession` to pass.
     ///
-    /// **That is a guard on this call, not on the atomics.**
-    /// [`Connection::has_move_capability`] and
-    /// [`Connection::has_uidplus_capability`] are still `pub` inherent methods
-    /// with no witness, so writing #634 back by hand — a `let has_move =
-    /// self.has_move_capability();` above `with_session` — still compiles.
-    /// What this buys is that the *correct* idiom has a name and reads no
-    /// worse than the hoist, so there is nothing to gain by hoisting.
+    /// **That is a guard on this call, not on the atomic.**
+    /// [`Connection::capabilities`] is still a `pub` inherent method with no
+    /// witness, so writing #634 back by hand — a `let caps =
+    /// self.capabilities();` above `with_session` — still compiles. What this
+    /// buys is that the *correct* idiom has a name and reads no worse than the
+    /// hoist, so there is nothing to gain by hoisting.
     ///
-    /// Making a stale or session-less read unrepresentable needs the pair to
+    /// Making a stale or session-less read unrepresentable needs the value to
     /// live with the session rather than beside it — `Option<(ImapSession,
-    /// Caps)>` in the slot, with `imap_login` returning the pair instead of
-    /// storing it. That also deletes [`Connection::take_poisoned`]'s
-    /// capability reset and gives a failed CAPABILITY probe somewhere to say
-    /// "unknown" instead of borrowing "absent" (#649). Tracked as #652; it
-    /// restructures the session slot, which #634 deliberately did not.
-    fn session_capabilities(&self, _session: &ImapSession) -> (bool, bool) {
-        (self.has_move_capability(), self.has_uidplus_capability())
+    /// ServerCapabilities)>` in the slot, with `imap_login` returning it
+    /// instead of storing it. That also deletes [`Connection::take_poisoned`]'s
+    /// capability reset. Tracked as #652; it restructures the session slot,
+    /// which #634 deliberately did not. What #649 already removed from that
+    /// job is the *silent* failure mode: a read taken outside a session now
+    /// yields [`ServerCapabilities::Unknown`], which no caller can turn into a
+    /// protocol choice without going through
+    /// [`ServerCapabilities::require_known`].
+    fn session_capabilities(&self, _session: &ImapSession) -> ServerCapabilities {
+        self.capabilities()
     }
 
     /// `LIST` against `pattern` (e.g. `"*"`, `"INBOX/*"`).
@@ -487,6 +489,9 @@ impl Connection {
     /// # Errors
     /// Returns `ImapError::BatchTooLarge` if more than 100 UIDs are passed.
     /// Returns `ImapError::UidValidityChanged` on a UIDVALIDITY mismatch.
+    /// Returns `ImapError::CapabilitiesUnknown` when the serving session's
+    /// post-login CAPABILITY probe told us nothing, since the fallback path
+    /// could otherwise issue a folder-wide EXPUNGE on a guess (#649).
     /// Propagates timeout, connection-lost, or protocol errors.
     pub async fn move_messages(
         &self,
@@ -498,15 +503,14 @@ impl Connection {
         self.with_session("move", Idempotency::Mutating, || {
             async |session| {
                 crate::ops::folders::select(session, source_folder, false).await?;
-                let (has_move, has_uidplus) = self.session_capabilities(session);
+                let capabilities = self.session_capabilities(session);
                 crate::ops::move_message::move_messages(
                     session,
                     source_folder,
                     dest_folder,
                     uids,
                     expected_source_uidvalidity,
-                    has_move,
-                    has_uidplus,
+                    capabilities,
                 )
                 .await
             }
@@ -559,6 +563,10 @@ impl Connection {
     /// `validate_folder_name`.
     /// Returns `ImapError::UidValidityChanged` if `expected_uidvalidity` is
     /// set and does not match the folder's observed UIDVALIDITY.
+    /// Returns `ImapError::CapabilitiesUnknown` when the serving session's
+    /// post-login CAPABILITY probe told us nothing *and* the message is not
+    /// already in Trash, since the Trash move's fallback could otherwise issue
+    /// a folder-wide EXPUNGE on a guess (#649).
     /// Returns `ImapError::ConnectionLost` or `ImapError::Timeout` on transport failure,
     /// or a protocol error if the server rejects the command.
     pub async fn delete_message(
@@ -573,14 +581,13 @@ impl Connection {
                 let selected = crate::ops::folders::select(session, folder, false).await?;
                 let uid_validity = selected.uid_validity;
                 crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
-                let (has_move, has_uidplus) = self.session_capabilities(session);
+                let capabilities = self.session_capabilities(session);
                 let result = crate::ops::delete::delete_message(
                     session,
                     uid,
                     folder,
                     trash_folder,
-                    has_move,
-                    has_uidplus,
+                    capabilities,
                 )
                 .await?;
                 Ok((result, uid_validity))

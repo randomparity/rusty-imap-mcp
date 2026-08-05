@@ -7,19 +7,19 @@
 //!   points (it has to be — async-imap commands are themselves `.await`).
 //! - The injected [`AuthEventSink`] may hold its own internal
 //!   `std::sync::Mutex` (the production `rimap-audit::AuditWriter`
-//!   does). That lock is NEVER held across an `.await`. Every call
-//!   from an async context goes through `tokio::task::spawn_blocking`;
-//!   the one call from a synchronous context — `AuthEmitGuard`'s
-//!   `Drop`, which cannot await at all — takes and releases the lock
-//!   inline. Both shapes satisfy the rule; only the second blocks the
-//!   thread it runs on, and `Connection::emit_auth_blocking` argues why
-//!   that is the right trade there.
+//!   does). That lock is NEVER held across an `.await`. Every `auth`
+//!   record — `connect_inner`'s own, and the one `AuthEmitGuard`'s
+//!   `Drop` writes for a cut connect — goes through
+//!   `Connection::emit_auth`, which takes and releases the lock inline
+//!   on the calling thread. That satisfies the rule and costs a
+//!   blocked thread for the duration of one fsync; `emit_auth` and
+//!   ADR-0014 argue why that is the right trade (#643).
 //!
 //! These two rules are independent and both must hold. See
 //! `docs/architecture/audit-locking.md`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use async_imap::Session;
@@ -86,6 +86,105 @@ pub struct ConnectionConfig {
 /// underlying transport; we always use `TlsStream<TcpStream>`.
 pub(crate) type ImapSession = Session<TlsStream<TcpStream>>;
 
+/// What the last login's post-login `CAPABILITY` probe established about the
+/// two extensions this crate branches on.
+///
+/// ## Why this is not a `(bool, bool)` (#649)
+///
+/// It used to be. A probe that failed, or that came back without a capability
+/// listing in it, was recorded as `(false, false)` — the same value a server
+/// that affirmatively advertises neither extension produces. Those two states
+/// need different answers, because `(false, false)` is *exactly* the condition
+/// [`crate::ops::expunge::fallback_uses_folder_wide_expunge`] selects the RFC
+/// 3501 folder-wide `EXPUNGE` on, which removes every `\Deleted` message in the
+/// mailbox rather than the requested UIDs. Encoding "we do not know" as "the
+/// server does not have it" therefore failed *open*, into the most destructive
+/// branch available, on the strength of no evidence at all.
+///
+/// One tri-state rather than two, because the probe is one event: it either
+/// yielded a listing that describes both extensions, or it yielded nothing that
+/// describes either. There is no reachable state in which MOVE is known and
+/// UIDPLUS is not.
+///
+/// [`Self::require_known`] is the only way to get the pair back out, so a
+/// caller that wants to branch on a capability has to decide what `Unknown`
+/// means to it first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerCapabilities {
+    /// The probe returned a capability listing, and this is what it said.
+    Known {
+        /// Server advertised MOVE (RFC 6851).
+        has_move: bool,
+        /// Server advertised UIDPLUS (RFC 4315).
+        has_uidplus: bool,
+    },
+    /// No advertisement is on record for the current session: no login has run
+    /// yet, the session was discarded, or the probe came back unreadable.
+    ///
+    /// **Not a synonym for "the server lacks both."** Nothing may be inferred
+    /// about the server from this.
+    Unknown,
+}
+
+impl ServerCapabilities {
+    /// `Unknown`, plus MOVE in bit 1 and UIDPLUS in bit 2 once bit 0 marks the
+    /// pair as known. Encoding lives here rather than at the atomic so the
+    /// round trip is one type's business; see [`Self::from_bits`].
+    const KNOWN_BIT: u8 = 0b001;
+    const MOVE_BIT: u8 = 0b010;
+    const UIDPLUS_BIT: u8 = 0b100;
+
+    /// Pack into the `u8` [`ConnectionInner::capabilities`] stores.
+    fn to_bits(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Known {
+                has_move,
+                has_uidplus,
+            } => {
+                Self::KNOWN_BIT
+                    | if has_move { Self::MOVE_BIT } else { 0 }
+                    | if has_uidplus { Self::UIDPLUS_BIT } else { 0 }
+            }
+        }
+    }
+
+    /// Unpack a value written by [`Self::to_bits`].
+    ///
+    /// Total, deliberately: any bit pattern without `KNOWN_BIT` reads as
+    /// `Unknown`, so there is no way for a corrupt or future encoding to
+    /// materialize a `Known` — which is the direction that costs mail.
+    fn from_bits(bits: u8) -> Self {
+        if bits & Self::KNOWN_BIT == 0 {
+            return Self::Unknown;
+        }
+        Self::Known {
+            has_move: bits & Self::MOVE_BIT != 0,
+            has_uidplus: bits & Self::UIDPLUS_BIT != 0,
+        }
+    }
+
+    /// The advertised pair, or the typed refusal `op` must return instead of
+    /// guessing.
+    ///
+    /// The single accessor for the pair, and the single place `Unknown` turns
+    /// into an outcome. Callers pass their own `op` tag so the error names the
+    /// operation that stopped.
+    ///
+    /// # Errors
+    ///
+    /// [`ImapError::CapabilitiesUnknown`] when no advertisement is on record.
+    pub(crate) fn require_known(self, op: &'static str) -> Result<(bool, bool), ImapError> {
+        match self {
+            Self::Known {
+                has_move,
+                has_uidplus,
+            } => Ok((has_move, has_uidplus)),
+            Self::Unknown => Err(ImapError::CapabilitiesUnknown { op }),
+        }
+    }
+}
+
 /// Lazy-connect IMAP connection. Cheaply cloneable (`Arc` internally).
 #[derive(Clone)]
 pub struct Connection {
@@ -105,20 +204,18 @@ pub(super) struct ConnectionInner {
     /// `None` = never connected, or last command tore down the connection.
     /// `Some(_)` = live session ready for the next command.
     pub(super) session: Mutex<Option<ImapSession>>,
-    /// Server advertised MOVE capability (RFC 6851) after login.
-    /// Reset to `false` by [`Connection::take_poisoned`], which is what
-    /// discards a session; the next login re-reads the real value.
+    /// [`ServerCapabilities`] as written by the last login's post-login
+    /// `CAPABILITY` probe, packed by [`ServerCapabilities::to_bits`].
+    ///
+    /// Reset to `Unknown` by [`Connection::take_poisoned`], which is what
+    /// discards a session; the next login re-reads the real value. `Unknown`
+    /// is also the value a freshly-constructed `Connection` carries, so at no
+    /// point does an advertisement exist that no login produced.
     ///
     /// Only a read taken while `session` holds the session that will serve the
-    /// command describes that session — see [`Connection::has_move_capability`]
-    /// for what a read from outside the session scope can be, and #634.
-    pub(super) has_move: AtomicBool,
-    /// Server advertised UIDPLUS capability (RFC 4315) after login.
-    /// Reset to `false` by [`Connection::take_poisoned`], which is what
-    /// discards a session; the next login re-reads the real value.
-    ///
-    /// Same read-inside-the-session-scope rule as [`Self::has_move`].
-    pub(super) has_uidplus: AtomicBool,
+    /// command describes that session — see [`Connection::capabilities`] for
+    /// what a read from outside the session scope can be, and #634.
+    pub(super) capabilities: AtomicU8,
     /// Set by [`Connection::poison`] when a command was cut mid-flight.
     /// Consumed by `dispatch::attempt` under the session lock; see `poison`
     /// for why it is a flag and not a lock.
@@ -310,10 +407,11 @@ impl ConnectProgress {
 /// carry no fingerprint and no credential source, which is the same shape a
 /// pre-resolve failure already produces.
 ///
-/// The write is synchronous, on the dropping thread. `emit_auth_blocking`
-/// states why that is the right trade here and nowhere else; the short version
-/// is that deferring it to the blocking pool guarantees the loss during a
-/// runtime shutdown, where writing inline at least has a chance.
+/// The write is synchronous, on the dropping thread — the same shape
+/// `connect_inner`'s own emit uses since #643. `Connection::emit_auth` states
+/// why; the short version is that deferring to the blocking pool loses the
+/// record during a runtime shutdown, which is one of the cuts this guard
+/// exists for.
 struct AuthEmitGuard<'a> {
     conn: &'a Connection,
     bundle: &'a TlsConfigBundle,
@@ -336,8 +434,7 @@ impl<'a> AuthEmitGuard<'a> {
     }
 
     /// The connect reached its own verdict, so `connect_inner` owns the record
-    /// from here. Called *before* the normal emit, not after: see the comment
-    /// at the call site for why the ordering is load-bearing.
+    /// from here.
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -406,8 +503,7 @@ impl Connection {
                 audit,
                 credentials,
                 session: Mutex::new(None),
-                has_move: AtomicBool::new(false),
-                has_uidplus: AtomicBool::new(false),
+                capabilities: AtomicU8::new(ServerCapabilities::Unknown.to_bits()),
                 poisoned: AtomicBool::new(false),
             }),
         }
@@ -432,7 +528,8 @@ impl Connection {
         self.inner.cfg.max_fetch_body_bytes
     }
 
-    /// Whether the server advertised the MOVE capability (RFC 6851).
+    /// What the last login's post-login `CAPABILITY` probe established about
+    /// MOVE (RFC 6851) and UIDPLUS (RFC 4315).
     ///
     /// Reports the *last* login's advertisement, which describes the session
     /// currently in the slot only while there is one. A caller that reads this
@@ -447,24 +544,18 @@ impl Connection {
     /// takes the live session as a witness.
     ///
     /// Nothing stops a future caller reading this directly and hoisting it back
-    /// out — that is convention, not enforcement. #652 tracks moving the pair
+    /// out — that is convention, not enforcement. #652 tracks moving the value
     /// into the session slot, which would make the stale read unrepresentable.
+    /// What a stale read can no longer be is a *silent* one: outside a session
+    /// this returns [`ServerCapabilities::Unknown`], and every consumer has to
+    /// handle that arm.
     ///
     /// It stays `pub` because the integration tests live outside the crate and
     /// assert on what a completed command observed. There is no in-tree
     /// production caller.
     #[must_use]
-    pub fn has_move_capability(&self) -> bool {
-        self.inner.has_move.load(Ordering::Relaxed)
-    }
-
-    /// Whether the server advertised the UIDPLUS capability (RFC 4315).
-    ///
-    /// Same read-inside-the-session-scope rule as
-    /// [`Self::has_move_capability`].
-    #[must_use]
-    pub fn has_uidplus_capability(&self) -> bool {
-        self.inner.has_uidplus.load(Ordering::Relaxed)
+    pub fn capabilities(&self) -> ServerCapabilities {
+        ServerCapabilities::from_bits(self.inner.capabilities.load(Ordering::Relaxed))
     }
 
     /// Mark the cached session unusable without taking the session lock.
@@ -526,40 +617,35 @@ impl Connection {
     /// ordering edge is needed at all, the mutex carries it.
     ///
     /// This is the only path that empties the slot, so it is also the only
-    /// place the capability atomics are reset. That reset used to run in
+    /// place the capability record is reset. That reset used to run in
     /// `with_session` as well, the moment a transport failure returned;
     /// removing it from there (#629) moved the reset *later*, to whenever the
     /// next command takes the session lock. Either placement leaves a window
-    /// in which the atomics describe no session at all — the `false`/`false`
-    /// this store leaves behind, or the discarded session's values before it
-    /// runs — and `!has_move && !has_uidplus` is exactly what selects the
-    /// folder-wide EXPUNGE fallback (see
-    /// `ops::expunge::fallback_uses_folder_wide_expunge`), which purges every
-    /// `\Deleted` message in the folder rather than the requested UIDs.
+    /// in which the recorded value describes no session at all — what this
+    /// store leaves behind, or the discarded session's advertisement before it
+    /// runs — and [`ServerCapabilities::Unknown`] is what it must be, because
+    /// no session means no advertisement. Storing `(false, false)` here, as
+    /// this used to, would have been a claim about a server nobody asked
+    /// (#649): it is exactly the condition
+    /// `ops::expunge::fallback_uses_folder_wide_expunge` selects the
+    /// folder-wide `EXPUNGE` on, which purges every `\Deleted` message in the
+    /// folder rather than the requested UIDs.
     ///
-    /// No command can observe **that** window, because the reset and the
-    /// reconnect that follows it both happen under this lock, and the two
-    /// capability readers run inside the `with_session` body — after
-    /// `dispatch::attempt` has populated the slot (#634). The reset is
-    /// therefore bookkeeping for the public accessors, not a value any
-    /// protocol selection is built from.
-    ///
-    /// That statement is about this window only. The same `false`/`false` also
-    /// arises from *inside* a completed login, when the post-login CAPABILITY
-    /// probe fails and `login::imap_login` encodes "unknown" as "absent" — and
-    /// a command does observe that one, by design, because it describes the
-    /// session it just got. Tracked as #649; the reconnect this function
-    /// triggers is one of the paths that reaches it.
+    /// No command observes this window either way, because the reset and the
+    /// reconnect that follows it both happen under this lock, and the
+    /// capability reader runs inside the `with_session` body — after
+    /// `dispatch::attempt` has populated the slot (#634).
     ///
     /// The other way out of the slot is `dispatch::attempt`'s `insert`, and
-    /// that follows a login, which stores the fresh values.
+    /// that follows a login, which stores the fresh advertisement.
     pub(super) fn take_poisoned(&self, slot: &mut Option<ImapSession>) -> bool {
         if !self.inner.poisoned.swap(false, Ordering::Relaxed) {
             return false;
         }
         *slot = None;
-        self.inner.has_move.store(false, Ordering::Relaxed);
-        self.inner.has_uidplus.store(false, Ordering::Relaxed);
+        self.inner
+            .capabilities
+            .store(ServerCapabilities::Unknown.to_bits(), Ordering::Relaxed);
         true
     }
 
@@ -595,8 +681,8 @@ impl Connection {
     ///
     /// Two carve-outs, both narrow and both stated where they arise:
     /// `build_tls_config` failing exits earlier than the attempt itself and
-    /// records nothing, and a runtime shutdown can discard the completed
-    /// path's queued write — see the comment on the disarm below.
+    /// records nothing, and the record [`AuthEmitGuard`] writes for a cut
+    /// connect can still lose a race with process exit — see its rustdoc.
     ///
     /// A caller *may* wrap this in a deadline shorter than `connect_timeout` —
     /// the per-tool-call ceiling (#594, ADR-0012) does. Cutting the future
@@ -621,23 +707,14 @@ impl Connection {
 
         let ctx = self.auth_context(&bundle, &progress);
 
-        // Disarm BEFORE the emit, not after. `emit_auth` dispatches the write
-        // to `spawn_blocking` on its first poll, and tokio does not cancel a
-        // blocking task when its `JoinHandle` is dropped, so a cut at that
-        // `.await` still lands the record. Disarming afterwards would let the
-        // guard add a second one.
-        //
-        // One exception, and it is a gap rather than a duplicate: a runtime
-        // that starts shutting down discards even an already-queued blocking
-        // closure, so a connect that completed and then lost its emit to a
-        // shutdown records nothing — the guard is disarmed by then. Closing it
-        // would mean making this emit synchronous too, which is a wider change
-        // than #623; tracked in #643. Disarming *after* would not fix it
-        // either, only trade a rare gap for a rare duplicate at the same await.
+        // Nothing awaits between here and the emit below — `emit_auth` writes
+        // on this thread (#643) — so the future cannot be dropped in the gap.
+        // The handover from guard to `connect_inner` is therefore neither a
+        // gap nor a duplicate, whichever order it is written in.
         emit_guard.disarm();
 
         match &outcome {
-            Ok(_) => self.emit_auth(auth_success(&ctx)).await?,
+            Ok(_) => self.emit_auth(auth_success(&ctx))?,
             Err(err) => {
                 // Deliberate: log but do NOT propagate emit_auth failures on
                 // the error branch. The ORIGINAL outcome (ImapError::Auth,
@@ -652,8 +729,8 @@ impl Connection {
                 // only other trace is a stderr line. (That counter reaches
                 // `process_end` when #8 wires it; today it is readable via
                 // `AuditWriter::suppressed_failures`.)
-                if let Err(audit_err) = self.emit_auth(auth_failure(&ctx, err.code())).await {
-                    self.inner.audit.note_auth_write_lost();
+                if let Err(audit_err) = self.emit_auth(auth_failure(&ctx, err.code())) {
+                    self.note_auth_write_lost();
                     tracing::error!(
                         original_error = %err,
                         audit_error = %audit_err,
@@ -754,15 +831,27 @@ mod tests {
     }
 
     impl rimap_core::auth_sink::AuthEventSink for RecordingSink {
+        /// Reports a poisoned lock as an [`AuthSinkError`] rather than
+        /// unwrapping, because that is what the trait requires of every
+        /// implementation and an in-tree example should model the contract it
+        /// documents. [`Self::events`] still unwraps: it is the *test's*
+        /// accessor, not part of the sink's contract, and a poisoned lock
+        /// there should fail the test loudly.
         fn emit_auth(
             &self,
             event: rimap_core::auth_event::AuthEvent,
         ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
-            self.events
-                .lock()
-                .expect("recording sink mutex")
-                .push(event);
-            Ok(())
+            match self.events.lock() {
+                Ok(mut events) => {
+                    events.push(event);
+                    Ok(())
+                }
+                Err(poisoned) => Err(rimap_core::auth_sink::AuthSinkError::new(
+                    rimap_core::ErrorCode::Internal,
+                    "recording sink lock poisoned",
+                    Box::new(std::io::Error::other(poisoned.to_string())),
+                )),
+            }
         }
     }
 
@@ -791,14 +880,72 @@ mod tests {
         }
     }
 
-    /// A record the guard could not write must still be *counted*. The guard
-    /// runs in a `Drop`, so swallowing the error is forced — but under the
-    /// default `fail_open = false` the writer returns the error rather than
-    /// counting it itself, so without this call the loss would leave nothing
-    /// behind but a stderr line. That would make the stricter setting yield
-    /// less evidence than the laxer one.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_record_the_guard_cannot_write_is_still_counted() {
+    /// Violates the [`rimap_core::auth_sink::AuthEventSink`] no-panic contract
+    /// on the write, but keeps its counter honest. Models the realistic shape:
+    /// a sink whose write path acquired a lock with `.unwrap()`.
+    #[derive(Debug, Default)]
+    struct PanickingSink {
+        losses: std::sync::atomic::AtomicUsize,
+    }
+
+    impl rimap_core::auth_sink::AuthEventSink for PanickingSink {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "the contract violation under test is precisely a panic \
+                      from a Result-returning sink"
+        )]
+        fn emit_auth(
+            &self,
+            _event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            panic!("sink violates the no-panic contract (test)");
+        }
+
+        fn note_auth_write_lost(&self) {
+            self.losses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Violates the contract on *both* trait methods. `note_auth_write_lost` is
+    /// a defaulted method an override can panic inside just as easily, and it
+    /// is what the emit's own containment calls next — so a sink like this is
+    /// the one that proves the abort was removed rather than moved one frame
+    /// down the stack.
+    #[derive(Debug, Default)]
+    struct WhollyPanickingSink {
+        /// Bumped *before* the panic, so a test can prove the second
+        /// containment was actually exercised rather than merely present.
+        notes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl rimap_core::auth_sink::AuthEventSink for WhollyPanickingSink {
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "the contract violation under test is precisely a panic \
+                      from a Result-returning sink"
+        )]
+        fn emit_auth(
+            &self,
+            _event: rimap_core::auth_event::AuthEvent,
+        ) -> Result<(), rimap_core::auth_sink::AuthSinkError> {
+            panic!("sink violates the no-panic contract on emit (test)");
+        }
+
+        fn note_auth_write_lost(&self) {
+            self.notes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            panic!("sink violates the no-panic contract on note (test)");
+        }
+    }
+
+    /// A listener that accepts and then sends nothing, so a client parks on a
+    /// `ServerHello` that never arrives. Every connect-cut test below needs
+    /// exactly this: a socket that was opened to a server, and a handshake that
+    /// will not finish on its own.
+    ///
+    /// The returned handle owns the accepted streams; abort it to close them.
+    async fn silent_listener() -> (u16, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind silent listener");
@@ -806,50 +953,20 @@ mod tests {
         let accepted = tokio::spawn(async move {
             let mut held = Vec::new();
             while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream);
+                held.push(stream); // keep the socket open, send nothing
             }
         });
-
-        let sink = std::sync::Arc::new(RejectingSink::default());
-        let cfg = super::ConnectionConfig {
-            account: None,
-            account_id: rimap_core::account::AccountId::default_account(),
-            host: "127.0.0.1".to_string(),
-            port,
-            encryption: super::ImapEncryption::Tls,
-            username: "alice@example.com".to_string(),
-            pinned_fingerprint: None,
-            connect_timeout: std::time::Duration::from_secs(30),
-            command_timeout: std::time::Duration::from_secs(30),
-            max_fetch_body_bytes: 4096,
-            max_append_bytes: 1024,
-        };
-        let conn = super::Connection::new(
-            cfg,
-            std::sync::Arc::clone(&sink)
-                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
-            std::sync::Arc::new(UnusedResolver),
-        );
-
-        let cut =
-            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
-        assert!(cut.is_err(), "the caller deadline must elapse first");
-
-        assert_eq!(
-            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "a rejected guard write must be reported as a lost record",
-        );
-
-        accepted.abort();
+        (port, accepted)
     }
 
-    /// A connection aimed at `127.0.0.1:port` whose sink records every event.
-    /// The resolver is [`UnusedResolver`]: both connect tests below are cut
-    /// or refused before `imap_login` reaches credential resolution, and a
-    /// panic is the loudest way to catch that assumption breaking.
-    fn recording_connection(port: u16) -> (super::Connection, std::sync::Arc<RecordingSink>) {
-        let sink = std::sync::Arc::new(RecordingSink::default());
+    /// A connection aimed at `127.0.0.1:port` with the caller's sink. The
+    /// resolver is [`UnusedResolver`]: every connect test below is cut or
+    /// refused before `imap_login` reaches credential resolution, and a panic
+    /// is the loudest way to catch that assumption breaking.
+    fn connection_with_sink(
+        port: u16,
+        sink: std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+    ) -> super::Connection {
         let cfg = super::ConnectionConfig {
             account: Some("acct".to_string()),
             account_id: rimap_core::account::AccountId::default_account(),
@@ -863,11 +980,173 @@ mod tests {
             max_fetch_body_bytes: 4096,
             max_append_bytes: 1024,
         };
-        let conn = super::Connection::new(
-            cfg,
+        super::Connection::new(cfg, sink, std::sync::Arc::new(UnusedResolver))
+    }
+
+    /// Drive a connect until a caller deadline cuts it, which runs
+    /// [`AuthEmitGuard`]'s `Drop` on this task. Returns once the guard's write
+    /// has been attempted.
+    ///
+    /// The 150ms budget has to stay well clear of `build_tls_config`, which
+    /// runs *before* the guard is armed and builds a ~150-anchor root store on
+    /// every connect. That costs single-digit milliseconds today; a cut landing
+    /// inside it would record nothing.
+    async fn connect_then_cut(conn: &super::Connection) {
+        let cut =
+            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
+        assert!(
+            cut.is_err(),
+            "the caller deadline must elapse first; a connect that finished on \
+             its own would make the assertions that follow vacuous",
+        );
+    }
+
+    /// A sink that panics must not take the process with it (#646).
+    ///
+    /// Containment used to be a side effect of `spawn_blocking`: a panicking
+    /// sink came back as a `JoinError`. #643 deleted that hop to stop losing
+    /// records on shutdown (ADR-0014), which left the no-panic contract
+    /// enforced by documentation alone — and three in-tree test sinks were
+    /// already violating it. `Connection::emit_auth` now contains the panic
+    /// deliberately.
+    ///
+    /// This is the ordinary-drop half: the panic escapes into a normal unwind,
+    /// so an uncontained sink fails this test rather than killing the binary.
+    /// The lost record must still be *counted*, which is what distinguishes a
+    /// contained panic from one that skipped the failure handler entirely.
+    /// [`a_guard_dropped_during_an_unwind_does_not_abort`] covers the shape
+    /// that aborts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_sink_cannot_abort_the_process_through_the_guard() {
+        let (port, accepted) = silent_listener().await;
+        let sink = std::sync::Arc::new(PanickingSink::default());
+        let conn = connection_with_sink(
+            port,
             std::sync::Arc::clone(&sink)
                 as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
-            std::sync::Arc::new(UnusedResolver),
+        );
+
+        connect_then_cut(&conn).await;
+
+        assert_eq!(
+            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a contained panic is still a lost record, and must be counted as \
+             one rather than silently swallowed",
+        );
+
+        accepted.abort();
+    }
+
+    /// Containing the emit's panic is not enough on its own: the handler's very
+    /// next call is `note_auth_write_lost`, a *defaulted* trait method a bad
+    /// sink can panic inside just as easily. Without its own containment the
+    /// abort would move one frame rather than disappear.
+    ///
+    /// The counter is bumped before the panic rather than after, so the
+    /// assertion pins both halves at once — that the second containment was
+    /// *reached*, and that it held. Surviving alone would go vacuously green if
+    /// a later change stopped calling `note_auth_write_lost` from this path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sink_that_panics_in_note_auth_write_lost_cannot_abort_either() {
+        let (port, accepted) = silent_listener().await;
+        let sink = std::sync::Arc::new(WhollyPanickingSink::default());
+        let conn = connection_with_sink(
+            port,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+        );
+
+        connect_then_cut(&conn).await;
+
+        assert_eq!(
+            sink.notes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the emit's containment must still run the failure handler, so the \
+             second panic is reached and contained rather than never raised",
+        );
+
+        accepted.abort();
+    }
+
+    /// The shape that actually aborts: [`AuthEmitGuard`]'s `Drop` running while
+    /// an outer unwind is already in flight. Rust treats a panic escaping a
+    /// destructor during cleanup as unrecoverable and calls `abort` — no second
+    /// unwind, no `process_end` record, no test failure to read, just SIGABRT
+    /// on the whole binary.
+    ///
+    /// The two tests above drive the guard from a cancelled `timeout`, which is
+    /// an ordinary drop; they prove containment but not that *this* case was
+    /// closed. `AuthEmitGuard`'s own rustdoc lists a panic unwinding through
+    /// the connect among the cuts it exists for, so the case is reachable.
+    ///
+    /// Constructed directly rather than through a connect: a real unwind has to
+    /// pass through the guard's frame, and no network is needed to make the
+    /// guard write — it is armed at construction. Removing either `catch_unwind`
+    /// turns this from a pass into an aborted test process.
+    #[test]
+    fn a_guard_dropped_during_an_unwind_does_not_abort() {
+        let sink = std::sync::Arc::new(WhollyPanickingSink::default());
+        let conn = connection_with_sink(
+            0,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+        );
+        let bundle = crate::tls::build_tls_config(None).expect("build a TLS bundle");
+        let progress = super::ConnectProgress::default();
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = super::AuthEmitGuard::new(&conn, &bundle, &progress);
+            panic!("an unwind passing through the connect");
+        }));
+
+        assert!(
+            caught.is_err(),
+            "the outer panic must unwind normally; reaching this line at all \
+             means the guard's own panic did not abort the process",
+        );
+        assert_eq!(
+            sink.notes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the guard must have been armed and reached the sink — surviving \
+             the unwind proves nothing if nothing was emitted",
+        );
+    }
+
+    /// A record the guard could not write must still be *counted*. The guard
+    /// runs in a `Drop`, so swallowing the error is forced — but under the
+    /// default `fail_open = false` the writer returns the error rather than
+    /// counting it itself, so without this call the loss would leave nothing
+    /// behind but a stderr line. That would make the stricter setting yield
+    /// less evidence than the laxer one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_the_guard_cannot_write_is_still_counted() {
+        let (port, accepted) = silent_listener().await;
+        let sink = std::sync::Arc::new(RejectingSink::default());
+        let conn = connection_with_sink(
+            port,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
+        );
+
+        connect_then_cut(&conn).await;
+
+        assert_eq!(
+            sink.losses.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a rejected guard write must be reported as a lost record",
+        );
+
+        accepted.abort();
+    }
+
+    /// A connection aimed at `127.0.0.1:port` whose sink records every event.
+    fn recording_connection(port: u16) -> (super::Connection, std::sync::Arc<RecordingSink>) {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let conn = connection_with_sink(
+            port,
+            std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn rimap_core::auth_sink::AuthEventSink>,
         );
         (conn, sink)
     }
@@ -888,34 +1167,14 @@ mod tests {
     /// thread, so `timeout(..).await` returning means the record is already
     /// in the sink. A test that had to poll for it would also pass with the
     /// count assertion racing a second record it never saw.
-    ///
-    /// The 150ms budget has to stay well clear of `build_tls_config`, which
-    /// runs *before* the guard is armed and builds a ~150-anchor root store on
-    /// every connect. That costs single-digit milliseconds today; a cut landing
-    /// inside it would record nothing and fail here.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connect_cut_by_a_caller_deadline_still_emits_one_auth_record() {
         use rimap_core::auth_event::AuthResult;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind silent listener");
-        let port = listener.local_addr().expect("listener addr").port();
-        let accepted = tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream); // keep the socket open, send nothing
-            }
-        });
-
+        let (port, accepted) = silent_listener().await;
         let (conn, sink) = recording_connection(port);
-        let cut =
-            tokio::time::timeout(std::time::Duration::from_millis(150), conn.connect_inner()).await;
-        assert!(
-            cut.is_err(),
-            "the caller deadline must elapse first; a connect that finished on \
-             its own would make the assertions below vacuous",
-        );
+
+        connect_then_cut(&conn).await;
 
         let events = sink.events();
         assert_eq!(
@@ -998,12 +1257,17 @@ mod tests {
     /// pinned separately by `tests/poison_reconnect.rs` over the scriptable
     /// fake, because deleting that call site leaves this test green.
     ///
-    /// The capability reset is asserted here because the atomics must not
-    /// keep describing a session that is gone: the public accessors read
-    /// them with no lock, and emptying the slot without clearing them is
-    /// what leaves a `true` over an empty slot. The commands themselves are
-    /// no longer at risk — they read the flags inside the `with_session`
-    /// body, after the reconnect has repopulated them (#634).
+    /// The capability reset is asserted here because the record must not
+    /// keep describing a session that is gone: the public accessor reads it
+    /// with no lock, and emptying the slot without clearing it is what leaves
+    /// an advertisement over an empty slot. The commands themselves are
+    /// no longer at risk — they read it inside the `with_session`
+    /// body, after the reconnect has repopulated it (#634).
+    ///
+    /// It must reset to `Unknown` specifically. `Known { false, false }` is a
+    /// claim that the server advertises neither MOVE nor UIDPLUS, and that is
+    /// the input that selects the folder-wide EXPUNGE — a discarded session is
+    /// no evidence for it (#649).
     #[test]
     fn poison_is_consumed_once_and_resets_capabilities() {
         use std::sync::atomic::Ordering;
@@ -1016,21 +1280,25 @@ mod tests {
             "an unpoisoned connection must not report a discard",
         );
 
-        conn.inner.has_move.store(true, Ordering::Relaxed);
-        conn.inner.has_uidplus.store(true, Ordering::Relaxed);
+        conn.inner.capabilities.store(
+            super::ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: true,
+            }
+            .to_bits(),
+            Ordering::Relaxed,
+        );
         conn.poison();
 
         assert!(
             conn.take_poisoned(&mut slot),
             "poison must be observed by the next holder of the session lock",
         );
-        assert!(
-            !conn.has_move_capability(),
-            "MOVE capability must not survive a poison",
-        );
-        assert!(
-            !conn.has_uidplus_capability(),
-            "UIDPLUS capability must not survive a poison",
+        assert_eq!(
+            conn.capabilities(),
+            super::ServerCapabilities::Unknown,
+            "a discarded session leaves no advertisement behind — and must not \
+             leave the `neither` that selects the folder-wide EXPUNGE",
         );
         assert!(
             !conn.take_poisoned(&mut slot),
@@ -1087,6 +1355,87 @@ mod tests {
             !conn.inner.poisoned.load(Ordering::Relaxed),
             "a cut before a session was cached must not poison: the next \
              command would discard an already-empty slot",
+        );
+    }
+
+    /// The packing is what lets one `AtomicU8` hold a tri-state, so every
+    /// value has to survive the round trip — a collision between `Unknown` and
+    /// any `Known` is the exact confusion #649 removed, reintroduced one layer
+    /// down.
+    #[test]
+    fn every_capability_state_survives_the_atomic_round_trip() {
+        use super::ServerCapabilities;
+
+        let states = [
+            ServerCapabilities::Unknown,
+            ServerCapabilities::Known {
+                has_move: false,
+                has_uidplus: false,
+            },
+            ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: false,
+            },
+            ServerCapabilities::Known {
+                has_move: false,
+                has_uidplus: true,
+            },
+            ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: true,
+            },
+        ];
+
+        for state in states {
+            assert_eq!(
+                ServerCapabilities::from_bits(state.to_bits()),
+                state,
+                "{state:?} did not survive the round trip",
+            );
+        }
+
+        // Distinctness, asserted over the encoding rather than the enum: the
+        // enum's own `PartialEq` would pass whatever `to_bits` collapsed.
+        let bits: Vec<u8> = states.iter().map(|s| s.to_bits()).collect();
+        for (i, a) in bits.iter().enumerate() {
+            for b in &bits[i.saturating_add(1)..] {
+                assert_ne!(a, b, "two capability states share one encoding");
+            }
+        }
+    }
+
+    /// A `Connection` that has never logged in holds no advertisement.
+    ///
+    /// This used to be `(false, false)`, which is bit-identical to "the server
+    /// advertises neither MOVE nor UIDPLUS" — so a test that probed an
+    /// `IMAP4rev1`-only server and asserted "neither" passed without the login
+    /// path running at all. Starting at `Unknown` makes the two states
+    /// distinguishable from construction onwards (#649).
+    #[test]
+    fn a_connection_that_never_logged_in_reports_unknown_capabilities() {
+        let conn = connection_with("mail.example.com", "alice@example.com", 4096);
+        assert_eq!(conn.capabilities(), super::ServerCapabilities::Unknown);
+    }
+
+    /// `Unknown` has no pair to hand out, and the refusal names the caller's
+    /// operation so the error tells an operator which command stopped.
+    #[test]
+    fn require_known_refuses_unknown_and_names_the_operation() {
+        use super::ServerCapabilities;
+
+        match ServerCapabilities::Unknown.require_known("move") {
+            Err(ImapError::CapabilitiesUnknown { op }) => assert_eq!(op, "move"),
+            other => panic!("expected CapabilitiesUnknown, got {other:?}"),
+        }
+
+        assert_eq!(
+            ServerCapabilities::Known {
+                has_move: true,
+                has_uidplus: false,
+            }
+            .require_known("move")
+            .ok(),
+            Some((true, false)),
         );
     }
 
@@ -1170,6 +1519,10 @@ mod tests {
             ),
             (
                 ImapError::Protocol(async_imap::error::Error::Bad("x".into())),
+                "ERR_IMAP_PROTOCOL",
+            ),
+            (
+                ImapError::CapabilitiesUnknown { op: "move" },
                 "ERR_IMAP_PROTOCOL",
             ),
             (

@@ -7,6 +7,15 @@ set shell := ["bash", "-uc"]
 
 MSRV := "1.88.0"
 
+# cargo-nextest version floor, stated once and enforced by `setup` below.
+# 0.9.95 is the first release supporting the leak-timeout table form
+# (`{ period = "...", result = "fail" }`, nextest changelog 2025-04-30),
+# which #642 will add to .config/nextest.toml; it also covers the
+# profile.ci `fail-fast = { max-fail = N }` table form already in use here
+# (0.9.89+, #625/#637). An older nextest hits a bare config-parse error on
+# either table form with no hint that upgrading nextest is the fix (#639).
+NEXTEST_MIN := "0.9.95"
+
 # Default: print available targets.
 default:
     @just --list
@@ -146,8 +155,21 @@ setup:
     rustup component add clippy rustfmt
     # Cargo subcommands — check then optionally install.
     cargo deny --version >/dev/null 2>&1 || cargo install --locked cargo-deny
-    cargo nextest --version >/dev/null 2>&1 || cargo install --locked cargo-nextest
+    # `cargo install`, unlike the `--version >/dev/null || install` pattern
+    # above, upgrades an existing binary in place — needed here since an
+    # installed-but-too-old nextest passes the bare existence check but not
+    # the version floor. `head -1`: `cargo nextest --version` prints five
+    # lines (release/commit-hash/commit-date/host besides the version line);
+    # without it awk emits $2 of every line instead of just the version.
+    nextest_ver="$(cargo nextest --version 2>/dev/null | head -1 | awk '{print $2}')"
+    if [ -z "$nextest_ver" ] || ! printf '%s\n%s\n' "{{NEXTEST_MIN}}" "$nextest_ver" | sort -V -C; then
+        echo "installing/upgrading cargo-nextest to >= {{NEXTEST_MIN}} (have: ${nextest_ver:-none})"
+        cargo install --locked cargo-nextest
+    fi
     cargo msrv --version >/dev/null 2>&1 || cargo install --locked cargo-msrv
+    # Pinned to the version the CI `semver-checks` job installs, so a local
+    # `just ci` and the gate agree on which lints are in force.
+    cargo semver-checks --version >/dev/null 2>&1 || cargo install --locked cargo-semver-checks --version 0.48.0
     # Optional, warn only.
     cargo mutants --version >/dev/null 2>&1 || echo "warn: cargo-mutants not installed (optional)"
     # Install pre-commit hooks.
@@ -250,7 +272,10 @@ test-msrv:
 mutants *args:
     cargo mutants --in-place {{args}}
 
-# Proton Bridge integration suite (gated on PROTON_BRIDGE_TEST=1).
+# Proton Bridge integration suite (gated on PROTON_BRIDGE_TEST=1). --profile
+# ci for the same reason as `test`/`test-msrv` (#639): this is a
+# container-backed suite, so an unrelated flake or a Bridge-container hiccup
+# should not cancel every other result still in flight.
 test-integration:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -258,11 +283,13 @@ test-integration:
         echo "set PROTON_BRIDGE_TEST=1 to run Proton Bridge integration tests"
         exit 1
     fi
-    cargo nextest run --workspace --locked --features proton-bridge-tests
+    cargo nextest run --workspace --locked --features proton-bridge-tests --profile ci
 
-# Adversarial email corpus against the content pipeline.
+# Adversarial email corpus against the content pipeline. --profile ci (#639)
+# for consistency with the other non-inner-loop suites above: a corpus
+# regression shouldn't cancel the run before the rest of the binary reports.
 test-injection:
-    cargo nextest run -p rimap-content --locked --test injection_corpus
+    cargo nextest run -p rimap-content --locked --test injection_corpus --profile ci
 
 # Run a single fuzz target for a fixed time budget. Requires nightly.
 # Example: just fuzz content_mime
@@ -355,6 +382,14 @@ check-metadata:
 test-publish-script:
     ./scripts/publish-crates.test.sh
 
+# Unit-test the pure functions in post-release-bump.sh (tag -> next -dev,
+# forward-bump guard, the derived-file-set assertions, step-output emission).
+# No cargo, no network; one read-only case reads HEAD of this repo. The job it
+# guards runs once per release, so this is the only thing that exercises it on
+# a normal branch (issue #662). Mirrored in the `publish-checks` CI job.
+test-post-release-bump:
+    ./scripts/post-release-bump.test.sh
+
 # Fail if a tracked fuzz workspace's Cargo.lock resolves a dependency shared
 # with the root workspace to a version the workspace lockfile does not hold.
 # `fuzz` and `crates/rimap-server/fuzz` are each their own cargo workspace, so
@@ -382,16 +417,44 @@ test-fuzz-lock-parity:
 publish-dry-run:
     ./scripts/publish-crates.sh --dry-run
 
-# Check the workspace public APIs against their last crates.io release for
-# accidental SemVer breakage (issue #544). Requires a network baseline and
-# `cargo-semver-checks` installed (`cargo install cargo-semver-checks --locked
-# --version 0.48.0`). No-ops on crates with no published baseline, so it is not
-# part of `ci`; the release workflow runs it as a publish gate.
+# Check the workspace public APIs against the last release tag for accidental
+# SemVer breakage (issues #544, #633). Requires `cargo-semver-checks`
+# (`just setup` installs it).
+#
+# The baseline is the last reachable `vX.Y.Z` tag, NOT the crates.io release.
+# Every publishable crate is currently reserved on crates.io as a bare `0.0.0`
+# placeholder, so a registry baseline diffs the real API against an empty crate:
+# every item reads as an addition and nothing can ever be reported as a break.
+# A tag baseline is version-aware — `0.1.1-dev` is a patch bump from `0.1.0`, so
+# a break reddens here until the planned version moves to `0.2.0-dev`. Multiple
+# breaking PRs in one release cycle all diff against the same tag, so that one
+# bump covers all of them. See RELEASING.md, "Breaking a public API".
+#
+# A tag baseline has one sharp edge a registry baseline does not: a crate that
+# does not exist at the baseline tag is an error ("package not found"), not a
+# skip. A PR adding a new publishable crate must pass `--exclude <crate>` for
+# that one PR — see RELEASING.md.
+#
+# This is also release.yml's publish gate (issue #650), so the baseline is
+# resolved by scripts/semver-baseline.sh rather than inline: at release time HEAD
+# is the tag being released, and the script is what keeps the gate from diffing
+# that tree against itself. See the header comment there.
 semver-checks:
-    cargo semver-checks check-release --workspace
+    #!/usr/bin/env bash
+    set -euo pipefail
+    baseline="$(./scripts/semver-baseline.sh)"
+    echo "semver baseline: $baseline ($(git rev-parse --short "$baseline"))"
+    cargo semver-checks check-release --workspace --baseline-rev "$baseline"
+
+# Unit-test semver-baseline.sh (baseline selection, the HEAD-is-the-tag case
+# release.yml hits, prerelease and unreachable tags, missing-baseline errors)
+# against throwaway git repos in a temp dir. No cargo, no network, no repo
+# state. Mirrored in the `publish-checks` CI job.
+test-semver-baseline:
+    ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-fuzz-lock-parity check-fuzz-lock-parity test-installer
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer semver-checks
     typos
 
 # Re-run pre-commit hooks across all files.
