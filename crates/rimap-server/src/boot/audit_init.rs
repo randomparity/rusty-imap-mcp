@@ -62,16 +62,29 @@ pub fn init_audit_writer_multi(
         )
     };
 
-    writer.log_process_start(ProcessStartInputs {
-        version: rimap_core::version::version().to_string(),
-        git_commit: rimap_core::version::commit().to_string(),
-        posture,
-        accounts,
-        config_path: config_file_path.to_path_buf(),
-        config_hash_sha256: config_hash,
+    // Unlike `posture` / `accounts`, this is populated for single- and
+    // multi-account configs alike: the provenance of a tool verdict is
+    // exactly as worth recording for one account as for five, and a reader
+    // reconstructing a boot should not have to branch on account count to
+    // find it (#632).
+    let tool_matrix = multi
+        .accounts
+        .values()
+        .map(crate::boot::tool_matrix::account_tool_matrix)
+        .collect();
+
+    let mut inputs = ProcessStartInputs::new(
+        rimap_core::version::version().to_string(),
+        rimap_core::version::commit().to_string(),
+        config_file_path.to_path_buf(),
+        config_hash,
         trailing,
-        current_inode: current,
-    })?;
+        current,
+    );
+    inputs.posture = posture;
+    inputs.accounts = accounts;
+    inputs.tool_matrix = tool_matrix;
+    writer.log_process_start(inputs)?;
 
     Ok(writer)
 }
@@ -97,6 +110,7 @@ fn compute_config_hash(path: &Path) -> String {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use tempfile::TempDir;
 
@@ -163,6 +177,118 @@ allowed_base_dir = "{}"
         assert_eq!(first["config_hash_sha256"].as_str().unwrap(), expected_hash);
     }
 
+    /// Two-account config whose `[defaults.security.tools]` allows
+    /// `delete_message` and whose `work` account tightens posture to
+    /// `readonly` without restating that tool. This is the #632 case: the
+    /// account holds a destructive tool purely by inheritance.
+    fn write_inherited_allow_config(dir: &TempDir) -> std::path::PathBuf {
+        let config_path = dir.path().join("config.toml");
+        let body = format!(
+            r#"
+[defaults.security]
+posture = "full"
+
+[defaults.security.tools]
+delete_message = "allow"
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[accounts.security]
+posture = "readonly"
+
+[accounts.security.tools]
+search = "deny"
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        );
+        std::fs::write(&config_path, body).unwrap();
+        config_path
+    }
+
+    #[test]
+    fn process_start_records_inherited_allow_on_tightened_posture() {
+        // Acceptance criteria for #632. Asserted against the raw JSONL line
+        // rather than a parsed `AuditRecord`: the field is
+        // `#[serde(default)]`, so a lenient parse would report an empty
+        // matrix as a successful read.
+        let dir = TempDir::new().unwrap();
+        let config_path = write_inherited_allow_config(&dir);
+        let validated = rimap_config::loader::load_and_validate(&config_path).unwrap();
+        let audit_path = validated.audit.path.clone();
+        {
+            init_audit_writer_multi(&validated, &config_path).unwrap();
+        }
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        let line = contents.lines().next().unwrap();
+        assert!(
+            line.contains(r#""tool_matrix""#),
+            "process_start must carry tool_matrix:\n{line}",
+        );
+        let first: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(first["kind"], "process_start");
+
+        let matrix = &first["tool_matrix"];
+        assert_eq!(matrix.as_array().unwrap().len(), 1);
+        assert_eq!(matrix[0]["account"], "work");
+        assert_eq!(matrix[0]["posture"], "readonly");
+
+        let tools = matrix[0]["tools"].as_array().unwrap();
+        let deletion = tools
+            .iter()
+            .find(|t| t["tool"] == "delete_message")
+            .expect("inherited delete_message verdict missing");
+        assert_eq!(deletion["allow"], true);
+        assert_eq!(deletion["source"], "inherited");
+
+        let search = tools
+            .iter()
+            .find(|t| t["tool"] == "search")
+            .expect("account-written search verdict missing");
+        assert_eq!(search["allow"], false);
+        assert_eq!(search["source"], "account");
+    }
+
+    #[test]
+    fn single_account_process_start_carries_the_same_tool_matrix_shape() {
+        // The `posture` / `accounts` fields branch on account count; the
+        // tool matrix deliberately does not, so a reader never has to.
+        let dir = TempDir::new().unwrap();
+        let config_path = write_config(&dir);
+        let raw = rimap_config::loader::load_from_path(&config_path).unwrap();
+        let validated = rimap_config::validate::validate_legacy_as_multi(raw).unwrap();
+        let audit_path = validated.audit.path.clone();
+        {
+            init_audit_writer_multi(&validated, &config_path).unwrap();
+        }
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        let line = contents.lines().next().unwrap();
+        let first: serde_json::Value = serde_json::from_str(line).unwrap();
+        // Single-account mode: `accounts` is omitted, `tool_matrix` is not.
+        assert!(first.get("accounts").is_none());
+        let matrix = first["tool_matrix"].as_array().unwrap();
+        assert_eq!(matrix.len(), 1);
+        assert_eq!(matrix[0]["account"], "default");
+        assert_eq!(matrix[0]["posture"], "readonly");
+        assert_eq!(
+            matrix[0]["tools"].as_array().unwrap().len(),
+            0,
+            "this config declares no explicit verdicts",
+        );
+    }
+
     #[test]
     fn process_end_writes_after_start() {
         use rimap_audit::{ProcessEnd, ProcessEndReason};
@@ -176,10 +302,7 @@ allowed_base_dir = "{}"
         {
             let writer = init_audit_writer_multi(&validated, &config_path).unwrap();
             writer
-                .log_process_end(ProcessEnd {
-                    reason: ProcessEndReason::Eof,
-                    total_tool_calls: 0,
-                })
+                .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0))
                 .unwrap();
         }
 
@@ -221,15 +344,12 @@ allowed_base_dir = "{}"
             .unwrap();
             let pid = ProcessId::new_now();
             writer
-                .write_record(&AuditRecord {
-                    seq: Seq(1),
-                    ts: Timestamp::now(),
-                    process_id: pid,
-                    payload: Payload::ProcessEnd(ProcessEnd {
-                        reason: ProcessEndReason::Eof,
-                        total_tool_calls: 0,
-                    }),
-                })
+                .write_record(&AuditRecord::new(
+                    Seq(1),
+                    Timestamp::now(),
+                    pid,
+                    Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0)),
+                ))
                 .unwrap();
         }
 

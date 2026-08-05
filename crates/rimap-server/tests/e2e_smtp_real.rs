@@ -31,9 +31,7 @@ use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
 use rimap_authz::rate_limit::Governor;
 use rimap_config::credential::CredentialStore;
-use rimap_config::model::{
-    ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig, SmtpConfig, SmtpEncryption,
-};
+use rimap_config::model::{ImapConfig, ImapEncryption, SmtpConfig, SmtpEncryption};
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::account::AccountId;
 use rimap_core::posture::Posture;
@@ -113,13 +111,12 @@ fn build_server_real(
         &account_cfg.security.expunge_folders,
     );
 
-    let smtp_cfg = SmtpConfig {
-        host: "127.0.0.1".into(),
-        port: mailpit.smtp_port(),
-        encryption: SmtpEncryption::None,
-        username: ACCOUNT_USERNAME.into(),
-        command_timeout_seconds: 30,
-    };
+    let smtp_cfg = SmtpConfig::new(
+        "127.0.0.1".into(),
+        mailpit.smtp_port(),
+        SmtpEncryption::None,
+        ACCOUNT_USERNAME.into(),
+    );
     let smtp = rimap_smtp::SmtpClient::new(&smtp_cfg, "RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2")
         .expect("smtp client");
 
@@ -151,32 +148,17 @@ fn build_server_real(
 }
 
 fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
-    ValidatedAccountConfig {
-        id: AccountId::default_account(),
-        imap: ImapConfig {
-            host: "127.0.0.1".into(),
-            port: harness.port(),
-            username: ACCOUNT_USERNAME.into(),
-            encryption: ImapEncryption::Tls,
-            tls_fingerprint_sha256: None,
-            connect_timeout_seconds: 10,
-            command_timeout_seconds: 30,
-        },
-        smtp: None,
-        security: SecurityConfig {
-            posture: Posture::Full,
-            ..SecurityConfig::default()
-        },
-        limits: LimitsConfig {
-            commands_per_second: 1000,
-            drafts_per_minute: 1000,
-            sends_per_minute: 1000,
-            ..LimitsConfig::default()
-        },
-        tool_overrides: BTreeMap::new(),
-        tls_fingerprint: Some(*harness.fingerprint()),
-        fallback_mode: rimap_config::model::FallbackMode::default(),
-    }
+    let mut cfg = ValidatedAccountConfig::new_for_tests(AccountId::default_account(), {
+        let mut imap = ImapConfig::new("127.0.0.1".into(), harness.port(), ACCOUNT_USERNAME.into());
+        imap.encryption = ImapEncryption::Tls;
+        imap
+    });
+    cfg.security.posture = Posture::Full;
+    cfg.limits.commands_per_second = 1000;
+    cfg.limits.drafts_per_minute = 1000;
+    cfg.limits.sends_per_minute = 1000;
+    cfg.tls_fingerprint = Some(*harness.fingerprint());
+    cfg
 }
 
 fn test_connection(harness: &DovecotHarness, audit: &AuditWriter) -> Connection {

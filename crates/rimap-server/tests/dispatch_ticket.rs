@@ -58,6 +58,33 @@ fn read_audit_records(path: &std::path::Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// A never-completing tool body that signals `entered` on its first poll.
+///
+/// This is the barrier for "the envelope is ready to be cancelled".
+/// `run_with_audit_envelope` awaits `emit_tool_start`, constructs the
+/// `AuditEnvelopeGuard`, and only *then* polls the body — so observing the
+/// first poll proves the `tool_start` write finished and the guard is
+/// armed. Nothing else polls this future, so the signal cannot arrive
+/// early, which makes it an exact ordering barrier rather than a timing
+/// window.
+///
+/// Kept in sync with the copy in `src/mcp/audit_envelope.rs`, which this
+/// integration-test binary cannot reach.
+fn body_signalling_first_poll(
+    entered: tokio::sync::oneshot::Sender<()>,
+) -> impl std::future::Future<Output = Result<serde_json::Value, rimap_core::RimapError>> {
+    let mut entered = Some(entered);
+    std::future::poll_fn(move |_cx| {
+        if let Some(entered) = entered.take() {
+            // A dropped receiver means the test already gave up; the
+            // assertions report that, so the send result is not actionable.
+            let _ = entered.send(());
+        }
+        // Never resolve: the abort must land while the body is suspended.
+        std::task::Poll::Pending
+    })
+}
+
 #[tokio::test]
 async fn execute_tool_for_test_emits_audit_envelope() {
     let fixture = build_test_server();
@@ -181,7 +208,6 @@ async fn use_account_rejected_spoof_is_not_in_audit_log() {
 async fn drop_during_body_enqueues_cancellation_tool_end() {
     use rimap_audit::spawn_drainer;
     use std::sync::Arc;
-    use tokio::time::Duration;
 
     let audit_dir = tempfile::TempDir::new().expect("audit tempdir");
     let audit_path = audit_dir.path().join("audit.jsonl");
@@ -191,7 +217,11 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
         rotate_keep: 0,
         retention_seconds: None,
         fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
+        // Deliberately not `Seq::FIRST`: the assertions below join `tool_end`
+        // to `tool_start` on `seq`, and with the default start every record
+        // in this test would be seq 1 — so a guard that hardcoded
+        // `Seq::FIRST` instead of carrying the real seq would still pass.
+        initial_seq: Seq(41),
     })
     .expect("audit open");
 
@@ -209,10 +239,9 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
     // Real infrastructure tools (ListAccounts) complete synchronously —
     // no yield point exists between guard creation and `guard.disarm()`,
     // so aborting at a yield point always lands outside the guarded
-    // window. Injecting `std::future::pending()` guarantees the abort
-    // fires while the body is suspended, which is exactly the state
-    // where `AuditEnvelopeGuard::drop` must enqueue the cancellation
-    // `tool_end`.
+    // window. A body that never resolves guarantees the abort fires while
+    // the body is suspended, which is exactly the state where
+    // `AuditEnvelopeGuard::drop` must enqueue the cancellation `tool_end`.
     //
     // The invariant: every `tool_start` must be paired with a `tool_end`.
     // Aborting mid-body exercises the cancellation path: the guard's
@@ -220,26 +249,36 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
     // A bad refactor that disarms the guard ABOVE `body(ticket).await`
     // breaks this: the `Drop` is a no-op, no `tool_end` is enqueued,
     // and counts diverge.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let server_clone = Arc::clone(&server);
     let task = tokio::spawn(async move {
         server_clone
             .run_envelope_with_body_for_test(
                 ToolName::ListAccounts,
-                std::future::pending::<Result<serde_json::Value, rimap_core::RimapError>>(),
+                body_signalling_first_poll(entered_tx),
             )
             .await
     });
 
-    // Give the envelope time to emit `tool_start` and enter the body's
-    // pending await before aborting. The `spawn_blocking` for `tool_start`
-    // is the only real work before the body; 50ms gives comfortable headroom
-    // on loaded CI runners without approaching the test's total budget.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for the body's first poll rather than for a clock. This orders
+    // the abort strictly after `tool_start` is written and the guard is
+    // armed, so no amount of host load can make the abort land early
+    // (#684 — the previous 50ms sleep was a race window, not a barrier).
+    //
+    // A dropped sender (e.g. `emit_tool_start` returned `Err`) already fails
+    // this fast. The outer timeout only covers the envelope *hanging* before
+    // the body: it is a bound on failure reporting, never on the barrier
+    // itself, so unlike the old sleep it cannot expire during a healthy run.
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+        .await
+        .expect("tool body was never polled within 30s")
+        .expect("envelope dropped the body without ever polling it");
     task.abort();
     let _ = task.await; // wait for the abort to settle
 
-    // Give the drainer time to flush the queued cancellation record.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // No sleep needed before the drain: dropping `server` closes the last
+    // cancellation sender, and `drainer.await` below then observes channel
+    // close only after every queued record has been written.
     drop(server);
     // Await the drainer after dropping server (which drops the last sender)
     // so it exits cleanly after flushing remaining records.
@@ -247,15 +286,48 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
 
     let records = read_audit_records(&audit_path);
 
-    let starts = records.iter().filter(|r| r["kind"] == "tool_start").count();
-    let ends = records.iter().filter(|r| r["kind"] == "tool_end").count();
-
+    // Pin exact counts, not just equality: `starts == ends` alone would also
+    // hold for a double-emitted `tool_end`, and equality plus a `>= 1` floor
+    // still says nothing about *which* `tool_end` was written.
+    let starts: Vec<_> = records
+        .iter()
+        .filter(|r| r["kind"] == "tool_start")
+        .collect();
+    let ends: Vec<_> = records.iter().filter(|r| r["kind"] == "tool_end").collect();
     assert_eq!(
-        starts, ends,
-        "tool_start count must equal tool_end count (no orphans); records={records:#?}",
+        starts.len(),
+        1,
+        "expected exactly one tool_start; records={records:#?}",
     );
-    assert!(
-        starts >= 1,
-        "at least one dispatch envelope must have fired; records={records:#?}",
+    assert_eq!(
+        ends.len(),
+        1,
+        "expected exactly one tool_end; records={records:#?}",
+    );
+
+    // The `tool_end` must be the guard's synthetic cancellation record, and
+    // it must be joined to the `tool_start` this dispatch actually wrote.
+    // Without these a `tool_end` from any other path would satisfy the counts.
+    let (start, end) = (starts[0], ends[0]);
+    assert_eq!(
+        end["status"], "cancelled",
+        "tool_end must record the cancellation, not a normal completion; end={end:#?}",
+    );
+    assert_eq!(
+        end["error_code"], "ERR_CANCELLED",
+        "cancellation tool_end must carry ERR_CANCELLED; end={end:#?}",
+    );
+    assert_eq!(
+        end["start_seq"], start["seq"],
+        "tool_end.start_seq must reference this dispatch's tool_start.seq; \
+         start={start:#?} end={end:#?}",
+    );
+    assert_eq!(
+        start["tool"], "list_accounts",
+        "the envelope under test is the list_accounts dispatch; start={start:#?}",
+    );
+    assert_eq!(
+        end["tool"], "list_accounts",
+        "tool_end duplicates the tool name so the line stands alone; end={end:#?}",
     );
 }

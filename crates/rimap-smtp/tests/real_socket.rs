@@ -19,13 +19,14 @@ use rimap_smtp::{SendEnvelope, SmtpClient, SmtpError};
 use support::smtp_responder::{Responder, Scenario};
 
 fn config(port: u16, encryption: SmtpEncryption) -> SmtpConfig {
-    SmtpConfig {
-        host: "127.0.0.1".into(),
+    let mut cfg = SmtpConfig::new(
+        "127.0.0.1".into(),
         port,
         encryption,
-        username: "user@example.com".into(),
-        command_timeout_seconds: 5,
-    }
+        "user@example.com".into(),
+    );
+    cfg.command_timeout_seconds = 5;
+    cfg
 }
 
 fn envelope() -> SendEnvelope {

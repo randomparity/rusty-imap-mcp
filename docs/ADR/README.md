@@ -28,3 +28,5 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0011](0011-fuzz-lockfile-workspace-parity.md) | Fuzz lockfiles gated for parity with the workspace, not kept fresh by Dependabot | Accepted |
 | [0012](0012-tool-call-ceiling.md) | One explicit configurable ceiling per tool call; `command_timeout` stays the per-stage budget | Accepted |
 | [0013](0013-per-field-defaults-merge.md) | `[defaults]` merges into an account field by field, through all-`Option` override structs | Accepted |
+| [0014](0014-synchronous-auth-audit-emission.md) | Every `auth` audit record is written synchronously, on the thread that produced it | Accepted |
+| [0015](0015-terminal-process-end-via-bounded-dispatch-drain.md) | `process_end` is terminal, enforced by a bounded dispatch drain | Accepted |

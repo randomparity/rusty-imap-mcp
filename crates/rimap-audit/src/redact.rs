@@ -1495,6 +1495,8 @@ mod redact_record_tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
         let redacted = redact(&rec, &salt());

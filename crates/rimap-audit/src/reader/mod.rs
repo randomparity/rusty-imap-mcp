@@ -265,6 +265,8 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: seq,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         }
     }
@@ -540,6 +542,8 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
         let path = write_lines(&dir, "a.jsonl", &[serde_json::to_string(&rec).unwrap()]);
@@ -567,6 +571,8 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
         let path = write_lines(&dir, "a.jsonl", &[serde_json::to_string(&rec).unwrap()]);

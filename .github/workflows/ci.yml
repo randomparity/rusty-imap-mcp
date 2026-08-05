@@ -87,22 +87,45 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: cargo-nextest
       # --profile ci selects the bounded max-fail policy in
       # .config/nextest.toml (#625): an unrelated flake or container hiccup
       # no longer suppresses every other test's result.
       - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
+      # nextest does not run doctests (upstream limitation), so the step above
+      # skips every one silently. The `compile_fail,E0639` blocks that enforce
+      # `#[non_exhaustive]` on `rimap_config::model::ImapConfig` (#665) and
+      # `rimap_audit::record::ProcessEnd` (#706) are doctests -- a doctest
+      # compiles as its own crate, which is the only place the attribute is in
+      # force. Mirrors `just test-doc`; without it, dropping an attribute in a
+      # conflict resolution leaves CI green.
+      - run: cargo test --workspace --doc --locked
       # The main --workspace pass above runs with the default silent-skip
       # posture: container-gated e2e tests return early when no docker/podman
       # runtime is present, so a runtime hiccup would let them all vanish while
-      # CI stays green. This step re-runs every container-gated e2e binary
-      # (binary(/e2e/) matches e2e, e2e_smtp, and the e2e_wire* family) under
+      # CI stays green. This step re-runs every container-gated binary under
       # RIMAP_REQUIRE_DOCKER=1, which flips the harness from silent-skip to a
       # hard failure. --no-tests=fail additionally guards against a binary being
       # renamed or dropped (zero tests selected). The binary regex auto-covers
       # any future e2e* binary without another CI edit.
+      #
+      # The selector spans two crates. rimap-imap was omitted until #636, which
+      # widened the skip path from "no docker/podman binary" to "no reachable
+      # daemon" — a strictly larger set of conditions, so leaving that crate
+      # outside this arm would let a CI daemon outage silently delete its 28
+      # container tests.
+      #
+      # It joins as `binary(dovecot) and test(case_01)`, not the whole binary:
+      # this step is a canary for "did the harness skip?", and one container
+      # boot answers that as well as 28 do. The --workspace pass above already
+      # runs all 28 in parallel, whereas --no-capture pins this step to a single
+      # test thread — so selecting the full binary would serialize ~28 Dovecot
+      # boots and add minutes for no extra signal. If case_01 is ever renamed,
+      # --no-tests=fail turns that into a loud failure here rather than a silent
+      # loss of the canary. rimap-imap's other container binary, proton, stays
+      # out on purpose: it needs a Proton Bridge no CI runner has.
       #
       # Deliberately NOT --profile ci (#625): this step runs only
       # container-backed e2e binaries, so under a dead or contended Docker
@@ -113,8 +136,8 @@ jobs:
       # daemon outage fails this step in seconds instead of minutes.
       - name: e2e suites — fail if container runtime unavailable or zero tests selected
         run: |
-          cargo nextest run -p rimap-server \
-            -E 'binary(/e2e/)' \
+          cargo nextest run -p rimap-server -p rimap-imap \
+            -E 'binary(/e2e/) + (binary(dovecot) and test(case_01))' \
             --locked --no-tests=fail \
             --no-capture
         env:
@@ -136,7 +159,7 @@ jobs:
         with:
           key: msrv
       - run: cargo check --workspace --all-targets --all-features --locked
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
@@ -157,7 +180,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: tool-schema-drift
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: just
       - name: Regenerate tool schemas
@@ -186,7 +209,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: tools-doc-drift
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: just
       - name: Regenerate docs/tools.md
@@ -214,13 +237,87 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: just
       - name: Validate publish metadata
         run: just check-metadata
       - name: Unit-test publish-crates.sh
         run: just test-publish-script
+      # post-release-bump runs once per release, against a workspace layout
+      # that has grown since the job was written. Nothing else exercises it on
+      # a normal branch, which is how its file set fell three files behind
+      # (issue #662). Pure bash plus one read-only git read — same profile as
+      # the publish-script tests above.
+      - name: Unit-test post-release-bump.sh
+        run: just test-post-release-bump
+      # semver-baseline.sh picks the baseline for BOTH the `semver-checks` job
+      # below and release.yml's publish gate (issue #650). Its cases build
+      # throwaway git repos in a temp dir, so they run here rather than in
+      # `semver-checks`: no cargo, no network, and no dependence on this
+      # checkout's tags — which this job deliberately does not fetch.
+      - name: Unit-test semver-baseline.sh
+        run: just test-semver-baseline
+      # prune-containers.sh picks the container runtime the `test` recipe's
+      # nextest run will actually use, so a divergence between the two is
+      # silent otherwise (issue #689). Its cases drive the script against fake
+      # docker/podman binaries in an isolated PATH — no real runtime, no
+      # network — so it runs here alongside the other pure-bash script tests.
+      - name: Unit-test prune-containers.sh
+        run: just test-prune-containers
+
+  # Public-API SemVer gate (issue #633). Until this job existed,
+  # `cargo semver-checks` ran only in release.yml's `publish` job, so a PR that
+  # broke a published crate's public API went green and the *release* reddened
+  # later with the break already on `main`.
+  #
+  # Its own job rather than a step in `publish-checks`: `publish-checks` is a
+  # manifest-only job that never builds, and this needs two full rustdoc builds
+  # (branch + baseline), which would turn a ~1 min job into a ~10 min one.
+  #
+  # `just semver-checks` baselines on the last `vX.Y.Z` tag, not on crates.io —
+  # the registry holds only `0.0.0` placeholder reservations, against which no
+  # break is expressible. See the recipe comment in the justfile.
+  semver-checks:
+    name: semver-checks
+    runs-on: ubuntu-24.04
+    # Two full workspace builds plus rustdoc, and the baseline tree is extracted
+    # under target/semver-checks/, which rust-cache prunes before saving — so
+    # the baseline half is always cold however warm the cache is.
+    timeout-minutes: 45
+    # `-D warnings` from the workflow env would apply to the *baseline* rustdoc
+    # build too, failing this job on lints that a newer toolchain emits against
+    # already-released code — a red gate that says nothing about SemVer. The
+    # branch's own lint coverage is the `clippy` job's, not this one's.
+    #
+    # An empty value also overrides `build.rustflags` from a `.cargo/config.toml`
+    # rather than merging with it. There is no such file today; if one is added,
+    # this job stops honouring it. Same applies to RUSTDOCFLAGS, which no
+    # workflow sets — a workflow-level one would need a matching override here.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # The baseline is resolved with `git describe`, which needs the tags
+          # and the history back to the last one. A shallow clone has neither.
+          fetch-depth: 0
+      # rimap-config -> keyring -> dbus-secret-service links libdbus-1 at build
+      # time, and the baseline build needs it just as the branch build does.
+      - name: Install libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          key: semver-checks
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+        with:
+          tool: just,cargo-semver-checks@0.48.0
+      - name: Check public API against the last release tag
+        run: just semver-checks
 
   # Dependency hygiene. The fuzz-lockfile parity gate (issue #608) lives here
   # because both are dependency-resolution gates, which is its thematic home.
@@ -244,7 +341,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: just
       # Ahead of cargo-deny: the parity result must not be masked by an
@@ -268,7 +365,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: zizmor
       - run: zizmor .github/workflows/
@@ -299,11 +396,54 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           key: sonarqube
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-nextest
+      # Driven through `nextest`, not the bare `cargo llvm-cov` that runs
+      # `cargo test` (#693). That default put this job three differences away
+      # from "test (stable)" at once — instrumented, different runner, and
+      # `.config/nextest.toml` applying to nothing here — so a flake seen only
+      # on this arm read as an instrumentation cost when instrumentation was
+      # measured at 1.02-1.27x and is the smallest of the three (#671, #692).
+      # With nextest, each test gets its own process and the shared config
+      # applies: `profile.ci`'s `fail-fast = { max-fail = 20 }` now bounds this
+      # arm the same way it bounds the test jobs, and the `container-backed` /
+      # `chaos-backed` groups and the 5s advisory `leak-timeout` now cover it.
+      #
+      # `--all-features` stays, and is deliberately NOT mirrored into "test
+      # (stable)": it is what makes the feature-gated code (`test-support`,
+      # `fuzzing`, `test-injection`, `vendored-keyring`) compile and count
+      # toward coverage at all, and the one suite it additionally selects
+      # (`proton-bridge-tests`) self-skips with no Proton Bridge to reach. The
+      # required test arm should not be made to carry that suite just to match.
+      #
+      # `--no-tests=pass` matches "test (stable)" — a workspace member with no
+      # tests is not a failure. nextest does not run doctests, and neither did
+      # the `cargo test` this replaces: cargo-llvm-cov excludes them unless
+      # `--doctests` is passed, so nothing is lost here (relevant to #708).
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --all-features --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov nextest --locked --workspace --all-features \
+            --no-tests=pass --profile ci \
+            --lcov --output-path lcov.info
+      # The scanner treats an empty or truncated lcov.info as "no coverage
+      # data" and still exits 0, so a report that silently stopped being
+      # produced would land as a green job with the quality gate reading
+      # whatever it read last. Fail on zero records instead, and print the
+      # totals so a later change to this arm can be diffed against them.
+      - name: Verify lcov.info is non-empty and report totals
+        run: |
+          awk -F: '
+            /^LF:/ { found += $2 }
+            /^LH:/ { hit += $2 }
+            END {
+              if (found == 0) {
+                print "::error::lcov.info records no instrumented lines — the coverage report is empty"
+                exit 1
+              }
+              printf "lcov.info: %d/%d lines covered (%.2f%%)\n", hit, found, 100 * hit / found
+            }
+          ' lcov.info
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f  # v8.2.1
         env:

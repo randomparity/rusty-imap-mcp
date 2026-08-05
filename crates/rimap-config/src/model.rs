@@ -3,6 +3,30 @@
 //!
 //! Validation is a separate pass (`validate.rs`): these structs only describe
 //! *shape*. An instance that deserializes successfully may still be invalid.
+//!
+//! # Policy: every struct here is `#[non_exhaustive]`
+//!
+//! The TOML schema grows — that is the normal life of a config format — and
+//! before #665 each new `pub` field was a breaking change to the public API.
+//! #648 is the worked example: one field on [`LimitsConfig`] forced the whole
+//! workspace to `0.2.0`. Marking every struct `#[non_exhaustive]` retires that
+//! failure mode; adding a field is now additive.
+//!
+//! This mirrors `rimap_content::output`, which has carried the same policy
+//! since Sprint 4b. **Any struct added to this module gets the attribute.**
+//!
+//! The attribute does not restrict this crate, so the `merge_onto`
+//! destructuring below and the derived `Deserialize` impls are unaffected.
+//! What it costs downstream is the struct literal: callers use
+//! `..Default::default()` where a `Default` exists, and the constructors on
+//! [`ImapConfig`], [`SmtpConfig`], and [`AuditConfig`] where one does not.
+//!
+//! [`Config`], [`MultiAccountConfig`], and [`RawAccountConfig`] deliberately
+//! get neither a `Default` nor a constructor. They are file-load roots
+//! produced by [`crate::load_and_validate`] / [`crate::load_from_path`], and a
+//! `Default` for them would mint a config with an empty `host` and `username`
+//! — precisely the invalid state `deny_unknown_fields` and the `validate`
+//! module exist to reject.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,6 +35,10 @@ use rimap_core::posture::Posture;
 use serde::{Deserialize, Serialize};
 
 /// The full config file.
+///
+/// Obtained from [`crate::load_from_path`]; not constructible downstream by
+/// design (see the module-level policy note).
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -33,6 +61,33 @@ pub struct Config {
 }
 
 /// `[imap]` block.
+///
+/// Build one with [`ImapConfig::new`] and assign the optional fields
+/// afterwards:
+///
+/// ```
+/// use rimap_config::ImapConfig;
+///
+/// let mut imap = ImapConfig::new("imap.example.com".to_string(), 993, "alice".to_string());
+/// imap.command_timeout_seconds = 60;
+/// ```
+///
+/// The struct literal is not available downstream:
+///
+/// ```compile_fail
+/// use rimap_config::ImapConfig;
+///
+/// let imap = ImapConfig {
+///     host: "imap.example.com".to_string(),
+///     port: 993,
+///     username: "alice".to_string(),
+///     encryption: Default::default(),
+///     tls_fingerprint_sha256: None,
+///     command_timeout_seconds: 30,
+///     connect_timeout_seconds: 10,
+/// };
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImapConfig {
@@ -56,6 +111,26 @@ pub struct ImapConfig {
     /// TCP + TLS handshake + greeting + CAPABILITY probe deadline.
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_seconds: u32,
+}
+
+impl ImapConfig {
+    /// Build an `[imap]` block from the three fields the TOML schema requires.
+    ///
+    /// Every remaining field takes the same value the loader applies when the
+    /// file omits it, so `ImapConfig::new(host, port, username)` and a config
+    /// file naming only those three keys produce identical values.
+    #[must_use]
+    pub fn new(host: String, port: u16, username: String) -> Self {
+        Self {
+            host,
+            port,
+            username,
+            encryption: ImapEncryption::default(),
+            tls_fingerprint_sha256: None,
+            command_timeout_seconds: default_command_timeout(),
+            connect_timeout_seconds: default_connect_timeout(),
+        }
+    }
 }
 
 fn default_command_timeout() -> u32 {
@@ -95,6 +170,7 @@ pub enum FallbackMode {
 }
 
 /// `[defaults.credentials]` / `[[accounts.credentials]]` block.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialsConfig {
@@ -120,6 +196,10 @@ pub enum SmtpEncryption {
 pub use rimap_core::ImapEncryption;
 
 /// `[smtp]` block. Optional — required only when `send_email` is enabled.
+///
+/// Build one with [`SmtpConfig::new`]; the struct literal is not available
+/// downstream.
+#[non_exhaustive]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SmtpConfig {
@@ -134,6 +214,23 @@ pub struct SmtpConfig {
     /// Per-command timeout in seconds.
     #[serde(default = "default_command_timeout")]
     pub command_timeout_seconds: u32,
+}
+
+impl SmtpConfig {
+    /// Build an `[smtp]` block from the four fields the TOML schema requires.
+    ///
+    /// `command_timeout_seconds` takes the same value the loader applies when
+    /// the file omits it.
+    #[must_use]
+    pub fn new(host: String, port: u16, encryption: SmtpEncryption, username: String) -> Self {
+        Self {
+            host,
+            port,
+            encryption,
+            username,
+            command_timeout_seconds: default_command_timeout(),
+        }
+    }
 }
 
 impl core::fmt::Debug for SmtpConfig {
@@ -159,6 +256,7 @@ pub enum Verdict {
 }
 
 /// `[security]` block.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
@@ -202,6 +300,7 @@ fn default_protected_folders() -> Vec<String> {
 }
 
 /// `[security.lookalike]` block. Shape only; Sprint 4 owns semantics.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LookalikeConfig {
@@ -231,6 +330,7 @@ fn default_true() -> bool {
 }
 
 /// `[limits]` block.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
@@ -329,6 +429,10 @@ fn default_tool_call_timeout() -> u32 {
 }
 
 /// `[audit]` block.
+///
+/// Build one with [`AuditConfig::new`]; the struct literal is not available
+/// downstream.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditConfig {
@@ -369,6 +473,25 @@ pub struct AuditConfig {
     pub allowed_base_dir: Option<PathBuf>,
 }
 
+impl AuditConfig {
+    /// Build an `[audit]` block from the one field the TOML schema requires.
+    ///
+    /// Every remaining field takes the same value the loader applies when the
+    /// file omits it — notably `fail_open: false`, the secure default.
+    #[must_use]
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            rotate_bytes: default_rotate_bytes(),
+            rotate_keep: default_rotate_keep(),
+            retention_seconds: None,
+            provenance_window_seconds: default_provenance_window(),
+            fail_open: false,
+            allowed_base_dir: None,
+        }
+    }
+}
+
 fn default_rotate_bytes() -> u64 {
     10_485_760
 }
@@ -380,6 +503,7 @@ fn default_provenance_window() -> u32 {
 }
 
 /// `[attachments]` block.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachmentsConfig {
@@ -393,6 +517,10 @@ pub struct AttachmentsConfig {
 // ---------------------------------------------------------------------------
 
 /// Multi-account configuration format with `[[accounts]]` array.
+///
+/// A file-load root; not constructible downstream by design (see the
+/// module-level policy note).
+#[non_exhaustive]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MultiAccountConfig {
@@ -409,6 +537,7 @@ pub struct MultiAccountConfig {
 }
 
 /// `[defaults]` block — shared settings inherited by accounts.
+#[non_exhaustive]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefaultsConfig {
@@ -424,6 +553,10 @@ pub struct DefaultsConfig {
 }
 
 /// A single account entry in `[[accounts]]`.
+///
+/// Deserialized as part of [`MultiAccountConfig`]; not constructible
+/// downstream by design (see the module-level policy note).
+#[non_exhaustive]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawAccountConfig {
@@ -471,6 +604,7 @@ pub struct RawAccountConfig {
 /// `[accounts.limits]` — the subset of `[limits]` one account overrides.
 ///
 /// Merged onto `[defaults.limits]` by [`AccountLimitsOverrides::merge_onto`].
+#[non_exhaustive]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountLimitsOverrides {
@@ -551,6 +685,7 @@ impl AccountLimitsOverrides {
 ///
 /// Merged onto `[defaults.security]` by
 /// [`AccountSecurityOverrides::merge_onto`].
+#[non_exhaustive]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountSecurityOverrides {
@@ -603,6 +738,7 @@ impl AccountSecurityOverrides {
 
 /// `[accounts.security.lookalike]` — the subset of `[security.lookalike]`
 /// one account overrides.
+#[non_exhaustive]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountLookalikeOverrides {
@@ -644,6 +780,7 @@ impl AccountLookalikeOverrides {
 /// `CredentialsConfig` — the same erasure #624 describes, and in the more
 /// dangerous direction: it would silently restore the shared env-var
 /// fallback that `keyring-only` exists to prevent (#78).
+#[non_exhaustive]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountCredentialsOverrides {

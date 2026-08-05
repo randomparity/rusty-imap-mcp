@@ -1,13 +1,21 @@
 //! Mailpit container harness for the real-socket SMTP e2e. Mirrors
 //! `DovecotHarness`: same `RIMAP_CONTAINER_TOOL` / `RIMAP_REQUIRE_DOCKER`
 //! gating, same `ReservedPort` + compose-project pattern, silent-skip when no
-//! runtime is available. Waits on Mailpit's HTTP `/api/v1/info` and exposes a
-//! delivered-message retrieval helper over the HTTP API.
+//! runtime is usable (no binary, or an unreachable daemon). Waits on
+//! Mailpit's HTTP `/api/v1/info` and exposes a
+//! delivered-message retrieval helper over the HTTP API. The runtime gate
+//! itself is `rimap-container-gate` (#675); only the mapping onto
+//! [`HarnessError`] is local — which is why `e2e_smtp_real`, linking this
+//! harness and the Dovecot one, selects and probes once rather than twice.
 //! See `AGENTS.md` "Container runtime for integration tests".
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+use rimap_container_gate::{
+    RuntimeProbe, probe_runtime, require_runtime, runtime, unusable_reason,
+};
 
 /// Failure modes for `MailpitHarness::try_start`. `DockerUnavailable` is the
 /// silent-skip signal. `HealthCheckFailed` replaces Dovecot's
@@ -39,47 +47,25 @@ impl std::fmt::Display for HarnessError {
 impl std::error::Error for HarnessError {}
 
 fn check_prerequisites() -> Result<(), HarnessError> {
-    let require_runtime = std::env::var("RIMAP_REQUIRE_DOCKER").is_ok();
-    if !runtime_available() {
-        return if require_runtime {
-            Err(HarnessError::ComposeFailed(
-                "neither docker nor podman found but RIMAP_REQUIRE_DOCKER=1".into(),
-            ))
-        } else {
-            Err(HarnessError::DockerUnavailable)
-        };
+    gate(runtime(), probe_runtime(), require_runtime())
+}
+
+/// Map `rimap_container_gate`'s verdict onto this harness's error type. Pure,
+/// so every combination is unit-testable without a container runtime. Covers
+/// only *prerequisites*: a failure once the container is being brought up — an
+/// unpullable image, exhausted address pools — stays a `ComposeFailed` that no
+/// caller silent-skips on.
+fn gate(tool: &str, probe: RuntimeProbe, require_runtime: bool) -> Result<(), HarnessError> {
+    let Some(reason) = unusable_reason(tool, probe) else {
+        return Ok(());
+    };
+    if require_runtime {
+        Err(HarnessError::ComposeFailed(format!(
+            "{reason} but RIMAP_REQUIRE_DOCKER=1"
+        )))
+    } else {
+        Err(HarnessError::DockerUnavailable)
     }
-    Ok(())
-}
-
-fn runtime() -> &'static str {
-    static TOOL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    TOOL.get_or_init(|| {
-        match std::env::var("RIMAP_CONTAINER_TOOL").as_deref() {
-            Ok("docker") => return "docker",
-            Ok("podman") => return "podman",
-            _ => {}
-        }
-        if binary_present("docker") {
-            "docker"
-        } else if binary_present("podman") {
-            "podman"
-        } else {
-            "docker"
-        }
-    })
-}
-
-fn binary_present(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn runtime_available() -> bool {
-    binary_present("docker") || binary_present("podman")
 }
 
 /// Mint a unique-on-host identifier for compose project naming. Same rationale
@@ -296,4 +282,46 @@ fn force_use_for_dead_code_link(h: &MailpitHarness) {
     let _ = h.smtp_port();
     let _ = h.api_base();
     let _ = MailpitHarness::fetch_raw_by_subject;
+}
+
+#[cfg(test)]
+mod tests {
+    #![expect(clippy::expect_used, reason = "tests")]
+
+    use super::{HarnessError, RuntimeProbe, gate};
+
+    /// A reachable binary with a dead daemon must skip, not hard-fail (#636).
+    #[test]
+    fn gate_skips_when_daemon_is_unreachable() {
+        let err =
+            gate("docker", RuntimeProbe::DaemonDown, false).expect_err("must not pass the gate");
+        assert!(
+            matches!(err, HarnessError::DockerUnavailable),
+            "daemon-down must be a silent skip, got {err:?}"
+        );
+    }
+
+    /// ...but CI, which sets `RIMAP_REQUIRE_DOCKER=1`, must still see it, and
+    /// must name the runtime it actually probed.
+    #[test]
+    fn gate_is_loud_when_daemon_is_unreachable_and_docker_required() {
+        let err = gate("podman", RuntimeProbe::DaemonDown, true).expect_err("must not pass");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, HarnessError::ComposeFailed(_)),
+            "RIMAP_REQUIRE_DOCKER=1 must turn a dead daemon into a hard error, got {err:?}"
+        );
+        assert!(msg.contains("podman"), "must name the runtime: {msg:?}");
+        assert!(msg.contains("daemon"), "must name the cause: {msg:?}");
+        assert!(msg.contains("RIMAP_REQUIRE_DOCKER"), "got {msg:?}");
+    }
+
+    #[test]
+    fn gate_admits_a_ready_runtime_and_skips_a_missing_binary() {
+        assert!(gate("docker", RuntimeProbe::Ready, true).is_ok());
+        assert!(matches!(
+            gate("docker", RuntimeProbe::NoBinary, false),
+            Err(HarnessError::DockerUnavailable)
+        ));
+    }
 }

@@ -185,16 +185,19 @@ impl AuditWriter {
     ///   here only under `fail_open = false`, where `write_record` returned
     ///   the error rather than counting it.
     ///
-    /// ## Not yet wired into `process_end`
+    /// ## Persisted in `process_end`
     ///
-    /// The intent is for the shutdown `process_end` record to read this
-    /// counter and persist it as `audit_write_failures_suppressed` so
-    /// operators can see how many records were dropped in the process's
-    /// lifetime, under either `fail_open` setting. That wiring depends on
-    /// the audit lifecycle glue (`process_start`/`process_end` emission)
-    /// tracked in issue #8 and is not yet in place. Today this accessor
-    /// is available for ad-hoc inspection and tests; the persistent
-    /// audit trail will follow when #8 lands.
+    /// The shutdown `process_end` record reads this counter into its
+    /// [`records_lost`](crate::record::ProcessEnd::records_lost) field, so
+    /// an operator reading the JSONL can tell that the file has a hole in
+    /// it without correlating against stderr they probably did not capture
+    /// (#647). The two sources above are reported as one number on
+    /// purpose: either way a record that should be on disk is not, the
+    /// cause is in the logs, and no operator decision turns on which of
+    /// the two produced it.
+    ///
+    /// A hard crash writes no `process_end` at all, so a non-zero count is
+    /// evidence of loss while a missing record is not evidence of none.
     #[must_use]
     pub fn suppressed_failures(&self) -> u64 {
         self.suppressed_failures.load(Ordering::Relaxed)
@@ -402,6 +405,8 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
         writer.write_record(&rec).unwrap();
@@ -440,6 +445,8 @@ mod tests {
                 payload: Payload::ProcessEnd(ProcessEnd {
                     reason: ProcessEndReason::Eof,
                     total_tool_calls: seq,
+                    records_lost: 0,
+                    undrained_dispatches: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -475,6 +482,8 @@ mod tests {
                 payload: Payload::ProcessEnd(ProcessEnd {
                     reason: ProcessEndReason::Eof,
                     total_tool_calls: seq,
+                    records_lost: 0,
+                    undrained_dispatches: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -545,6 +554,8 @@ mod tests {
                 payload: Payload::ProcessEnd(ProcessEnd {
                     reason: ProcessEndReason::Eof,
                     total_tool_calls: seq,
+                    records_lost: 0,
+                    undrained_dispatches: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -731,6 +742,7 @@ mod tests {
             git_commit: String::new(),
             posture: Some(rimap_core::Posture::DraftSafe),
             accounts: None,
+            tool_matrix: Vec::new(),
             config_path: std::path::PathBuf::from("/tmp/config.toml"),
             config_hash_sha256: "ab".repeat(32),
             trailing: TrailingState {
@@ -773,6 +785,8 @@ mod tests {
             .log_process_end(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 42,
+                records_lost: 0,
+                undrained_dispatches: 0,
             })
             .unwrap();
         assert_eq!(seq, crate::record::ids::Seq::FIRST);
@@ -818,6 +832,8 @@ mod tests {
             .log_process_end(crate::record::ProcessEnd {
                 reason: crate::record::ProcessEndReason::Eof,
                 total_tool_calls: writer.total_tool_calls(),
+                records_lost: 0,
+                undrained_dispatches: 0,
             })
             .unwrap();
         assert_eq!(writer.total_tool_calls(), 2);
@@ -847,6 +863,8 @@ mod tests {
             .log_process_end(ProcessEnd {
                 reason: ProcessEndReason::SignalTerm,
                 total_tool_calls: 7,
+                records_lost: 0,
+                undrained_dispatches: 0,
             })
             .unwrap();
         drop(writer);
@@ -879,6 +897,7 @@ mod tests {
             git_commit: String::new(),
             posture: Some(rimap_core::Posture::DraftSafe),
             accounts: None,
+            tool_matrix: Vec::new(),
             config_path: std::path::PathBuf::from("/tmp/c.toml"),
             config_hash_sha256: "00".repeat(32),
             trailing: TrailingState {
@@ -942,6 +961,8 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
 
@@ -986,6 +1007,8 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::Eof,
                 total_tool_calls: 0,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
 

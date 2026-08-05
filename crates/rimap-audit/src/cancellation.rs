@@ -5,6 +5,17 @@
 //! Used by `rimap-server/src/mcp/audit_envelope.rs::AuditEnvelopeGuard` to
 //! close out the `tool_start` / `tool_end` pair when the MCP dispatch future
 //! is dropped mid-call (#71, #99).
+//!
+//! [`spawn_drainer`] writes each record through a bare
+//! `tokio::task::spawn_blocking`, not `DispatchDrain::spawn_blocking_tracked`.
+//! That is a sanctioned exception, not the general pattern: `spawn_blocking_tracked`
+//! lives on `DispatchDrain` in `rimap-server`, which depends on `rimap-audit`
+//! and not the reverse, so it is unreachable from this crate. The drainer's
+//! `JoinHandle` is bounded a different way instead — a join-budget timeout
+//! and an `abort()` on overrun in `rimap-server`'s shutdown path. See
+//! `docs/architecture/audit-locking.md` for the full argument. Do not copy
+//! this shape for a new audit-write path elsewhere in the workspace; use
+//! `spawn_blocking_tracked`.
 
 use crate::ToolEndInputs;
 use crate::writer::AuditWriter;
@@ -51,11 +62,16 @@ pub fn cancellation_channel() -> (CancelledToolEndSender, CancelledToolEndReceiv
 }
 
 /// Spawn a dedicated tokio task that drains `receiver` and writes each
-/// record via `AuditWriter::log_tool_end` on a `spawn_blocking` thread.
-/// The task exits when all senders are dropped and the channel drains.
+/// record via `AuditWriter::log_tool_end` on a bare `spawn_blocking` thread
+/// — the sanctioned exception documented at the top of this module, not a
+/// pattern to copy. The task exits when all senders are dropped and the
+/// channel drains.
 ///
 /// The returned `JoinHandle` should be `await`ed on shutdown so the drainer
-/// finishes any remaining queued records before the runtime exits.
+/// finishes any remaining queued records before the runtime exits. Callers
+/// (`rimap-server/src/main.rs`) bound that wait with a timeout and `abort()`
+/// the task on overrun, since this function has no way to bound itself from
+/// inside `rimap-audit` — see `docs/architecture/audit-locking.md`.
 #[must_use]
 pub fn spawn_drainer(
     receiver: CancelledToolEndReceiver,

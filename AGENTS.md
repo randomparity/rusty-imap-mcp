@@ -62,6 +62,7 @@ just test-fast       # inner-loop unit tests (~4 s; skips heavy integration/prop
 just test            # full nextest workspace — run before pushing
 just test-msrv       # same as `test` but on the MSRV toolchain (1.88.0)
 just deny            # cargo deny check (advisories, licenses, bans, sources)
+just semver-checks   # public API vs the last vX.Y.Z tag (see RELEASING.md)
 just ci              # full local-CI equivalent — run this before pushing
 just hooks           # re-run prek on all files
 just test-injection  # adversarial email corpus (content pipeline, future)
@@ -76,16 +77,57 @@ there, not in ad-hoc scripts.
 The Dovecot integration harness autodetects `docker` first, then falls
 back to `podman` (via `podman compose` / `podman-compose`). Both
 runtimes work on macOS (Apple Silicon and Intel), Ubuntu CI, and Fedora.
-Override with `RIMAP_CONTAINER_TOOL=docker` or
-`RIMAP_CONTAINER_TOOL=podman` if you need to force a specific one. Set
-`RIMAP_REQUIRE_DOCKER=1` to fail loudly instead of silently skipping
-when no runtime is installed.
+
+Autodetect picks the first runtime that *works*, not the first one
+installed: each candidate is probed in turn and the first whose daemon
+answers is selected, so a stopped Docker Desktop falls through to a
+working podman instead of skipping the suite. Set
+`RIMAP_CONTAINER_TOOL=docker` or `RIMAP_CONTAINER_TOOL=podman` to force a
+choice — an explicit override probes only the runtime it names and never
+falls through, so a typo'd or unusable override fails on its own terms.
+
+The gate probes the runtime, not just the binary: it runs
+`<runtime> info`, the first call that actually contacts the daemon. A
+missing binary *and* a binary whose daemon cannot be reached (stopped,
+restarting, socket gone) are both silent skips — they are the two ways a
+host genuinely cannot run the fixture. Selection and its verdict share
+one cache, so the probe runs once per test process (twice only when the
+first candidate is unusable) and gives up after 10s per candidate. Set
+`RIMAP_REQUIRE_DOCKER=1` to turn either into a loud failure; CI does.
+
+All of that lives once, in the `rimap-container-gate` crate
+(`publish = false`, a dev-dependency of `rimap-imap` and `rimap-server`).
+Every container harness — `rimap-imap`'s Dovecot one and `rimap-server`'s
+Dovecot, Mailpit, and chaos ones — calls it and maps its verdict onto
+that harness's own error type; the compose files, readiness probes, and
+`Drop` teardown stay with each fixture. It used to be four copies, and
+both #636 and #674 had to be fixed in all four with nothing detecting a
+copy that got missed (issue #675). Because the cache lives in the crate,
+a binary linking two harnesses — `e2e_smtp_real` links Dovecot and
+Mailpit — still selects and probes exactly once.
+
+Everything else is loud, deliberately. The probe only reports "cannot
+run containers" when the runtime's own stderr says it could not reach
+its engine; any other non-zero exit — and a probe that overruns its
+budget — is treated as usable, so the run proceeds to `compose up` and
+fails there. That is what keeps a *live* daemon refusing work visible:
+an unpullable image, a readiness timeout, or
+`all predefined address pools have been fully subnetted` (which is what
+several agents running `just ci` at once actually hit) is a hard failure
+at every posture, never a skip.
 
 The fixture image is `docker.io/dovecot/dovecot:2.4.4-root` (rootful
 flavor, multi-arch `linux/amd64` + `linux/arm64`). It listens on
 container ports 143 (IMAP+STARTTLS) and 993 (IMAPS); the Rust harness
 maps host ports dynamically. There is no arch gate — every supported
 developer host can run the suite.
+
+`just test`'s `prune-containers` recipe (`scripts/prune-containers.sh`)
+runs before any test binary starts, so it cannot call
+`rimap-container-gate`; it mirrors the same contract in shell instead —
+same autodetect order, same "probe, don't just check the binary"
+behavior, same verbatim `RIMAP_CONTAINER_TOOL` override — so the two
+never disagree about which runtime a given host lands on (issue #689).
 
 ### Local Test Troubleshooting: Address Pool Exhaustion
 
@@ -110,10 +152,11 @@ audit-log pairing + namespace attribution.
   is available; with Docker on either linux/amd64 or macOS arm64,
   expect ~10–60s on a warm machine (Dovecot bring-up dominates).
 - Gating: silent-skip ONLY when the host genuinely cannot run the
-  fixture — missing docker/podman. `RIMAP_REQUIRE_DOCKER=1` flips
-  every failure mode (compose-up, readiness timeout, port reservation,
-  fingerprint read) to a panic with diagnostic context. Same
-  convention as the legacy in-process `e2e_full_session`.
+  fixture — missing docker/podman, or a runtime whose daemon does not
+  answer the pre-flight probe. `RIMAP_REQUIRE_DOCKER=1` flips every
+  failure mode (unusable runtime, compose-up, readiness timeout, port
+  reservation, fingerprint read) to a panic with diagnostic context.
+  Same convention as the legacy in-process `e2e_full_session`.
 - Schema regen: when changing any `<Tool>Meta` or `<Tool>Untrusted`
   struct in `crates/rimap-server/src/tools/`, run
   `just regen-tool-schemas` and commit the diff. CI fails on a
@@ -282,7 +325,8 @@ are the ones that trip people up or aren't obvious from the lint set.
   disconnects. It terminates TLS with a pinned self-signed cert, is
   host-runnable (no container), and is PR-blocking. Use the Dovecot container
   harness (`tests/integration/`) for *conformant* end-to-end behavior; it is
-  container-gated and silent-skips without a runtime.
+  container-gated and silent-skips without a usable runtime (see "Container
+  runtime for integration tests").
 
 ## Git, commits, and PR workflow
 
@@ -295,16 +339,25 @@ are the ones that trip people up or aren't obvious from the lint set.
   underlying issue — do not `--no-verify`. Do not `--amend` commits that have
   been pushed.
 - **PR workflow:** feature branch -> push -> PR against `main`. `main` requires
-  twelve status checks, strict (the branch must be up to date before merging):
+  thirteen status checks, strict (the branch must be up to date before merging):
   `rustfmt`, `clippy`, `check (macOS)`, `test (stable)`, `test (MSRV 1.88.0)`,
   `cargo-deny`, `zizmor self-check`, `SonarQube`, `mcp-conformance (Node)`,
-  `publish checks`, `tool-schema drift`, `tools-doc drift`. A separate release
-  workflow triggers on `v*` tags and builds binaries for five platform targets.
+  `publish checks`, `tool-schema drift`, `tools-doc drift`, `semver-checks`. A
+  separate release workflow triggers on `v*` tags and builds binaries for five
+  platform targets.
 - **A CI job outside that list runs without enforcing.** It goes red and the PR
   merges anyway, so adding a gate to an unrequired job silently disarms it
   (issue #613). Before wiring a new check into a job, confirm the job's
   status-check name is required, and add it if not:
   `gh api repos/randomparity/rusty-imap-mcp/branches/main/protection --jq '.required_status_checks.contexts'`
+- **`semver-checks` fails when a PR breaks the public API of a publishable
+  crate** without bumping the planned version. The fix is
+  `cargo set-version --workspace 0.2.0-dev` (from `cargo-edit`), not an
+  override. See [RELEASING.md](RELEASING.md), "Breaking a public API".
+- **`release.yml` runs the same `just semver-checks` before publishing** (issue
+  #650), so a red one is not only a PR problem — it is what stands between a
+  break and an unpublishable-back crates.io version. Do not paper over it in the
+  recipe; the fix belongs in the manifest version.
 - **Never force-push to `main`.** Never amend commits that have been pushed.
   Never skip hooks.
 
