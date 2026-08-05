@@ -1127,14 +1127,26 @@ mod read_deadline_tests {
     }
 
     /// The two graces compose rather than override: the first read on the
-    /// coverage arm pays start-up *and* the arm's tail, so it takes whichever
-    /// is larger instead of the cold-start grace alone.
+    /// coverage arm pays start-up *and* the arm's tail, so it must clear both
+    /// lower bounds.
+    ///
+    /// Asserted as two bounds rather than against
+    /// `COLD_START_TIMEOUT.max(INSTRUMENTED_READ_FLOOR)`, which would only
+    /// restate the implementation — and, while both constants sit at 10 s,
+    /// would hold even if one grace overrode the other. These bounds keep
+    /// biting if either constant moves.
     #[test]
     fn the_cold_start_grace_and_the_floor_compose() {
-        assert_eq!(
-            read_deadline_for(false, REQUEST_TIMEOUT, INSTRUMENTED),
-            COLD_START_TIMEOUT.max(INSTRUMENTED_READ_FLOOR),
-            "the first instrumented read takes the larger of the two graces",
+        let deadline = read_deadline_for(false, REQUEST_TIMEOUT, INSTRUMENTED);
+        assert!(
+            deadline >= COLD_START_TIMEOUT,
+            "the first instrumented read must still cover process start-up; \
+             got {deadline:?}",
+        );
+        assert!(
+            deadline >= INSTRUMENTED_READ_FLOOR,
+            "the first instrumented read must still clear the coverage-arm \
+             floor; got {deadline:?}",
         );
     }
 
