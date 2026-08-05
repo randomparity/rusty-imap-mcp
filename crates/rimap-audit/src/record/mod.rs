@@ -204,15 +204,16 @@ pub struct AccountToolMatrix {
 }
 
 impl AccountToolMatrix {
-    /// Construct a matrix with no explicit verdicts. `tools` is
-    /// `#[serde(default)]` — an account that overrides nothing has an empty
-    /// list — so callers with verdicts assign the field.
+    /// Construct a matrix. `tools` is a parameter rather than a defaulted
+    /// empty list because the one caller resolves it before it can build the
+    /// matrix at all; an account that overrides nothing passes `Vec::new()`
+    /// and says so.
     #[must_use]
-    pub fn new(account: String, posture: Posture) -> Self {
+    pub fn new(account: String, posture: Posture, tools: Vec<ToolVerdict>) -> Self {
         Self {
             account,
             posture,
-            tools: Vec::new(),
+            tools,
         }
     }
 }

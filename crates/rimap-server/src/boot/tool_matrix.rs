@@ -35,9 +35,7 @@ pub fn account_tool_matrix(acfg: &ValidatedAccountConfig) -> AccountToolMatrix {
             ))
         })
         .collect();
-    let mut matrix = AccountToolMatrix::new(acfg.id.as_str().to_string(), acfg.security.posture);
-    matrix.tools = tools;
-    matrix
+    AccountToolMatrix::new(acfg.id.as_str().to_string(), acfg.security.posture, tools)
 }
 
 /// Render one verdict as `<tool>=<allow|deny>(<account|inherited>)`.

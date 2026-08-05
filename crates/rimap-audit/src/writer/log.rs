@@ -357,6 +357,15 @@ impl ProcessStartInputs {
     /// mode-dependent fields (`posture` for single-account, `accounts` for
     /// multi-account, `tool_matrix` for both), and boot assigns whichever it
     /// resolved. The six parameters are the ones every start has.
+    ///
+    /// They stay defaulted rather than joining the signature the way
+    /// [`ToolStartInputs::new`]'s `posture_effective` did, for two reasons. An
+    /// empty `tool_matrix` is not a claim: it is `#[serde(default)]` precisely
+    /// because records written before #632 carry no such field, so a reader
+    /// already cannot distinguish "no overrides" from "written by an older
+    /// build" and does not read it as "no account had an override". And at
+    /// nine parameters a constructor is harder to call correctly than the
+    /// struct it builds, which is the problem this type exists to solve.
     #[must_use]
     pub fn new(
         version: String,

@@ -60,15 +60,15 @@ fn fixed_pid() -> ProcessId {
 /// (E0639) -- both are struct expressions.
 #[test]
 fn record_types_are_built_through_constructors_and_field_assignment() {
-    let matrix = {
-        let mut m = AccountToolMatrix::new("work".to_string(), Posture::Readonly);
-        m.tools = vec![ToolVerdict::new(
+    let matrix = AccountToolMatrix::new(
+        "work".to_string(),
+        Posture::Readonly,
+        vec![ToolVerdict::new(
             ToolName::DeleteMessage,
             false,
             VerdictSource::Account,
-        )];
-        m
-    };
+        )],
+    );
     assert_eq!(matrix.account, "work");
     assert_eq!(matrix.tools.len(), 1);
 
