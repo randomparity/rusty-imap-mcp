@@ -2324,6 +2324,7 @@ mod dispatch_drain_tests {
             .log_process_end(rimap_audit::record::ProcessEnd {
                 reason: rimap_audit::record::ProcessEndReason::Eof,
                 total_tool_calls: 1,
+                records_lost: writer.suppressed_failures(),
             })
             .expect("process_end write succeeds");
     }
