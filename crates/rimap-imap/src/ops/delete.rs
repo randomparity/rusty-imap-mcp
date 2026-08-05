@@ -1,6 +1,6 @@
 //! `delete_message`: STORE +FLAGS (\Deleted) + UID MOVE to Trash.
 
-use crate::connection::ImapSession;
+use crate::connection::{ImapSession, ServerCapabilities};
 use crate::error::ImapError;
 use crate::ops::store;
 use crate::types::{Flag, FlagAction, Uid};
@@ -16,24 +16,26 @@ use crate::types::{Flag, FlagAction, Uid};
 ///
 /// Returns `ImapError::InvalidInput` if `source_folder` or `trash_folder`
 /// fails `validate_folder_name`.
+/// Returns `ImapError::CapabilitiesUnknown` when `capabilities` is
+/// [`ServerCapabilities::Unknown`] and a Trash move is required — see the
+/// refusal below.
 /// Propagates connection-lost or protocol errors from async-imap.
 pub(crate) async fn delete_message(
     session: &mut ImapSession,
     uid: Uid,
     source_folder: &str,
     trash_folder: &str,
-    has_move: bool,
-    has_uidplus: bool,
+    capabilities: ServerCapabilities,
 ) -> Result<DeleteResult, ImapError> {
     super::folder_management::validate_folder_name(source_folder)?;
     super::folder_management::validate_folder_name(trash_folder)?;
 
-    // Step 1: STORE +FLAGS (\Deleted)
-    store::store(session, &[uid], &[Flag::Deleted], FlagAction::Add).await?;
-
-    // Step 2: If already in Trash, skip the move
-    let in_trash = source_folder.eq_ignore_ascii_case(trash_folder);
-    if in_trash {
+    // Step 1: If already in Trash, flag and stop. Decided before capabilities
+    // are consulted because this path issues neither UID MOVE nor EXPUNGE, so
+    // an uninformative probe cannot endanger it — refusing here would cost
+    // availability and buy nothing.
+    if source_folder.eq_ignore_ascii_case(trash_folder) {
+        store::store(session, &[uid], &[Flag::Deleted], FlagAction::Add).await?;
         return Ok(DeleteResult {
             uid,
             moved_to_trash: false,
@@ -42,7 +44,17 @@ pub(crate) async fn delete_message(
         });
     }
 
-    // Step 3: Move to Trash
+    // Step 2: Everything below can reach the folder-wide EXPUNGE, so an
+    // advertisement is required rather than assumed (#649). This runs *before*
+    // the `\Deleted` STORE: refusing after it would leave the message flagged
+    // for deletion by whatever expunges the folder next, which is the outcome
+    // being refused, merely deferred.
+    let (has_move, has_uidplus) = capabilities.require_known("delete_message")?;
+
+    // Step 3: STORE +FLAGS (\Deleted)
+    store::store(session, &[uid], &[Flag::Deleted], FlagAction::Add).await?;
+
+    // Step 4: Move to Trash
     let uid_set = store::uid_set_string(&[uid]);
     if has_move {
         session
@@ -89,7 +101,9 @@ pub struct DeleteResult {
     /// `true` only when the fallback ran AND the server lacked UIDPLUS, so
     /// the EXPUNGE was folder-wide (RFC 3501) — removing every `\Deleted`
     /// message in the source folder, not just the targeted UID. This is the
-    /// distinct data-loss condition (`!has_move && !has_uidplus`); callers
-    /// should surface `ServerFolderWideExpungeDataLoss`.
+    /// distinct data-loss condition (the server advertised *neither* MOVE nor
+    /// UIDPLUS); callers should surface `ServerFolderWideExpungeDataLoss`.
+    /// A session whose capabilities are unknown never produces this result —
+    /// the delete is refused instead (#649).
     pub folder_wide_expunge: bool,
 }

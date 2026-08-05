@@ -243,6 +243,13 @@ jobs:
       # the publish-script tests above.
       - name: Unit-test post-release-bump.sh
         run: just test-post-release-bump
+      # semver-baseline.sh picks the baseline for BOTH the `semver-checks` job
+      # below and release.yml's publish gate (issue #650). Its cases build
+      # throwaway git repos in a temp dir, so they run here rather than in
+      # `semver-checks`: no cargo, no network, and no dependence on this
+      # checkout's tags — which this job deliberately does not fetch.
+      - name: Unit-test semver-baseline.sh
+        run: just test-semver-baseline
 
   # Public-API SemVer gate (issue #633). Until this job existed,
   # `cargo semver-checks` ran only in release.yml's `publish` job, so a PR that
