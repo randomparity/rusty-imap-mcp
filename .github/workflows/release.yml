@@ -476,6 +476,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          # `just semver-checks` resolves its baseline with `git describe`, which
+          # needs the tags and the history back to the previous release. The
+          # default shallow, tagless clone has neither.
+          fetch-depth: 0
       # The publish verify build compiles rimap-config -> keyring (Linux libdbus).
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
@@ -484,11 +488,31 @@ jobs:
           toolchain: stable
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
-          tool: cargo-semver-checks@0.48.0
-      # Gate: fail the publish on accidental SemVer breakage vs the last
-      # crates.io release. No-ops on the first release (no baseline).
+          tool: just,cargo-semver-checks@0.48.0
+      # Last gate before an irreversible action: a crates.io version cannot be
+      # unpublished, only yanked. Every other gate in this repo guards a merge,
+      # which is revertible.
+      #
+      # `just semver-checks` — the same recipe the per-PR `semver-checks` job
+      # runs, so publish and PR share one baseline definition (issue #650). It
+      # diffs against the PREVIOUS `vX.Y.Z` tag; HEAD here IS the tag being
+      # released, and scripts/semver-baseline.sh is what stops that from becoming
+      # a self-comparison. It does NOT baseline on crates.io: the registry holds
+      # only `0.0.0` placeholder reservations, against which no break is
+      # expressible, so a registry baseline is green by construction.
+      #
+      # Not redundant with the per-PR job: the release triggers on a tag push and
+      # `verify-tag` checks the tag against Cargo.toml, not that the tagged
+      # commit ever reached `main` — a tag cut off a branch is published without
+      # the PR gate having seen that tree.
+      #
+      # This runs on `stable` (the job's publish toolchain) where the PR job pins
+      # 1.94.0. Both halves of a run use one toolchain, so the diff stays
+      # consistent; the skew only bites if the baseline tag's code stops
+      # compiling under a future stable, which reads as a build error, not a
+      # SemVer verdict.
       - name: Check for SemVer breakage
-        run: cargo semver-checks check-release --workspace
+        run: just semver-checks
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

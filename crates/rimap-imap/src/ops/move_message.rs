@@ -1,7 +1,7 @@
 //! UID MOVE with COPY+DELETE fallback for servers without the MOVE
 //! extension (RFC 6851).
 
-use crate::connection::ImapSession;
+use crate::connection::{ImapSession, ServerCapabilities};
 use crate::error::ImapError;
 use crate::ops::store;
 use crate::types::{Flag, FlagAction, MoveResult, Uid};
@@ -23,8 +23,10 @@ pub struct MoveOutcome {
     /// `true` only when the fallback ran AND the server lacked UIDPLUS, so
     /// the EXPUNGE was folder-wide (RFC 3501) — removing every `\Deleted`
     /// message in the source folder, not just the moved UIDs. This is the
-    /// distinct data-loss condition (`!has_move && !has_uidplus`); callers
-    /// should surface `ServerFolderWideExpungeDataLoss`.
+    /// distinct data-loss condition (the server advertised *neither* MOVE nor
+    /// UIDPLUS); callers should surface `ServerFolderWideExpungeDataLoss`.
+    /// A session whose capabilities are unknown never produces this outcome —
+    /// the move is refused instead (#649).
     pub folder_wide_expunge: bool,
     /// Source-folder UIDVALIDITY observed at the guard STATUS probe, or
     /// `None` if no guard was requested or the server omitted it.
@@ -37,12 +39,16 @@ pub struct MoveOutcome {
 
 /// Move `uids` from the currently selected folder to `dest_folder`.
 ///
-/// When `has_move` is `true` the server advertised the MOVE capability
-/// and UID MOVE is used directly. A BAD response in this case is
-/// propagated as an error (the server lied about its capabilities).
+/// When the serving session advertised MOVE, UID MOVE is used directly. A BAD
+/// response in this case is propagated as an error (the server lied about its
+/// capabilities).
 ///
-/// When `has_move` is `false` the COPY+DELETE fallback is used
-/// immediately without attempting UID MOVE.
+/// When it advertised no MOVE, the COPY+DELETE fallback is used immediately
+/// without attempting UID MOVE.
+///
+/// When `capabilities` is [`ServerCapabilities::Unknown`] the move is refused
+/// rather than served, because the fallback it would otherwise pick can issue
+/// a folder-wide EXPUNGE — see the refusal below and #649.
 ///
 /// If `expected_source_uidvalidity` is `Some(v)`, a STATUS probe is
 /// issued against `src_folder` before the move. A mismatch returns
@@ -52,6 +58,8 @@ pub struct MoveOutcome {
 /// # Errors
 ///
 /// Returns `ImapError::BatchTooLarge` if `uids.len() > MAX_BATCH`.
+/// Returns `ImapError::CapabilitiesUnknown` if `capabilities` is
+/// [`ServerCapabilities::Unknown`].
 /// Returns `ImapError::UidValidityChanged` on a UIDVALIDITY mismatch.
 /// Propagates connection-lost or protocol errors from async-imap.
 pub(crate) async fn move_messages(
@@ -60,8 +68,7 @@ pub(crate) async fn move_messages(
     dest_folder: &str,
     uids: &[Uid],
     expected_source_uidvalidity: Option<u32>,
-    has_move: bool,
-    has_uidplus: bool,
+    capabilities: ServerCapabilities,
 ) -> Result<MoveOutcome, ImapError> {
     crate::ops::folders::validate_server_folder_name(dest_folder)?;
     if uids.len() > MAX_BATCH {
@@ -79,6 +86,14 @@ pub(crate) async fn move_messages(
             destination_uid_validity: None,
         });
     }
+
+    // Both branches below turn on the advertisement, and the one they pick
+    // when it says "no MOVE, no UIDPLUS" purges every `\Deleted` message in
+    // `src_folder`. A session that never produced a readable advertisement
+    // gets a refusal, not that branch by default (#649). Ahead of the STATUS
+    // probe and every mutation, so a refused move leaves the mailbox as it
+    // found it.
+    let (has_move, has_uidplus) = capabilities.require_known("move")?;
 
     // UIDVALIDITY guard: STATUS does not require SELECT and does not
     // perturb the session's currently selected mailbox.

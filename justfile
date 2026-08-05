@@ -434,23 +434,27 @@ publish-dry-run:
 # does not exist at the baseline tag is an error ("package not found"), not a
 # skip. A PR adding a new publishable crate must pass `--exclude <crate>` for
 # that one PR — see RELEASING.md.
+#
+# This is also release.yml's publish gate (issue #650), so the baseline is
+# resolved by scripts/semver-baseline.sh rather than inline: at release time HEAD
+# is the tag being released, and the script is what keeps the gate from diffing
+# that tree against itself. See the header comment there.
 semver-checks:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Capture stderr rather than discarding it: "no tag found" and "not a git
-    # repo" both exit non-zero, and only the first deserves the fetch hint.
-    if ! baseline="$(git describe --tags --abbrev=0 \
-        --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' 2>&1)"; then
-        echo "error: no vX.Y.Z tag found, so there is no SemVer baseline" >&2
-        echo "  git describe: $baseline" >&2
-        echo "hint: run 'git fetch --tags' (a shallow or tagless clone hides them)" >&2
-        exit 1
-    fi
+    baseline="$(./scripts/semver-baseline.sh)"
     echo "semver baseline: $baseline ($(git rev-parse --short "$baseline"))"
     cargo semver-checks check-release --workspace --baseline-rev "$baseline"
 
+# Unit-test semver-baseline.sh (baseline selection, the HEAD-is-the-tag case
+# release.yml hits, prerelease and unreachable tags, missing-baseline errors)
+# against throwaway git repos in a temp dir. No cargo, no network, no repo
+# state. Mirrored in the `publish-checks` CI job.
+test-semver-baseline:
+    ./scripts/semver-baseline.test.sh
+
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-fuzz-lock-parity check-fuzz-lock-parity test-installer semver-checks
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer semver-checks
     typos
 
 # Re-run pre-commit hooks across all files.

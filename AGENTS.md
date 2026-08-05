@@ -77,20 +77,23 @@ there, not in ad-hoc scripts.
 The Dovecot integration harness autodetects `docker` first, then falls
 back to `podman` (via `podman compose` / `podman-compose`). Both
 runtimes work on macOS (Apple Silicon and Intel), Ubuntu CI, and Fedora.
-Override with `RIMAP_CONTAINER_TOOL=docker` or
-`RIMAP_CONTAINER_TOOL=podman` if you need to force a specific one.
 
-That autodetect picks the first runtime *installed*, not the first one
-that works: with a stopped Docker Desktop and a working podman it still
-selects docker, and skips. Use `RIMAP_CONTAINER_TOOL` to override.
+Autodetect picks the first runtime that *works*, not the first one
+installed: each candidate is probed in turn and the first whose daemon
+answers is selected, so a stopped Docker Desktop falls through to a
+working podman instead of skipping the suite. Set
+`RIMAP_CONTAINER_TOOL=docker` or `RIMAP_CONTAINER_TOOL=podman` to force a
+choice — an explicit override probes only the runtime it names and never
+falls through, so a typo'd or unusable override fails on its own terms.
 
-The gate probes the runtime it selected, not just the binary: it runs
+The gate probes the runtime, not just the binary: it runs
 `<runtime> info`, the first call that actually contacts the daemon. A
 missing binary *and* a binary whose daemon cannot be reached (stopped,
 restarting, socket gone) are both silent skips — they are the two ways a
-host genuinely cannot run the fixture. The probe runs once per test
-process and gives up after 10s. Set `RIMAP_REQUIRE_DOCKER=1` to turn
-either into a loud failure; CI does.
+host genuinely cannot run the fixture. Selection and its verdict share
+one cache, so the probe runs once per test process (twice only when the
+first candidate is unusable) and gives up after 10s per candidate. Set
+`RIMAP_REQUIRE_DOCKER=1` to turn either into a loud failure; CI does.
 
 Everything else is loud, deliberately. The probe only reports "cannot
 run containers" when the runtime's own stderr says it could not reach
@@ -336,12 +339,10 @@ are the ones that trip people up or aren't obvious from the lint set.
   `cargo set-version --workspace 0.2.0-dev` (from `cargo-edit`), not an
   override. See
   [RELEASING.md](RELEASING.md), "Breaking a public API".
-- **`semver-checks` is red on `main` right now** — its first run found a break
-  that predates it: `LimitsConfig` gained a `pub` field after `v0.1.0`. Issue
-  #648 tracks the version bump that clears it. Until then `just ci` fails on
-  that recipe for everyone, and a red `semver-checks` on your PR is that
-  standing failure rather than anything you did. Confirm it is the same
-  `rimap-config` / `LimitsConfig` finding before ignoring it.
+- **`release.yml` runs the same `just semver-checks` before publishing** (issue
+  #650), so a red one is not only a PR problem — it is what stands between a
+  break and an unpublishable-back crates.io version. Do not paper over it in the
+  recipe; the fix belongs in the manifest version.
 - **Never force-push to `main`.** Never amend commits that have been pushed.
   Never skip hooks.
 
