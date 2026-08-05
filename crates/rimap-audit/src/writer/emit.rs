@@ -86,10 +86,13 @@ impl AuditWriter {
     /// This function performs synchronous filesystem I/O: at minimum a
     /// `write_all` + `flush` + (conditionally) `fsync`, and on rotation
     /// additionally `rename`, `open`, `try_lock`, `read_dir`,
-    /// `symlink_metadata`, and `remove_file`. An async caller should invoke
-    /// it inside `tokio::task::spawn_blocking` so the wait lands on the
-    /// blocking pool rather than stalling a runtime worker; the `tool_start`
-    /// / `tool_end` emitters in `rimap_server::mcp::audit_envelope` do.
+    /// `symlink_metadata`, and `remove_file`. An async caller should move it
+    /// onto the blocking pool rather than stall a runtime worker on it — in
+    /// this workspace through `DispatchDrain::spawn_blocking_tracked`, which
+    /// also registers the write with the shutdown drain (#672), rather than a
+    /// bare `tokio::task::spawn_blocking`. The `tool_start` / `tool_end`
+    /// emitters in `rimap_server::mcp::audit_envelope` are the pattern;
+    /// `docs/architecture/audit-locking.md` has the rule and its exceptions.
     ///
     /// `Connection::emit_auth` deliberately does not, and ADR-0014 records
     /// why: the hop loses the record when the runtime is shutting down, and
