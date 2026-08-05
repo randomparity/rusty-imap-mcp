@@ -24,6 +24,13 @@
 //!    or it is not additive on disk. `docs/audit-log.md` ("Compatibility
 //!    contract") is the normative statement; these are its teeth.
 //!
+//! Provenance of the golden strings below: they are not this branch's output
+//! written down after the fact. Each was produced independently by pre-change
+//! code -- a worktree at the merge-base, where these types are still plain
+//! structs -- built with struct literals and compared byte-for-byte. They
+//! matched, which is what makes "the format did not move" an executed result
+//! rather than an argument from the shape of the diff.
+//!
 //! Sibling of `rimap-config`'s `non_exhaustive_model.rs` (#665) and
 //! `non_exhaustive_validate.rs` (#707).
 

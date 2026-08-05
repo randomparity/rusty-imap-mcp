@@ -108,9 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Downstream impact: the struct literal is no longer available outside the
   crate, and **that includes functional-update syntax** — `..Default::default()`
   is still a struct expression, so rustc rejects it too (E0639). Construct via
-  the new constructors and reach the rest by field assignment — the fields stay
-  `pub` — as in `let mut i = ToolStartInputs::new(tool, args, hash);
-  i.account = …;`. Pattern matches need a trailing `..`.
+  the new constructors, which take the fields that have no safe default:
+  `ToolStartInputs::new(tool, account, posture_effective, redacted, hash)`.
+  Reach the remaining fields by assignment — they stay `pub` — as in
+  `let mut i = ToolEndInputs::new(start_seq, tool, status, duration_ms,
+  provenance); i.account = …;`, which is the type where `account` genuinely is
+  defaulted. Pattern matches need a trailing `..`.
 
   Constructors were added only where something outside `rimap-audit` actually
   builds the type: `AuditRecord::new`, `ProcessEnd::new`, `ToolVerdict::new`,
