@@ -301,9 +301,10 @@ pub enum CloseOrResponse {
     ///
     /// The budget is reported rather than left to the caller to name, because
     /// it is not always the `request_dur` the caller passed: a first read after
-    /// spawn is widened to `COLD_START_TIMEOUT`, so a caller interpolating its
-    /// own constant into the panic message would understate how long the
-    /// server actually had.
+    /// spawn is widened to `COLD_START_TIMEOUT`, and on CI's coverage arm every
+    /// read is floored at `INSTRUMENTED_READ_FLOOR`. A caller interpolating its
+    /// own constant into the panic message would understate how long the server
+    /// actually had — by 5x on the arm where that matters most.
     Hung(Duration),
 }
 
@@ -340,7 +341,9 @@ pub struct Harness {
     /// false, response reads are widened to `COLD_START_TIMEOUT` because they
     /// are still paying for process start-up; once true every read runs on the
     /// caller's own budget so genuine hangs stay fast-fail. Start-up is a
-    /// once-per-process cost, so it is charged to exactly one read.
+    /// once-per-process cost, so it is charged to exactly one read. The
+    /// coverage arm's `INSTRUMENTED_READ_FLOOR` is independent of this flag —
+    /// it applies to every read, not just the first.
     first_output_seen: bool,
     // Hold the tempdir until the harness drops so the audit log path
     // remains valid for the lifetime of the spawned process.
@@ -603,14 +606,16 @@ allowed_base_dir = "{}"
     }
 
     /// Read exactly one parsed envelope from stdout under the default 2s
-    /// `REQUEST_TIMEOUT`. Shared by `request` and `recv_until_id`.
+    /// `REQUEST_TIMEOUT` — subject to both widenings in [`read_deadline`].
+    /// Shared by `request` and `recv_until_id`.
     async fn read_one_envelope(&mut self, caller: &str) -> Value {
         self.read_one_envelope_within(caller, REQUEST_TIMEOUT).await
     }
 
     /// Read exactly one parsed envelope from stdout, bounding the read by
     /// `read_timeout` — widened to `COLD_START_TIMEOUT` if the child has not
-    /// produced any output yet. Skips notifications (which have a `method` and
+    /// produced any output yet, and to `INSTRUMENTED_READ_FLOOR` on CI's
+    /// coverage arm. Skips notifications (which have a `method` and
     /// absent/null `id`) but does NOT skip responses; returns the first
     /// response observed. Panics on timeout, EOF, or parse failure with stderr
     /// included in the diagnostic.
@@ -669,8 +674,9 @@ allowed_base_dir = "{}"
     /// Send a JSON-RPC request and return the parsed response value, bounding the
     /// response read by the shared [`REQUEST_TIMEOUT`] — or by
     /// [`COLD_START_TIMEOUT`] if this is the first read after spawn, which is
-    /// still paying for process start-up. Panics on timeout, EOF before a
-    /// response arrives, or non-JSON output.
+    /// still paying for process start-up, or by [`INSTRUMENTED_READ_FLOOR`] when
+    /// running under coverage. Panics on timeout, EOF before a response arrives,
+    /// or non-JSON output.
     pub async fn request(&mut self, method: &str, params: Value) -> Value {
         self.request_within(method, params, REQUEST_TIMEOUT).await
     }
@@ -681,8 +687,11 @@ allowed_base_dir = "{}"
     /// cap — used for both the fault call and reconnect-bearing recovery calls.
     ///
     /// A `deadline` below [`COLD_START_TIMEOUT`] is still widened to it on the
-    /// first read after spawn; larger ones are passed through untouched, which
-    /// is the case these callers rely on.
+    /// first read after spawn, and one below [`INSTRUMENTED_READ_FLOOR`] is
+    /// widened to that under coverage; larger ones are passed through
+    /// untouched, which is the case these callers rely on. The 15 s the chaos
+    /// scenarios pass today clears both graces, so they are unaffected by
+    /// either.
     pub async fn request_within(
         &mut self,
         method: &str,
