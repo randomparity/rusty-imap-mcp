@@ -288,12 +288,15 @@ pub struct ProcessEnd {
 impl ProcessEnd {
     /// Construct a `process_end` payload.
     ///
-    /// `records_lost` is a parameter rather than a defaulted field, which is
-    /// the one place this crate departs from #665's rule that a constructor
-    /// takes exactly the fields serde treats as required. A zero here is not
-    /// an absent value: it is an affirmative, durable claim that this
-    /// process's record stream has no hole in it. A caller that never
-    /// assigned the field would publish that claim without measuring it.
+    /// `records_lost` is a parameter rather than a defaulted field, departing
+    /// from #665's rule that a constructor takes exactly the fields serde
+    /// treats as required. A zero here is not an absent value: it is an
+    /// affirmative, durable claim that this process's record stream has no
+    /// hole in it. A caller that never assigned the field would publish that
+    /// claim without measuring it.
+    ///
+    /// [`ToolStartInputs::new`](crate::ToolStartInputs::new) departs for the
+    /// same reason, and its doc states the rule the two share.
     /// Production reads it from
     /// [`AuditWriter::suppressed_failures`](crate::AuditWriter::suppressed_failures)
     /// (#647); a synthetic record passes the count it means to assert.
