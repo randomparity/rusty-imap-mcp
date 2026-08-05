@@ -300,13 +300,21 @@ mod tests {
     use super::AuditEnvelopeGuard;
 
     fn test_writer(path: std::path::PathBuf) -> AuditWriter {
+        test_writer_from_seq(path, Seq::FIRST)
+    }
+
+    /// Like [`test_writer`] but starting the sequence at `initial_seq`. A test
+    /// that joins two records on `seq` needs this: with the default start the
+    /// record under test is always seq 1, so the join also holds for a bug
+    /// that hardcoded [`Seq::FIRST`] instead of carrying the real seq.
+    fn test_writer_from_seq(path: std::path::PathBuf, initial_seq: Seq) -> AuditWriter {
         AuditWriter::open(&AuditOptions {
             path,
             rotate_bytes: 10 * 1024 * 1024,
             rotate_keep: 5,
             retention_seconds: None,
             fail_open: false,
-            initial_seq: Seq::FIRST,
+            initial_seq,
         })
         .unwrap()
     }
@@ -314,12 +322,15 @@ mod tests {
     /// A never-completing tool body that signals `entered` on its first poll.
     ///
     /// This is the barrier for "the envelope is ready to be cancelled".
-    /// [`super::ImapMcpServer::run_with_audit_envelope`] awaits
-    /// `emit_tool_start`, constructs the [`AuditEnvelopeGuard`], and only
-    /// *then* polls the body — so observing the first poll proves the
-    /// `tool_start` write finished and the guard is armed. Nothing else polls
-    /// this future, so the signal cannot arrive early, which makes it an exact
-    /// ordering barrier rather than a timing window.
+    /// `run_with_audit_envelope` awaits `emit_tool_start`, constructs the
+    /// `AuditEnvelopeGuard`, and only *then* polls the body — so observing the
+    /// first poll proves the `tool_start` write finished and the guard is
+    /// armed. Nothing else polls this future, so the signal cannot arrive
+    /// early, which makes it an exact ordering barrier rather than a timing
+    /// window.
+    ///
+    /// Kept in sync with the copy in `tests/dispatch_ticket.rs`, which cannot
+    /// reach this one from an integration-test binary.
     fn body_signalling_first_poll(
         entered: tokio::sync::oneshot::Sender<()>,
     ) -> impl std::future::Future<Output = Result<serde_json::Value, rimap_core::RimapError>> {
@@ -378,7 +389,9 @@ mod tests {
                 std::time::Instant::now(),
                 tx.clone(),
             );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            // No sleep: the implicit drop of `_guard` below is synchronous and
+            // so is its `try_send`, so the record is queued before this scope
+            // ends. `drainer.await` is the only barrier this test needs.
             // Implicit drop of `_guard` here — undisarmed, so cancellation fires.
         }
 
@@ -436,7 +449,9 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
-        let writer = test_writer(path.clone());
+        // Not `Seq::FIRST` — see `test_writer_from_seq`; the `start_seq` join
+        // at the end of this test is only meaningful off the default start.
+        let writer = test_writer_from_seq(path.clone(), Seq(41));
 
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());
@@ -466,7 +481,15 @@ mod tests {
         // Wait for the body's first poll rather than for a clock: the abort
         // is then strictly ordered after the guard is armed, whatever the
         // host load (#684 — the previous 50ms sleep was a race window).
-        entered_rx.await.unwrap();
+        //
+        // A dropped sender (e.g. `emit_tool_start` returned `Err`) already
+        // fails this fast. The outer timeout only covers the envelope
+        // *hanging* before the body, so unlike the old sleep it cannot
+        // expire during a healthy run.
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+            .await
+            .expect("tool body was never polled within 30s")
+            .expect("envelope dropped the body without ever polling it");
         task.abort();
         let _ = task.await; // wait for the abort to settle
 
@@ -484,29 +507,28 @@ mod tests {
             "expected exactly 2 records (tool_start + cancellation tool_end), got {} records:\n{contents}",
             lines.len(),
         );
-        assert!(
-            lines[0].contains(r#""tool_start""#),
-            "first record must be tool_start: {}",
-            lines[0],
-        );
-        assert!(
-            lines[1].contains(r#""status":"cancelled""#),
-            "second record must be cancellation tool_end: {}",
-            lines[1],
-        );
-        assert!(
-            lines[1].contains(r#""error_code":"ERR_CANCELLED""#),
-            "second record must carry ERR_CANCELLED: {}",
-            lines[1],
-        );
-        // Join the two records, so a cancellation synthesized against some
-        // other dispatch's `seq` cannot satisfy the assertions above.
+        // Assert on parsed fields rather than substrings: `contains` would
+        // also match the same text appearing in some other field's value.
         let start: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         let end: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(start["kind"], "tool_start", "first record: {contents}");
+        assert_eq!(end["kind"], "tool_end", "second record: {contents}");
+        assert_eq!(
+            end["status"], "cancelled",
+            "tool_end must record the cancellation, not a completion: {contents}",
+        );
+        assert_eq!(
+            end["error_code"], "ERR_CANCELLED",
+            "cancellation tool_end must carry ERR_CANCELLED: {contents}",
+        );
+        // Join the two records so the cancellation is provably the one this
+        // dispatch opened, rather than any `tool_end` reaching the drainer.
         assert_eq!(
             end["start_seq"], start["seq"],
             "tool_end.start_seq must reference this dispatch's tool_start.seq: {contents}",
         );
+        assert_eq!(start["tool"], "list_accounts", "start tool: {contents}");
+        assert_eq!(end["tool"], "list_accounts", "end tool: {contents}");
     }
 
     /// The per-tool-call ceiling (#594) fires inside the envelope's body,
