@@ -292,6 +292,7 @@ pub struct ProcessStart {
 ///     reason: rimap_audit::record::ProcessEndReason::Eof,
 ///     total_tool_calls: 0,
 ///     records_lost: 0,
+///     undrained_dispatches: 0,
 /// };
 /// ```
 ///
@@ -310,7 +311,7 @@ pub struct ProcessStart {
 ///
 /// ```
 /// use rimap_audit::record::{ProcessEnd, ProcessEndReason};
-/// let end = ProcessEnd::new(ProcessEndReason::Eof, 12, 0);
+/// let end = ProcessEnd::new(ProcessEndReason::Eof, 12, 0, 0);
 /// assert_eq!(end.total_tool_calls, 12);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,29 +332,53 @@ pub struct ProcessEnd {
     /// carry no such field, and must keep deserializing as zero.
     #[serde(default)]
     pub records_lost: u64,
+    /// Tool dispatches — or audit writes one of them offloaded — still
+    /// registered when the shutdown drain's budget expired. Non-zero means the
+    /// terminal-record guarantee was **not** met for this run: whatever those
+    /// dispatches wrote afterwards is sequenced after this record or was lost
+    /// to process exit. See `docs/audit-log.md`, "`process_end` is terminal",
+    /// and ADR-0015.
+    ///
+    /// A dispatch that offloaded an audit write takes a second registration for
+    /// it (#672), so this bounds the number of dispatches involved from above
+    /// rather than counting them exactly.
+    ///
+    /// `#[serde(default)]` because `process_end` records written before #680
+    /// carry no such field, and must keep deserializing as zero.
+    #[serde(default)]
+    pub undrained_dispatches: u64,
 }
 
 impl ProcessEnd {
     /// Construct a `process_end` payload.
     ///
-    /// `records_lost` is a parameter rather than a defaulted field, departing
-    /// from #665's rule that a constructor takes exactly the fields serde
-    /// treats as required. A zero here is not an absent value: it is an
-    /// affirmative, durable claim that this process's record stream has no
-    /// hole in it. A caller that never assigned the field would publish that
-    /// claim without measuring it.
+    /// `records_lost` and `undrained_dispatches` are parameters rather than
+    /// defaulted fields, departing from #665's rule that a constructor takes
+    /// exactly the fields serde treats as required. A zero in either is not an
+    /// absent value: it is an affirmative, durable claim — that this process's
+    /// record stream has no hole in it, and that no dispatch outlived the
+    /// shutdown drain. A caller that never assigned the field would publish
+    /// that claim without measuring it.
     ///
     /// [`ToolStartInputs::new`](crate::ToolStartInputs::new) departs for the
-    /// same reason, and its doc states the rule the two share.
-    /// Production reads it from
+    /// same reason, and its doc states the rule the three share.
+    /// Production reads `records_lost` from
     /// [`AuditWriter::suppressed_failures`](crate::AuditWriter::suppressed_failures)
-    /// (#647); a synthetic record passes the count it means to assert.
+    /// (#647) and `undrained_dispatches` from the return of the server's
+    /// dispatch drain (#680); a synthetic record passes the counts it means to
+    /// assert.
     #[must_use]
-    pub fn new(reason: ProcessEndReason, total_tool_calls: u64, records_lost: u64) -> Self {
+    pub fn new(
+        reason: ProcessEndReason,
+        total_tool_calls: u64,
+        records_lost: u64,
+        undrained_dispatches: u64,
+    ) -> Self {
         Self {
             reason,
             total_tool_calls,
             records_lost,
+            undrained_dispatches,
         }
     }
 }
@@ -729,6 +754,7 @@ mod tests {
                 reason: ProcessEndReason::SignalInt,
                 total_tool_calls: 42,
                 records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
         let json = serde_json::to_string(&rec).unwrap();

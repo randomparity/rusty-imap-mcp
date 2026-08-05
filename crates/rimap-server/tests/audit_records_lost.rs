@@ -55,12 +55,15 @@ fn process_end_line(path: &std::path::Path) -> String {
 }
 
 /// Mirrors `rimap-server`'s `emit_process_end`: the counters are read off the
-/// writer at shutdown and stamped into the record.
+/// writer at shutdown and stamped into the record. `undrained_dispatches` is
+/// zero because this file's scenarios have no dispatch drain at all; the count
+/// has its own suite (`audit_undrained_dispatches.rs`, #680).
 fn emit_process_end(writer: &AuditWriter) {
     let end = ProcessEnd::new(
         ProcessEndReason::Eof,
         writer.total_tool_calls(),
         writer.suppressed_failures(),
+        0,
     );
     writer.log_process_end(end).unwrap();
 }

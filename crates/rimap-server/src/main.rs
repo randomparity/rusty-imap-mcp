@@ -98,6 +98,26 @@ enum InitOutcome {
     Rmcp(Box<ServerInitializeError>),
 }
 
+/// Everything `serve_mcp` hands back to `run_server`.
+///
+/// The transport result cannot carry the drain residue on its own: `run_server`
+/// consumes it twice — once as [`emit_process_end`]'s input and once as its own
+/// return value — and the count has to reach `process_end` on *both* arms,
+/// because a run that failed still drained. Folding the count into the `Ok`
+/// variant would drop it exactly where a residue matters most (#680).
+///
+/// A named struct rather than a `(Result, u64)` tuple: the count is a bare
+/// integer built at three exits, and a tuple offers nothing that catches one
+/// assembled in the wrong order.
+struct ServeOutcome {
+    /// Outcome of the MCP transport, and `run_server`'s return value.
+    result: anyhow::Result<()>,
+    /// Registrations still outstanding when the dispatch drain's budget
+    /// expired. Zero on every clean shutdown, and measured rather than assumed
+    /// on every exit path — see [`drain_dispatches`].
+    undrained_dispatches: u64,
+}
+
 /// How long `serve_mcp` waits for in-flight tool dispatches to unwind after
 /// cancelling them. They are cancelled, not merely awaited, so the wait covers
 /// only the unwind — a synchronous `AuthEmitGuard` audit write and its `fsync`,
@@ -113,6 +133,48 @@ const DISPATCH_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 /// the join — and so the whole process exit — waiting for that command's own
 /// timeout (#645).
 const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
+
+/// The dispatch drain's budget for this process.
+///
+/// Under `test-support` only, `RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS` shortens it.
+/// A non-zero `process_end.undrained_dispatches` is otherwise unreachable from
+/// the wire — every dispatch a test can park is cancellable and unwinds well
+/// inside two seconds — so without this lever the suite that pins the count
+/// would only ever observe zero, which is the vacuous case. Same shape and same
+/// gating as `RIMAP_TEST_FORCE_NEXT_AUDIT_WRITE_FAILURE`; a malformed value is
+/// ignored in favour of the production budget.
+fn dispatch_drain_budget() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Some(ms) = std::env::var("RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    DISPATCH_DRAIN_BUDGET
+}
+
+/// Cancel every in-flight tool dispatch, wait out the drain budget, and report
+/// the residue.
+///
+/// Called on every exit from [`serve_mcp`], including the init-failure paths
+/// that never reached a dispatch: an idle drain returns `0` without parking, so
+/// the zero those paths record is measured rather than assumed. That matters
+/// because `ProcessEnd::new` treats a zero as an affirmative durable claim.
+async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
+    let budget = dispatch_drain_budget();
+    let undrained = dispatch_drain.shutdown(budget).await;
+    if undrained > 0 {
+        tracing::warn!(
+            undrained,
+            budget = ?budget,
+            "tool dispatches outlived the shutdown drain; any audit record they \
+             still write is sequenced after process_end or lost",
+        );
+    }
+    // Lossless on every supported target: `usize` is at most 64 bits.
+    u64::try_from(undrained).unwrap_or(u64::MAX)
+}
 
 fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Some(result) = dispatch_subcommand(cli) {
@@ -207,9 +269,12 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
 
-    let mcp_result = rt.block_on(serve_mcp(&multi, &audit, &credentials, &download_dir));
+    let ServeOutcome {
+        result: mcp_result,
+        undrained_dispatches,
+    } = rt.block_on(serve_mcp(&multi, &audit, &credentials, &download_dir));
 
-    emit_process_end(&audit, &mcp_result);
+    emit_process_end(&audit, &mcp_result, undrained_dispatches);
 
     // Shut down the runtime without waiting for blocking tasks. The
     // validator's `validate_inbound` bridge owns a `tokio::io::stdin()`
@@ -235,15 +300,29 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
 /// function must complete before `run_server` writes `process_end`,
 /// which is what makes that record terminal (see `docs/audit-log.md`
 /// and ADR-0015).
+///
+/// Returns a [`ServeOutcome`] rather than a bare `Result` so the drain's
+/// residue reaches `process_end` on the error path too (#680).
 async fn serve_mcp(
     multi: &rimap_config::validate::ValidatedMultiConfig,
     audit: &rimap_audit::AuditWriter,
     credentials: &Arc<dyn CredentialStore>,
     download_dir: &Arc<std::path::Path>,
-) -> anyhow::Result<()> {
-    let registry = build_registry(multi, audit, credentials, download_dir)
+) -> ServeOutcome {
+    // Before the drain exists there is nothing to report, so a registry
+    // failure is the one exit that states its zero without measuring it.
+    let registry = match build_registry(multi, audit, credentials, download_dir)
         .await
-        .context("building account registry")?;
+        .context("building account registry")
+    {
+        Ok(registry) => registry,
+        Err(e) => {
+            return ServeOutcome {
+                result: Err(e),
+                undrained_dispatches: 0,
+            };
+        }
+    };
 
     let (cancellation_tx, cancellation_rx) = rimap_audit::cancellation_channel();
     let drainer_handle = rimap_audit::spawn_drainer(cancellation_rx, audit.clone());
@@ -280,10 +359,17 @@ async fn serve_mcp(
                 |e| anyhow::anyhow!("validator bridge during init: {e}"),
             );
             let _ = supervisor.shutdown_after_failure().await;
-            return Err(primary);
+            return ServeOutcome {
+                result: Err(primary),
+                undrained_dispatches: drain_dispatches(&dispatch_drain).await,
+            };
         }
         Err(InitOutcome::Rmcp(boxed)) => {
-            return handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
+            let result = handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
+            return ServeOutcome {
+                result,
+                undrained_dispatches: drain_dispatches(&dispatch_drain).await,
+            };
         }
     };
     // waiting() takes ownership of service, consuming it and dropping the
@@ -328,15 +414,7 @@ async fn serve_mcp(
     // `auth` record *after* the `process_end` of its own process (#645), and a
     // dispatch still holding a cancellation sender kept the drainer join
     // waiting for that command's full timeout.
-    let undrained = dispatch_drain.shutdown(DISPATCH_DRAIN_BUDGET).await;
-    if undrained > 0 {
-        tracing::warn!(
-            undrained,
-            budget = ?DISPATCH_DRAIN_BUDGET,
-            "tool dispatches outlived the shutdown drain; any audit record they \
-             still write is sequenced after process_end or lost",
-        );
-    }
+    let undrained = drain_dispatches(&dispatch_drain).await;
 
     let shutdown_outcome = match &service_outcome {
         Ok(()) => supervisor.drain().await,
@@ -376,24 +454,37 @@ async fn serve_mcp(
             );
         }
     }
-    mcp_result
+    ServeOutcome {
+        result: mcp_result,
+        undrained_dispatches: undrained,
+    }
 }
 
 /// Emit the `process_end` audit record at process shutdown. Reason
 /// reflects whether the MCP server loop completed cleanly (`Eof`)
 /// or with an error (`Error`). Failures to write are logged but do
 /// not propagate.
-fn emit_process_end(audit: &rimap_audit::AuditWriter, mcp_result: &anyhow::Result<()>) {
+///
+/// `undrained_dispatches` is [`ServeOutcome::undrained_dispatches`], threaded
+/// out of `serve_mcp` rather than read off the writer: unlike the other two
+/// counters it is not the audit writer's to know (#680).
+fn emit_process_end(
+    audit: &rimap_audit::AuditWriter,
+    mcp_result: &anyhow::Result<()>,
+    undrained_dispatches: u64,
+) {
     let reason = match mcp_result {
         Ok(()) => rimap_audit::ProcessEndReason::Eof,
         Err(_) => rimap_audit::ProcessEndReason::Error,
     };
-    // Last chance to state that this file has a hole in it: the counter
-    // lives only in memory, and the process is about to exit (#647).
+    // Last chance to state that this file has a hole in it, or that it is not
+    // terminal for this process: both counters live only in memory, and the
+    // process is about to exit (#647, #680).
     let process_end = rimap_audit::ProcessEnd::new(
         reason,
         audit.total_tool_calls(),
         audit.suppressed_failures(),
+        undrained_dispatches,
     );
     match audit.log_process_end(process_end) {
         Ok(seq) => tracing::info!(seq = %seq, "process_end audit record written"),

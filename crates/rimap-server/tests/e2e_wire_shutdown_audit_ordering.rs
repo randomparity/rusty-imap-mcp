@@ -245,8 +245,25 @@ fn assert_cut_auth_precedes_terminal_process_end(raw: &str) {
     );
 }
 
-#[tokio::test]
-async fn shutdown_cut_auth_record_precedes_process_end() {
+/// What one run of the parked-dispatch scenario leaves behind. The `TempDir` is
+/// carried so the audit log and the canary sweep outlive the driver.
+struct ScenarioRun {
+    tempdir: TempDir,
+    /// The audit JSONL, verbatim — parsed by the caller, which decides how
+    /// strict to be.
+    raw: String,
+    /// The fake's recorded IMAP dialog at the moment stdin closed.
+    recorded: Vec<String>,
+    password: String,
+}
+
+/// Drive the whole scenario: boot the fake, park a `list_folders` reconnect on
+/// `LOGIN`, close stdin, and wait for the binary to exit.
+///
+/// `extra_env` is applied to the child on top of the fixed environment, which is
+/// what lets a caller shorten the dispatch drain budget and turn the parked
+/// dispatch into a *residue* rather than a clean cut.
+async fn run_parked_dispatch_scenario(extra_env: &[(&str, &str)]) -> ScenarioRun {
     let server =
         FakeImapServer::start_sequence(vec![boot_then_disconnect(), park_on_login()]).await;
 
@@ -262,10 +279,14 @@ async fn shutdown_cut_auth_record_precedes_process_end() {
 
     let stderr_path = base.join("rusty-imap-mcp.stderr.log");
     let stderr_file = std::fs::File::create(&stderr_path).expect("create stderr log");
-    let mut child = Command::new(cargo_bin("rusty-imap-mcp"))
+    let mut command = Command::new(cargo_bin("rusty-imap-mcp"));
+    command.env("RUSTY_IMAP_MCP_PASSWORD", &password);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = command
         .arg("--config")
         .arg(&config_path)
-        .env("RUSTY_IMAP_MCP_PASSWORD", &password)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr_file))
@@ -334,10 +355,81 @@ async fn shutdown_cut_auth_record_precedes_process_end() {
     );
 
     let raw = std::fs::read_to_string(base.join("audit.jsonl")).expect("read audit log");
-    assert_cut_auth_precedes_terminal_process_end(&raw);
+    ScenarioRun {
+        tempdir,
+        raw,
+        recorded,
+        password,
+    }
+}
 
-    canary::assert_login_frame_only(&password, &recorded);
-    canary::assert_absent(&password, &[base], &[]);
+/// The `process_end` record, as parsed JSON.
+///
+/// Lenient where [`parse_strict`] is not, and deliberately: a run whose drain
+/// budget expired leaves a cut dispatch writing concurrently with process exit,
+/// so a torn trailing line is the *documented* consequence of the state under
+/// test rather than a regression in it. The strict parse stays with the
+/// clean-shutdown assertion, which is where an intact file is the claim.
+fn process_end_record(raw: &str) -> Value {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|r| r["kind"] == "process_end")
+        .unwrap_or_else(|| panic!("no process_end record in:\n{raw}"))
+}
+
+#[tokio::test]
+async fn shutdown_cut_auth_record_precedes_process_end() {
+    let run = run_parked_dispatch_scenario(&[]).await;
+    assert_cut_auth_precedes_terminal_process_end(&run.raw);
+
+    // The whole point of the drain is that this run has no residue, and the
+    // record says so rather than leaving a reader to infer it from absence.
+    assert_eq!(
+        process_end_record(&run.raw)["undrained_dispatches"],
+        0,
+        "a run whose dispatch was cut in time must state a zero residue:\n{}",
+        run.raw,
+    );
+
+    canary::assert_login_frame_only(&run.password, &run.recorded);
+    canary::assert_absent(&run.password, &[run.tempdir.path()], &[]);
+}
+
+/// The other half of the same guarantee: when the drain budget expires with a
+/// dispatch still registered, `process_end.undrained_dispatches` says so, so a
+/// reader holding only the audit file can tell that the terminal-record rule
+/// was not met for this run (#680).
+///
+/// Before this, the count went to `tracing::warn!` and nowhere else — and
+/// stderr is the one channel an MCP client routinely discards.
+///
+/// The budget is driven to zero rather than raced against a slow dispatch: the
+/// parked `LOGIN` reconnect holds its registration for the whole test (the fake
+/// stalls 120s), so the drain's `wait_for(inflight == 0)` cannot be satisfied
+/// and the timeout is the only thing that resolves. That makes the non-zero
+/// deterministic on a contended host instead of wall-clock dependent.
+#[tokio::test]
+async fn a_dispatch_outliving_the_drain_budget_is_reported_in_process_end() {
+    let run = run_parked_dispatch_scenario(&[("RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS", "0")]).await;
+
+    let process_end = process_end_record(&run.raw);
+    let undrained = process_end["undrained_dispatches"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!(
+                "process_end carries an undrained_dispatches count:\n{}",
+                run.raw
+            )
+        });
+    assert!(
+        undrained > 0,
+        "the parked dispatch outlived a zero drain budget, so process_end must \
+         report a non-zero residue; got {undrained}:\n{}",
+        run.raw,
+    );
+
+    canary::assert_login_frame_only(&run.password, &run.recorded);
+    canary::assert_absent(&run.password, &[run.tempdir.path()], &[]);
 }
 
 /// Write one newline-delimited JSON-RPC frame to the child's stdin.
