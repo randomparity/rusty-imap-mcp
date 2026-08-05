@@ -174,8 +174,8 @@ in an issue that has since closed.
 
 **`cargo-semver-checks` no longer runs only in the release workflow.** PR #651
 (issue #633, merged 2026-08-04) added a `semver-checks` job to
-`.github/workflows/ci.yml` that runs on every PR, and the `ci` recipe in the
-justfile invokes `just semver-checks` alongside the other gates. As of
+`.github/workflows/ci.yml` that runs on every PR, and the justfile's `ci`
+recipe includes the `semver-checks` recipe the job calls. As of
 2026-08-05 `semver-checks` is also a **required status check** on `main` —
 thirteen contexts — so a PR that breaks a publishable crate's public API is red
 until the version bump lands in the same PR. "Nothing on a PR catches this"
