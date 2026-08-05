@@ -137,19 +137,17 @@ const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
 /// The dispatch drain's budget for this process.
 ///
 /// Under `test-support` only, `RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS` *replaces*
-/// it — in either direction. A non-zero `process_end.undrained_dispatches` is
-/// unreachable from the wire otherwise, because every dispatch a test can park
-/// is cancellable and unwinds well inside two seconds, so the suite that pins
-/// the count drives the budget to zero; the sibling test that pins a *zero*
-/// residue widens it instead, so its assertion does not ride a clock ADR-0015
-/// describes as unbounded under contention. Same shape and same gating as
+/// it. One suite sets it, to zero: a non-zero
+/// `process_end.undrained_dispatches` is otherwise unreachable from the wire,
+/// because every dispatch a test can park is cancellable and unwinds well
+/// inside two seconds, so the test pinning that count would only ever observe
+/// the vacuous case. Same shape and same gating as
 /// `RIMAP_TEST_FORCE_NEXT_AUDIT_WRITE_FAILURE`; a malformed value is ignored in
 /// favour of the production budget.
 ///
-/// Because both wire scenarios override it, no test measures
-/// [`DISPATCH_DRAIN_BUDGET`] end to end. The absent case is routed through
-/// [`budget_from_override`] rather than returned separately, so the branch every
-/// production run takes is the branch that function's tests pin.
+/// [`DISPATCH_DRAIN_BUDGET`] keeps its end-to-end coverage:
+/// `shutdown_cut_auth_record_precedes_process_end` sets no override, so it
+/// drives the shipped constant and asserts a zero residue under it.
 #[cfg(feature = "test-support")]
 fn dispatch_drain_budget() -> Duration {
     budget_from_override(
@@ -185,8 +183,22 @@ fn budget_from_override(raw: Option<&str>) -> Duration {
 /// that never reached a dispatch: an idle drain returns `0` without parking, so
 /// the zero those paths record is measured rather than assumed. That matters
 /// because `ProcessEnd::new` treats a zero as an affirmative durable claim.
+///
+/// A shortened budget makes that claim cheap — at zero the drain cannot wait at
+/// all, so a run with nothing registered at that instant reports `0` for a
+/// guarantee it never attempted. The override is `test-support`-only, but it is
+/// the one carve-out around this record that would otherwise leave a reader
+/// nothing, so it announces itself.
 async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
     let budget = dispatch_drain_budget();
+    if budget != DISPATCH_DRAIN_BUDGET {
+        tracing::warn!(
+            budget = ?budget,
+            production_budget = ?DISPATCH_DRAIN_BUDGET,
+            "dispatch drain budget overridden; process_end.undrained_dispatches \
+             describes this budget, not the shipped one",
+        );
+    }
     let undrained = dispatch_drain.shutdown(budget).await;
     if undrained > 0 {
         tracing::warn!(
@@ -939,14 +951,17 @@ mod dispatch_drain_budget_tests {
 
     use super::{DISPATCH_DRAIN_BUDGET, budget_from_override};
 
-    /// The only coverage the shipped budget has, and it covers the branch
-    /// production takes: `dispatch_drain_budget` passes the absent variable
-    /// straight through to this function. Both wire scenarios in
-    /// `e2e_wire_shutdown_audit_ordering` override the budget — one to zero,
-    /// one wide — so nothing else would catch the override branch being taken
-    /// unconditionally. A drain that no longer waits is the inversion #645 /
-    /// ADR-0015 exist to prevent, and it would also stamp a spurious non-zero
-    /// `undrained_dispatches` into the trail operators are told to alert on.
+    /// Every `test-support` build that does not set the variable — which is
+    /// every test in the workspace but one, plus the Node conformance harness —
+    /// resolves its budget through this call. A production build compiles the
+    /// `cfg(not(test-support))` body instead and never reaches here; the
+    /// end-to-end coverage of the shipped constant is
+    /// `shutdown_cut_auth_record_precedes_process_end`, which sets no override.
+    ///
+    /// What this catches is the override branch being taken unconditionally: a
+    /// drain that no longer waits is the inversion #645 / ADR-0015 exist to
+    /// prevent, and it would stamp a spurious non-zero `undrained_dispatches`
+    /// into the trail operators are told to alert on.
     #[test]
     fn an_absent_override_leaves_the_production_budget_in_place() {
         assert_eq!(budget_from_override(None), DISPATCH_DRAIN_BUDGET);

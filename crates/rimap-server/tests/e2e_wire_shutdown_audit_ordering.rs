@@ -381,25 +381,20 @@ fn process_end_record(raw: &str) -> Value {
         .unwrap_or_else(|| panic!("no process_end record in:\n{raw}"))
 }
 
-/// The clean-cut run's budget. Explicit and generous rather than the production
-/// two seconds, because this suite asserts a *zero* residue and the production
-/// budget is not one this test may rely on: `DispatchDrain::shutdown` and
-/// ADR-0015 both record that it "is honoured only while at least one runtime
-/// worker can still park to drive the timer", and the cut path here performs a
-/// synchronous, fsync-ing `AuthEmitGuard` write. On a contended host that
-/// overrun is tolerable-and-warned by design, but it would redden this
-/// assertion and point the reader at the feature rather than at the host.
-/// The drain returns the moment the count reaches zero, so a wide budget costs
-/// nothing on the passing path.
-const CLEAN_CUT_DRAIN_BUDGET_MS: &str = "30000";
-
+/// Runs at the shipped `DISPATCH_DRAIN_BUDGET` — no override — and is the only
+/// thing in the repo that does. The `undrained_dispatches == 0` assertion is
+/// precisely the claim that two seconds covers this scenario's cut path, so
+/// widening the budget here would make the assertion unfailable and delete the
+/// coverage in the same stroke.
+///
+/// The contention worry that would argue for widening does not apply: a budget
+/// the runtime cannot drive to time *overruns*, and by the time `shutdown`'s
+/// timeout is finally polled the fsync has landed and `inflight` is zero, so it
+/// returns zero and this passes. Only a driven timer that genuinely expires
+/// with a dispatch still registered reddens it — which is the signal, not noise.
 #[tokio::test]
 async fn shutdown_cut_auth_record_precedes_process_end() {
-    let run = run_parked_dispatch_scenario(&[(
-        "RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS",
-        CLEAN_CUT_DRAIN_BUDGET_MS,
-    )])
-    .await;
+    let run = run_parked_dispatch_scenario(&[]).await;
     assert_cut_auth_precedes_terminal_process_end(&run.raw);
 
     // The whole point of the drain is that this run has no residue, and the
