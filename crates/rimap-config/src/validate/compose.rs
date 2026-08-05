@@ -22,7 +22,14 @@ use crate::model::{
 use super::{identity, limits, paths, rules};
 
 /// Validated per-account config with resolved overrides and fingerprint.
+///
+/// `#[non_exhaustive]`: adding a field here is additive, not a breaking
+/// change (#707). Downstream crates cannot write a struct expression for
+/// this type — including functional-update syntax, which rustc rejects
+/// with E0639 — so a value is obtained from [`validate_multi`] /
+/// [`validate_legacy_as_multi`] and adjusted by field assignment.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ValidatedAccountConfig {
     /// Account identity.
     pub id: AccountId,
@@ -55,7 +62,13 @@ pub struct ValidatedAccountConfig {
 }
 
 /// Validated multi-account config — the canonical output of config loading.
+///
+/// `#[non_exhaustive]` for the same reason as [`ValidatedAccountConfig`]
+/// (#707): the field set is expected to grow, and no downstream crate
+/// should be able to mint a "validated" config that never ran through
+/// [`validate_multi`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ValidatedMultiConfig {
     /// Per-account validated configs, keyed by account id.
     pub accounts: BTreeMap<AccountId, ValidatedAccountConfig>,
@@ -63,6 +76,57 @@ pub struct ValidatedMultiConfig {
     pub audit: AuditConfig,
     /// Global attachment download settings.
     pub attachments: AttachmentsConfig,
+}
+
+/// Test fixture for [`ValidatedAccountConfig`].
+///
+/// Gated behind `test-support` on purpose, as is the sibling fixture on
+/// [`ValidatedMultiConfig`]. In production these types are obtainable
+/// only from the validation entry points, which is what makes
+/// "validated" mean something; the gate keeps that true while still
+/// letting downstream test code build a fixture without a config file
+/// and a filesystem probe. Same rationale and same gate as
+/// [`validate_multi_allowing_empty`].
+#[cfg(feature = "test-support")]
+impl ValidatedAccountConfig {
+    /// Build a fixture account from the two fields that have no
+    /// meaningful default. Every remaining field starts at its own
+    /// default (no SMTP, default posture and limits, no overrides, no
+    /// pinned fingerprint); fields are `pub`, so a caller adjusts what
+    /// it cares about by assignment.
+    #[must_use]
+    pub fn new_for_tests(id: AccountId, imap: ImapConfig) -> Self {
+        Self {
+            id,
+            imap,
+            smtp: None,
+            security: SecurityConfig::default(),
+            limits: LimitsConfig::default(),
+            tool_overrides: BTreeMap::new(),
+            account_written_tools: BTreeSet::new(),
+            tls_fingerprint: None,
+            fallback_mode: FallbackMode::default(),
+        }
+    }
+}
+
+/// Test fixture for [`ValidatedMultiConfig`] — same gate and same
+/// rationale as the [`ValidatedAccountConfig`] fixture above.
+#[cfg(feature = "test-support")]
+impl ValidatedMultiConfig {
+    /// Build a fixture multi-account config with no accounts. `audit`
+    /// and `attachments` are required because neither has a default that
+    /// is safe to invent — an audit path in particular is what the
+    /// writer opens. Add accounts by assigning to
+    /// [`Self::accounts`].
+    #[must_use]
+    pub fn new_for_tests(audit: AuditConfig, attachments: AttachmentsConfig) -> Self {
+        Self {
+            accounts: BTreeMap::new(),
+            audit,
+            attachments,
+        }
+    }
 }
 
 /// Validate a multi-account config.

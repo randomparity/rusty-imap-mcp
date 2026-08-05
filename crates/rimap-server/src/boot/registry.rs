@@ -453,14 +453,14 @@ mod tests {
         // cargo-mutants `replace == with !=` mutation at line 223
         // would flip the assignment, breaking the audit-log
         // "infrastructure vs per-account" rendering.
-        use rimap_config::model::{ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig};
+        use rimap_config::model::{ImapConfig, ImapEncryption};
         use rimap_config::validate::ValidatedAccountConfig;
         use rimap_core::account::AccountId;
         use rimap_core::posture::Posture;
 
-        let acfg = ValidatedAccountConfig {
-            id: AccountId::default_account(),
-            imap: ImapConfig {
+        let mut acfg = ValidatedAccountConfig::new_for_tests(
+            AccountId::default_account(),
+            ImapConfig {
                 host: "imap.example.com".into(),
                 port: 993,
                 username: "u@example.com".into(),
@@ -469,17 +469,8 @@ mod tests {
                 connect_timeout_seconds: 10,
                 command_timeout_seconds: 30,
             },
-            smtp: None,
-            security: SecurityConfig {
-                posture: Posture::DraftSafe,
-                ..SecurityConfig::default()
-            },
-            limits: LimitsConfig::default(),
-            tool_overrides: BTreeMap::new(),
-            account_written_tools: std::collections::BTreeSet::new(),
-            tls_fingerprint: None,
-            fallback_mode: rimap_config::model::FallbackMode::default(),
-        };
+        );
+        acfg.security.posture = Posture::DraftSafe;
 
         let default_id = AccountId::new(rimap_core::account::DEFAULT_ACCOUNT_NAME).unwrap();
         let conn_default = build_account_connection(&default_id, &acfg);
