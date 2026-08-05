@@ -2556,6 +2556,7 @@ dependencies = [
  "dbus-secret-service",
  "directories",
  "keyring",
+ "rimap-config",
  "rimap-core",
  "rpassword",
  "secrecy",
