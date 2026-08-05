@@ -8,9 +8,9 @@
 //! makes that non-vacuous is the **scripted dialog**: the fake expects
 //! `UID COPY`, so a client that had taken the MOVE path would desync and the
 //! move would fail. This scenario deliberately asserts nothing about the
-//! capability atomics — its server advertises `IMAP4rev1` only, so the probe's
-//! result is `(false, false)`, bit-identical to the construction-time default,
-//! and no assertion on them could tell a probe from no probe.
+//! advertisement itself — its server advertises `IMAP4rev1` only, so the
+//! probe yields `Known { false, false }`, and an assertion on that alone
+//! cannot distinguish the fallback the dialog already pins.
 //! `login_handshake_rejection.rs` is where they discriminate (its server
 //! advertises `MOVE UIDPLUS` pre-login and nothing post-login), and
 //! `capability_reconnect_freshness.rs` is what pins the read point itself
