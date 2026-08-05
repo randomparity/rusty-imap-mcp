@@ -192,41 +192,20 @@ fmt-check:
 lint:
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-# Remove stale rimap-it-* pods/volumes left by SIGKILL'd test runs.
-# Operates below compose to avoid the lock-exhaustion cascade where
-# compose-down itself fails because podman has no free locks.
+# Remove stale rimap-it-* pods/volumes left by SIGKILL'd test runs. Picks the
+# runtime the same way the Rust test harnesses do (#674/#688): first of
+# docker, podman whose daemon actually answers, not just the first binary on
+# PATH — see scripts/prune-containers.sh for why (issue #689).
 [private]
 prune-containers:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tool="${RIMAP_CONTAINER_TOOL:-}"
-    if [ -z "$tool" ]; then
-        if command -v docker >/dev/null 2>&1; then tool=docker
-        elif command -v podman >/dev/null 2>&1; then tool=podman
-        else exit 0; fi
-    fi
-    cutoff=$(($(date +%s) - 1800))
-    # Remove stale pods (podman) or containers (docker) whose names
-    # start with rimap-it- and that were created more than 30min ago.
-    if [ "$tool" = "podman" ]; then
-        podman pod ls --format '{{{{.Name}}' --noheading 2>/dev/null \
-        | grep '^rimap-it-' \
-        | while read -r pod; do
-            created=$(podman pod inspect "$pod" --format '{{{{.Created}}' 2>/dev/null) || continue
-            ts=$(date -d "$created" +%s 2>/dev/null) || continue
-            if [ "$ts" -lt "$cutoff" ]; then
-                podman pod rm -f "$pod" 2>/dev/null || true
-            fi
-        done || true
-    fi
-    # Prune orphaned rimap-it-* volumes regardless of runtime.
-    "$tool" volume ls --format '{{{{.Name}}' 2>/dev/null \
-    | grep '^rimap-it-' \
-    | while read -r vol; do
-        "$tool" volume rm -f "$vol" 2>/dev/null || true
-    done || true
-    # Prune orphaned docker/podman networks.
-    "$tool" network prune -f >/dev/null 2>&1 || true
+    ./scripts/prune-containers.sh
+
+# Unit-test prune-containers.sh's runtime selection and pruning logic against
+# fake docker/podman binaries (autodetect order, explicit-override-with-no-
+# fallback, daemon-down vs no-binary messaging, pod/volume counting). No real
+# container runtime, no network. Mirrored in the `publish-checks` CI job.
+test-prune-containers:
+    ./scripts/prune-containers.test.sh
 
 # Generate roff manpages into man/man1/ (consumed by tarball/deb/rpm packaging).
 # The pages exclude test-support subcommands because xtask depends on rimap-server
@@ -454,7 +433,7 @@ test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer semver-checks
+ci: fmt-check lint test test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer test-prune-containers semver-checks
     typos
 
 # Re-run pre-commit hooks across all files.

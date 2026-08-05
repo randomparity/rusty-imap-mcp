@@ -17,7 +17,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use crate::error::{ImapError, StarttlsFailure, StarttlsRefusal};
 use crate::tls::TlsConfigBundle;
 
-use super::{Connection, ImapEncryption, ImapSession};
+use super::{Connection, ImapEncryption, SessionEntry};
 
 impl Connection {
     /// Run TCP connect, TLS establishment, and IMAP login against `bundle`,
@@ -31,7 +31,7 @@ impl Connection {
         &self,
         bundle: &TlsConfigBundle,
         progress: &super::ConnectProgress,
-    ) -> Result<ImapSession, ImapError> {
+    ) -> Result<SessionEntry, ImapError> {
         let cfg = &self.inner.cfg;
         let total_deadline = cfg.connect_timeout;
         let started = std::time::Instant::now();
