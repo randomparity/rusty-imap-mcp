@@ -20,6 +20,9 @@
 //! Infrastructure tools (always available):
 //!   [ok ] use_account
 //!   [ok ] list_accounts
+//! Explicit tool overrides:
+//!   delete_message=allow(inherited)
+//!   search=deny(account)
 //! Capabilities (imap.example.com:993):
 //!   [ok ] IMAP4REV1
 //!   [ok ] IDLE
@@ -101,6 +104,31 @@ fn write_fingerprint_section<W: Write>(
     Ok(())
 }
 
+/// Print the `Explicit tool overrides:` section for one account.
+///
+/// Rows come from [`crate::boot::tool_matrix::account_tool_matrix`], the same
+/// producer the boot log line and the `process_start` audit record use, so
+/// the three renderings cannot report different provenance (#632).
+fn write_explicit_overrides_section<W: Write>(
+    out: &mut W,
+    acfg: &rimap_config::validate::ValidatedAccountConfig,
+) -> std::io::Result<()> {
+    let matrix = crate::boot::tool_matrix::account_tool_matrix(acfg);
+    if matrix.tools.is_empty() {
+        writeln!(out, "Explicit tool overrides: none")?;
+        return Ok(());
+    }
+    writeln!(out, "Explicit tool overrides:")?;
+    for verdict in &matrix.tools {
+        writeln!(
+            out,
+            "  {}",
+            crate::boot::tool_matrix::render_verdict(verdict)
+        )?;
+    }
+    Ok(())
+}
+
 /// Load `path`, validate, acquire an exclusive audit lock, build the effective
 /// matrix, print to `out`, and return. The audit lock is held for the duration
 /// of the call and released on return.
@@ -146,6 +174,7 @@ pub async fn run<W: Write>(path: &Path, out: &mut W) -> anyhow::Result<()> {
         {
             writeln!(out, "  [ok ] {tool}")?;
         }
+        write_explicit_overrides_section(out, acfg)?;
 
         // Errors are reported inline but do not abort the dry-run — a
         // multi-account config may have one unreachable host and still
@@ -302,6 +331,76 @@ allowed_base_dir = "{}"
         assert!(
             text.contains("list_accounts"),
             "list_accounts must still be listed somewhere:\n{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dry_run_marks_inherited_and_account_written_overrides() {
+        // Same rows the boot log line and the process_start record carry, so
+        // an operator reading either sees the same provenance (#632).
+        let dir = tight_tempdir();
+        let config_path = dir.path().join("config.toml");
+        let body = format!(
+            r#"
+[defaults.security]
+posture = "full"
+
+[defaults.security.tools]
+delete_message = "allow"
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[accounts.security]
+posture = "readonly"
+
+[accounts.security.tools]
+search = "deny"
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        );
+        std::fs::write(&config_path, body).unwrap();
+
+        let mut out = Vec::new();
+        run(&config_path, &mut out).await.unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains("Explicit tool overrides:"),
+            "overrides section missing:\n{text}"
+        );
+        assert!(
+            text.contains("delete_message=allow(inherited)"),
+            "inherited allow not marked:\n{text}"
+        );
+        assert!(
+            text.contains("search=deny(account)"),
+            "account-written deny not marked:\n{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dry_run_reports_no_explicit_overrides_as_none() {
+        let dir = tight_tempdir();
+        let path = write_minimal_config(&dir);
+        let mut out = Vec::new();
+        run(&path, &mut out).await.unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Explicit tool overrides: none"),
+            "expected the empty-overrides line:\n{text}"
         );
     }
 

@@ -156,6 +156,9 @@ fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
             );
             o
         },
+        account_written_tools: std::collections::BTreeSet::from([
+            rimap_core::tool::ToolName::ExportMessages,
+        ]),
         tls_fingerprint: Some(*harness.fingerprint()),
         fallback_mode: rimap_config::model::FallbackMode::default(),
     }
