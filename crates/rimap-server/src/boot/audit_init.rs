@@ -179,6 +179,7 @@ allowed_base_dir = "{}"
                 .log_process_end(ProcessEnd {
                     reason: ProcessEndReason::Eof,
                     total_tool_calls: 0,
+                    records_lost: 0,
                 })
                 .unwrap();
         }
@@ -228,6 +229,7 @@ allowed_base_dir = "{}"
                     payload: Payload::ProcessEnd(ProcessEnd {
                         reason: ProcessEndReason::Eof,
                         total_tool_calls: 0,
+                        records_lost: 0,
                     }),
                 })
                 .unwrap();
