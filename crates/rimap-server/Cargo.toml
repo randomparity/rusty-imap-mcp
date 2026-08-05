@@ -133,6 +133,11 @@ ureq = { workspace = true }
 # Shared scriptable adversarial IMAP fake (ADR-0008): drives the production
 # binary against a scripted short-page FETCH for the fetch_skipped wire test.
 rimap-fake-imap = { path = "../rimap-fake-imap" }
+# Container-runtime selection, daemon probe, and skip-or-fail gate, shared by
+# the Dovecot, Mailpit, and chaos harnesses here and by rimap-imap's Dovecot
+# harness (issue #675). One selection and one probe per test process, even in
+# e2e_smtp_real, which links two of those harnesses.
+rimap-container-gate = { path = "../rimap-container-gate" }
 
 # --- Native packaging (issue #545, ADR-0006). amd64/arm64 only; the packaged
 # binary static-links libdbus (vendored-keyring), so no libdbus runtime dep.
