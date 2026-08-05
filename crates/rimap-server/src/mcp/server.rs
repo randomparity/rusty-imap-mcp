@@ -2205,10 +2205,18 @@ mod dispatch_drain_tests {
     /// first, so the ordering assertion fails rather than flickering.
     const RELEASE_DELAY: Duration = Duration::from_millis(150);
 
-    /// Ceiling on [`await_registrations`]. Reached in milliseconds when the
-    /// offload is tracked; burned in full when it is not, which is the
-    /// regression these tests name.
-    const REGISTRATION_BARRIER: Duration = Duration::from_secs(1);
+    /// Ceiling on the two barriers below. Reached in milliseconds on any host
+    /// that is not pathologically loaded; burned in full only when the offload
+    /// is untracked, which is the regression these tests name. Generous on
+    /// purpose — expiry does not fail a barrier, it just lets the run continue
+    /// to an assertion, so a slow runner costs seconds rather than a red build.
+    const REGISTRATION_BARRIER: Duration = Duration::from_secs(5);
+
+    /// How long a late write is given to land before the tail is read. Only a
+    /// regression produces one, so this is spent on making the *failure*
+    /// legible: too short and a broken build fails on the "record is present"
+    /// assertion instead of on the ordering one.
+    const SETTLE: Duration = Duration::from_secs(1);
 
     /// A runtime whose blocking pool has exactly one usable thread, plus a real
     /// `AuditWriter` over a temp dir. tokio sizes the pool at
@@ -2465,7 +2473,7 @@ mod dispatch_drain_tests {
         server: Arc<ImapMcpServer>,
         drainer: tokio::task::JoinHandle<()>,
     ) {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(SETTLE).await;
         drop(tx);
         drop(server);
         drainer.await.expect("drainer joins");
