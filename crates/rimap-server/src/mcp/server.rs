@@ -2087,6 +2087,81 @@ mod dispatch_drain_tests {
         );
     }
 
+    /// The residue the drain reports must reach the durable audit trail as
+    /// `process_end.undrained_dispatches`, or a reader holding only the file
+    /// cannot tell that terminality went unbacked for that run (#680).
+    ///
+    /// The whole path is real: a real `DispatchDrain` producing a real non-zero
+    /// count, a real `AuditWriter` writing a real line to a real file, and the
+    /// same `ProcessEnd::new` shape `main.rs::emit_process_end` uses. The one
+    /// thing standing in for production is the uncancelable block — an
+    /// `mpsc::recv` the *test* closes rather than a clock, so the count cannot
+    /// flip to zero on a fast or an overloaded runner.
+    ///
+    /// The wire suite `e2e_wire_shutdown_audit_ordering` covers the threading
+    /// out of `serve_mcp` that this test stops short of; it cannot cover a
+    /// non-zero deterministically, because every dispatch reachable from the
+    /// wire is cancellable and can unwind before the drain reads its count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_undrained_count_reaches_process_end_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let writer = AuditWriter::open(&AuditOptions {
+            path: path.clone(),
+            rotate_bytes: 10 * 1024 * 1024,
+            rotate_keep: 5,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: Seq::FIRST,
+        })
+        .expect("audit writer opens");
+
+        let drain = DispatchDrain::new();
+        let entered = Arc::new(AtomicBool::new(false));
+        let (release, blocked) = mpsc::channel::<()>();
+        let dispatch = tokio::spawn({
+            let drain = drain.clone();
+            let entered = Arc::clone(&entered);
+            async move {
+                drain
+                    .track(async move {
+                        entered.store(true, Ordering::SeqCst);
+                        let _ = blocked.recv();
+                        Err(ErrorData::internal_error("finished".to_string(), None))
+                    })
+                    .await
+            }
+        });
+        await_flag(&entered).await;
+
+        let undrained = drain.shutdown(Duration::from_millis(50)).await;
+        assert_eq!(undrained, 1, "the blocked dispatch must be reported");
+
+        // Exactly what `run_server` does with the drain's return.
+        let end = rimap_audit::record::ProcessEnd::new(
+            rimap_audit::record::ProcessEndReason::Eof,
+            1,
+            writer.suppressed_failures(),
+            u64::try_from(undrained).expect("count fits u64"),
+        );
+        writer.log_process_end(end).expect("process_end write");
+
+        drop(release);
+        let _ = dispatch.await;
+
+        // Read the raw line, not through `reader`, which defaults a missing
+        // field back to zero and would pass on a record that never carried it.
+        let contents = std::fs::read_to_string(&path).expect("audit file readable");
+        let line = contents
+            .lines()
+            .find(|l| l.contains(r#""kind":"process_end""#))
+            .expect("a process_end line is on disk");
+        assert!(
+            line.contains(r#""undrained_dispatches":1"#),
+            "the drain's residue must reach the record; got: {line}",
+        );
+    }
+
     /// The correctness argument for the whole drain is that a dispatch's guards
     /// finish running before its registration is released. That holds for the
     /// cancel path (covered above) and equally when the `track` future is
