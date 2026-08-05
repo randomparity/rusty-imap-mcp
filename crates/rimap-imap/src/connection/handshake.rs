@@ -389,6 +389,11 @@ mod tests {
         /// matter and not just the count: since #623 a connect cut by an
         /// enclosing deadline also leaves a Failure behind, so a test that
         /// counted alone could no longer tell the two apart.
+        ///
+        /// Unlike the sink's own `emit_auth`, this keeps its `.expect`: it is
+        /// the test's accessor rather than an implementation of the no-panic
+        /// contract, and a poisoned lock here means an earlier panic the test
+        /// should fail on rather than read through.
         pub(super) fn failure_codes(&self) -> Vec<rimap_core::ErrorCode> {
             self.events
                 .lock()
@@ -402,12 +407,129 @@ mod tests {
 
     impl AuthEventSink for RecordingAudit {
         fn emit_auth(&self, event: AuthEvent) -> Result<(), AuthSinkError> {
-            self.events
-                .lock()
-                .expect("recording sink mutex")
-                .push(event);
-            Ok(())
+            match self.events.lock() {
+                Ok(mut events) => {
+                    events.push(event);
+                    Ok(())
+                }
+                Err(poisoned) => Err(AuthSinkError::new(
+                    rimap_core::ErrorCode::Internal,
+                    "recording sink lock poisoned",
+                    Box::new(std::io::Error::other(poisoned.to_string())),
+                )),
+            }
         }
+    }
+
+    /// A [`RecordingAudit`] whose mutex is poisoned the only way a real one
+    /// ever is: a panic raised while the lock was held.
+    fn poisoned_recording_audit() -> RecordingAudit {
+        let audit = RecordingAudit::default();
+
+        let poisoning = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = audit.events.lock().expect("a fresh mutex is unpoisoned");
+            // "lock", not "mutex": #681's sweep greps for the latter to find
+            // sinks still panicking through their lock, and this fixture is
+            // not one of them.
+            panic!("poison the recording sink lock (test)");
+        }));
+
+        assert!(poisoning.is_err(), "the poisoning panic must be raised");
+        assert!(
+            audit.events.lock().is_err(),
+            "the held guard must have dropped during that unwind, which is \
+             what poisons the mutex; without it the tests below are vacuous",
+        );
+        audit
+    }
+
+    /// An event whose contents no assertion reads — the tests below are about
+    /// what the sink does with the lock, not with the record.
+    fn any_auth_event() -> AuthEvent {
+        AuthEvent {
+            account: None,
+            result: rimap_core::auth_event::AuthResult::Failure,
+            host: "127.0.0.1".to_string(),
+            port: 143,
+            username: "unused".to_string(),
+            tls_fingerprint_sha256: None,
+            fingerprint_match: None,
+            error_code: Some(rimap_core::ErrorCode::Internal),
+            credential_source: None,
+        }
+    }
+
+    /// A poisoned lock must be *reported*, because [`AuthEventSink`] forbids
+    /// panicking and this sink is an implementation of it like any other.
+    ///
+    /// #646 wrapped the crate's one call into the trait in `catch_unwind`, so
+    /// the `.expect` this replaces no longer failed a test loudly: the panic
+    /// was caught, the record counted as lost, and the reader left with a
+    /// count mismatch several frames from its cause (#681). Fixing the sink
+    /// removes the mismatch rather than relying on the backstop to soften it.
+    #[test]
+    fn a_poisoned_recording_sink_reports_the_poison_rather_than_panicking() {
+        let audit = poisoned_recording_audit();
+
+        let err = audit
+            .emit_auth(any_auth_event())
+            .expect_err("a poisoned lock cannot record the event");
+
+        assert_eq!(
+            err.code(),
+            rimap_core::ErrorCode::Internal,
+            "a broken sink is an internal fault, not a transport one",
+        );
+    }
+
+    /// The shape that actually aborts: the sink's write running in a `Drop`
+    /// while an unwind is already in flight. Rust treats a panic escaping a
+    /// destructor during cleanup as unrecoverable and calls `abort` — no
+    /// second unwind, no test failure to read, just SIGABRT.
+    ///
+    /// The test above covers the ordinary call and fails ordinarily; this one
+    /// is why the contract exists at all. `Connection::emit_auth` contains a
+    /// sink panic at the crate's one call site (#646), so the write is dropped
+    /// into an unwind directly here rather than driven through a connect —
+    /// that containment is a backstop for a broken sink, not a licence for
+    /// one, and a test routed through it would pass whatever this sink did.
+    #[test]
+    fn a_poisoned_recording_sink_written_during_an_unwind_does_not_abort() {
+        struct EmitOnDrop<'a> {
+            audit: &'a RecordingAudit,
+            rejected: &'a std::cell::Cell<bool>,
+        }
+
+        impl Drop for EmitOnDrop<'_> {
+            fn drop(&mut self) {
+                let lost = self.audit.emit_auth(any_auth_event());
+                self.rejected.set(lost.is_err());
+            }
+        }
+
+        let audit = poisoned_recording_audit();
+        let rejected = std::cell::Cell::new(false);
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _emitter = EmitOnDrop {
+                audit: &audit,
+                rejected: &rejected,
+            };
+            panic!("an unwind passing through the connect");
+        }));
+
+        assert!(
+            caught.is_err(),
+            "the outer panic must unwind normally; reaching this line at all \
+             means the sink's write did not abort the process",
+        );
+        assert!(
+            rejected.get(),
+            "the drop must have reached the sink and had its write rejected — \
+             surviving the unwind proves nothing if nothing was emitted, and \
+             the flag is set after the call so it also pins that `emit_auth` \
+             returned rather than diverged",
+        );
     }
 
     fn connection_with_budgets(
