@@ -164,7 +164,7 @@ fn uid(value: u32) -> Uid {
 /// Assertions shared by both operations: nothing that mutates the mailbox may
 /// reach the wire, and the recorded state must be `Unknown` rather than either
 /// bool pair it used to be confused with.
-fn assert_refused_without_touching_the_mailbox(
+async fn assert_refused_without_touching_the_mailbox(
     conn: &rimap_imap::Connection,
     dialog: &[String],
     err: &ImapError,
@@ -176,7 +176,7 @@ fn assert_refused_without_touching_the_mailbox(
     }
 
     assert_eq!(
-        conn.capabilities(),
+        conn.capabilities().await,
         ServerCapabilities::Unknown,
         "the serving session's probe established nothing, so nothing may be \
          recorded as its advertisement",
@@ -217,7 +217,7 @@ async fn delete_after_an_unreadable_reconnect_probe_refuses_rather_than_expungin
 
     conn.list_folders("*").await.expect("warm-up list");
     assert_eq!(
-        conn.capabilities(),
+        conn.capabilities().await,
         ServerCapabilities::Known {
             has_move: true,
             has_uidplus: true,
@@ -236,7 +236,8 @@ async fn delete_after_an_unreadable_reconnect_probe_refuses_rather_than_expungin
         .await
         .expect_err("a reconnect that established no capabilities must refuse");
 
-    assert_refused_without_touching_the_mailbox(&conn, &server.recorded(), &err, "delete_message");
+    assert_refused_without_touching_the_mailbox(&conn, &server.recorded(), &err, "delete_message")
+        .await;
 }
 
 /// `move_messages` over the same reconnect. A separate call site with its own
@@ -259,7 +260,7 @@ async fn move_after_an_unreadable_reconnect_probe_refuses_rather_than_expunging(
         .await
         .expect_err("a reconnect that established no capabilities must refuse");
 
-    assert_refused_without_touching_the_mailbox(&conn, &server.recorded(), &err, "move");
+    assert_refused_without_touching_the_mailbox(&conn, &server.recorded(), &err, "move").await;
 }
 
 /// The refusal keys on `Unknown`, not on "no MOVE and no UIDPLUS".
@@ -290,7 +291,7 @@ async fn an_affirmative_neither_still_takes_the_documented_fallback() {
         .expect("an IMAP4rev1-only server is a known state, not an unknown one");
 
     assert_eq!(
-        conn.capabilities(),
+        conn.capabilities().await,
         ServerCapabilities::Known {
             has_move: false,
             has_uidplus: false,
