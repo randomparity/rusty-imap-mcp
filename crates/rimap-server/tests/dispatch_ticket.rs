@@ -63,9 +63,13 @@ fn read_audit_records(path: &std::path::Path) -> Vec<serde_json::Value> {
 /// This is the barrier for "the envelope is ready to be cancelled".
 /// `run_with_audit_envelope` awaits `emit_tool_start`, constructs the
 /// `AuditEnvelopeGuard`, and only *then* polls the body — so observing the
-/// first poll proves the `tool_start` write finished and the guard is armed.
-/// Nothing else polls this future, so the signal cannot arrive early, which
-/// makes it an exact ordering barrier rather than a timing window.
+/// first poll proves the `tool_start` write finished and the guard is
+/// armed. Nothing else polls this future, so the signal cannot arrive
+/// early, which makes it an exact ordering barrier rather than a timing
+/// window.
+///
+/// Kept in sync with the copy in `src/mcp/audit_envelope.rs`, which this
+/// integration-test binary cannot reach.
 fn body_signalling_first_poll(
     entered: tokio::sync::oneshot::Sender<()>,
 ) -> impl std::future::Future<Output = Result<serde_json::Value, rimap_core::RimapError>> {
@@ -213,7 +217,11 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
         rotate_keep: 0,
         retention_seconds: None,
         fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
+        // Deliberately not `Seq::FIRST`: the assertions below join `tool_end`
+        // to `tool_start` on `seq`, and with the default start every record
+        // in this test would be seq 1 — so a guard that hardcoded
+        // `Seq::FIRST` instead of carrying the real seq would still pass.
+        initial_seq: Seq(41),
     })
     .expect("audit open");
 
@@ -256,7 +264,15 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
     // the abort strictly after `tool_start` is written and the guard is
     // armed, so no amount of host load can make the abort land early
     // (#684 — the previous 50ms sleep was a race window, not a barrier).
-    entered_rx.await.expect("tool body must be polled");
+    //
+    // A dropped sender (e.g. `emit_tool_start` returned `Err`) already fails
+    // this fast. The outer timeout only covers the envelope *hanging* before
+    // the body: it is a bound on failure reporting, never on the barrier
+    // itself, so unlike the old sleep it cannot expire during a healthy run.
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered_rx)
+        .await
+        .expect("tool body was never polled within 30s")
+        .expect("envelope dropped the body without ever polling it");
     task.abort();
     let _ = task.await; // wait for the abort to settle
 
@@ -309,5 +325,9 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
     assert_eq!(
         start["tool"], "list_accounts",
         "the envelope under test is the list_accounts dispatch; start={start:#?}",
+    );
+    assert_eq!(
+        end["tool"], "list_accounts",
+        "tool_end duplicates the tool name so the line stands alone; end={end:#?}",
     );
 }
