@@ -95,6 +95,17 @@ one cache, so the probe runs once per test process (twice only when the
 first candidate is unusable) and gives up after 10s per candidate. Set
 `RIMAP_REQUIRE_DOCKER=1` to turn either into a loud failure; CI does.
 
+All of that lives once, in the `rimap-container-gate` crate
+(`publish = false`, a dev-dependency of `rimap-imap` and `rimap-server`).
+Every container harness — `rimap-imap`'s Dovecot one and `rimap-server`'s
+Dovecot, Mailpit, and chaos ones — calls it and maps its verdict onto
+that harness's own error type; the compose files, readiness probes, and
+`Drop` teardown stay with each fixture. It used to be four copies, and
+both #636 and #674 had to be fixed in all four with nothing detecting a
+copy that got missed (issue #675). Because the cache lives in the crate,
+a binary linking two harnesses — `e2e_smtp_real` links Dovecot and
+Mailpit — still selects and probes exactly once.
+
 Everything else is loud, deliberately. The probe only reports "cannot
 run containers" when the runtime's own stderr says it could not reach
 its engine; any other non-zero exit — and a probe that overruns its
@@ -112,8 +123,8 @@ maps host ports dynamically. There is no arch gate — every supported
 developer host can run the suite.
 
 `just test`'s `prune-containers` recipe (`scripts/prune-containers.sh`)
-runs before any test binary starts, so it cannot share the harness's
-Rust selection code; it mirrors the same contract in shell instead —
+runs before any test binary starts, so it cannot call
+`rimap-container-gate`; it mirrors the same contract in shell instead —
 same autodetect order, same "probe, don't just check the binary"
 behavior, same verbatim `RIMAP_CONTAINER_TOOL` override — so the two
 never disagree about which runtime a given host lands on (issue #689).
