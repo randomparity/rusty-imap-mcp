@@ -53,7 +53,8 @@ the file.
   a newer version than the binary doing the merging.
 - A field it expects and does not find was added after *that line* was written.
   Every such field has a documented read-as value in the tables below --
-  `records_lost` reads as `0`, `tool_matrix` as empty -- and a reader that
+  `records_lost` reads as `0`, `undrained_dispatches` as `0`, `tool_matrix` as
+  empty -- and a reader that
   substitutes it gets the same answer the writer would have given.
 - Fields it does find keep their spelling, their type, and their position on
   the line. Records already on disk are never rewritten in place.
@@ -156,6 +157,7 @@ recently flushed.
 | `reason` | One of `signal_int`, `signal_term`, `eof`, `error` |
 | `total_tool_calls` | Number of tool calls dispatched in this process |
 | `records_lost` | Number of records this process failed to persist and told no caller about (absent on records written before this field existed; read as `0`) |
+| `undrained_dispatches` | Tool dispatches -- or audit writes one of them offloaded -- still registered when the shutdown drain's budget expired (absent on records written before this field existed; read as `0`) |
 
 **A non-zero `records_lost` means this file has a hole in it.** Some event
 happened and left no record — most often a disk that filled mid-run. The count
@@ -202,10 +204,18 @@ Read the exception before building on the rule.
   server logs `tool dispatches outlived the shutdown drain` with the count and
   proceeds. Anything those dispatches write afterwards keeps the old behaviour:
   sequenced after `process_end`, or lost to process exit. This one is
-  **announced on stderr**, so a reader can tell: treat a run whose log carries
-  that warning as suspect, and alert on it. An audit write still queued on the
-  blocking pool when the budget expires is counted in that same warning, so it
-  is announced too rather than silently absorbed.
+  **announced in the file**, as `process_end.undrained_dispatches`: a non-zero
+  count is the record saying that terminality was not met for its own run, so a
+  reader holding nothing but the audit log can tell. Treat such a run as
+  suspect and alert on it. An audit write still queued on the blocking pool
+  when the budget expires holds a registration of its own, so it is counted
+  there too rather than silently absorbed. The same count is still logged to
+  stderr, which is now the redundant copy rather than the only one.
+
+  The caveat the field cannot lift: a run that never reaches `process_end` at
+  all -- a hard crash, a `SIGKILL` -- reports nothing, neither a count nor a
+  zero. A non-zero count is evidence that terminality was broken; a missing
+  `process_end` is not evidence that it held.
 
 Separately, and not an exception to *ordering*: a record may be missing
 entirely. Loss on shutdown is expected and documented (best-effort). Terminality
