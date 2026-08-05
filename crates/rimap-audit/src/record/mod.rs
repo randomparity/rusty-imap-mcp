@@ -149,6 +149,17 @@ pub struct ProcessEnd {
     pub reason: ProcessEndReason,
     /// Number of tool calls dispatched in this process.
     pub total_tool_calls: u64,
+    /// Number of records this process failed to persist and told no caller
+    /// about — read from
+    /// [`AuditWriter::suppressed_failures`](crate::AuditWriter::suppressed_failures)
+    /// at shutdown. Non-zero means this file has a hole in it: some event
+    /// happened that left no record. The two sources are deliberately merged
+    /// into one count; see that accessor for why.
+    ///
+    /// `#[serde(default)]` because `process_end` records written before #647
+    /// carry no such field, and must keep deserializing as zero.
+    #[serde(default)]
+    pub records_lost: u64,
 }
 
 /// Top-level audit record enum. One variant per `kind` discriminator.
@@ -397,6 +408,7 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::SignalInt,
                 total_tool_calls: 42,
+                records_lost: 0,
             }),
         };
         let json = serde_json::to_string(&rec).unwrap();

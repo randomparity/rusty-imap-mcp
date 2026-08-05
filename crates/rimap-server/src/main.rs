@@ -391,6 +391,9 @@ fn emit_process_end(audit: &rimap_audit::AuditWriter, mcp_result: &anyhow::Resul
     let process_end = rimap_audit::ProcessEnd {
         reason,
         total_tool_calls: audit.total_tool_calls(),
+        // Last chance to state that this file has a hole in it: the counter
+        // lives only in memory, and the process is about to exit (#647).
+        records_lost: audit.suppressed_failures(),
     };
     match audit.log_process_end(process_end) {
         Ok(seq) => tracing::info!(seq = %seq, "process_end audit record written"),
