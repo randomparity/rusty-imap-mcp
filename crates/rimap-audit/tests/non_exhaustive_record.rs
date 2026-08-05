@@ -62,7 +62,8 @@ fn fixed_pid() -> ProcessId {
 // ---------------------------------------------------------------------------
 
 /// The constructor plus field assignment is the downstream idiom. Writing
-/// `ProcessEnd { reason, total_tool_calls, records_lost }` here, or
+/// `ProcessEnd { reason, total_tool_calls, records_lost, undrained_dispatches }`
+/// here, or
 /// `ProcessEnd { reason, ..Default::default() }`, is rejected by rustc
 /// (E0639) -- both are struct expressions.
 #[test]
@@ -91,23 +92,39 @@ fn record_types_are_built_through_constructors_and_field_assignment() {
         Seq(1),
         fixed_ts(),
         fixed_pid(),
-        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 7, 3)),
+        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 7, 3, 0)),
     );
     assert_eq!(record.seq, Seq(1));
 }
 
-/// `ProcessEnd::new` takes `records_lost` even though the field is
-/// `#[serde(default)]`, because a zero there is a durable claim that the
-/// process's record stream has no hole in it. The constructor records what
-/// the caller passed rather than assuming the reassuring value.
+/// `ProcessEnd::new` takes `records_lost` and `undrained_dispatches` even
+/// though both fields are `#[serde(default)]`, because a zero in either is a
+/// durable claim -- that the record stream has no hole in it, and that no tool
+/// dispatch outlived the shutdown drain. The constructor records what the
+/// caller passed rather than assuming the reassuring value.
 #[test]
 fn process_end_constructor_records_the_loss_count_it_was_given() {
-    let lost = ProcessEnd::new(ProcessEndReason::Error, 12, 4);
+    let lost = ProcessEnd::new(ProcessEndReason::Error, 12, 4, 2);
     assert_eq!(lost.records_lost, 4);
     assert_eq!(lost.total_tool_calls, 12);
+    assert_eq!(lost.undrained_dispatches, 2);
 
-    let clean = ProcessEnd::new(ProcessEndReason::Eof, 12, 0);
+    let clean = ProcessEnd::new(ProcessEndReason::Eof, 12, 0, 0);
     assert_eq!(clean.records_lost, 0);
+    assert_eq!(clean.undrained_dispatches, 0);
+}
+
+/// Three adjacent `u64` parameters are transposable without a compile error,
+/// and each lands on a field an operator alerts on. Distinct values in a known
+/// order are the only thing that catches a swap -- the sibling pin
+/// `ProcessStartInputs` carries for the same reason.
+#[test]
+fn process_end_constructor_maps_each_count_to_its_own_field() {
+    let end = ProcessEnd::new(ProcessEndReason::SignalInt, 11, 22, 33);
+    assert_eq!(end.reason, ProcessEndReason::SignalInt);
+    assert_eq!(end.total_tool_calls, 11);
+    assert_eq!(end.records_lost, 22);
+    assert_eq!(end.undrained_dispatches, 33);
 }
 
 /// A downstream match on a `#[non_exhaustive]` struct needs a rest pattern.
@@ -115,7 +132,7 @@ fn process_end_constructor_records_the_loss_count_it_was_given() {
 /// added later cannot silently change what this destructuring means.
 #[test]
 fn downstream_pattern_matches_need_a_rest_pattern() {
-    let end = ProcessEnd::new(ProcessEndReason::SignalTerm, 3, 0);
+    let end = ProcessEnd::new(ProcessEndReason::SignalTerm, 3, 0, 0);
     let ProcessEnd { reason, .. } = end;
     assert_eq!(reason, ProcessEndReason::SignalTerm);
 
@@ -148,11 +165,11 @@ fn process_end_line_is_byte_exact() {
         Seq(1),
         fixed_ts(),
         fixed_pid(),
-        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 7, 3)),
+        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 7, 3, 5)),
     );
     assert_golden(
         &record,
-        r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"eof","total_tool_calls":7,"records_lost":3}"#,
+        r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"eof","total_tool_calls":7,"records_lost":3,"undrained_dispatches":5}"#,
     );
 }
 
@@ -467,7 +484,7 @@ fn whole_second_timestamps_lose_their_zero_millis_on_rewrite() {
 fn a_line_read_off_disk_reserializes_unchanged() {
     let goldens = [
         r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"","posture":"readonly","tool_matrix":[],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
-        r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"signal_int","total_tool_calls":0,"records_lost":0}"#,
+        r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"signal_int","total_tool_calls":0,"records_lost":0,"undrained_dispatches":0}"#,
         r#"{"seq":3,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"config","path":"/etc/rimap/config.toml","hash_sha256":"00"}"#,
     ];
 

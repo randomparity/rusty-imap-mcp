@@ -261,6 +261,7 @@ mod tests {
             reason: ProcessEndReason::Eof,
             total_tool_calls: 0,
             records_lost: 0,
+            undrained_dispatches: 0,
         })
     }
 

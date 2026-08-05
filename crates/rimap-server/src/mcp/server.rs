@@ -2319,11 +2319,13 @@ mod dispatch_drain_tests {
     }
 
     /// Exactly what `run_server` writes, immediately after the drain returns.
-    fn log_process_end(writer: &AuditWriter) {
+    /// `undrained` is the drain's own return, as `main.rs` threads it (#680).
+    fn log_process_end(writer: &AuditWriter, undrained: usize) {
         let end = rimap_audit::record::ProcessEnd::new(
             rimap_audit::record::ProcessEndReason::Eof,
             1,
             writer.suppressed_failures(),
+            u64::try_from(undrained).unwrap_or(u64::MAX),
         );
         writer
             .log_process_end(end)
@@ -2373,7 +2375,7 @@ mod dispatch_drain_tests {
 
             let releaser = release_slot_after_delay(release_tx);
             let undrained = drain.shutdown(Duration::from_secs(30)).await;
-            log_process_end(&writer);
+            log_process_end(&writer, undrained);
 
             releaser.join().expect("releaser thread joins");
             occupant.await.expect("occupant joins");
@@ -2439,7 +2441,7 @@ mod dispatch_drain_tests {
 
             let releaser = release_slot_after_delay(release_tx);
             let undrained = drain.shutdown(Duration::from_secs(30)).await;
-            log_process_end(&writer);
+            log_process_end(&writer, undrained);
 
             releaser.join().expect("releaser thread joins");
             occupant.await.expect("occupant joins");

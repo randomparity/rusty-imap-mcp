@@ -18,7 +18,7 @@ fn record(seq: u64, pid: ProcessId) -> AuditRecord {
         Seq(seq),
         Timestamp::now(),
         pid,
-        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, seq, 0)),
+        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, seq, 0, 0)),
     )
 }
 

@@ -302,7 +302,7 @@ allowed_base_dir = "{base}"
         {
             let writer = init_audit_writer_multi(&validated, &config_path).unwrap();
             writer
-                .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0))
+                .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0))
                 .unwrap();
         }
 
@@ -348,7 +348,7 @@ allowed_base_dir = "{base}"
                     Seq(1),
                     Timestamp::now(),
                     pid,
-                    Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 0, 0)),
+                    Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0)),
                 ))
                 .unwrap();
         }
