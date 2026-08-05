@@ -2,7 +2,9 @@
 //! `crates/rimap-server/tests/e2e.rs`. Honors the same env vars
 //! (`RIMAP_CONTAINER_TOOL`, `RIMAP_REQUIRE_DOCKER`) and silently skips
 //! when no container runtime is usable — no binary, or a binary whose
-//! daemon does not answer.
+//! daemon does not answer. That decision comes from `rimap-container-gate`,
+//! shared with the Mailpit and chaos harnesses here and with `rimap-imap`'s
+//! Dovecot harness (#675); only the mapping onto [`HarnessError`] is local.
 //! See `AGENTS.md` "Container runtime for integration tests".
 
 #![expect(clippy::expect_used, reason = "integration tests")]

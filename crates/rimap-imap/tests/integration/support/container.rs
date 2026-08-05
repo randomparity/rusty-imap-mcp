@@ -3,6 +3,11 @@
 //! runtime whose daemon answers wins, or `RIMAP_CONTAINER_TOOL={docker,podman}`
 //! forces a choice. Each test run gets a unique compose project name so
 //! parallel tests don't collide.
+//!
+//! Runtime selection, the daemon probe, and the skip-or-fail verdict come from
+//! `rimap-container-gate`, shared with `rimap-server`'s harnesses (#675); only
+//! the mapping onto [`HarnessError`] is local. See `AGENTS.md` "Container
+//! runtime for integration tests".
 
 #![allow(dead_code)]
 

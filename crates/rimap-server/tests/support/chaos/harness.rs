@@ -3,7 +3,9 @@
 //! toxics (latency, resets, byte-trickle) can be injected between the server and
 //! Dovecot. Reuses the `DovecotHarness` scaffolding (runtime autodetect,
 //! `ReservedPort`, `uuid_like` project names, fingerprint hand-off, Drop
-//! teardown). See `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`
+//! teardown), and takes its runtime gate from `rimap-container-gate` (#675) —
+//! only the three-tier `RIMAP_CHAOS`/skip/loud policy below is local.
+//! See `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`
 //! and `AGENTS.md` "Container runtime for integration tests".
 
 #![expect(clippy::expect_used, reason = "integration tests")]

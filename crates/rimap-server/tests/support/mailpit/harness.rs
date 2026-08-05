@@ -3,7 +3,10 @@
 //! gating, same `ReservedPort` + compose-project pattern, silent-skip when no
 //! runtime is usable (no binary, or an unreachable daemon). Waits on
 //! Mailpit's HTTP `/api/v1/info` and exposes a
-//! delivered-message retrieval helper over the HTTP API.
+//! delivered-message retrieval helper over the HTTP API. The runtime gate
+//! itself is `rimap-container-gate` (#675); only the mapping onto
+//! [`HarnessError`] is local — which is why `e2e_smtp_real`, linking this
+//! harness and the Dovecot one, selects and probes once rather than twice.
 //! See `AGENTS.md` "Container runtime for integration tests".
 
 use std::path::PathBuf;
