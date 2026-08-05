@@ -224,9 +224,9 @@ impl Connection {
     /// ## Why this blocks rather than deferring to the blocking pool
     ///
     /// `AuditWriter::write_record` fsyncs `auth` records, and its docs tell
-    /// async callers to route through `spawn_blocking` (RUST-ASYNC-04). This
-    /// emitter deliberately does not, and ADR-0014 records the decision. The
-    /// short form:
+    /// async callers to route through `spawn_blocking`. This emitter
+    /// deliberately does not, and ADR-0014 records the decision. The short
+    /// form:
     ///
     /// * **`spawn_blocking` loses the record on a shutdown.** Read against
     ///   tokio 1.53, a deferred closure survives a shutdown only by luck.
@@ -278,8 +278,8 @@ impl Connection {
     ///   against its 512-thread cap instead and cannot starve the scheduler, so
     ///   this makes `audit.path` a local-storage requirement rather than a
     ///   preference — and one nothing currently enforces: `docs/audit-log.md`
-    ///   still scopes the warning to the cut path (#667), and detecting a
-    ///   non-local `audit.path` at startup is #668.
+    ///   states it for the operator, but detecting a non-local `audit.path`
+    ///   at startup is #668.
     ///
     /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
     /// file I/O, nothing inside its critical section calls back into this

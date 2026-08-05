@@ -64,11 +64,12 @@ pub(super) fn validate_timeouts(
 /// `command_timeout` on the command body; `with_session` runs a second
 /// `attempt` when a read-only op fails with `ConnectionLost`.
 ///
-/// This covers the *deadline-bounded* stages only. One await on the same
+/// This covers the *deadline-bounded* stages only. One stage on the same
 /// path carries no deadline of its own — `connect_inner`'s `emit_auth`
-/// runs an audit write outside the connect deadline — so a ceiling set
-/// exactly at this value still has no slack for it. It is a floor for the
-/// validation below, not a promise about wall clock.
+/// runs an audit write, synchronously on the calling thread, outside the
+/// connect deadline — so a ceiling set exactly at this value still has no
+/// slack for it. It is a floor for the validation below, not a promise
+/// about wall clock.
 ///
 /// Computed in `u64` so `u32::MAX` budgets cannot wrap into a value that
 /// passes the comparison in [`validate_tool_call_ceiling`].

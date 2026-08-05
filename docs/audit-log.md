@@ -309,12 +309,26 @@ Config-related event. Declared for future use.
   failed). Both log the failure and continue. Neither goes unaccounted --
   they increment the same lost-record counter as a `fail_open`
   suppression.
-- **`audit.path` must be on local storage.** The drop-guard write above
-  runs on a runtime worker thread with the account's connection lock
-  held, and nothing bounds it. Pointed at a network mount that stops
-  responding (NFS, SMB), that write never returns: the account wedges,
-  and enough concurrent occurrences stall the server as a whole. Local
-  disk has no such failure mode.
+- **`audit.path` must be on local storage.** This is not limited to the
+  two exceptional paths above. *Every* connect writes its `auth` record
+  synchronously on a runtime worker thread, with the account's session
+  lock held, and nothing bounds that write -- no timeout covers it
+  (ADR-0014). Pointed at a network mount that stops responding (NFS,
+  SMB), the write never returns: the worker stays pinned for the life of
+  the process, the session lock is never released, and any peer queued on
+  that account waits forever rather than spending its
+  `imap.command_timeout_seconds`.
+
+  How many workers one stall can pin is bounded by `min(accounts,
+  worker_threads)` -- and the second term can be 1. The runtime sizes its
+  worker pool from `available_parallelism()`, so under a one-vCPU quota
+  (a container CPU limit, a small VM) a *single* account's connect pins
+  the only worker. With every worker pinned the timer stops advancing, so
+  no deadline fires anywhere in the process -- including the per-tool-call
+  ceiling -- and the server stops answering its MCP client at all.
+
+  Nothing checks the path's locality at startup; it is an operator
+  requirement. Local disk has no such failure mode.
 
 ## Running multiple MCP clients
 

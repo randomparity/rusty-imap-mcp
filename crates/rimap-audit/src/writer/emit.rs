@@ -23,13 +23,15 @@ impl AuditWriter {
     /// callers can therefore produce a file where physical line order
     /// disagrees with `seq` order (allocation races with the write).
     ///
-    /// Readers of the audit log MUST sort by the `seq` field rather
-    /// than relying on line order. `read_trailing_state` and the Sprint 3
-    /// consumers (`Connection::ensure_connected`, `rimap-server::audit_init`)
-    /// are all single-writer through a serializing outer mutex, so the
-    /// inversion does not occur in practice today. The contract is
-    /// documented here so a future multi-writer call site cannot silently
-    /// break downstream readers.
+    /// Readers of the audit log MUST sort by the `seq` field rather than
+    /// relying on line order. No outer lock serializes the writers into
+    /// one, so this is a live hazard rather than a hypothetical one:
+    /// `rimap_server::boot::audit_init` writes `process_start` before
+    /// serving begins, but from then on `Connection::emit_auth` (an `auth`
+    /// record per connect, inline on a runtime worker, serialized per
+    /// account by the session lock but not across accounts) and
+    /// `rimap_server::mcp::audit_envelope` (`tool_start` / `tool_end` on
+    /// the blocking pool) can be inside this pair concurrently.
     ///
     /// # Errors
     /// Returns `AuditError::Write` if the internal mutex is poisoned.
@@ -84,11 +86,18 @@ impl AuditWriter {
     /// This function performs synchronous filesystem I/O: at minimum a
     /// `write_all` + `flush` + (conditionally) `fsync`, and on rotation
     /// additionally `rename`, `open`, `try_lock`, `read_dir`,
-    /// `symlink_metadata`, and `remove_file`. Callers in an async context
-    /// MUST invoke this inside `tokio::task::spawn_blocking` to avoid
-    /// stalling the runtime executor. The existing production call sites
-    /// (`Connection::emit_auth` and future tool-audit emitters) route
-    /// through `spawn_blocking` for this reason. (RUST-ASYNC-04)
+    /// `symlink_metadata`, and `remove_file`. An async caller should invoke
+    /// it inside `tokio::task::spawn_blocking` so the wait lands on the
+    /// blocking pool rather than stalling a runtime worker; the `tool_start`
+    /// / `tool_end` emitters in `rimap_server::mcp::audit_envelope` do.
+    ///
+    /// `Connection::emit_auth` deliberately does not, and ADR-0014 records
+    /// why: the hop loses the record when the runtime is shutting down, and
+    /// the `Drop` caller has nobody to await it. The cost it accepts in
+    /// exchange is exactly the stall described above — see that function's
+    /// docs for the bound on how many workers it can pin, and
+    /// `docs/audit-log.md` for why it makes `audit.path` a local-storage
+    /// requirement.
     ///
     /// # Errors
     /// - [`AuditError::Serialize`] on JSON failure (never suppressed).
