@@ -24,26 +24,13 @@
 #[path = "support/mod.rs"]
 mod support;
 
-/// Zero-account config: enough to boot the binary, answer `list_accounts`, and
-/// shut down without any IMAP connection at all.
-fn write_config(tempdir: &tempfile::TempDir) -> std::path::PathBuf {
-    let config_path = tempdir.path().join("config.toml");
-    let config = format!(
-        r#"
-accounts = []
-
-[audit]
-path = "{audit}"
-allowed_base_dir = "{base}"
-"#,
-        audit = tempdir.path().join("audit.jsonl").display(),
-        base = tempdir.path().display(),
-    );
-    std::fs::write(&config_path, config).expect("write config");
-    config_path
-}
-
 /// The one `process_end` line in `path`, as raw text.
+///
+/// A near-copy of the same helper in `audit_records_lost.rs`. Each integration
+/// test is its own crate, so the two cannot share a private fn; hoisting it into
+/// `support/` would compile it into every suite that includes the module and
+/// need a dead-code suppression in each. Nine lines duplicated is the cheaper
+/// side of that trade.
 fn process_end_line(path: &std::path::Path) -> String {
     let contents = std::fs::read_to_string(path).expect("read audit log");
     let mut lines = contents
@@ -59,11 +46,9 @@ fn process_end_line(path: &std::path::Path) -> String {
 /// the two apart unless the field is always present.
 #[tokio::test]
 async fn a_clean_shutdown_records_zero_undrained_end_to_end() {
-    let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let config_path = write_config(&tempdir);
-
-    let mut harness =
-        support::wire::harness::Harness::spawn_with_config(&config_path, tempdir, &[]).await;
+    // `Harness::spawn` is the zero-account config: enough to boot the binary,
+    // answer `list_accounts`, and shut down with no IMAP connection at all.
+    let mut harness = support::wire::harness::Harness::spawn().await;
     let _ = harness.initialize_handshake().await;
     harness.send_initialized().await;
     let response = harness
