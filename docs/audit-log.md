@@ -52,6 +52,28 @@ recently flushed.
 |---|---|
 | `reason` | One of `signal_int`, `signal_term`, `eof`, `error` |
 | `total_tool_calls` | Number of tool calls dispatched in this process |
+| `records_lost` | Number of records this process failed to persist and told no caller about (absent on records written before this field existed; read as `0`) |
+
+**A non-zero `records_lost` means this file has a hole in it.** Some event
+happened and left no record — most often a disk that filled mid-run. The count
+merges its two sources on purpose, because no operator decision turns on which
+one it was:
+
+- a write, flush, or fsync failure that `fail_open = true` swallowed and
+  continued past;
+- a record whose caller had nowhere to return the failure to — `rimap-imap`'s
+  cut-connect `Drop` guard and its auth-failure branch, which keeps the
+  connect's own error. These reach the counter only under the default
+  `fail_open = false`, where the write error went back to a caller who could
+  not surface it.
+
+Either way the cause is on stderr at `error` level; the count is what survives
+in the file. Treat a run reporting a non-zero count as one whose record stream
+is incomplete, and alert on it.
+
+The reverse does not hold: a run that lost records to a hard crash writes no
+`process_end` at all. A non-zero count is evidence of loss; a missing record is
+not evidence of none.
 
 **`process_end` is terminal for its `process_id`, subject to the two exceptions
 below.** When a `process_end` record is present, no other record carrying the
