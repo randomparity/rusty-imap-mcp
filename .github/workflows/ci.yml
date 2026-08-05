@@ -250,6 +250,13 @@ jobs:
       # checkout's tags — which this job deliberately does not fetch.
       - name: Unit-test semver-baseline.sh
         run: just test-semver-baseline
+      # prune-containers.sh picks the container runtime the `test` recipe's
+      # nextest run will actually use, so a divergence between the two is
+      # silent otherwise (issue #689). Its cases drive the script against fake
+      # docker/podman binaries in an isolated PATH — no real runtime, no
+      # network — so it runs here alongside the other pure-bash script tests.
+      - name: Unit-test prune-containers.sh
+        run: just test-prune-containers
 
   # Public-API SemVer gate (issue #633). Until this job existed,
   # `cargo semver-checks` ran only in release.yml's `publish` job, so a PR that
