@@ -175,15 +175,18 @@ in an issue that has since closed.
 **`cargo-semver-checks` no longer runs only in the release workflow.** PR #651
 (issue #633, merged 2026-08-04) added a `semver-checks` job to
 `.github/workflows/ci.yml` that runs on every PR, and the justfile's `ci`
-recipe includes the `semver-checks` recipe the job calls. As of
-2026-08-05 `semver-checks` is also a **required status check** on `main` —
-thirteen contexts — so a PR that breaks a publishable crate's public API is red
-until the version bump lands in the same PR. "Nothing on a PR catches this"
-was true when this ADR was written; it is not true now.
+recipe includes the `semver-checks` recipe that job calls. As of 2026-08-05
+`semver-checks` is also a **required status check** on `main` — thirteen
+contexts — so a PR that breaks a publishable crate's public API is red until
+the version bump lands in the same PR. "Nothing on a PR catches this" was true
+when this ADR was written; it is not true now.
 
 **The version no longer stays `0.1.1-dev`.** `[workspace.package]` in the root
 `Cargo.toml` reads `0.2.0-dev`, and `rimap-config` inherits it through
-`version.workspace = true`. The bump this bullet declined to make has happened.
+`version.workspace = true`. That bump was not made for this ADR's break —
+issue #648 moved the workspace for an earlier `LimitsConfig` break (ADR-0012)
+in the same cycle. It covers this break all the same: every break since
+`v0.1.0` diffs against that tag, so one minor bump answers them all.
 
 **The open question is answered, so it needs no tracker.** #633 is closed, and
 "whether a breaking pre-1.0 change should bump the minor" is now settled in
