@@ -516,6 +516,20 @@ async fn pre_initialize_envelope_write_failure_records_error() {
         stderr.contains("pre-init error envelope"),
         "expected propagated 'pre-init error envelope' anyhow context in stderr, got:\n{stderr}",
     );
+
+    // #722: this arm returns before `supervisor.shutdown_after_failure()`,
+    // so no bridge-shutdown outcome is consulted and none can displace the
+    // write error the operator needs to see. The assertion above proves the
+    // write error reached stderr; this one proves it was not replaced by the
+    // shutdown arm's message. Together they pin the ordering documented on
+    // `handle_init_failure` — a "fix" that ran the shutdown first and let its
+    // error win would keep the first assertion green and redden this one.
+    assert!(
+        !stderr.contains("validator bridge after pre-init"),
+        "envelope write failure must propagate as-is, not as a bridge-shutdown \
+         error; the write-failure arm returns before shutdown_after_failure \
+         (#722), got:\n{stderr}",
+    );
 }
 
 // ---------------------------------------------------------------------------
