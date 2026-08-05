@@ -133,6 +133,10 @@ const SHUTDOWN_CUT_MESSAGE: &str = "server is shutting down";
 /// the JSONL tail mid-line (#645). Draining first makes `process_end`
 /// terminal; see `docs/audit-log.md`.
 ///
+/// Audit writes the dispatch offloads to the blocking pool register separately,
+/// through [`DispatchDrain::spawn_blocking_tracked`], because a detached
+/// blocking closure outlives the dispatch that submitted it (#672).
+///
 /// Both halves are cheap clones of one shared cell, so the server can hand a
 /// clone to `serve_mcp` without any take-once ceremony.
 #[derive(Clone)]
@@ -174,11 +178,11 @@ impl DispatchDrain {
     /// by the time `shutdown` observes the count reach zero.
     /// `drop_ordering_holds_when_the_track_future_is_aborted` pins it.
     ///
-    /// It does **not** cover the `tool_start` / `tool_end` writes that
-    /// `mcp::audit_envelope` hands to `spawn_blocking`: dropping the future
-    /// awaiting that `JoinHandle` detaches the closure rather than cancelling
-    /// it, so the write still happens, unordered (#672). `auth` writes are
-    /// synchronous (ADR-0014) and are covered.
+    /// The `tool_start` / `tool_end` writes `mcp::audit_envelope` hands to the
+    /// blocking pool are not covered by that argument — a detached closure
+    /// outlives the future that awaited it — so they take a registration of
+    /// their own via [`DispatchDrain::spawn_blocking_tracked`] (#672).
+    /// `auth` writes are synchronous (ADR-0014) and need nothing extra.
     async fn track<F>(&self, body: F) -> Result<CallToolResult, ErrorData>
     where
         F: Future<Output = Result<CallToolResult, ErrorData>>,
@@ -202,9 +206,41 @@ impl DispatchDrain {
         outcome
     }
 
+    /// Run `f` on the blocking pool, registered with this drain for the
+    /// closure's whole lifetime rather than for the awaiting future's.
+    ///
+    /// `spawn_blocking` is not cancellable. Dropping its `JoinHandle` — which
+    /// is what dropping the future that awaits it does, and therefore what
+    /// cutting a dispatch does — *detaches* the closure; it does not stop it.
+    /// So an audit write already handed to the pool used to run after
+    /// `process_end`, and to do it silently, because the dispatch's own
+    /// registration had been released and [`DispatchDrain::shutdown`] reported
+    /// a clean drain (#672).
+    ///
+    /// The registration is opened here, on the async side, *before* the closure
+    /// is submitted, and moved into it — so it spans the queue wait as well as
+    /// the write itself, and is released only when the closure returns or is
+    /// dropped unrun. `shutdown` therefore either waits for the write to land
+    /// or counts it in the residue it reports.
+    pub(crate) fn spawn_blocking_tracked<F, R>(&self, f: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let registration = Registration::open(self);
+        tokio::task::spawn_blocking(move || {
+            let _registration = registration;
+            f()
+        })
+    }
+
     /// Cancel every registered dispatch and wait up to `budget` for them to
-    /// finish unwinding. Returns the number still registered when the budget
-    /// expired — `0` on a clean drain.
+    /// finish unwinding. Returns the number of registrations still outstanding
+    /// when the budget expired — `0` on a clean drain.
+    ///
+    /// A registration is a dispatch or an audit write one of them offloaded, so
+    /// a non-zero return bounds the number of dispatches involved from above
+    /// rather than counting them exactly.
     ///
     /// A non-zero return is not recoverable here: the caller logs it and
     /// proceeds, because the alternative is an unbounded shutdown. Those
@@ -230,6 +266,14 @@ impl DispatchDrain {
         } else {
             *self.inner.inflight.borrow()
         }
+    }
+
+    /// Registrations currently outstanding. Test-only: the drain's own tests
+    /// use it as a barrier, so they synchronise on the registration actually
+    /// having been taken rather than on a wall-clock sleep.
+    #[cfg(test)]
+    fn inflight(&self) -> usize {
+        *self.inner.inflight.borrow()
     }
 }
 
@@ -270,9 +314,10 @@ pub struct ImapMcpServer {
     /// Per-process salt used when applying `Redactor` to tool arguments.
     /// Wrapped in `Arc` so `spawn_blocking` closures can cheaply capture it.
     pub(crate) redaction_salt: Arc<RedactionSalt>,
-    /// Registry of in-flight `call_tool` dispatches, drained at shutdown so
-    /// no audit record they produce can outlive `process_end` (#645).
-    drain: DispatchDrain,
+    /// Registry of in-flight `call_tool` dispatches and of the audit writes
+    /// they offload, drained at shutdown so no audit record they produce can
+    /// outlive `process_end` (#645, #672).
+    pub(crate) drain: DispatchDrain,
 }
 
 impl ImapMcpServer {
@@ -1921,11 +1966,20 @@ mod dispatch_drain_tests {
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::{AuditWriter, Seq, cancellation_channel, spawn_drainer};
+    use rimap_core::tool::ToolName;
     use rmcp::model::{CallToolResult, ErrorData};
 
-    use super::{DispatchDrain, SHUTDOWN_CUT_MESSAGE};
+    use super::{DispatchDrain, ImapMcpServer, SHUTDOWN_CUT_MESSAGE};
+    use crate::mcp::dispatch::PostureContext;
+
+    /// What a `run_with_audit_envelope` body resolves to. Named so the
+    /// `pending::<_>()` turbofish below stays readable.
+    type BodyResult = Result<serde_json::Value, rimap_core::RimapError>;
 
     /// Records on drop that it was dropped. Stands in for `AuthEmitGuard`,
     /// whose drop performs the synchronous audit write whose ordering against
@@ -2129,5 +2183,291 @@ mod dispatch_drain_tests {
             "the cancel arm is biased first, so a dispatch rmcp had not yet \
              polled when the drain ran must never reach a connect",
         );
+    }
+
+    // --- #672: audit writes offloaded to the blocking pool ------------------
+    //
+    // `spawn_blocking` is not cancellable. Dropping its `JoinHandle` — which is
+    // what dropping the future that awaits it does, and therefore what cutting a
+    // dispatch does — *detaches* the closure rather than stopping it. Before the
+    // fix such a write still ran, after `process_end`, and silently: the drain
+    // saw the dispatch's own registration released and reported a clean drain.
+    //
+    // Both tests below hold that window open with the test, not with a clock.
+    // The fixture runtime's blocking pool has exactly one usable thread; an
+    // occupant holds it, so the audit write is *queued* rather than running when
+    // the drain cuts the dispatch. A plain thread releases the occupant on a
+    // delay, giving the fixed drain something to wait for and the unfixed one
+    // time to write `process_end` first.
+
+    /// Blocking-pool queue time the drain is given something to wait on. Long
+    /// enough that an untracked run gets `process_end` — a local append — down
+    /// first, so the ordering assertion fails rather than flickering.
+    const RELEASE_DELAY: Duration = Duration::from_millis(150);
+
+    /// Ceiling on [`await_registrations`]. Reached in milliseconds when the
+    /// offload is tracked; burned in full when it is not, which is the
+    /// regression these tests name.
+    const REGISTRATION_BARRIER: Duration = Duration::from_secs(1);
+
+    /// A runtime whose blocking pool has exactly one usable thread, plus a real
+    /// `AuditWriter` over a temp dir. tokio sizes the pool at
+    /// `max_blocking_threads + worker_threads` and the workers hold their own
+    /// slots, so a single occupant leaves zero spare.
+    fn offload_fixture() -> (tokio::runtime::Runtime, tempfile::TempDir, AuditWriter) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = AuditWriter::open(&AuditOptions {
+            path: dir.path().join("audit.jsonl"),
+            rotate_bytes: 10 * 1024 * 1024,
+            rotate_keep: 5,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: Seq::FIRST,
+        })
+        .expect("audit writer opens");
+        (rt, dir, writer)
+    }
+
+    /// Fill the fixture's one blocking slot. Returns once the closure is
+    /// genuinely running, so nothing submitted afterwards can jump the queue,
+    /// along with the sender whose drop releases it.
+    fn occupy_blocking_slot() -> (mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
+        let (occupied_tx, occupied_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let occupant = tokio::task::spawn_blocking(move || {
+            occupied_tx.send(()).expect("occupant reports in");
+            let _ = release_rx.recv();
+        });
+        occupied_rx.recv().expect("blocking slot is occupied");
+        (release_tx, occupant)
+    }
+
+    /// Release the blocking slot after [`RELEASE_DELAY`], from a plain thread:
+    /// the pool is full, so the release cannot itself be a pool task.
+    fn release_slot_after_delay(release_tx: mpsc::Sender<()>) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(RELEASE_DELAY);
+            drop(release_tx);
+        })
+    }
+
+    /// Wait until `drain` holds `n` registrations, or until the barrier
+    /// expires. Expiry is not an error: on an untracked build the second
+    /// registration never appears, and the caller must go on to fail on the
+    /// ordering rather than hang.
+    async fn await_registrations(drain: &DispatchDrain, n: usize) {
+        let deadline = Instant::now() + REGISTRATION_BARRIER;
+        while drain.inflight() < n && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Assert the raw JSONL: every line parses, the offloaded `expected_kind`
+    /// record is present, and `process_end` is both the last line and the
+    /// highest `seq`.
+    ///
+    /// Deliberately strict, and deliberately not routed through a record
+    /// reader. `tests/support/chaos/audit.rs` and the production reader both
+    /// skip lines they cannot parse (ADR-0015), which is exactly how a
+    /// misordered or torn tail hides. The `expected_kind` check is what stops a
+    /// run whose barrier fired before the write was submitted from passing
+    /// vacuously — no record at all trivially satisfies an ordering assertion.
+    fn assert_process_end_is_terminal(path: &std::path::Path, expected_kind: &str) {
+        let contents = std::fs::read_to_string(path).expect("audit file is readable");
+        let records: Vec<serde_json::Value> = contents
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|e| panic!("every audit line must parse; {e} on {line:?}"))
+            })
+            .collect();
+
+        assert!(
+            records.iter().any(|r| r["kind"] == expected_kind),
+            "the offloaded {expected_kind} must have been written at all, or this \
+             test is not exercising the window it names:\n{contents}",
+        );
+        let last = records.last().expect("at least one record");
+        assert_eq!(
+            last["kind"], "process_end",
+            "process_end must be the last line in the file:\n{contents}",
+        );
+        let max_seq = records
+            .iter()
+            .map(|r| r["seq"].as_u64().expect("every record carries a seq"))
+            .max()
+            .expect("at least one record");
+        assert_eq!(
+            last["seq"].as_u64().expect("process_end carries a seq"),
+            max_seq,
+            "process_end must carry the highest seq in the file:\n{contents}",
+        );
+    }
+
+    /// Exactly what `run_server` writes, immediately after the drain returns.
+    fn log_process_end(writer: &AuditWriter) {
+        writer
+            .log_process_end(rimap_audit::record::ProcessEnd {
+                reason: rimap_audit::record::ProcessEndReason::Eof,
+                total_tool_calls: 1,
+            })
+            .expect("process_end write succeeds");
+    }
+
+    /// A `tool_start` write already queued on the blocking pool when the drain
+    /// cuts its dispatch must not append after `process_end`. The dispatch never
+    /// reaches its body: it is parked on `emit_tool_start`'s offload.
+    #[test]
+    fn an_offloaded_tool_start_cannot_append_after_process_end() {
+        let (rt, dir, writer) = offload_fixture();
+        let path = dir.path().join("audit.jsonl");
+
+        rt.block_on(async {
+            let (tx, rx) = cancellation_channel();
+            let drainer = spawn_drainer(rx, writer.clone());
+            let server = Arc::new(ImapMcpServer::new_for_tests(writer.clone(), tx.clone()));
+            let drain = server.dispatch_drain();
+
+            let (release_tx, occupant) = occupy_blocking_slot();
+
+            let dispatch = tokio::spawn({
+                let drain = drain.clone();
+                let server = Arc::clone(&server);
+                async move {
+                    drain
+                        .track(async move {
+                            server
+                                .run_with_audit_envelope(
+                                    ToolName::ListAccounts,
+                                    None,
+                                    PostureContext::Infrastructure,
+                                    &serde_json::Map::new(),
+                                    |_ticket| std::future::pending::<BodyResult>(),
+                                )
+                                .await
+                        })
+                        .await
+                }
+            });
+
+            // The dispatch's own registration plus the offloaded write's.
+            // Nothing between `track` and the `spawn_blocking` submit awaits, so
+            // reaching two means the write is in the pool's queue.
+            await_registrations(&drain, 2).await;
+
+            let releaser = release_slot_after_delay(release_tx);
+            let undrained = drain.shutdown(Duration::from_secs(30)).await;
+            log_process_end(&writer);
+
+            releaser.join().expect("releaser thread joins");
+            occupant.await.expect("occupant joins");
+            let _ = dispatch.await;
+            settle(tx, server, drainer).await;
+
+            assert_eq!(undrained, 0, "the drain must account for the queued write");
+            assert_process_end_is_terminal(&path, "tool_start");
+        });
+    }
+
+    /// The same for `emit_tool_end`, whose window is a different one: the body
+    /// has completed and the envelope guard is already disarmed, so the only
+    /// thing left to misorder is the offloaded write itself.
+    #[test]
+    fn an_offloaded_tool_end_cannot_append_after_process_end() {
+        let (rt, dir, writer) = offload_fixture();
+        let path = dir.path().join("audit.jsonl");
+
+        rt.block_on(async {
+            let (tx, rx) = cancellation_channel();
+            let drainer = spawn_drainer(rx, writer.clone());
+            let server = Arc::new(ImapMcpServer::new_for_tests(writer.clone(), tx.clone()));
+            let drain = server.dispatch_drain();
+
+            // The body parks here until the slot is occupied, so `tool_start`
+            // gets a free pool and only `tool_end` is left queued.
+            let (open_gate, gate) = tokio::sync::oneshot::channel::<()>();
+            let dispatch = tokio::spawn({
+                let drain = drain.clone();
+                let server = Arc::clone(&server);
+                async move {
+                    drain
+                        .track(async move {
+                            server
+                                .run_with_audit_envelope(
+                                    ToolName::ListAccounts,
+                                    None,
+                                    PostureContext::Infrastructure,
+                                    &serde_json::Map::new(),
+                                    |_ticket| async move {
+                                        let _ = gate.await;
+                                        Ok(serde_json::Value::Null)
+                                    },
+                                )
+                                .await
+                        })
+                        .await
+                }
+            });
+
+            // Barrier on the artifact itself: `tool_start` is on disk, so the
+            // pool is idle again and the occupant below is first in line.
+            await_records(&path, 1).await;
+            let (release_tx, occupant) = occupy_blocking_slot();
+            open_gate
+                .send(())
+                .expect("body is still parked on the gate");
+
+            // The dispatch's registration plus `emit_tool_end`'s. The body
+            // completed, so this is the last offload the envelope makes.
+            await_registrations(&drain, 2).await;
+
+            let releaser = release_slot_after_delay(release_tx);
+            let undrained = drain.shutdown(Duration::from_secs(30)).await;
+            log_process_end(&writer);
+
+            releaser.join().expect("releaser thread joins");
+            occupant.await.expect("occupant joins");
+            let _ = dispatch.await;
+            settle(tx, server, drainer).await;
+
+            assert_eq!(undrained, 0, "the drain must account for the queued write");
+            assert_process_end_is_terminal(&path, "tool_end");
+        });
+    }
+
+    /// Wait until the audit file holds `n` lines. Used as a barrier on the real
+    /// artifact rather than on a sleep.
+    async fn await_records(path: &std::path::Path, n: usize) {
+        let deadline = Instant::now() + REGISTRATION_BARRIER;
+        while Instant::now() < deadline {
+            let count = std::fs::read_to_string(path)
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
+            if count >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("audit file never reached {n} records");
+    }
+
+    /// Give anything the drain failed to account for time to land — so the
+    /// assertions see the real tail rather than a not-yet-written one — then
+    /// close the cancellation channel and join its drainer.
+    async fn settle(
+        tx: rimap_audit::CancelledToolEndSender,
+        server: Arc<ImapMcpServer>,
+        drainer: tokio::task::JoinHandle<()>,
+    ) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(tx);
+        drop(server);
+        drainer.await.expect("drainer joins");
     }
 }
