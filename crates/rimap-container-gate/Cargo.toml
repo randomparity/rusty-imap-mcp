@@ -1,0 +1,17 @@
+[package]
+name = "rimap-container-gate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "Container-runtime selection, daemon probe, and skip-or-fail gate shared by rusty-imap-mcp's container-backed test harnesses"
+
+[lints]
+workspace = true
+
+# No dependencies, by design. The gate runs before any fixture starts and must
+# work in every container test binary in the workspace; anything it pulled in
+# would be linked into all of them.

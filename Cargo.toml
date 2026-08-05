@@ -5,6 +5,7 @@ members = [
     "crates/rimap-config",
     "crates/rimap-imap",
     "crates/rimap-fake-imap",
+    "crates/rimap-container-gate",
     "crates/rimap-content",
     "crates/rimap-audit",
     "crates/rimap-authz",
