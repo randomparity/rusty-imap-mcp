@@ -111,6 +111,52 @@ impl AccountSummary {
     }
 }
 
+/// Which config layer wrote one explicit per-tool verdict.
+///
+/// `[accounts.security.tools]` and `[defaults.security.tools]` merge per key
+/// into a single map at composition time; this is the distinction that merge
+/// would otherwise erase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictSource {
+    /// Written in the account's own `[accounts.security.tools]` block.
+    Account,
+    /// Inherited from `[defaults.security.tools]`.
+    Inherited,
+}
+
+/// One explicit per-tool verdict and the config layer that wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolVerdict {
+    /// The tool the verdict names. Serializes via [`ToolName::as_str`].
+    pub tool: ToolName,
+    /// `true` for an explicit `allow`, `false` for an explicit `deny`.
+    ///
+    /// A bool rather than a mirror of `rimap_config::model::Verdict`:
+    /// `rimap-audit` deliberately depends on `rimap-core` alone, and a
+    /// second two-variant enum for the same idea would be a defect surface
+    /// with no on-disk gain.
+    pub allow: bool,
+    /// Whether the account wrote this verdict or inherited it.
+    pub source: VerdictSource,
+}
+
+/// One account's effective posture and its explicit per-tool verdicts, as
+/// resolved at boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountToolMatrix {
+    /// Account name from config.
+    pub account: String,
+    /// Effective base posture for this account.
+    pub posture: Posture,
+    /// Explicit verdicts only, in tool declaration order. Tools with no
+    /// override follow `posture` through the compile-time posture table,
+    /// which the record's `version` / `git_commit` already identify — so
+    /// listing them per boot would be redundant bulk.
+    #[serde(default)]
+    pub tools: Vec<ToolVerdict>,
+}
+
 /// Payload of the `process_start` kind. Fields chosen to chain history across
 /// restarts (see spec §10 startup self-check).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +172,16 @@ pub struct ProcessStart {
     /// Per-account summaries (multi-account mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounts: Option<Vec<AccountSummary>>,
+    /// Per-account posture and explicit per-tool verdicts, each marked
+    /// account-written or inherited (#632). Unlike `posture` / `accounts`
+    /// above, this carries one entry per account in both single- and
+    /// multi-account mode, so the posture a process booted with is
+    /// reconstructable from the log without knowing which mode it ran in.
+    ///
+    /// `#[serde(default)]` because `process_start` records written before
+    /// #632 carry no such field, and must keep deserializing as empty.
+    #[serde(default)]
+    pub tool_matrix: Vec<AccountToolMatrix>,
     /// Absolute path of the loaded config file.
     pub config_path: PathBuf,
     /// SHA-256 of the config file contents at load time, hex-encoded.
@@ -345,6 +401,7 @@ pub enum Payload {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use std::path::PathBuf;
 
@@ -358,6 +415,17 @@ mod tests {
     };
 
     fn sample_start() -> AuditRecord {
+        sample_start_with(Vec::new())
+    }
+
+    fn process_start_of(rec: &AuditRecord) -> Option<&ProcessStart> {
+        match &rec.payload {
+            Payload::ProcessStart(start) => Some(start),
+            _ => None,
+        }
+    }
+
+    fn sample_start_with(tool_matrix: Vec<crate::record::AccountToolMatrix>) -> AuditRecord {
         AuditRecord {
             seq: Seq::FIRST,
             ts: Timestamp::now(),
@@ -367,6 +435,7 @@ mod tests {
                 git_commit: String::new(),
                 posture: Some(Posture::DraftSafe),
                 accounts: None,
+                tool_matrix,
                 config_path: PathBuf::from("/tmp/config.toml"),
                 config_hash_sha256: "abcd".repeat(16),
                 previous_last_seq: None,
@@ -397,6 +466,58 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         let back: AuditRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn process_start_tool_matrix_serializes_verdicts_with_provenance() {
+        use crate::record::{AccountToolMatrix, ToolVerdict, VerdictSource};
+
+        let rec = sample_start_with(vec![AccountToolMatrix {
+            account: "work".to_string(),
+            posture: Posture::Readonly,
+            tools: vec![
+                ToolVerdict {
+                    tool: ToolName::DeleteMessage,
+                    allow: true,
+                    source: VerdictSource::Inherited,
+                },
+                ToolVerdict {
+                    tool: ToolName::Search,
+                    allow: false,
+                    source: VerdictSource::Account,
+                },
+            ],
+        }]);
+
+        let json = serde_json::to_string(&rec).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["tool_matrix"][0]["account"], "work");
+        assert_eq!(v["tool_matrix"][0]["posture"], "readonly");
+        assert_eq!(v["tool_matrix"][0]["tools"][0]["tool"], "delete_message");
+        assert_eq!(v["tool_matrix"][0]["tools"][0]["allow"], true);
+        assert_eq!(v["tool_matrix"][0]["tools"][0]["source"], "inherited");
+        assert_eq!(v["tool_matrix"][0]["tools"][1]["tool"], "search");
+        assert_eq!(v["tool_matrix"][0]["tools"][1]["allow"], false);
+        assert_eq!(v["tool_matrix"][0]["tools"][1]["source"], "account");
+
+        let back: AuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn process_start_without_tool_matrix_parses_as_empty() {
+        // A record written before #632 carries no `tool_matrix` key. Asserted
+        // against raw JSONL rather than a re-serialized struct, because
+        // `#[serde(default)]` is exactly the thing a round-trip would hide.
+        let line = r#"{"seq":1,"ts":"2026-05-05T12:00:00.000Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.1.0","git_commit":"","posture":"readonly","config_path":"/tmp/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#;
+        assert!(
+            !line.contains("tool_matrix"),
+            "fixture must be the pre-#632 shape",
+        );
+        let rec: AuditRecord = serde_json::from_str(line).unwrap();
+        let start = process_start_of(&rec).expect("fixture is a process_start");
+        assert!(start.tool_matrix.is_empty());
+        assert_eq!(start.posture, Some(Posture::Readonly));
     }
 
     #[test]
