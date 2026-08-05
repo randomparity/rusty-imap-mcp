@@ -22,7 +22,7 @@ use tokio_rustls::client::TlsStream;
 use crate::error::{AuthFailure, ImapError};
 
 use super::handshake::drain_for_logindisabled;
-use super::{Connection, ImapSession};
+use super::{Connection, ImapSession, ServerCapabilities};
 
 impl Connection {
     /// Run the IMAP greeting + CAPABILITY probe + LOGIN sequence.
@@ -133,21 +133,83 @@ impl Connection {
 
         // Post-login: probe CAPABILITY for MOVE (RFC 6851) and
         // UIDPLUS (RFC 4315).
-        let (has_move, has_uidplus) = match session.capabilities().await {
-            Ok(caps) => (caps.has_str("MOVE"), caps.has_str("UIDPLUS")),
+        let capabilities = Self::read_capabilities(&mut session).await;
+        self.inner
+            .capabilities
+            .store(capabilities.to_bits(), Ordering::Relaxed);
+
+        Ok(session)
+    }
+
+    /// Run the post-login `CAPABILITY` probe and classify what came back.
+    ///
+    /// ## Why an uninformative probe is `Unknown` and not `(false, false)`
+    ///
+    /// Reporting "the server advertises neither MOVE nor UIDPLUS" from a probe
+    /// that established nothing selects the folder-wide RFC 3501 `EXPUNGE` on
+    /// the next delete or move — see [`ServerCapabilities`] and #649. So this
+    /// returns [`ServerCapabilities::Known`] only when the reply was a
+    /// capability listing, and the operations that would otherwise guess refuse
+    /// instead.
+    ///
+    /// ## The two ways the probe tells us nothing
+    ///
+    /// Both reach the same `Unknown`, and only one of them is an `Err`:
+    ///
+    /// * **The command failed.** A torn connection or an unparseable response
+    ///   comes back as `Err`. Rare, and usually fatal to the session anyway.
+    /// * **The command "succeeded" with no listing in it.** This is the common
+    ///   one and it was invisible before. `async-imap`'s `parse_capabilities`
+    ///   (read against 0.11.3) accumulates `* CAPABILITY` lines until the
+    ///   tagged completion and then returns `Ok` **without inspecting the
+    ///   tagged status**, so a server answering `BAD` or `NO` — a load-shedding
+    ///   proxy, a mid-restart server — yields `Ok(<empty set>)`. That set is
+    ///   indistinguishable from a parsed listing by type alone.
+    ///
+    /// What separates them is `IMAP4rev1`: RFC 3501 §7.2.1 requires the
+    /// CAPABILITY response to include it, so a listing that lacks it is not a
+    /// listing this client can read. That check is what makes an
+    /// `IMAP4rev1`-only server (a genuine "neither extension") land on `Known {
+    /// false, false }` while a `BAD` lands on `Unknown`, which is the whole
+    /// distinction #649 is about.
+    ///
+    /// A server advertising only `IMAP4rev2` (RFC 9051) is therefore `Unknown`
+    /// too, and its deletes and moves are refused rather than served. That is
+    /// the safe side of a gap, not a fix for it: RFC 9051 folds MOVE and
+    /// UIDPLUS into the base protocol and stops advertising them, so reading
+    /// such a server as "advertises neither" would have selected the
+    /// folder-wide `EXPUNGE` against a server that in fact supports `UID
+    /// EXPUNGE`. Real `IMAP4rev2` support is #686.
+    async fn read_capabilities(session: &mut ImapSession) -> ServerCapabilities {
+        let caps = match session.capabilities().await {
+            Ok(caps) => caps,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "post-login CAPABILITY probe failed; \
-                     assuming no MOVE/UIDPLUS support",
+                    "post-login CAPABILITY probe failed; MOVE/UIDPLUS support \
+                     is unknown for this session and operations that would \
+                     otherwise fall back to a folder-wide EXPUNGE will refuse",
                 );
-                (false, false)
+                return ServerCapabilities::Unknown;
             }
         };
-        self.inner.has_move.store(has_move, Ordering::Relaxed);
-        self.inner.has_uidplus.store(has_uidplus, Ordering::Relaxed);
 
-        Ok(session)
+        if !caps.has_str("IMAP4rev1") {
+            tracing::warn!(
+                advertised = caps.len(),
+                "post-login CAPABILITY reply omitted IMAP4rev1, so it is not a \
+                 capability listing this client can read (RFC 3501 7.2.1); \
+                 MOVE/UIDPLUS support is unknown for this session and \
+                 operations that would otherwise fall back to a folder-wide \
+                 EXPUNGE will refuse",
+            );
+            return ServerCapabilities::Unknown;
+        }
+
+        ServerCapabilities::Known {
+            has_move: caps.has_str("MOVE"),
+            has_uidplus: caps.has_str("UIDPLUS"),
+        }
     }
 
     /// Emit an [`AuthEvent`] through the injected sink, synchronously, on the

@@ -14,6 +14,6 @@ pub mod time;
 pub mod tls;
 pub mod types;
 
-pub use crate::connection::{Connection, ConnectionConfig, ImapEncryption};
+pub use crate::connection::{Connection, ConnectionConfig, ImapEncryption, ServerCapabilities};
 pub use crate::error::{AuthFailure, ImapError, StarttlsFailure, StarttlsRefusal};
 pub use special_use::{SpecialUse, SpecialUseMap, classify_special_use};

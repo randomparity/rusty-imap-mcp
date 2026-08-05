@@ -50,6 +50,29 @@ pub enum ImapError {
     /// Underlying `async-imap` protocol error.
     #[error("IMAP protocol error: {0}")]
     Protocol(#[source] async_imap::error::Error),
+    /// The post-login `CAPABILITY` probe returned nothing this client can read
+    /// as an advertisement, so the server's MOVE (RFC 6851) and UIDPLUS
+    /// (RFC 4315) support is *unknown* — not known-absent.
+    ///
+    /// Returned by the operations whose fallback path can issue a folder-wide
+    /// RFC 3501 `EXPUNGE`, which removes every `\Deleted` message in the
+    /// mailbox rather than the requested UIDs. Guessing "absent" selects that
+    /// path, so those operations refuse instead (#649). See
+    /// [`crate::connection::ServerCapabilities`].
+    ///
+    /// Recoverable: the advertisement is re-read on the next login, so
+    /// reconnecting (any transport failure, or
+    /// [`crate::Connection::poison`]) and retrying can resolve it.
+    #[error(
+        "server capabilities unknown: the post-login CAPABILITY probe returned \
+         no usable advertisement, so {op} is refused rather than fall back to a \
+         folder-wide EXPUNGE that would remove every \\Deleted message in the \
+         mailbox"
+    )]
+    CapabilitiesUnknown {
+        /// Short tag identifying the operation that was refused.
+        op: &'static str,
+    },
     /// A `SELECT` / `EXAMINE` was answered with a tagged `NO` because the
     /// mailbox does not exist or cannot be accessed (RFC 3501 §6.3.1 /
     /// §6.3.2). Distinct from [`Self::Protocol`]: this is a client / input
@@ -216,7 +239,10 @@ impl ImapError {
             Self::Timeout { .. } => ErrorCode::Timeout,
             Self::Auth { .. } => ErrorCode::Auth,
             Self::SizeLimit { .. } => ErrorCode::AttachmentTooLarge,
-            Self::Protocol(_) => ErrorCode::ImapProtocol,
+            // The server answered CAPABILITY with something that is not a
+            // capability listing, which is a server-side protocol fault even
+            // though the refusal is ours.
+            Self::Protocol(_) | Self::CapabilitiesUnknown { .. } => ErrorCode::ImapProtocol,
             Self::FolderNotFound { .. } => ErrorCode::NotFound,
             Self::InvalidInput { .. } | Self::BatchTooLarge { .. } => ErrorCode::InvalidInput,
             Self::UidValidityChanged { .. } | Self::UidValidityUnavailable { .. } => {
@@ -406,6 +432,33 @@ mod tests {
             name: "[Gmail]/Nope".to_string(),
         };
         assert!(format!("{err}").contains("[Gmail]/Nope"));
+    }
+
+    #[test]
+    fn capabilities_unknown_names_the_op_and_the_branch_it_refused() {
+        // The message is what an operator or agent sees on the wire, so it has
+        // to say which operation stopped and why stopping was the safe answer
+        // — otherwise "capabilities unknown" reads as a transient blip and the
+        // caller retries into the same refusal without learning anything.
+        let err = ImapError::CapabilitiesUnknown { op: "move" };
+        let display = format!("{err}");
+        assert!(display.contains("move"), "{display}");
+        assert!(display.contains("CAPABILITY"), "{display}");
+        assert!(display.to_uppercase().contains("EXPUNGE"), "{display}");
+    }
+
+    #[test]
+    fn capabilities_unknown_maps_to_imap_protocol_code() {
+        use rimap_core::ErrorCode;
+        // A CAPABILITY reply that is not a capability listing is a server
+        // fault, not a client-input error and not an auth failure.
+        assert_eq!(
+            ImapError::CapabilitiesUnknown {
+                op: "delete_message"
+            }
+            .code(),
+            ErrorCode::ImapProtocol,
+        );
     }
 
     #[test]
