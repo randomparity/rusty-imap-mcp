@@ -65,6 +65,10 @@ proptest = { workspace = true }
 # (ADR-0008). It owns the `rcgen`/`tokio-rustls`/`rustls` TLS-termination stack,
 # so this crate no longer needs those as dev-deps directly.
 rimap-fake-imap = { path = "../rimap-fake-imap" }
+# Container-runtime selection, daemon probe, and skip-or-fail gate, shared with
+# rimap-server's container harnesses (issue #675). The Dovecot fixture's own
+# lifecycle stays in tests/integration/support/container.rs.
+rimap-container-gate = { path = "../rimap-container-gate" }
 # Scoped tracing capture for the missing/zero-UID FETCH skip-warn assertion.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
