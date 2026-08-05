@@ -339,24 +339,21 @@ are the ones that trip people up or aren't obvious from the lint set.
   underlying issue — do not `--no-verify`. Do not `--amend` commits that have
   been pushed.
 - **PR workflow:** feature branch -> push -> PR against `main`. `main` requires
-  twelve status checks, strict (the branch must be up to date before merging):
+  thirteen status checks, strict (the branch must be up to date before merging):
   `rustfmt`, `clippy`, `check (macOS)`, `test (stable)`, `test (MSRV 1.88.0)`,
   `cargo-deny`, `zizmor self-check`, `SonarQube`, `mcp-conformance (Node)`,
-  `publish checks`, `tool-schema drift`, `tools-doc drift`. A separate release
-  workflow triggers on `v*` tags and builds binaries for five platform targets.
+  `publish checks`, `tool-schema drift`, `tools-doc drift`, `semver-checks`. A
+  separate release workflow triggers on `v*` tags and builds binaries for five
+  platform targets.
 - **A CI job outside that list runs without enforcing.** It goes red and the PR
   merges anyway, so adding a gate to an unrequired job silently disarms it
   (issue #613). Before wiring a new check into a job, confirm the job's
   status-check name is required, and add it if not:
   `gh api repos/randomparity/rusty-imap-mcp/branches/main/protection --jq '.required_status_checks.contexts'`
-- **`semver-checks` is a thirteenth check that is *not* yet required** (issue
-  #633). It runs on every PR and reports, but until `semver-checks` is added to
-  the contexts list above it cannot block a merge — treat a red one as blocking
-  by hand. It fails when a PR breaks the public API of a publishable crate
-  without bumping the planned version; the fix is
+- **`semver-checks` fails when a PR breaks the public API of a publishable
+  crate** without bumping the planned version. The fix is
   `cargo set-version --workspace 0.2.0-dev` (from `cargo-edit`), not an
-  override. See
-  [RELEASING.md](RELEASING.md), "Breaking a public API".
+  override. See [RELEASING.md](RELEASING.md), "Breaking a public API".
 - **`release.yml` runs the same `just semver-checks` before publishing** (issue
   #650), so a red one is not only a PR problem — it is what stands between a
   break and an unpublishable-back crates.io version. Do not paper over it in the

@@ -165,3 +165,43 @@ any account that wrote the enclosing table.
   field-coverage test in `model.rs` fails when the mirror falls behind, so the
   omission surfaces at test time rather than as another silently-dropped
   default.
+
+## Amendment · 2026-08-05 · issue [#723](https://github.com/randomparity/rusty-imap-mcp/issues/723)
+
+The *Consequences* bullet on `RawAccountConfig`'s breaking type change rests on
+two premises that no longer describe the repository, and parks an open question
+in an issue that has since closed.
+
+**`cargo-semver-checks` no longer runs only in the release workflow.** PR #651
+(issue #633, merged 2026-08-04) added a `semver-checks` job to
+`.github/workflows/ci.yml` that runs on every PR, and the justfile's `ci`
+recipe includes the `semver-checks` recipe that job calls. As of 2026-08-05
+`semver-checks` is also a **required status check** on `main` — thirteen
+contexts — so a PR that breaks a publishable crate's public API is red until
+the version bump lands in the same PR. "Nothing on a PR catches this" was true
+when this ADR was written; it is not true now.
+
+**The version no longer stays `0.1.1-dev`.** `[workspace.package]` in the root
+`Cargo.toml` reads `0.2.0-dev`, and `rimap-config` inherits it through
+`version.workspace = true`. That bump was not made for this ADR's break —
+issue #648 moved the workspace for an earlier `LimitsConfig` break (ADR-0012)
+in the same cycle. It covers this break all the same: every break since
+`v0.1.0` diffs against that tag, so one minor bump answers them all.
+
+**The open question is answered, so it needs no tracker.** #633 is closed, and
+"whether a breaking pre-1.0 change should bump the minor" is now settled in
+[RELEASING.md](../../RELEASING.md) under *Breaking a public API*: at `0.x` the
+minor field **is** the breaking-change field, so a PR breaking a publishable
+crate's public API moves the planned version with it —
+`cargo set-version --workspace 0.2.0-dev`, never a hand-edit. That is the PR
+author's job rather than release-prep's, because release-prep chooses between
+patch and minor for *accumulated features* and cannot retroactively discover
+that some merged PR removed a `pub fn`. Once the planned version is already
+`0.2.0-dev`, further breaks in the same cycle are free: they diff against the
+same tag, and one bump covers them all. `AGENTS.md` carries the same rule as
+the fix for a red `semver-checks`. No successor issue is filed, because there
+is nothing left open to track.
+
+The record above is left as written: it is what was true when the decision was
+made, and the reasoning was sound for the repository it was made in. What
+changed is the repository, not the argument.
