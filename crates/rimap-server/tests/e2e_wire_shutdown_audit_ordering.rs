@@ -28,11 +28,15 @@
 //!   budget is rmcp's and precedes the drain under test, so this suite carries
 //!   its own exit budget rather than widening a constant every other wire suite
 //!   shares.
-//! * **The audit log is parsed strictly.** Not
+//! * **The ordering assertion parses the audit log strictly.** Not
 //!   `tests/support/chaos/audit.rs::read_records`: every line must parse and the
 //!   file must end on a record boundary. A lenient parser reads a torn tail as
-//!   an absent record, which is exactly the failure mode this test exists to
-//!   catch.
+//!   an absent record, which is exactly the failure mode that test exists to
+//!   catch. Strictness belongs to that assertion, not to the file: the
+//!   zero-budget run below deliberately leaves a dispatch writing concurrently
+//!   with process exit, so a torn tail there is the documented consequence of
+//!   the state under test and `process_end_record` reads it leniently. Do not
+//!   reuse the lenient helper in an ordering assertion.
 
 #![expect(clippy::expect_used, reason = "integration tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]
@@ -377,9 +381,25 @@ fn process_end_record(raw: &str) -> Value {
         .unwrap_or_else(|| panic!("no process_end record in:\n{raw}"))
 }
 
+/// The clean-cut run's budget. Explicit and generous rather than the production
+/// two seconds, because this suite asserts a *zero* residue and the production
+/// budget is not one this test may rely on: `DispatchDrain::shutdown` and
+/// ADR-0015 both record that it "is honoured only while at least one runtime
+/// worker can still park to drive the timer", and the cut path here performs a
+/// synchronous, fsync-ing `AuthEmitGuard` write. On a contended host that
+/// overrun is tolerable-and-warned by design, but it would redden this
+/// assertion and point the reader at the feature rather than at the host.
+/// The drain returns the moment the count reaches zero, so a wide budget costs
+/// nothing on the passing path.
+const CLEAN_CUT_DRAIN_BUDGET_MS: &str = "30000";
+
 #[tokio::test]
 async fn shutdown_cut_auth_record_precedes_process_end() {
-    let run = run_parked_dispatch_scenario(&[]).await;
+    let run = run_parked_dispatch_scenario(&[(
+        "RIMAP_TEST_DISPATCH_DRAIN_BUDGET_MS",
+        CLEAN_CUT_DRAIN_BUDGET_MS,
+    )])
+    .await;
     assert_cut_auth_precedes_terminal_process_end(&run.raw);
 
     // The whole point of the drain is that this run has no residue, and the
