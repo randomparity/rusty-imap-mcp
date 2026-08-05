@@ -2556,6 +2556,7 @@ dependencies = [
  "dbus-secret-service",
  "directories",
  "keyring",
+ "rimap-config",
  "rimap-core",
  "rpassword",
  "secrecy",
@@ -2568,6 +2569,10 @@ dependencies = [
  "tracing",
  "utf7-imap",
 ]
+
+[[package]]
+name = "rimap-container-gate"
+version = "0.2.0-dev"
 
 [[package]]
 name = "rimap-content"
@@ -2640,6 +2645,7 @@ dependencies = [
  "proptest",
  "rimap-audit",
  "rimap-config",
+ "rimap-container-gate",
  "rimap-core",
  "rimap-fake-imap",
  "rustls",
@@ -2677,6 +2683,7 @@ dependencies = [
  "rimap-audit",
  "rimap-authz",
  "rimap-config",
+ "rimap-container-gate",
  "rimap-content",
  "rimap-core",
  "rimap-fake-imap",

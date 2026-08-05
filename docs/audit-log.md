@@ -34,13 +34,53 @@ First record of every process invocation.
 |---|---|
 | `version` | Semver of the running binary |
 | `git_commit` | Build-time git SHA (empty until wired) |
-| `posture` | Effective base posture at startup |
+| `posture` | Effective base posture at startup (single-account mode only) |
+| `accounts` | Per-account name/posture/IMAP host (multi-account mode only) |
+| `tool_matrix` | Per-account posture and explicit per-tool verdicts with provenance (absent on records written before this field existed; read as an empty list) |
 | `config_path` | Absolute path of the loaded config file |
 | `config_hash_sha256` | SHA-256 hex of the config file contents at load time |
 | `previous_last_seq` | Last `seq` found in the file at startup (null if empty) |
 | `previous_process_id` | Process ID of the previous run (null if empty) |
 | `previous_file_inode` | Inode of the audit file as observed at open time |
 | `audit_file_inode_changed` | True if the inode differs from the prior `process_start`'s inode (tamper signal) |
+
+#### `tool_matrix`
+
+One entry per account, in both single- and multi-account mode -- unlike
+`posture` / `accounts`, which are mutually exclusive, so nothing reading
+`tool_matrix` has to branch on account count.
+
+```json
+"tool_matrix": [
+  {
+    "account": "work",
+    "posture": "readonly",
+    "tools": [
+      {"tool": "delete_message", "allow": true,  "source": "inherited"},
+      {"tool": "search",         "allow": false, "source": "account"}
+    ]
+  }
+]
+```
+
+| Field | Description |
+|---|---|
+| `account` | Account name from config (`default` for a flat config) |
+| `posture` | Effective base posture for this account |
+| `tools[].tool` | The tool the verdict names |
+| `tools[].allow` | `true` for an explicit `allow`, `false` for an explicit `deny` |
+| `tools[].source` | `account` if the account's own `[accounts.security.tools]` wrote it, `inherited` if it came from `[defaults.security.tools]` |
+
+`tools` lists **explicit verdicts only**. A tool with no override follows
+`posture` through the posture table, which the record's `version` and
+`git_commit` already identify.
+
+**`"allow": true` with `"source": "inherited"` is the line to look for.** An
+account tightened to `posture = "readonly"` still holds every `allow` it
+inherited from `[defaults.security.tools]` -- that is the documented merge
+semantics (ADR-0014), and this is where it becomes visible. The same rows are
+printed by `rusty-imap-mcp --dry-run` and logged at `info` level at boot under
+the message `effective tool matrix`.
 
 ### `process_end`
 
@@ -75,7 +115,7 @@ The reverse does not hold: a run that lost records to a hard crash writes no
 `process_end` at all. A non-zero count is evidence of loss; a missing record is
 not evidence of none.
 
-**`process_end` is terminal for its `process_id`, subject to the two exceptions
+**`process_end` is terminal for its `process_id`, subject to the one exception
 below.** When a `process_end` record is present, no other record carrying the
 same `process_id` follows it anywhere in the file. A reader may treat it as
 closing that process, and may attribute every subsequent record to a later run.
@@ -83,12 +123,16 @@ closing that process, and may attribute every subsequent record to a later run.
 The rule is enforced, not incidental. Before writing `process_end` the server
 cancels every in-flight tool dispatch and waits, bounded, for each to unwind --
 so a connect the shutdown cuts writes its `auth` record (`ERR_CANCELLED`, see
-below) *before* the `process_end`, rather than racing it. The two states this
-rules out are a trailing `auth` record that a naive reader would attribute to the
-*next* process in the same file, and a half-written final line that makes the
-JSONL tail unparseable.
+below) *before* the `process_end`, rather than racing it. The wait covers the
+`tool_start` / `tool_end` writes a dispatch hands to the blocking pool as well
+as the dispatch itself: those writes are not cancellable, so each takes its own
+registration and the drain waits for the write, not for the dispatch that
+submitted it (`auth` writes are synchronous, ADR-0014, and need nothing extra).
+The two states this rules out are a trailing record that a naive reader would
+attribute to the *next* process in the same file, and a half-written final line
+that makes the JSONL tail unparseable.
 
-Read the exceptions before building on the rule.
+Read the exception before building on the rule.
 
 - **A dispatch that outlived the drain budget.** If a dispatch cannot be
   unwound in time -- it is inside an uncancelable blocking call, say -- the
@@ -96,16 +140,9 @@ Read the exceptions before building on the rule.
   proceeds. Anything those dispatches write afterwards keeps the old behaviour:
   sequenced after `process_end`, or lost to process exit. This one is
   **announced on stderr**, so a reader can tell: treat a run whose log carries
-  that warning as suspect, and alert on it.
-- **A `tool_start` or `tool_end` write already handed to the blocking pool.**
-  Those two are offloaded with `spawn_blocking`; every `auth` write is
-  synchronous (ADR-0014). Dropping the task that awaits the offloaded write
-  *detaches* it rather than cancelling it, so a dispatch cut in that narrow
-  window still appends its record, after `process_end`. This one is **not**
-  announced: the drain counts the dispatch as cleanly unwound. Tracked as
-  [#672](https://github.com/randomparity/rusty-imap-mcp/issues/672); until it
-  closes, the rule is "terminal except for a `tool_start`/`tool_end` that was
-  already mid-flight at the cut".
+  that warning as suspect, and alert on it. An audit write still queued on the
+  blocking pool when the budget expires is counted in that same warning, so it
+  is announced too rather than silently absorbed.
 
 Separately, and not an exception to *ordering*: a record may be missing
 entirely. Loss on shutdown is expected and documented (best-effort). Terminality

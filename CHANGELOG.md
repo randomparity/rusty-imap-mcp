@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Boot now reports each account's effective tool matrix, marking every explicit
+  per-tool verdict as account-written or inherited from
+  `[defaults.security.tools]`. An inherited `allow` on an account tightened to
+  `posture = "readonly"` is visible without running anything: it appears in a
+  `tracing::info!` line at startup, in a new `tool_matrix` field on the
+  `process_start` audit record (present for single- and multi-account configs
+  alike), and in a new `Explicit tool overrides:` section of
+  `rusty-imap-mcp --dry-run`. All three render the same rows from one producer.
+  `process_start` records written before this field parse unchanged. See #632
+  and `docs/audit-log.md`.
 - crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
   new `publish-crates` release job. Publishes in dependency order with an
   idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by
@@ -58,6 +68,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_and_validate` / `load_from_path`, and a `Default` for them would mint a
   config with an empty `host` and `username` — the invalid state validation
   exists to reject.
+- **API break: `rimap_config::validate::ValidatedAccountConfig` and
+  `ValidatedMultiConfig` are now `#[non_exhaustive]` (#707).** These are the
+  two `pub` structs the validation pipeline outputs, and both are still
+  growing: #632 broke them one field ago by adding `account_written_tools`.
+  Marking them makes a future field additive. Sibling of #665, which applied
+  the same policy to `rimap_config::model`.
+
+  Downstream impact: the struct literal is no longer available outside the
+  crate, and **that includes functional-update syntax** — `..Default::default()`
+  is still a struct expression, so rustc rejects it too (E0639). Neither type
+  gains a `Default`: in production a validated config is obtainable only from
+  `validate_multi` / `validate_legacy_as_multi` / `load_and_validate`, which is
+  what makes "validated" mean something, and a `Default` would mint the
+  unvalidated state those entry points exist to reject. Adjust a value from
+  one of those entry points by field assignment; pattern matches need a
+  trailing `..`.
+
+  For test code, the `test-support` feature adds
+  `ValidatedAccountConfig::new_for_tests(id, imap)` and
+  `ValidatedMultiConfig::new_for_tests(audit, attachments)` — each takes the
+  fields with no meaningful default and fills the rest with the value the
+  validator resolves for an omitted key, leaving the remainder to field
+  assignment. They sit behind the same gate as `validate_multi_allowing_empty`
+  so the production surface keeps offering exactly one way in.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after
@@ -86,8 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
   field, so the folder-list widenings above are invisible in its output.
   Review those two lists by hand against your `[defaults.security]` for every
-  account carrying a partial `[accounts.security]` block. A boot-time record
-  of the resolved values is tracked in #632.
+  account carrying a partial `[accounts.security]` block. #632 added a
+  boot-time record of the resolved *tool verdicts* with their provenance; the
+  resolved folder lists are still recorded nowhere.
 - `rimap-config`: `RawAccountConfig::{security, limits, credentials}` change
   type to the new `AccountSecurityOverrides` / `AccountLimitsOverrides` /
   `AccountCredentialsOverrides` mirror structs. Breaking for direct consumers

@@ -453,30 +453,17 @@ mod tests {
         // cargo-mutants `replace == with !=` mutation at line 223
         // would flip the assignment, breaking the audit-log
         // "infrastructure vs per-account" rendering.
-        use rimap_config::model::{ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig};
+        use rimap_config::model::{ImapConfig, ImapEncryption};
         use rimap_config::validate::ValidatedAccountConfig;
         use rimap_core::account::AccountId;
         use rimap_core::posture::Posture;
 
-        let acfg = ValidatedAccountConfig {
-            id: AccountId::default_account(),
-            imap: {
-                let mut imap =
-                    ImapConfig::new("imap.example.com".into(), 993, "u@example.com".into());
-                imap.encryption = ImapEncryption::Tls;
-                imap
-            },
-            smtp: None,
-            security: {
-                let mut security = SecurityConfig::default();
-                security.posture = Posture::DraftSafe;
-                security
-            },
-            limits: LimitsConfig::default(),
-            tool_overrides: BTreeMap::new(),
-            tls_fingerprint: None,
-            fallback_mode: rimap_config::model::FallbackMode::default(),
-        };
+        let mut acfg = ValidatedAccountConfig::new_for_tests(AccountId::default_account(), {
+            let mut imap = ImapConfig::new("imap.example.com".into(), 993, "u@example.com".into());
+            imap.encryption = ImapEncryption::Tls;
+            imap
+        });
+        acfg.security.posture = Posture::DraftSafe;
 
         let default_id = AccountId::new(rimap_core::account::DEFAULT_ACCOUNT_NAME).unwrap();
         let conn_default = build_account_connection(&default_id, &acfg);

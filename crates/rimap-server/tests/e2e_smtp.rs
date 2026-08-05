@@ -49,7 +49,7 @@ use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
 use rimap_authz::rate_limit::Governor;
 use rimap_config::credential::CredentialStore;
-use rimap_config::model::{ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig};
+use rimap_config::model::{ImapConfig, ImapEncryption};
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::account::AccountId;
 use rimap_core::posture::Posture;
@@ -152,31 +152,17 @@ fn build_server(harness: &DovecotHarness, fake: FakeSmtpSender) -> ServerScope {
 }
 
 fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
-    ValidatedAccountConfig {
-        id: AccountId::default_account(),
-        imap: {
-            let mut imap =
-                ImapConfig::new("127.0.0.1".into(), harness.port(), ACCOUNT_USERNAME.into());
-            imap.encryption = ImapEncryption::Tls;
-            imap
-        },
-        smtp: None,
-        security: {
-            let mut security = SecurityConfig::default();
-            security.posture = Posture::Full;
-            security
-        },
-        limits: {
-            let mut limits = LimitsConfig::default();
-            limits.commands_per_second = 1000;
-            limits.drafts_per_minute = 1000;
-            limits.sends_per_minute = 1000;
-            limits
-        },
-        tool_overrides: BTreeMap::new(),
-        tls_fingerprint: Some(*harness.fingerprint()),
-        fallback_mode: rimap_config::model::FallbackMode::default(),
-    }
+    let mut cfg = ValidatedAccountConfig::new_for_tests(AccountId::default_account(), {
+        let mut imap = ImapConfig::new("127.0.0.1".into(), harness.port(), ACCOUNT_USERNAME.into());
+        imap.encryption = ImapEncryption::Tls;
+        imap
+    });
+    cfg.security.posture = Posture::Full;
+    cfg.limits.commands_per_second = 1000;
+    cfg.limits.drafts_per_minute = 1000;
+    cfg.limits.sends_per_minute = 1000;
+    cfg.tls_fingerprint = Some(*harness.fingerprint());
+    cfg
 }
 
 fn test_connection(harness: &DovecotHarness, audit: &AuditWriter) -> Connection {

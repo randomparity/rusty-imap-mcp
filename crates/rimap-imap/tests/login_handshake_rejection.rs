@@ -205,7 +205,7 @@ async fn post_login_capability_probe_failure_refuses_the_move() {
     // an `IMAP4rev1`-only server produces — the distinction the refusal rests
     // on, asserted directly so it cannot rot into the old bool pair.
     assert_eq!(
-        conn.capabilities(),
+        conn.capabilities().await,
         ServerCapabilities::Unknown,
         "an empty post-login CAPABILITY probe establishes nothing about the \
          server and must not be recorded as an advertisement",

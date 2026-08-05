@@ -540,6 +540,11 @@ async fn build_registry(
     let mut account_states = std::collections::BTreeMap::new();
     let auth_sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
     for (id, acfg) in &multi.accounts {
+        // Emitted before the guard is built so an account that fails to come
+        // up still leaves its effective matrix on the record (#632).
+        rimap_server::boot::tool_matrix::log_account_matrix(
+            &rimap_server::boot::tool_matrix::account_tool_matrix(acfg),
+        );
         let guard = build_account_guard(acfg).context("building dispatch guard")?;
         let conn_cfg = registry::build_account_connection(id, acfg);
         let resolver: Arc<dyn rimap_core::CredentialResolver> =
@@ -759,20 +764,18 @@ mod resolve_download_dir_tests {
     use super::resolve_download_dir_multi;
     use rimap_config::model::{AttachmentsConfig, AuditConfig};
     use rimap_config::validate::ValidatedMultiConfig;
-    use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn minimal_multi(download_dir: String) -> ValidatedMultiConfig {
-        ValidatedMultiConfig {
-            accounts: BTreeMap::new(),
-            audit: AuditConfig::new(PathBuf::from("/tmp/unused-audit.log")),
-            attachments: {
+        ValidatedMultiConfig::new_for_tests(
+            AuditConfig::new(PathBuf::from("/tmp/unused-audit.log")),
+            {
                 let mut attachments = AttachmentsConfig::default();
                 attachments.download_dir = download_dir;
                 attachments
             },
-        }
+        )
     }
 
     #[test]
