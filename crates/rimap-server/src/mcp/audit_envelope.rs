@@ -192,11 +192,11 @@ impl ImapMcpServer {
             start_seq,
             tool,
             outcome.status,
+            outcome.error_code,
             duration_ms,
             provenance,
         );
         inputs.account = account;
-        inputs.error_code = outcome.error_code;
         inputs.result_summary = outcome.result_summary;
         let join = self
             .drain
@@ -274,11 +274,11 @@ impl Drop for AuditEnvelopeGuard {
             inner.start_seq,
             tool,
             rimap_audit::record::ToolStatus::Cancelled,
+            Some(rimap_core::ErrorCode::Cancelled),
             duration_ms,
             Provenance::new(60, Vec::new()),
         );
         cancellation.account = inner.account;
-        cancellation.error_code = Some(rimap_core::ErrorCode::Cancelled);
         if let Err(e) = inner.sender.try_send(cancellation) {
             tracing::warn!(
                 error = %e,

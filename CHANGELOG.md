@@ -92,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validator resolves for an omitted key, leaving the remainder to field
   assignment. They sit behind the same gate as `validate_multi_allowing_empty`
   so the production surface keeps offering exactly one way in.
-- **API break: every `pub` struct in `rimap_audit::record` is now
+- **API break: every `pub` struct *defined in* `rimap_audit::record` is now
   `#[non_exhaustive]`, along with the three writer-input structs (#706).** The
   12 record types — `AuditRecord`, `ProcessStart`, `ProcessEnd`, `ToolStart`,
   `ToolEnd`, `ConfigEvent`, `ResultSummary`, `Provenance`,
@@ -102,8 +102,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tool_matrix` to `ProcessStart` and `ProcessStartInputs`. Both were genuine
   breaking changes that `cargo semver-checks` reported as clean, because it
   baselines on `v0.1.0` and a declared `0.2.0-dev` major bump permits any break
-  (`0 checks: 0 pass, 253 skip`). Third and last of the `#[non_exhaustive]`
-  siblings, after #665 and #707.
+  (`0 checks: 0 pass, 253 skip`). Third of the `#[non_exhaustive]` siblings,
+  after #665 and #707; #715 (`AuditOptions`, `Filter`, `TrailingState`) and
+  #716 (`AuthEvent`) carry the remainder, both before `v0.2.0` is tagged.
+
+  **Two record-adjacent types are deliberately not covered.** `AuthEvent`
+  backs the `auth` kind but is defined in `rimap_core::auth_event` and only
+  re-exported from `rimap_audit::record`, because `rimap-imap` constructs it
+  without depending on `rimap-audit`; marking it needs a constructor in
+  `rimap-core` and a sweep of `rimap-imap`, so it is #716. Adding a field to
+  `AuthEvent` therefore remains a breaking change, and it has already grown
+  one that way (`credential_source`, #78). `AuditOptions` and `Filter` are
+  #715. Until both land, `auth` records and the writer's configuration
+  surface keep the hazard this entry describes removing everywhere else.
 
   Downstream impact: the struct literal is no longer available outside the
   crate, and **that includes functional-update syntax** — `..Default::default()`

@@ -166,6 +166,7 @@ fn tool_end_line_is_byte_exact() {
         Seq(10),
         ToolName::FetchMessage,
         ToolStatus::Ok,
+        None,
         47,
         Provenance::new(60, vec!["<abc@example>".to_string()]),
     ));
@@ -197,6 +198,7 @@ fn unpopulated_optional_fields_stay_off_the_line() {
             Seq(10),
             ToolName::FetchMessage,
             ToolStatus::Ok,
+            None,
             47,
             Provenance::new(60, Vec::new()),
         ))),

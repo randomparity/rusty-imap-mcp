@@ -5,13 +5,22 @@
 //!
 //! # Adding a field
 //!
-//! Every payload struct here is `#[non_exhaustive]`, so adding a field is
-//! additive at the Rust API level: no downstream crate can name the full set
-//! of fields in a struct expression, and none has to be recompiled against a
-//! wider one. It is additive on disk too, because readers tolerate an absent
-//! field via `#[serde(default)]`. Both halves are required — see
+//! Every payload struct *defined* here is `#[non_exhaustive]`, so adding a
+//! field is additive at the Rust API level: no downstream crate can name the
+//! full set of fields in a struct expression, and none has to be recompiled
+//! against a wider one. It is additive on disk too, because readers tolerate
+//! an absent field via `#[serde(default)]`. Both halves are required — see
 //! `docs/audit-log.md` ("Compatibility contract"), which is the normative
 //! statement of what a reader may assume.
+//!
+//! **One payload is not covered.** [`AuthEvent`] backs the `auth` kind but is
+//! defined in `rimap_core::auth_event` and only re-exported here, because
+//! `rimap-imap` constructs it without depending on this crate. It is still
+//! exhaustive, so adding a field to it *is* a breaking change and the
+//! paragraph above does not apply to `auth` records. It has already grown one
+//! field this way (`credential_source`, #78). Tracked in #716; until that
+//! lands, treat `AuthEvent` as the pre-#706 hazard this module otherwise
+//! removes.
 //!
 //! `#[non_exhaustive]` is a Rust-visibility construct only. It does not touch
 //! serde, so an unchanged record serializes to byte-identical JSONL. The
@@ -265,6 +274,45 @@ pub struct ProcessStart {
 }
 
 /// Payload of the `process_end` kind.
+///
+/// # The attribute is load-bearing
+///
+/// A doctest compiles as its own crate, so `#[non_exhaustive]` is in force in
+/// the block below exactly as it is for a downstream consumer. That makes this
+/// the workspace's only *enforcing* check on the attribute: the integration
+/// tests in `tests/non_exhaustive_record.rs` document the idiom, but every
+/// construct in them compiles just as well on an exhaustive struct, so they
+/// would stay green if the attribute were dropped in a conflict resolution.
+/// These two do not.
+///
+/// A struct expression is rejected:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::record::ProcessEnd {
+///     reason: rimap_audit::record::ProcessEndReason::Eof,
+///     total_tool_calls: 0,
+///     records_lost: 0,
+/// };
+/// ```
+///
+/// And so is functional-update syntax, which is the premise this change was
+/// twice reported to have gotten wrong -- `..Default::default()` is still a
+/// struct expression:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::record::ToolStart {
+///     tool: rimap_core::tool::ToolName::Search,
+///     ..Default::default()
+/// };
+/// ```
+///
+/// The supported form is [`ProcessEnd::new`] plus field assignment:
+///
+/// ```
+/// use rimap_audit::record::{ProcessEnd, ProcessEndReason};
+/// let end = ProcessEnd::new(ProcessEndReason::Eof, 12, 0);
+/// assert_eq!(end.total_tool_calls, 12);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ProcessEnd {
@@ -346,6 +394,12 @@ impl AuditRecord {
 // `rimap-imap` can construct them without depending on this crate.
 // Re-exported here under their canonical names for ergonomic access
 // from within `rimap-audit` (writer, reader, on-disk format tests).
+//
+// NOTE: `AuthEvent` is the one payload in this module that is NOT
+// `#[non_exhaustive]` — it is defined in another crate, so #706 could not
+// mark it without a constructor there and a sweep of `rimap-imap`'s
+// construction sites. Adding a field to it is still a breaking change.
+// See the module docs and #716.
 pub use rimap_core::auth_event::{AuthEvent, AuthResult};
 
 /// Payload of the `tool_start` kind. Recorded before dispatch begins so a

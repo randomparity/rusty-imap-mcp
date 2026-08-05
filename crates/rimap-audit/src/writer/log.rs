@@ -212,22 +212,29 @@ pub struct ToolEndInputs {
 impl ToolEndInputs {
     /// Describe a completed tool call.
     ///
-    /// `account` and `error_code` start `None` (an infrastructure tool has no
-    /// account; a success has no error code) and `result_summary` starts
-    /// empty, which is the correct record for a tool that returned nothing.
-    /// Assign whichever apply.
+    /// `error_code` is a parameter, beside the `status` it has to agree with.
+    /// `ToolEnd::error_code` is documented as "the stable error code on
+    /// `status = Error`; `None` on success", so a defaulted `None` on a failed
+    /// call is not an absent value — it is a record asserting *this call
+    /// failed and carries no code*, which on the line is indistinguishable
+    /// from a success's `null` and leaves post-incident triage unable to
+    /// classify the failure. Same rule as
+    /// [`crate::record::ProcessEnd::new`]'s `records_lost`. Pass `None` with
+    /// [`ToolStatus::Ok`](crate::record::ToolStatus::Ok) and
+    /// `Some(code)` with `Error` or `Cancelled`.
     ///
-    /// Unlike [`ToolStartInputs::new`], `account` is defaulted here rather
-    /// than required: `start_seq` names the paired `tool_start`, which carries
-    /// the account and the posture that governed the dispatch, so a `tool_end`
-    /// that omits it is recoverable rather than misleading. It is duplicated
-    /// onto this record only so a single line reads on its own. Nothing on a
-    /// `tool_end` makes a security claim the way `posture_effective` does.
+    /// `account` and `result_summary` stay defaulted. `start_seq` names the
+    /// paired `tool_start`, which carries the account and the posture that
+    /// governed the dispatch, so a `tool_end` that omits the account is
+    /// recoverable rather than misleading — it is duplicated onto this record
+    /// only so a single line reads on its own. An empty `result_summary` is
+    /// the correct record for a tool that returned nothing.
     #[must_use]
     pub fn new(
         start_seq: crate::record::ids::Seq,
         tool: rimap_core::tool::ToolName,
         status: crate::record::ToolStatus,
+        error_code: Option<rimap_core::ErrorCode>,
         duration_ms: u64,
         provenance: crate::record::Provenance,
     ) -> Self {
@@ -236,7 +243,7 @@ impl ToolEndInputs {
             tool,
             account: None,
             status,
-            error_code: None,
+            error_code,
             duration_ms,
             result_summary: crate::record::ResultSummary::default(),
             provenance,

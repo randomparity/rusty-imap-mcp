@@ -94,6 +94,14 @@ jobs:
       # .config/nextest.toml (#625): an unrelated flake or container hiccup
       # no longer suppresses every other test's result.
       - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
+      # nextest does not run doctests (upstream limitation), so the step above
+      # skips every one silently. The `compile_fail,E0639` blocks that enforce
+      # `#[non_exhaustive]` on `rimap_config::model::ImapConfig` (#665) and
+      # `rimap_audit::record::ProcessEnd` (#706) are doctests -- a doctest
+      # compiles as its own crate, which is the only place the attribute is in
+      # force. Mirrors `just test-doc`; without it, dropping an attribute in a
+      # conflict resolution leaves CI green.
+      - run: cargo test --workspace --doc --locked
       # The main --workspace pass above runs with the default silent-skip
       # posture: container-gated e2e tests return early when no docker/podman
       # runtime is present, so a runtime hiccup would let them all vanish while
