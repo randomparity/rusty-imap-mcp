@@ -299,9 +299,15 @@ impl ToolStartInputs {
     /// that this dispatch bypassed per-account posture gating by design
     /// (`use_account`, `list_accounts`). A caller that left the field to a
     /// default would record an account-scoped, posture-gated call as exempt
-    /// from gating. They travel together -- an infrastructure tool has
-    /// neither, an account-scoped dispatch has both -- so passing
-    /// `(None, None)` is the explicit way to say "infrastructure".
+    /// from gating. Passing `(None, None)` is the explicit way to say
+    /// "infrastructure".
+    ///
+    /// The two are expected to travel together -- an infrastructure tool has
+    /// neither, an account-scoped dispatch has both -- but the signature does
+    /// not enforce that, and `new(tool, Some(account), None, ..)` still
+    /// compiles into a record claiming an account-scoped call was exempt from
+    /// gating. Making that unrepresentable needs a two-variant scope
+    /// parameter rather than two `Option`s; no current caller gets it wrong.
     #[must_use]
     pub fn new(
         tool: rimap_core::tool::ToolName,

@@ -36,10 +36,21 @@ the file.
 
 - Every line is one complete JSON object, and `seq`, `ts`, `process_id`, and
   `kind` are present on all of them.
-- A `kind` it does not recognize is a record type added after it was written.
-  Skip the line; do not treat the file as corrupt.
 - A field it does not recognize is a field added after it was written. Ignore
   it; do not treat the line as corrupt.
+- A `kind` it does not recognize is a record type added after it was written.
+  It should skip the line rather than treat the file as corrupt.
+
+  **The bundled reader does not yet do this.** `stream_records` — and so
+  `rimap audit merge` — aborts with a read error on any non-trailing line it
+  cannot parse, and an unrecognized `kind` is a parse failure, because the
+  record enum has no catch-all variant. So a `v0.2` binary reading a file that
+  a later version wrote stops at the first unknown record instead of skipping
+  it. Only a malformed *trailing* line is tolerated, which covers a torn write
+  at the tail, not forward compatibility. Tracked in #717. Until it lands,
+  treat "skip unknown kinds" as the contract third-party readers should
+  implement and as a known gap in this one, and do not merge files written by
+  a newer version than the binary doing the merging.
 - A field it expects and does not find was added after *that line* was written.
   Every such field has a documented read-as value in the tables below --
   `records_lost` reads as `0`, `tool_matrix` as empty -- and a reader that

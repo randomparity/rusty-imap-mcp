@@ -184,6 +184,157 @@ fn tool_end_line_is_byte_exact() {
     );
 }
 
+/// `tool_start` is the record with the most reason to be pinned and was the
+/// last to get a golden. It is the only kind whose payload goes through a
+/// hand-written `Serialize` ([`rimap_audit::record::PostureEffective`]), the
+/// only one carrying a security-relevant field, and the one whose constructor
+/// this change altered most.
+///
+/// The pre-existing in-crate test asserts through a parsed
+/// `serde_json::Value`, which is field-order-insensitive and so passes
+/// straight through a reordering. This does not.
+#[test]
+fn tool_start_line_is_byte_exact() {
+    let record = AuditRecord::new(
+        Seq(10),
+        fixed_ts(),
+        fixed_pid(),
+        Payload::ToolStart(rimap_audit::record::ToolStart::from(
+            rimap_audit::ToolStartInputs::new(
+                ToolName::FetchMessage,
+                Some("work".to_string()),
+                Some(Posture::Readonly),
+                serde_json::json!({"folder": "INBOX", "uid": 12345}),
+                "de".repeat(32),
+            ),
+        )),
+    );
+    assert_golden(
+        &record,
+        r#"{"seq":10,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"tool_start","account":"work","tool":"fetch_message","posture_effective":"readonly","arguments_redacted":{"folder":"INBOX","uid":12345},"arguments_hash_sha256":"dededededededededededededededededededededededededededededededede"}"#,
+    );
+}
+
+/// The infrastructure dispatch, whose `posture_effective` is the literal
+/// `"infrastructure"` -- the string that records "this call bypassed
+/// per-account posture gating by design". Pinned separately because it comes
+/// from the hand-written `Serialize`'s other arm, and because editing that
+/// literal would silently redefine what every such record on disk means.
+#[test]
+fn tool_start_infrastructure_line_is_byte_exact() {
+    let record = AuditRecord::new(
+        Seq(11),
+        fixed_ts(),
+        fixed_pid(),
+        Payload::ToolStart(rimap_audit::record::ToolStart::from(
+            rimap_audit::ToolStartInputs::new(
+                ToolName::UseAccount,
+                None,
+                None,
+                serde_json::json!({}),
+                "ab".repeat(32),
+            ),
+        )),
+    );
+    assert_golden(
+        &record,
+        r#"{"seq":11,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"tool_start","tool":"use_account","posture_effective":"infrastructure","arguments_redacted":{},"arguments_hash_sha256":"abababababababababababababababababababababababababababababababab"}"#,
+    );
+}
+
+/// The `auth` kind. Its payload is [`rimap_audit::record::AuthEvent`], which
+/// lives in `rimap-core` and is the one payload this change could not mark
+/// `#[non_exhaustive]` (#716) -- which makes pinning its bytes more important
+/// here, not less, since a field added to it is still a silent format change.
+///
+/// `username` carries a login identity and must never carry credential
+/// material; the golden uses an obvious placeholder.
+#[test]
+fn auth_line_is_byte_exact() {
+    let record = AuditRecord::new(
+        Seq(2),
+        fixed_ts(),
+        fixed_pid(),
+        Payload::Auth(rimap_audit::record::AuthEvent {
+            account: Some("work".to_string()),
+            result: rimap_audit::record::AuthResult::Success,
+            host: "imap.example.com".to_string(),
+            port: 993,
+            username: "alice@example.com".to_string(),
+            tls_fingerprint_sha256: Some("ab".repeat(32)),
+            fingerprint_match: Some(true),
+            error_code: None,
+            credential_source: None,
+        }),
+    );
+    assert_golden(
+        &record,
+        r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"auth","account":"work","result":"success","host":"imap.example.com","port":993,"username":"alice@example.com","tls_fingerprint_sha256":"abababababababababababababababababababababababababababababababab","fingerprint_match":true,"error_code":null}"#,
+    );
+}
+
+/// `process_start` in its multi-account shape, with a populated `accounts`
+/// array and a populated `tool_matrix`. The single-account, empty-matrix shape
+/// is covered by the round-trip goldens; this pins the nested structures --
+/// including `tool_matrix`, the #632 field whose addition is the reason this
+/// issue exists.
+#[test]
+fn process_start_multi_account_line_is_byte_exact() {
+    let mut inputs = rimap_audit::ProcessStartInputs::new(
+        "0.2.0-dev".to_string(),
+        "abc123".to_string(),
+        std::path::PathBuf::from("/etc/rimap/config.toml"),
+        "00".to_string(),
+        rimap_audit::read_trailing_state(std::path::Path::new(
+            "/nonexistent/rimap-golden-absent.jsonl",
+        ))
+        .expect("absent file yields an empty trailing state"),
+        7,
+    );
+    inputs.accounts = Some(vec![rimap_audit::record::AccountSummary::new(
+        "work".to_string(),
+        Posture::Readonly,
+        "imap.example.com".to_string(),
+    )]);
+    inputs.tool_matrix = vec![AccountToolMatrix::new(
+        "work".to_string(),
+        Posture::Readonly,
+        vec![ToolVerdict::new(
+            ToolName::DeleteMessage,
+            true,
+            VerdictSource::Inherited,
+        )],
+    )];
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("audit.jsonl");
+    let writer = rimap_audit::AuditWriter::open(&rimap_audit::AuditOptions {
+        path: path.clone(),
+        rotate_bytes: 0,
+        rotate_keep: 0,
+        retention_seconds: None,
+        fail_open: false,
+        initial_seq: Seq::FIRST,
+    })
+    .expect("writer opens");
+    writer
+        .log_process_start(inputs)
+        .expect("process_start write succeeds");
+    drop(writer);
+
+    let written = std::fs::read_to_string(&path).expect("audit file readable");
+    let mut record: AuditRecord =
+        serde_json::from_str(written.trim_end()).expect("written line parses");
+    // The writer stamps a live `ts`/`process_id`; replace them so the golden
+    // is about the payload shape rather than the clock.
+    record.ts = fixed_ts();
+    record.process_id = fixed_pid();
+    assert_golden(
+        &record,
+        r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"abc123","accounts":[{"name":"work","posture":"readonly","imap_host":"imap.example.com"}],"tool_matrix":[{"account":"work","posture":"readonly","tools":[{"tool":"delete_message","allow":true,"source":"inherited"}]}],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
+    );
+}
+
 /// The fields `#[serde(skip_serializing_if)]` omits stay omitted. This is the
 /// half of "additive" that the attribute cannot enforce: a new field without
 /// a skip or default would appear in every line written from then on, and
