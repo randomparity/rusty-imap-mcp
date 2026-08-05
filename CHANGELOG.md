@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Boot now reports each account's effective tool matrix, marking every explicit
+  per-tool verdict as account-written or inherited from
+  `[defaults.security.tools]`. An inherited `allow` on an account tightened to
+  `posture = "readonly"` is visible without running anything: it appears in a
+  `tracing::info!` line at startup, in a new `tool_matrix` field on the
+  `process_start` audit record (present for single- and multi-account configs
+  alike), and in a new `Explicit tool overrides:` section of
+  `rusty-imap-mcp --dry-run`. All three render the same rows from one producer.
+  `process_start` records written before this field parse unchanged. See #632
+  and `docs/audit-log.md`.
 - crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
   new `publish-crates` release job. Publishes in dependency order with an
   idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by
@@ -86,8 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
   field, so the folder-list widenings above are invisible in its output.
   Review those two lists by hand against your `[defaults.security]` for every
-  account carrying a partial `[accounts.security]` block. A boot-time record
-  of the resolved values is tracked in #632.
+  account carrying a partial `[accounts.security]` block. #632 added a
+  boot-time record of the resolved *tool verdicts* with their provenance; the
+  resolved folder lists are still recorded nowhere.
 - `rimap-config`: `RawAccountConfig::{security, limits, credentials}` change
   type to the new `AccountSecurityOverrides` / `AccountLimitsOverrides` /
   `AccountCredentialsOverrides` mirror structs. Breaking for direct consumers

@@ -738,6 +738,7 @@ mod tests {
             git_commit: String::new(),
             posture: Some(rimap_core::Posture::DraftSafe),
             accounts: None,
+            tool_matrix: Vec::new(),
             config_path: std::path::PathBuf::from("/tmp/config.toml"),
             config_hash_sha256: "ab".repeat(32),
             trailing: TrailingState {
@@ -889,6 +890,7 @@ mod tests {
             git_commit: String::new(),
             posture: Some(rimap_core::Posture::DraftSafe),
             accounts: None,
+            tool_matrix: Vec::new(),
             config_path: std::path::PathBuf::from("/tmp/c.toml"),
             config_hash_sha256: "00".repeat(32),
             trailing: TrailingState {

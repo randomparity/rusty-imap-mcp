@@ -474,6 +474,7 @@ mod tests {
             },
             limits: LimitsConfig::default(),
             tool_overrides: BTreeMap::new(),
+            account_written_tools: std::collections::BTreeSet::new(),
             tls_fingerprint: None,
             fallback_mode: rimap_config::model::FallbackMode::default(),
         };
