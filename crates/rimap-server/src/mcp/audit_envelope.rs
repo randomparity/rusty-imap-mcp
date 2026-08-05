@@ -311,6 +311,30 @@ mod tests {
         .unwrap()
     }
 
+    /// A never-completing tool body that signals `entered` on its first poll.
+    ///
+    /// This is the barrier for "the envelope is ready to be cancelled".
+    /// [`super::ImapMcpServer::run_with_audit_envelope`] awaits
+    /// `emit_tool_start`, constructs the [`AuditEnvelopeGuard`], and only
+    /// *then* polls the body — so observing the first poll proves the
+    /// `tool_start` write finished and the guard is armed. Nothing else polls
+    /// this future, so the signal cannot arrive early, which makes it an exact
+    /// ordering barrier rather than a timing window.
+    fn body_signalling_first_poll(
+        entered: tokio::sync::oneshot::Sender<()>,
+    ) -> impl std::future::Future<Output = Result<serde_json::Value, rimap_core::RimapError>> {
+        let mut entered = Some(entered);
+        std::future::poll_fn(move |_cx| {
+            if let Some(entered) = entered.take() {
+                // A dropped receiver means the test already gave up; the
+                // assertions report that, so the send result is not actionable.
+                let _ = entered.send(());
+            }
+            // Never resolve: the abort must land while the body is suspended.
+            std::task::Poll::Pending
+        })
+    }
+
     fn test_writer_fail_open(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
         AuditWriter::open(&AuditOptions {
             path,
@@ -404,7 +428,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropped_run_with_audit_envelope_emits_exactly_one_cancellation() {
         use std::sync::Arc;
-        use std::time::Duration;
 
         use rimap_core::tool::ToolName;
 
@@ -421,9 +444,11 @@ mod tests {
         let server = Arc::new(ImapMcpServer::new_for_tests(writer, tx.clone()));
 
         // Spawn `run_with_audit_envelope` with a body that pends forever.
-        // After `emit_tool_start` has had time to fire, `abort()` the
-        // task; the wrapper future is dropped between `tool_start` and
-        // `emit_tool_end`, exercising the guard's `Drop` path.
+        // Once the body has been polled — which proves `tool_start` is
+        // written and the guard is armed — `abort()` the task; the wrapper
+        // future is dropped between `tool_start` and `emit_tool_end`,
+        // exercising the guard's `Drop` path.
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let server_clone = Arc::clone(&server);
         let task = tokio::spawn(async move {
             let args = serde_json::Map::new();
@@ -433,23 +458,20 @@ mod tests {
                     None,
                     PostureContext::Infrastructure,
                     &args,
-                    |_ticket| {
-                        std::future::pending::<Result<serde_json::Value, rimap_core::RimapError>>()
-                    },
+                    |_ticket| body_signalling_first_poll(entered_tx),
                 )
                 .await
         });
 
-        // Give the envelope time to emit `tool_start` and enter the
-        // body's pending await before aborting. 50ms matches the
-        // headroom used by `dispatch_ticket::drop_during_body_*`.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for the body's first poll rather than for a clock: the abort
+        // is then strictly ordered after the guard is armed, whatever the
+        // host load (#684 — the previous 50ms sleep was a race window).
+        entered_rx.await.unwrap();
         task.abort();
         let _ = task.await; // wait for the abort to settle
 
-        // Give the drainer time to flush the queued cancellation record.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        // Drop the last sender so the drainer task can exit.
+        // No sleep before the drain: closing every cancellation sender makes
+        // `drainer.await` itself the flush barrier.
         drop(tx);
         drop(server);
         drainer.await.unwrap();
@@ -476,6 +498,14 @@ mod tests {
             lines[1].contains(r#""error_code":"ERR_CANCELLED""#),
             "second record must carry ERR_CANCELLED: {}",
             lines[1],
+        );
+        // Join the two records, so a cancellation synthesized against some
+        // other dispatch's `seq` cannot satisfy the assertions above.
+        let start: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let end: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(
+            end["start_seq"], start["seq"],
+            "tool_end.start_seq must reference this dispatch's tool_start.seq: {contents}",
         );
     }
 
