@@ -432,10 +432,23 @@ async fn emit_pre_init_error_envelope(
 
 /// Dispatch an `rmcp::serve_server` init failure: emit the pre-init
 /// envelope (when applicable), classify `InitializeFailed`, then shut
-/// down the validator supervisor. Every failure path runs
-/// `shutdown_after_failure` so the bridge tasks are awaited (or
-/// aborted) before the runtime drops; otherwise inbound's blocking
-/// stdin read can prevent the process from exiting promptly.
+/// down the validator supervisor. `shutdown_after_failure` awaits (or
+/// aborts) the bridge tasks before the runtime drops; otherwise
+/// inbound's blocking stdin read can prevent the process from exiting
+/// promptly.
+///
+/// **The pre-init write-failure arm is the one exception.** When
+/// `emit_pre_init_error_envelope` itself fails — broken pipe, i.e. the
+/// client's stdout reader is already gone — `?` propagates before
+/// `shutdown_after_failure` is reached, detaching both bridge
+/// `JoinHandle`s. Left as-is on purpose (#722): the shutdown would be
+/// inert on this arm. `drop(init_fut)` above has already dropped rmcp's
+/// write half, so outbound has reached EOF on its own, and the inbound
+/// abort could not stop a blocking stdin read anyway — `run_server`'s
+/// `Runtime::shutdown_background` is what makes this process exit. What
+/// the operator needs from this arm is the write error, undisplaced by
+/// any bridge-shutdown outcome; `mcp_wire_negative`'s
+/// `pre_initialize_envelope_write_failure_records_error` pins that.
 async fn handle_init_failure(
     error: ServerInitializeError,
     stdout_for_preinit: &std::sync::Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
