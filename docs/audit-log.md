@@ -54,8 +54,16 @@ the file.
 - A field it expects and does not find was added after *that line* was written.
   Every such field has a documented read-as value in the tables below --
   `records_lost` reads as `0`, `undrained_dispatches` as `0`, `tool_matrix` as
-  empty -- and a reader that
-  substitutes it gets the same answer the writer would have given.
+  empty -- so the line parses into the same struct a current writer produces.
+
+  **That is a parse rule, not a measurement.** For the two counters it means
+  *not measured*, not *measured as zero*: a binary predating `records_lost`
+  could lose records, and one predating `undrained_dispatches` could leave
+  dispatches running past `process_end`, and either wrote the fact to stderr
+  and no field. An alerting rule keyed on `> 0` must therefore treat a line
+  that omits the field as **unknown**, not as clean -- which is the ordinary
+  state of a log spanning an upgrade, and of any merged or rotated set that
+  reaches back across one.
 - Fields it does find keep their spelling, their type, and their position on
   the line. Records already on disk are never rewritten in place.
 
@@ -157,7 +165,7 @@ recently flushed.
 | `reason` | One of `signal_int`, `signal_term`, `eof`, `error` |
 | `total_tool_calls` | Number of tool calls dispatched in this process |
 | `records_lost` | Number of records this process failed to persist and told no caller about (absent on records written before this field existed; read as `0`) |
-| `undrained_dispatches` | Tool dispatches -- or audit writes one of them offloaded -- still registered when the shutdown drain's budget expired (absent on records written before this field existed; read as `0`) |
+| `undrained_dispatches` | Tool dispatches -- or audit writes one of them offloaded -- still registered when the shutdown drain's budget expired (absent on records written before this field existed, where it means *not measured* rather than zero) |
 
 **A non-zero `records_lost` means this file has a hole in it.** Some event
 happened and left no record — most often a disk that filled mid-run. The count
@@ -212,10 +220,23 @@ Read the exception before building on the rule.
   there too rather than silently absorbed. The same count is still logged to
   stderr, which is now the redundant copy rather than the only one.
 
-  The caveat the field cannot lift: a run that never reaches `process_end` at
-  all -- a hard crash, a `SIGKILL` -- reports nothing, neither a count nor a
-  zero. A non-zero count is evidence that terminality was broken; a missing
-  `process_end` is not evidence that it held.
+  Two things the field does not cover, so a zero is narrower than "this run was
+  clean":
+
+  - A run that never reaches `process_end` at all -- a hard crash, a `SIGKILL`
+    -- reports nothing, neither a count nor a zero. A non-zero count is
+    evidence that terminality was broken; a missing `process_end` is not
+    evidence that it held.
+  - **The cancellation drainer's own join budget is a second, still
+    stderr-only hole.** The residue is measured before that join, and a cut
+    dispatch releases its registration as soon as it hands its `tool_end` to
+    the drainer's queue -- so the drain honestly reports zero while records sit
+    unwritten. If the join then expires, the server aborts the drainer: those
+    queued records are lost, and a write already handed to the blocking pool
+    lands after `process_end`. `records_lost` does not see it either, because
+    nothing was ever written to fail. The warning
+    `cancellation drainer did not finish within the join budget` on stderr is
+    the only signal. Tracked in #725.
 
 Separately, and not an exception to *ordering*: a record may be missing
 entirely. Loss on shutdown is expected and documented (best-effort). Terminality
