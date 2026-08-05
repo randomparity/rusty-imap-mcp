@@ -10,7 +10,6 @@
 //! process exit; see `AuthEmitGuard`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::Ordering;
 
 use async_imap::imap_proto::{Response, Status};
 use async_imap::types::UnsolicitedResponse;
@@ -22,7 +21,7 @@ use tokio_rustls::client::TlsStream;
 use crate::error::{AuthFailure, ImapError};
 
 use super::handshake::drain_for_logindisabled;
-use super::{Connection, ImapSession, ServerCapabilities};
+use super::{Connection, ImapSession, ServerCapabilities, SessionEntry};
 
 impl Connection {
     /// Run the IMAP greeting + CAPABILITY probe + LOGIN sequence.
@@ -45,12 +44,19 @@ impl Connection {
     /// resolution succeeds, rather than returned, so a connect cut after that
     /// point still records which store the credential came from. See
     /// [`super::ConnectProgress`].
+    ///
+    /// Returns the session paired with what its own post-login `CAPABILITY`
+    /// probe advertised. This is the only place a [`ServerCapabilities`] value
+    /// is produced, and it is produced already attached to the session it
+    /// describes — the advertisement has no separate storage to be written to,
+    /// so it cannot be left over from, or applied to, a different session
+    /// (#652).
     pub(super) async fn imap_login(
         &self,
         tls_stream: TlsStream<TcpStream>,
         already_greeted: bool,
         progress: &super::ConnectProgress,
-    ) -> Result<ImapSession, ImapError> {
+    ) -> Result<SessionEntry, ImapError> {
         let mut client = async_imap::Client::new(tls_stream);
 
         // Read the server greeting — skipped for STARTTLS, which already
@@ -132,13 +138,11 @@ impl Connection {
         };
 
         // Post-login: probe CAPABILITY for MOVE (RFC 6851) and
-        // UIDPLUS (RFC 4315).
+        // UIDPLUS (RFC 4315), and hand the answer back attached to the session
+        // that gave it.
         let capabilities = Self::read_capabilities(&mut session).await;
-        self.inner
-            .capabilities
-            .store(capabilities.to_bits(), Ordering::Relaxed);
 
-        Ok(session)
+        Ok(SessionEntry::new(session, capabilities))
     }
 
     /// Run the post-login `CAPABILITY` probe and classify what came back.
