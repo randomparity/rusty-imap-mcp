@@ -111,6 +111,13 @@ container ports 143 (IMAP+STARTTLS) and 993 (IMAPS); the Rust harness
 maps host ports dynamically. There is no arch gate — every supported
 developer host can run the suite.
 
+`just test`'s `prune-containers` recipe (`scripts/prune-containers.sh`)
+runs before any test binary starts, so it cannot share the harness's
+Rust selection code; it mirrors the same contract in shell instead —
+same autodetect order, same "probe, don't just check the binary"
+behavior, same verbatim `RIMAP_CONTAINER_TOOL` override — so the two
+never disagree about which runtime a given host lands on (issue #689).
+
 ### Local Test Troubleshooting: Address Pool Exhaustion
 
 If running integration tests locally triggers the error:
