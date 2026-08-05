@@ -334,10 +334,17 @@ pub struct ProcessEnd {
     pub records_lost: u64,
     /// Tool dispatches — or audit writes one of them offloaded — still
     /// registered when the shutdown drain's budget expired. Non-zero means the
-    /// terminal-record guarantee was **not** met for this run: whatever those
-    /// dispatches wrote afterwards is sequenced after this record or was lost
-    /// to process exit. See `docs/audit-log.md`, "`process_end` is terminal",
-    /// and ADR-0015.
+    /// terminal-record guarantee is **not backed** for this run: what those
+    /// dispatches wrote may be sequenced after this record, may have been lost
+    /// to process exit, or may have landed in time after all. See
+    /// `docs/audit-log.md`, "`process_end` is terminal", and ADR-0015.
+    ///
+    /// It measures an exceeded bound, not an observed disorder. Every counted
+    /// dispatch had already been cancelled when the count was read, and the
+    /// server then spends up to its drainer-join budget before writing this
+    /// record — so one that missed the drain by a millisecond may well finish
+    /// inside that window. Alert on a non-zero count and treat the run as
+    /// unverified; do not read it as proof that a record followed this one.
     ///
     /// A dispatch that offloaded an audit write takes a second registration for
     /// it (#672), so this bounds the number of dispatches involved from above

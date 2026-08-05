@@ -160,3 +160,40 @@ knowledge in `rimap-imap`, and it would still leave every *other* in-flight
 dispatch orphaned, including the one whose `AuditEnvelopeGuard` holds the
 cancellation sender that stalls the drainer join. The dispatch is the right
 unit of ownership because it is the unit rmcp actually spawns.
+
+## Amendment · 2026-08-05 · issue [#680](https://github.com/randomparity/rusty-imap-mcp/issues/680)
+
+The first of the two holes named under *Consequences* is now announced in the
+audit file rather than only on stderr. Nothing in *Context*, *Decision*, or
+*Alternatives considered* changes; this records where two statements in
+*Consequences* stopped describing the repository.
+
+- "This one is announced on stderr with a count" is now the redundant copy. The
+  count reaches the trail as `process_end.undrained_dispatches`, a
+  `#[serde(default)]` field present on every record written from now on, and a
+  required fourth parameter to `ProcessEnd::new` for the reason `records_lost`
+  is one — a zero is an affirmative claim, so a caller that never assigned it
+  would publish that claim unmeasured. `serve_mcp` returns a composite carrying
+  the residue beside its transport result, because `run_server` consumes that
+  result twice and the count has to reach `process_end` on the error path too.
+- "#647 will carry the same fact into the audit trail" was discharged by #680
+  instead. #647 landed `process_end.records_lost`, a different counter for a
+  different residue; the two are siblings, not the same field.
+
+**What the count does not say.** It measures an exceeded *bound*. Every counted
+dispatch had already been cancelled when the count was read, and the drainer
+join below still has its own budget to run before `process_end` is written, so
+a dispatch that missed the drain narrowly may land in order anyway. A non-zero
+count means the ordering this ADR establishes is unverified for that run — not
+that a record was observed following `process_end`.
+
+The second hole — an offloaded `tool_start` / `tool_end` write — was closed by
+[#672](https://github.com/randomparity/rusty-imap-mcp/issues/672) as this
+record anticipated, and those writes now take a registration of their own, so
+they are counted in the same residue. A third, which this record does not
+enumerate, was found while closing #680: the cancellation drainer's own join
+budget. The residue is latched before that join, and a cut dispatch releases
+its registration as soon as it *enqueues* to the drainer, so an aborted drainer
+loses queued records and can let a blocking-pool write land after `process_end`
+with both durable counters reading zero. That one is still stderr-only and is
+tracked in [#725](https://github.com/randomparity/rusty-imap-mcp/issues/725).

@@ -32,10 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tracing::warn!` and nowhere else — and stderr is the channel an MCP client
   routinely discards, so a reader holding only the audit file could not tell a
   run that drained cleanly from one that left dispatches running past
-  `process_end`. A non-zero count is the record stating that terminality was
-  not met for its own run. `process_end` records written before this field
-  parse unchanged, and a clean run states its zero explicitly rather than
-  omitting it. See #680, #645 / ADR-0015, and `docs/audit-log.md`.
+  `process_end`. A non-zero count is the record stating that terminality is
+  *unverified* for its own run — it measures an exceeded bound, not a sighting
+  of a record following `process_end`. Records written before this field parse
+  unchanged, and a clean run states its zero explicitly rather than omitting
+  it. See #680, #645 / ADR-0015, and `docs/audit-log.md`.
 - `process_end` is now the terminal audit record of its process. The server
   cancels and drains in-flight tool dispatches before writing it, so a connect
   the shutdown cuts records its `auth` entry (`ERR_CANCELLED`) *before*
