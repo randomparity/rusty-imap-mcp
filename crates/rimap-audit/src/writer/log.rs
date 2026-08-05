@@ -10,11 +10,20 @@
 //!   record has no derived fields and the caller can construct it
 //!   verbatim. Adding a `<Kind>Inputs` shim would be a redirect with
 //!   no behavior.
-//! - **`<Kind>Inputs` shim with `From<Inputs> for record::<Kind>`**
-//!   ([`ProcessStartInputs`], [`ToolStartInputs`], [`ToolEndInputs`])
-//!   — the on-disk record carries derived state (`PostureEffective::
-//!   from_optional`, inode-change computation) that the caller would
-//!   otherwise have to re-derive at every site.
+//! - **`<Kind>Inputs` shim** ([`ProcessStartInputs`], [`ToolStartInputs`],
+//!   [`ToolEndInputs`]) — the on-disk record carries derived state
+//!   (`PostureEffective::from_optional`, inode-change computation) that the
+//!   caller would otherwise have to re-derive at every site.
+//!
+//!   [`ToolStartInputs`] and [`ToolEndInputs`] convert through
+//!   `From<Inputs> for record::<Kind>`. [`ProcessStartInputs`] does not: its
+//!   conversion is written out inside [`AuditWriter::log_process_start`],
+//!   because the derivation needs `trailing` and `current_inode` together to
+//!   compute `audit_file_inode_changed` and to split `trailing` across three
+//!   record fields. That hand-written mapping is the one place a field can be
+//!   miswired without the compiler noticing — it moves three `String`s whose
+//!   order the type system cannot check — so it is pinned field-by-field in
+//!   `tests/non_exhaustive_record.rs`.
 //!
 //! New `log_*` methods MUST follow this rule: pick the record struct
 //! directly when no translation is needed; introduce a `*Inputs` shim

@@ -219,6 +219,64 @@ fn unpopulated_optional_fields_stay_off_the_line() {
     }
 }
 
+/// `ProcessStartInputs::new` takes three `String` parameters in a row --
+/// `version`, `git_commit`, `config_hash_sha256` -- and the mapping onto the
+/// record happens inside `log_process_start`, not through a `From` impl any
+/// other test exercises. Swapping two of them compiles, type-checks, and
+/// passes every other test in the workspace, while writing a config hash into
+/// the version field of a forensic record forever.
+///
+/// So each value here is self-identifying: a transposition names itself in the
+/// failure. This is the one construction site in the diff where the compiler
+/// offers no protection at all, which is exactly why it gets a test rather
+/// than a careful reading.
+#[test]
+fn process_start_inputs_map_onto_the_fields_they_name() {
+    use rimap_audit::{AuditOptions, AuditWriter, ProcessStartInputs};
+    use rimap_audit::{current_inode, read_trailing_state};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("audit.jsonl");
+
+    let trailing = read_trailing_state(&path).expect("empty file has trailing state");
+    let writer = AuditWriter::open(&AuditOptions {
+        path: path.clone(),
+        rotate_bytes: 0,
+        rotate_keep: 0,
+        retention_seconds: None,
+        fail_open: false,
+        initial_seq: Seq::FIRST,
+    })
+    .expect("writer opens");
+    let inode = current_inode(&path).expect("inode readable after open");
+
+    writer
+        .log_process_start(ProcessStartInputs::new(
+            "VERSION-goes-here".to_string(),
+            "GITCOMMIT-goes-here".to_string(),
+            std::path::PathBuf::from("/etc/rimap/CONFIGPATH.toml"),
+            "CONFIGHASH-goes-here".to_string(),
+            trailing,
+            inode,
+        ))
+        .expect("process_start write succeeds");
+    drop(writer);
+
+    let line = std::fs::read_to_string(&path).expect("audit file readable");
+    let v: serde_json::Value =
+        serde_json::from_str(line.trim_end()).expect("written line is valid JSON");
+
+    assert_eq!(v["kind"], "process_start");
+    assert_eq!(v["version"], "VERSION-goes-here");
+    assert_eq!(v["git_commit"], "GITCOMMIT-goes-here");
+    assert_eq!(v["config_path"], "/etc/rimap/CONFIGPATH.toml");
+    assert_eq!(v["config_hash_sha256"], "CONFIGHASH-goes-here");
+    assert_eq!(
+        v["previous_file_inode"], inode,
+        "current_inode maps onto previous_file_inode, not onto a seq field",
+    );
+}
+
 /// A whole-second timestamp does **not** survive a read-rewrite byte-for-byte:
 /// `time`'s RFC 3339 formatter elides a zero subsecond, so `12:00:00.000Z`
 /// comes back as `12:00:00Z`. Pinned here as known, pre-existing behaviour
