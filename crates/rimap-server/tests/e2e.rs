@@ -129,18 +129,11 @@ fn build_test_env(harness: DovecotHarness) -> TestEnv {
 }
 
 fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
-    let mut cfg = ValidatedAccountConfig::new_for_tests(
-        AccountId::default_account(),
-        ImapConfig {
-            host: "127.0.0.1".into(),
-            port: harness.port(),
-            username: "rimap-test".into(),
-            encryption: ImapEncryption::Tls,
-            tls_fingerprint_sha256: None,
-            connect_timeout_seconds: 10,
-            command_timeout_seconds: 30,
-        },
-    );
+    let mut cfg = ValidatedAccountConfig::new_for_tests(AccountId::default_account(), {
+        let mut imap = ImapConfig::new("127.0.0.1".into(), harness.port(), "rimap-test".into());
+        imap.encryption = ImapEncryption::Tls;
+        imap
+    });
     cfg.security.posture = Posture::DraftSafe;
     // Enable the default-deny `export_messages` tool — the equivalent of
     // `[security.tools] export_messages = true` in a real config.

@@ -769,16 +769,12 @@ mod resolve_download_dir_tests {
 
     fn minimal_multi(download_dir: String) -> ValidatedMultiConfig {
         ValidatedMultiConfig::new_for_tests(
-            AuditConfig {
-                path: PathBuf::from("/tmp/unused-audit.log"),
-                rotate_bytes: 10_485_760,
-                rotate_keep: 5,
-                retention_seconds: None,
-                provenance_window_seconds: 60,
-                fail_open: false,
-                allowed_base_dir: None,
+            AuditConfig::new(PathBuf::from("/tmp/unused-audit.log")),
+            {
+                let mut attachments = AttachmentsConfig::default();
+                attachments.download_dir = download_dir;
+                attachments
             },
-            AttachmentsConfig { download_dir },
         )
     }
 

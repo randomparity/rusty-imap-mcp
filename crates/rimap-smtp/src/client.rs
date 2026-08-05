@@ -273,13 +273,14 @@ mod tests {
     };
 
     fn test_config() -> SmtpConfig {
-        SmtpConfig {
-            host: "localhost".into(),
-            port: 1025,
-            encryption: SmtpEncryption::None,
-            username: "test@example.com".into(),
-            command_timeout_seconds: 5,
-        }
+        let mut cfg = SmtpConfig::new(
+            "localhost".into(),
+            1025,
+            SmtpEncryption::None,
+            "test@example.com".into(),
+        );
+        cfg.command_timeout_seconds = 5;
+        cfg
     }
 
     #[test]
@@ -300,13 +301,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_secs(5));
         });
 
-        let cfg = SmtpConfig {
-            host: "127.0.0.1".into(),
+        let mut cfg = SmtpConfig::new(
+            "127.0.0.1".into(),
             port,
-            encryption: SmtpEncryption::None,
-            username: "user@example.com".into(),
-            command_timeout_seconds: 1,
-        };
+            SmtpEncryption::None,
+            "user@example.com".into(),
+        );
+        cfg.command_timeout_seconds = 1;
         let client = SmtpClient::new(&cfg, "pw").unwrap();
         let env = SendEnvelope {
             from: "a@example.com".into(),
