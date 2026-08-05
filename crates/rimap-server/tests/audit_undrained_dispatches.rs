@@ -8,11 +8,14 @@
 //! dispatches running past `process_end` — precisely the state that makes the
 //! terminal-record rule unreliable for that run. Issue: #680.
 //!
-//! The *non-zero* case needs a dispatch parked past the drain budget, which
-//! costs a fake IMAP server; it lives with the rest of that machinery in
-//! `e2e_wire_shutdown_audit_ordering.rs`. What is here is the pair that needs no
-//! fake: a clean run states its zero, and a line written before the field
-//! existed still parses.
+//! The *non-zero* case needs a dispatch that cannot unwind before the drain
+//! reads its count, which no wire-reachable dispatch can promise; it lives in
+//! `mcp::server`'s `dispatch_drain_tests`
+//! (`an_undrained_count_reaches_process_end_on_disk`, which parks on an
+//! `mpsc::recv` the test itself closes) and in `main.rs`
+//! (`the_undrained_count_reaches_the_record_verbatim`, which pins the
+//! `emit_process_end` hop). What is here is the end-to-end pair: a clean run
+//! states its zero, and a line written before the field existed still parses.
 //!
 //! Assertions read the raw JSONL rather than going through `reader`, which is
 //! lenient by design and would happily default a missing field back to zero —
