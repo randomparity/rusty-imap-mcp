@@ -2,6 +2,45 @@
 //! header (`seq`, `ts`, `process_id`, `kind`) plus a kind-specific payload.
 //! Serialization uses `#[serde(tag = "kind")]` to produce a flat JSON object
 //! per line (JSONL).
+//!
+//! # Adding a field
+//!
+//! Every payload struct *defined* here is `#[non_exhaustive]`, so adding a
+//! field is additive at the Rust API level: no downstream crate can name the
+//! full set of fields in a struct expression, and none has to be recompiled
+//! against a wider one. It is additive on disk too, because readers tolerate
+//! an absent field via `#[serde(default)]`. Both halves are required — see
+//! `docs/audit-log.md` ("Compatibility contract"), which is the normative
+//! statement of what a reader may assume.
+//!
+//! **One payload is not covered.** [`AuthEvent`] backs the `auth` kind but is
+//! defined in `rimap_core::auth_event` and only re-exported here, because
+//! `rimap-imap` constructs it without depending on this crate. It is still
+//! exhaustive, so adding a field to it *is* a breaking change and the
+//! paragraph above does not apply to `auth` records. It has already grown one
+//! field this way (`credential_source`, #78). Tracked in #716; until that
+//! lands, treat `AuthEvent` as the pre-#706 hazard this module otherwise
+//! removes.
+//!
+//! `#[non_exhaustive]` is a Rust-visibility construct only. It does not touch
+//! serde, so an unchanged record serializes to byte-identical JSONL. The
+//! golden lines in `tests/non_exhaustive_record.rs` hold that, and are the
+//! reason this change is safe to make against an append-only file.
+//!
+//! Because the attribute rejects *every* cross-crate struct expression —
+//! functional-update syntax included (rustc E0639) — types something outside
+//! this crate constructs carry a `new` taking the fields with no meaningful
+//! default. Reach the rest by assignment: the fields stay `pub`.
+//! [`ProcessEnd::new`] is the one deliberate exception to "no meaningful
+//! default"; see it for why.
+//!
+//! The newtypes in [`ids`] are deliberately left exhaustive; see that module.
+//! So are the enums here ([`Payload`], [`ProcessEndReason`], [`ToolStatus`],
+//! [`VerdictSource`], [`PostureEffective`]), matching #665's treatment of
+//! `rimap_config::model`. A new variant is a new `kind` or a new value of an
+//! existing one — a reader that does not know it cannot do anything useful
+//! with the record, so forcing downstream matches through a wildcard arm
+//! would convert a compile error into a silently ignored record.
 
 use std::path::PathBuf;
 
@@ -90,6 +129,7 @@ pub enum ProcessEndReason {
 /// which matches [`rimap_core::Posture::as_str`] byte-for-byte so the
 /// on-disk form is identical to the prior string-typed field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AccountSummary {
     /// Account name from config.
     pub name: String,
@@ -111,9 +151,90 @@ impl AccountSummary {
     }
 }
 
+/// Which config layer wrote one explicit per-tool verdict.
+///
+/// `[accounts.security.tools]` and `[defaults.security.tools]` merge per key
+/// into a single map at composition time; this is the distinction that merge
+/// would otherwise erase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictSource {
+    /// Written in the account's own `[accounts.security.tools]` block.
+    Account,
+    /// Inherited from `[defaults.security.tools]`.
+    Inherited,
+}
+
+/// One explicit per-tool verdict and the config layer that wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ToolVerdict {
+    /// The tool the verdict names. Serializes via [`ToolName::as_str`].
+    pub tool: ToolName,
+    /// `true` for an explicit `allow`, `false` for an explicit `deny`.
+    ///
+    /// A bool rather than a mirror of `rimap_config::model::Verdict`:
+    /// `rimap-audit` deliberately depends on `rimap-core` alone, and a
+    /// second two-variant enum for the same idea would be a defect surface
+    /// with no on-disk gain.
+    pub allow: bool,
+    /// Whether the account wrote this verdict or inherited it.
+    pub source: VerdictSource,
+}
+
+impl ToolVerdict {
+    /// Construct a verdict. Every field is load-bearing, so all three are
+    /// parameters.
+    #[must_use]
+    pub fn new(tool: ToolName, allow: bool, source: VerdictSource) -> Self {
+        Self {
+            tool,
+            allow,
+            source,
+        }
+    }
+}
+
+/// One account's effective posture and its explicit per-tool verdicts, as
+/// resolved at boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AccountToolMatrix {
+    /// Account name from config.
+    pub account: String,
+    /// Effective base posture for this account.
+    pub posture: Posture,
+    /// Explicit verdicts only, in tool declaration order. Tools with no
+    /// override follow `posture` through the compile-time posture table,
+    /// which the record's `version` / `git_commit` already identify — so
+    /// listing them per boot would be redundant bulk.
+    #[serde(default)]
+    pub tools: Vec<ToolVerdict>,
+}
+
+impl AccountToolMatrix {
+    /// Construct a matrix. `tools` is a parameter rather than a defaulted
+    /// empty list because the one caller resolves it before it can build the
+    /// matrix at all; an account that overrides nothing passes `Vec::new()`
+    /// and says so.
+    #[must_use]
+    pub fn new(account: String, posture: Posture, tools: Vec<ToolVerdict>) -> Self {
+        Self {
+            account,
+            posture,
+            tools,
+        }
+    }
+}
+
 /// Payload of the `process_start` kind. Fields chosen to chain history across
 /// restarts (see spec §10 startup self-check).
+///
+/// Nothing outside this crate constructs a `ProcessStart` directly — the
+/// writer builds it from [`crate::ProcessStartInputs`] — so it carries no
+/// constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProcessStart {
     /// Semver of the running binary.
     pub version: String,
@@ -126,6 +247,16 @@ pub struct ProcessStart {
     /// Per-account summaries (multi-account mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accounts: Option<Vec<AccountSummary>>,
+    /// Per-account posture and explicit per-tool verdicts, each marked
+    /// account-written or inherited (#632). Unlike `posture` / `accounts`
+    /// above, this carries one entry per account in both single- and
+    /// multi-account mode, so the posture a process booted with is
+    /// reconstructable from the log without knowing which mode it ran in.
+    ///
+    /// `#[serde(default)]` because `process_start` records written before
+    /// #632 carry no such field, and must keep deserializing as empty.
+    #[serde(default)]
+    pub tool_matrix: Vec<AccountToolMatrix>,
     /// Absolute path of the loaded config file.
     pub config_path: PathBuf,
     /// SHA-256 of the config file contents at load time, hex-encoded.
@@ -143,18 +274,127 @@ pub struct ProcessStart {
 }
 
 /// Payload of the `process_end` kind.
+///
+/// # The attribute is load-bearing
+///
+/// A doctest compiles as its own crate, so `#[non_exhaustive]` is in force in
+/// the block below exactly as it is for a downstream consumer. That makes this
+/// the workspace's only *enforcing* check on the attribute: the integration
+/// tests in `tests/non_exhaustive_record.rs` document the idiom, but every
+/// construct in them compiles just as well on an exhaustive struct, so they
+/// would stay green if the attribute were dropped in a conflict resolution.
+/// These two do not.
+///
+/// A struct expression is rejected:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::record::ProcessEnd {
+///     reason: rimap_audit::record::ProcessEndReason::Eof,
+///     total_tool_calls: 0,
+///     records_lost: 0,
+///     undrained_dispatches: 0,
+/// };
+/// ```
+///
+/// And so is functional-update syntax, which is the premise this change was
+/// twice reported to have gotten wrong -- `..Default::default()` is still a
+/// struct expression:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::record::ToolStart {
+///     tool: rimap_core::tool::ToolName::Search,
+///     ..Default::default()
+/// };
+/// ```
+///
+/// The supported form is [`ProcessEnd::new`] plus field assignment:
+///
+/// ```
+/// use rimap_audit::record::{ProcessEnd, ProcessEndReason};
+/// let end = ProcessEnd::new(ProcessEndReason::Eof, 12, 0, 0);
+/// assert_eq!(end.total_tool_calls, 12);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProcessEnd {
     /// Why the process exited.
     pub reason: ProcessEndReason,
     /// Number of tool calls dispatched in this process.
     pub total_tool_calls: u64,
+    /// Number of records this process failed to persist and told no caller
+    /// about — read from
+    /// [`AuditWriter::suppressed_failures`](crate::AuditWriter::suppressed_failures)
+    /// at shutdown. Non-zero means this file has a hole in it: some event
+    /// happened that left no record. The two sources are deliberately merged
+    /// into one count; see that accessor for why.
+    ///
+    /// `#[serde(default)]` because `process_end` records written before #647
+    /// carry no such field, and must keep deserializing as zero.
+    #[serde(default)]
+    pub records_lost: u64,
+    /// Tool dispatches — or audit writes one of them offloaded — still
+    /// registered when the shutdown drain's budget expired. Non-zero means the
+    /// terminal-record guarantee is **not backed** for this run: what those
+    /// dispatches wrote may be sequenced after this record, may have been lost
+    /// to process exit, or may have landed in time after all. See
+    /// `docs/audit-log.md`, "`process_end` is terminal", and ADR-0015.
+    ///
+    /// It measures an exceeded bound, not an observed disorder. Every counted
+    /// dispatch had already been cancelled when the count was read, and the
+    /// server then spends up to its drainer-join budget before writing this
+    /// record — so one that missed the drain by a millisecond may well finish
+    /// inside that window. Alert on a non-zero count and treat the run as
+    /// unverified; do not read it as proof that a record followed this one.
+    ///
+    /// A dispatch that offloaded an audit write takes a second registration for
+    /// it (#672), so this bounds the number of dispatches involved from above
+    /// rather than counting them exactly.
+    ///
+    /// `#[serde(default)]` because `process_end` records written before #680
+    /// carry no such field, and must keep deserializing as zero.
+    #[serde(default)]
+    pub undrained_dispatches: u64,
+}
+
+impl ProcessEnd {
+    /// Construct a `process_end` payload.
+    ///
+    /// `records_lost` and `undrained_dispatches` are parameters rather than
+    /// defaulted fields, departing from #665's rule that a constructor takes
+    /// exactly the fields serde treats as required. A zero in either is not an
+    /// absent value: it is an affirmative, durable claim — that this process's
+    /// record stream has no hole in it, and that no dispatch outlived the
+    /// shutdown drain. A caller that never assigned the field would publish
+    /// that claim without measuring it.
+    ///
+    /// [`ToolStartInputs::new`](crate::ToolStartInputs::new) departs for the
+    /// same reason, and its doc states the rule the three share.
+    /// Production reads `records_lost` from
+    /// [`AuditWriter::suppressed_failures`](crate::AuditWriter::suppressed_failures)
+    /// (#647) and `undrained_dispatches` from the return of the server's
+    /// dispatch drain (#680); a synthetic record passes the counts it means to
+    /// assert.
+    #[must_use]
+    pub fn new(
+        reason: ProcessEndReason,
+        total_tool_calls: u64,
+        records_lost: u64,
+        undrained_dispatches: u64,
+    ) -> Self {
+        Self {
+            reason,
+            total_tool_calls,
+            records_lost,
+            undrained_dispatches,
+        }
+    }
 }
 
 /// Top-level audit record enum. One variant per `kind` discriminator.
 /// Serialized as a flat JSON object per line with `seq`, `ts`, `process_id`,
 /// `kind`, and the kind-specific fields merged in via `#[serde(flatten)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuditRecord {
     /// Per-process monotonic sequence number.
     pub seq: Seq,
@@ -168,15 +408,39 @@ pub struct AuditRecord {
     pub payload: Payload,
 }
 
+impl AuditRecord {
+    /// Assemble a record from its header and payload. Every field is part of
+    /// the header contract, so all four are parameters.
+    #[must_use]
+    pub fn new(seq: Seq, ts: Timestamp, process_id: ProcessId, payload: Payload) -> Self {
+        Self {
+            seq,
+            ts,
+            process_id,
+            payload,
+        }
+    }
+}
+
 // `AuthEvent` and `AuthResult` live in `rimap_core::auth_event` so
 // `rimap-imap` can construct them without depending on this crate.
 // Re-exported here under their canonical names for ergonomic access
 // from within `rimap-audit` (writer, reader, on-disk format tests).
+//
+// NOTE: `AuthEvent` is the one payload in this module that is NOT
+// `#[non_exhaustive]` — it is defined in another crate, so #706 could not
+// mark it without a constructor there and a sweep of `rimap-imap`'s
+// construction sites. Adding a field to it is still a breaking change.
+// See the module docs and #716.
 pub use rimap_core::auth_event::{AuthEvent, AuthResult};
 
 /// Payload of the `tool_start` kind. Recorded before dispatch begins so a
 /// crash mid-call still leaves a breadcrumb.
+///
+/// Built by the writer from [`crate::ToolStartInputs`]; no external
+/// construction site, so no constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolStart {
     /// Account name this tool call targets.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,7 +479,12 @@ pub enum ToolStatus {
 /// (e.g. raw `message_ids_returned`). Any field added here therefore bypasses
 /// the argument redaction schema and MUST be consciously reviewed for
 /// sensitivity before being recorded durably.
+///
+/// Every field is `#[serde(default)]`, so `Default` is the whole constructor
+/// this type needs: build with `ResultSummary::default()` and assign what the
+/// tool actually produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct ResultSummary {
     /// RFC 822 `Message-ID` values returned to the caller.
     #[serde(default)]
@@ -266,6 +535,7 @@ pub struct ResultSummary {
 /// Basename and byte count of one attachment recorded in a `tool_end`
 /// [`ResultSummary`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AttachmentProvenance {
     /// Basename of the attached sandbox file (never a full path).
     pub filename: String,
@@ -273,8 +543,17 @@ pub struct AttachmentProvenance {
     pub bytes: u64,
 }
 
+impl AttachmentProvenance {
+    /// Record one attachment. Both fields are required to identify it.
+    #[must_use]
+    pub fn new(filename: String, bytes: u64) -> Self {
+        Self { filename, bytes }
+    }
+}
+
 /// Snapshot of the provenance ring buffer at `tool_end` time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Provenance {
     /// Configured window in seconds.
     pub window_seconds: u32,
@@ -282,8 +561,25 @@ pub struct Provenance {
     pub message_ids_recently_read: Vec<String>,
 }
 
+impl Provenance {
+    /// Snapshot the ring buffer. `message_ids_recently_read` has no
+    /// `#[serde(default)]`: an empty list and an absent one mean different
+    /// things to a reader, so the caller states which it has.
+    #[must_use]
+    pub fn new(window_seconds: u32, message_ids_recently_read: Vec<String>) -> Self {
+        Self {
+            window_seconds,
+            message_ids_recently_read,
+        }
+    }
+}
+
 /// Payload of the `tool_end` kind.
+///
+/// Built by the writer from [`crate::ToolEndInputs`]; no external
+/// construction site, so no constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolEnd {
     /// Account name this tool call targeted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,8 +601,10 @@ pub struct ToolEnd {
 }
 
 /// Payload of the `config` kind. Declared now so Sprint 5 can emit it; no
-/// code path writes it yet.
+/// code path writes it yet — and so no external construction site, and no
+/// constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ConfigEvent {
     /// Path the config was loaded from.
     pub path: PathBuf,
@@ -334,6 +632,7 @@ pub enum Payload {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use std::path::PathBuf;
 
@@ -347,6 +646,17 @@ mod tests {
     };
 
     fn sample_start() -> AuditRecord {
+        sample_start_with(Vec::new())
+    }
+
+    fn process_start_of(rec: &AuditRecord) -> Option<&ProcessStart> {
+        match &rec.payload {
+            Payload::ProcessStart(start) => Some(start),
+            _ => None,
+        }
+    }
+
+    fn sample_start_with(tool_matrix: Vec<crate::record::AccountToolMatrix>) -> AuditRecord {
         AuditRecord {
             seq: Seq::FIRST,
             ts: Timestamp::now(),
@@ -356,6 +666,7 @@ mod tests {
                 git_commit: String::new(),
                 posture: Some(Posture::DraftSafe),
                 accounts: None,
+                tool_matrix,
                 config_path: PathBuf::from("/tmp/config.toml"),
                 config_hash_sha256: "abcd".repeat(16),
                 previous_last_seq: None,
@@ -389,6 +700,58 @@ mod tests {
     }
 
     #[test]
+    fn process_start_tool_matrix_serializes_verdicts_with_provenance() {
+        use crate::record::{AccountToolMatrix, ToolVerdict, VerdictSource};
+
+        let rec = sample_start_with(vec![AccountToolMatrix {
+            account: "work".to_string(),
+            posture: Posture::Readonly,
+            tools: vec![
+                ToolVerdict {
+                    tool: ToolName::DeleteMessage,
+                    allow: true,
+                    source: VerdictSource::Inherited,
+                },
+                ToolVerdict {
+                    tool: ToolName::Search,
+                    allow: false,
+                    source: VerdictSource::Account,
+                },
+            ],
+        }]);
+
+        let json = serde_json::to_string(&rec).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["tool_matrix"][0]["account"], "work");
+        assert_eq!(v["tool_matrix"][0]["posture"], "readonly");
+        assert_eq!(v["tool_matrix"][0]["tools"][0]["tool"], "delete_message");
+        assert_eq!(v["tool_matrix"][0]["tools"][0]["allow"], true);
+        assert_eq!(v["tool_matrix"][0]["tools"][0]["source"], "inherited");
+        assert_eq!(v["tool_matrix"][0]["tools"][1]["tool"], "search");
+        assert_eq!(v["tool_matrix"][0]["tools"][1]["allow"], false);
+        assert_eq!(v["tool_matrix"][0]["tools"][1]["source"], "account");
+
+        let back: AuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn process_start_without_tool_matrix_parses_as_empty() {
+        // A record written before #632 carries no `tool_matrix` key. Asserted
+        // against raw JSONL rather than a re-serialized struct, because
+        // `#[serde(default)]` is exactly the thing a round-trip would hide.
+        let line = r#"{"seq":1,"ts":"2026-05-05T12:00:00.000Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.1.0","git_commit":"","posture":"readonly","config_path":"/tmp/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#;
+        assert!(
+            !line.contains("tool_matrix"),
+            "fixture must be the pre-#632 shape",
+        );
+        let rec: AuditRecord = serde_json::from_str(line).unwrap();
+        let start = process_start_of(&rec).expect("fixture is a process_start");
+        assert!(start.tool_matrix.is_empty());
+        assert_eq!(start.posture, Some(Posture::Readonly));
+    }
+
+    #[test]
     fn process_end_round_trips() {
         let rec = AuditRecord {
             seq: Seq(9999),
@@ -397,6 +760,8 @@ mod tests {
             payload: Payload::ProcessEnd(ProcessEnd {
                 reason: ProcessEndReason::SignalInt,
                 total_tool_calls: 42,
+                records_lost: 0,
+                undrained_dispatches: 0,
             }),
         };
         let json = serde_json::to_string(&rec).unwrap();

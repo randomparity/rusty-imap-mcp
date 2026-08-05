@@ -1,53 +1,24 @@
 //! `DovecotHarness`: hand-rolled `compose up`/`down` lifecycle with a Drop
 //! guard. Supports both `docker compose` and `podman compose` — the first
-//! available binary wins, or `RIMAP_CONTAINER_TOOL={docker,podman}` forces
-//! a choice. Each test run gets a unique compose project name so parallel
-//! tests don't collide.
+//! runtime whose daemon answers wins, or `RIMAP_CONTAINER_TOOL={docker,podman}`
+//! forces a choice. Each test run gets a unique compose project name so
+//! parallel tests don't collide.
+//!
+//! Runtime selection, the daemon probe, and the skip-or-fail verdict come from
+//! `rimap-container-gate`, shared with `rimap-server`'s harnesses (#675); only
+//! the mapping onto [`HarnessError`] is local. See `AGENTS.md` "Container
+//! runtime for integration tests".
 
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use rimap_container_gate::{
+    RuntimeProbe, probe_runtime, require_runtime, runtime, unusable_reason,
+};
 use rimap_core::TlsFingerprint;
-
-/// Name of the container runtime binary to invoke (`docker` or `podman`).
-/// Detected once per process. Falls back to `"docker"` even when nothing is
-/// installed — callers gate on [`runtime_available`] before using it.
-fn runtime() -> &'static str {
-    static TOOL: OnceLock<&'static str> = OnceLock::new();
-    TOOL.get_or_init(|| {
-        // Explicit override wins. Unrecognized values fall through to
-        // autodetect silently — the harness has no logger available and
-        // `print_stderr` is denied by the workspace lint policy.
-        match std::env::var("RIMAP_CONTAINER_TOOL").as_deref() {
-            Ok("docker") => return "docker",
-            Ok("podman") => return "podman",
-            _ => {}
-        }
-        if binary_present("docker") {
-            "docker"
-        } else if binary_present("podman") {
-            "podman"
-        } else {
-            "docker"
-        }
-    })
-}
-
-fn binary_present(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn runtime_available() -> bool {
-    binary_present("docker") || binary_present("podman")
-}
 
 #[derive(Debug)]
 pub enum HarnessError {
@@ -82,10 +53,12 @@ pub struct DovecotHarness {
 
 impl DovecotHarness {
     /// Start a fresh Dovecot container. Returns `Err(DockerUnavailable)`
-    /// and skips the test silently when neither `docker` nor `podman`
-    /// is installed (unless `RIMAP_REQUIRE_DOCKER=1` is set, in which
-    /// case the absence becomes a hard error). Pick a specific runtime
-    /// with `RIMAP_CONTAINER_TOOL={docker,podman}`.
+    /// and skips the test silently when the host cannot run containers at
+    /// all — no `docker`/`podman` binary, or a binary whose daemon does not
+    /// answer (unless `RIMAP_REQUIRE_DOCKER=1` is set, in which case either
+    /// becomes a hard error). Pick a specific runtime with
+    /// `RIMAP_CONTAINER_TOOL={docker,podman}`. Failures once the container
+    /// is being brought up are never skipped.
     pub fn try_start() -> Result<Self, HarnessError> {
         check_prerequisites()?;
 
@@ -251,19 +224,25 @@ impl DovecotHarness {
 }
 
 fn check_prerequisites() -> Result<(), HarnessError> {
-    let require_runtime = std::env::var("RIMAP_REQUIRE_DOCKER").is_ok();
+    gate(runtime(), probe_runtime(), require_runtime())
+}
 
-    if !runtime_available() {
-        return if require_runtime {
-            Err(HarnessError::DockerCommandFailed(
-                "neither docker nor podman found but RIMAP_REQUIRE_DOCKER=1".into(),
-            ))
-        } else {
-            Err(HarnessError::DockerUnavailable)
-        };
+/// Map `rimap_container_gate`'s verdict onto this harness's error type. Pure,
+/// so every combination is unit-testable without a container runtime. Note this
+/// covers only *prerequisites*: a failure after the gate — `compose up`
+/// refusing an image, or exhausting its address pools — stays a
+/// `DockerCommandFailed` that no caller silent-skips on.
+fn gate(tool: &str, probe: RuntimeProbe, require_runtime: bool) -> Result<(), HarnessError> {
+    let Some(reason) = unusable_reason(tool, probe) else {
+        return Ok(());
+    };
+    if require_runtime {
+        Err(HarnessError::DockerCommandFailed(format!(
+            "{reason} but RIMAP_REQUIRE_DOCKER=1"
+        )))
+    } else {
+        Err(HarnessError::DockerUnavailable)
     }
-
-    Ok(())
 }
 
 /// Minimal interface over `docker compose up` so the retry wrapper
@@ -757,6 +736,106 @@ mod tests {
 
     const PORT_COLLISION_STDERR: &str =
         "Bind for 127.0.0.1:12345 failed: port is already allocated";
+
+    /// A reachable binary with a dead daemon must skip, not hard-fail (#636).
+    #[test]
+    fn gate_skips_when_daemon_is_unreachable() {
+        let err =
+            gate("docker", RuntimeProbe::DaemonDown, false).expect_err("must not pass the gate");
+        assert!(
+            matches!(err, HarnessError::DockerUnavailable),
+            "daemon-down must be a silent skip, got {err:?}"
+        );
+    }
+
+    /// ...but CI, which sets `RIMAP_REQUIRE_DOCKER=1`, must still see it, and
+    /// must name the runtime it actually probed.
+    #[test]
+    fn gate_is_loud_when_daemon_is_unreachable_and_docker_required() {
+        let Err(HarnessError::DockerCommandFailed(msg)) =
+            gate("podman", RuntimeProbe::DaemonDown, true)
+        else {
+            panic!("RIMAP_REQUIRE_DOCKER=1 must turn a dead daemon into a hard error");
+        };
+        assert!(
+            msg.contains("podman"),
+            "must name the runtime probed: {msg:?}"
+        );
+        assert!(msg.contains("daemon"), "must name the cause: {msg:?}");
+        assert!(msg.contains("RIMAP_REQUIRE_DOCKER"), "got {msg:?}");
+    }
+
+    #[test]
+    fn gate_skips_when_no_runtime_binary_is_installed() {
+        let err = gate("docker", RuntimeProbe::NoBinary, false).expect_err("must not pass");
+        assert!(matches!(err, HarnessError::DockerUnavailable), "{err:?}");
+    }
+
+    /// The message names the runtime actually selected, so an override pointing
+    /// at an uninstalled runtime does not read as "nothing is installed".
+    #[test]
+    fn gate_is_loud_when_no_binary_and_docker_required() {
+        let Err(HarnessError::DockerCommandFailed(msg)) =
+            gate("podman", RuntimeProbe::NoBinary, true)
+        else {
+            panic!("RIMAP_REQUIRE_DOCKER=1 must turn a missing binary into a hard error");
+        };
+        assert!(
+            msg.contains("podman"),
+            "must name the runtime probed: {msg:?}"
+        );
+        assert!(msg.contains("RIMAP_REQUIRE_DOCKER"), "got {msg:?}");
+    }
+
+    #[test]
+    fn gate_admits_a_ready_runtime_under_both_postures() {
+        assert!(gate("docker", RuntimeProbe::Ready, false).is_ok());
+        assert!(gate("docker", RuntimeProbe::Ready, true).is_ok());
+    }
+
+    /// The gate only covers prerequisites. A daemon that dies *after* the probe
+    /// surfaces at `compose up`, and must stay a hard error — silent-skipping
+    /// there would hide real breakage.
+    #[test]
+    fn compose_up_daemon_error_stays_a_hard_failure() {
+        let runner = FlakyComposeRunner::always_fail_with(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?",
+        );
+        let mut tls = ReservedPort::acquire().expect("tls");
+        let mut starttls = ReservedPort::acquire().expect("starttls");
+
+        let result = compose_up_with_retry(
+            &runner,
+            "test-proj",
+            dummy_compose_dir(),
+            &mut tls,
+            &mut starttls,
+        );
+
+        let Err(HarnessError::DockerCommandFailed(msg)) = result else {
+            panic!("a compose-time daemon failure must not be a skip: {result:?}");
+        };
+        assert!(
+            msg.contains("Cannot connect to the Docker daemon"),
+            "{msg:?}"
+        );
+        assert_eq!(
+            runner.attempts(),
+            1,
+            "daemon errors are not port collisions"
+        );
+    }
+
+    /// Address-pool exhaustion is what concurrent container test runs actually
+    /// hit. It is a live daemon refusing work, not an absent one, so it must
+    /// neither be retried as a port collision nor skipped.
+    #[test]
+    fn address_pool_exhaustion_is_not_a_port_collision() {
+        assert!(!is_port_collision(
+            "Error response from daemon: all predefined address pools have been fully subnetted"
+        ));
+    }
 
     #[test]
     fn is_port_collision_matches_docker_engine_error() {

@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -208,7 +208,7 @@ jobs:
       # Packages are built host-side (x86_64 runner) via --target; cargo-deb maps
       # the triple to the arm64 Debian/RPM Architecture. No emulated install-test
       # for arm64 (structural + content assertion only — ADR-0006).
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -476,19 +476,43 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          # `just semver-checks` resolves its baseline with `git describe`, which
+          # needs the tags and the history back to the previous release. The
+          # default shallow, tagless clone has neither.
+          fetch-depth: 0
       # The publish verify build compiles rimap-config -> keyring (Linux libdbus).
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
-          tool: cargo-semver-checks@0.48.0
-      # Gate: fail the publish on accidental SemVer breakage vs the last
-      # crates.io release. No-ops on the first release (no baseline).
+          tool: just,cargo-semver-checks@0.48.0
+      # Last gate before an irreversible action: a crates.io version cannot be
+      # unpublished, only yanked. Every other gate in this repo guards a merge,
+      # which is revertible.
+      #
+      # `just semver-checks` — the same recipe the per-PR `semver-checks` job
+      # runs, so publish and PR share one baseline definition (issue #650). It
+      # diffs against the PREVIOUS `vX.Y.Z` tag; HEAD here IS the tag being
+      # released, and scripts/semver-baseline.sh is what stops that from becoming
+      # a self-comparison. It does NOT baseline on crates.io: the registry holds
+      # only `0.0.0` placeholder reservations, against which no break is
+      # expressible, so a registry baseline is green by construction.
+      #
+      # Not redundant with the per-PR job: the release triggers on a tag push and
+      # `verify-tag` checks the tag against Cargo.toml, not that the tagged
+      # commit ever reached `main` — a tag cut off a branch is published without
+      # the PR gate having seen that tree.
+      #
+      # This runs on `stable` (the job's publish toolchain) where the PR job pins
+      # 1.94.0. Both halves of a run use one toolchain, so the diff stays
+      # consistent; the skew only bites if the baseline tag's code stops
+      # compiling under a future stable, which reads as a build error, not a
+      # SemVer verdict.
       - name: Check for SemVer breakage
-        run: cargo semver-checks check-release --workspace
+        run: just semver-checks
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -707,25 +731,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
+      # `just` drives the fuzz-lockfile realign and the parity gate the bump
+      # would otherwise leave red (ADR-0011); cargo-edit provides set-version.
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+        with:
+          tool: just@1.58.0
       - name: Install cargo-edit
         run: cargo install cargo-edit --locked --version 0.13.11
+      # The script performs the bump, re-resolves every lockfile it touches,
+      # runs the gates the bump PR gets no CI to run, and reports the exact set
+      # of dirtied files as `paths`. `add-paths` consumes that set rather than a
+      # hand-written list, which had silently omitted three files (issue #662).
       - name: Compute next -dev and rewrite versions
         id: bump
         env:
           TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          released="${TAG#v}"
-          IFS=. read -r major minor patch <<< "$released"
-          next="${major}.${minor}.$((patch + 1))-dev"
-          cargo set-version --workspace "$next"
-          cargo update --workspace
-          cargo update --manifest-path html-oracle/Cargo.toml -p rimap-core -p rimap-content
-          if ! grep -q '^## \[Unreleased\]' CHANGELOG.md; then
-            awk 'BEGIN{done=0} /^## \[/ && !done {print "## [Unreleased]"; print ""; done=1} {print}' \
-              CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
-          fi
-          echo "next=$next" >> "$GITHUB_OUTPUT"
+        run: ./scripts/post-release-bump.sh "$TAG"
       - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -733,16 +754,19 @@ jobs:
           branch: chore/post-release-bump-v${{ steps.bump.outputs.next }}
           commit-message: "chore: bump version to ${{ steps.bump.outputs.next }} after ${{ github.ref_name }} release"
           title: "chore: bump version to ${{ steps.bump.outputs.next }} after ${{ github.ref_name }}"
-          add-paths: |
-            Cargo.toml
-            Cargo.lock
-            crates/*/Cargo.toml
-            html-oracle/Cargo.lock
-            CHANGELOG.md
+          add-paths: ${{ steps.bump.outputs.paths }}
           body: |
             Automated post-release bump to `${{ steps.bump.outputs.next }}` after the `${{ github.ref_name }}` release (ADR-0003).
 
-            **CI kick-off required before merge:** PRs opened by `GITHUB_TOKEN` do not trigger `pull_request` CI. Push an empty commit to this branch, or run `just ci` locally, to get a green signal. If the next release is a minor/major bump, edit the version on this PR first.
+            The bump job already ran `cargo metadata --locked` and `just check-fuzz-lock-parity` against this exact tree, and committed every file the bump dirtied — `xtask/Cargo.toml` excepted, whose deliberate `0.0.0` is restored (ADR-0003).
+
+            **CI kick-off required before merge:** PRs opened by `GITHUB_TOKEN` do not trigger `pull_request` CI (ADR-0003 accepts this over a standing PAT). Get a signal with either:
+
+            ```
+            gh pr checkout <this PR> && git commit --allow-empty -m "chore: kick CI" && git push
+            ```
+
+            or `just ci` locally on the branch. If the next release is a minor/major bump, edit the version on this PR first.
 
   # Post-publish signal (not a gate): a downstream leaf whose failure does NOT
   # un-publish the release. Pins the version so it never touches the rate-limited

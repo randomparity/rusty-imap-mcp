@@ -98,6 +98,63 @@ enum InitOutcome {
     Rmcp(Box<ServerInitializeError>),
 }
 
+/// Everything `serve_mcp` hands back to `run_server`.
+///
+/// The transport result cannot carry the drain residue on its own: `run_server`
+/// consumes it twice — once as [`emit_process_end`]'s input and once as its own
+/// return value — and the count has to reach `process_end` on *both* arms,
+/// because a run that failed still drained. Folding the count into the `Ok`
+/// variant would drop it exactly where a residue matters most (#680).
+///
+/// A named struct rather than a `(Result, u64)` tuple: the count is a bare
+/// integer built at three exits, and a tuple offers nothing that catches one
+/// assembled in the wrong order.
+struct ServeOutcome {
+    /// Outcome of the MCP transport, and `run_server`'s return value.
+    result: anyhow::Result<()>,
+    /// Registrations still outstanding when the dispatch drain's budget
+    /// expired. Zero on every clean shutdown, and measured rather than assumed
+    /// on every exit path — see [`drain_dispatches`].
+    undrained_dispatches: u64,
+}
+
+/// How long `serve_mcp` waits for in-flight tool dispatches to unwind after
+/// cancelling them. They are cancelled, not merely awaited, so the wait covers
+/// only the unwind — a synchronous `AuthEmitGuard` audit write and its `fsync`,
+/// plus any `spawn_blocking` call that has to return before its task can be
+/// polled again. Two seconds is well clear of that and still an order of
+/// magnitude below the point an operator would call the exit hung.
+const DISPATCH_DRAIN_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long `serve_mcp` waits for the cancellation drainer to finish after the
+/// dispatch drain. On the clean path every cancellation sender is already gone
+/// and the join returns at once; the bound only matters when the dispatch drain
+/// timed out, because a dispatch still holding a sender would otherwise keep
+/// the join — and so the whole process exit — waiting for that command's own
+/// timeout (#645).
+const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
+
+/// Cancel every in-flight tool dispatch, wait out the drain budget, and report
+/// the residue.
+///
+/// Called on every exit from [`serve_mcp`], including the init-failure paths
+/// that never reached a dispatch: an idle drain returns `0` without parking, so
+/// the zero those paths record is measured rather than assumed. That matters
+/// because `ProcessEnd::new` treats a zero as an affirmative durable claim.
+async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
+    let undrained = dispatch_drain.shutdown(DISPATCH_DRAIN_BUDGET).await;
+    if undrained > 0 {
+        tracing::warn!(
+            undrained,
+            budget = ?DISPATCH_DRAIN_BUDGET,
+            "tool dispatches outlived the shutdown drain; any audit record they \
+             still write is sequenced after process_end or lost",
+        );
+    }
+    // Lossless on every supported target: `usize` is at most 64 bits.
+    u64::try_from(undrained).unwrap_or(u64::MAX)
+}
+
 fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Some(result) = dispatch_subcommand(cli) {
         return result;
@@ -191,9 +248,12 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new().context("creating tokio runtime")?;
 
-    let mcp_result = rt.block_on(serve_mcp(&multi, &audit, &credentials, &download_dir));
+    let ServeOutcome {
+        result: mcp_result,
+        undrained_dispatches,
+    } = rt.block_on(serve_mcp(&multi, &audit, &credentials, &download_dir));
 
-    emit_process_end(&audit, &mcp_result);
+    emit_process_end(&audit, &mcp_result, undrained_dispatches);
 
     // Shut down the runtime without waiting for blocking tasks. The
     // validator's `validate_inbound` bridge owns a `tokio::io::stdin()`
@@ -213,23 +273,42 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
 
 /// Build the account registry, wrap stdio with the #277 envelope
 /// validator, and drive the two-phase init/serve race against the
-/// validator bridges. The `select!` / `drop` / supervisor-shutdown /
-/// drainer-join ordering here is load-bearing (#277) and must not be
-/// reordered.
+/// validator bridges. The `select!` / `drop` / dispatch-drain /
+/// supervisor-shutdown / drainer-join ordering here is load-bearing
+/// (#277, #645) and must not be reordered. In particular the whole
+/// function must complete before `run_server` writes `process_end`,
+/// which is what makes that record terminal (see `docs/audit-log.md`
+/// and ADR-0015).
+///
+/// Returns a [`ServeOutcome`] rather than a bare `Result` so the drain's
+/// residue reaches `process_end` on the error path too (#680).
 async fn serve_mcp(
     multi: &rimap_config::validate::ValidatedMultiConfig,
     audit: &rimap_audit::AuditWriter,
     credentials: &Arc<dyn CredentialStore>,
     download_dir: &Arc<std::path::Path>,
-) -> anyhow::Result<()> {
-    let registry = build_registry(multi, audit, credentials, download_dir)
+) -> ServeOutcome {
+    // Before the drain exists there is nothing to report, so a registry
+    // failure is the one exit that states its zero without measuring it.
+    let registry = match build_registry(multi, audit, credentials, download_dir)
         .await
-        .context("building account registry")?;
+        .context("building account registry")
+    {
+        Ok(registry) => registry,
+        Err(e) => {
+            return ServeOutcome {
+                result: Err(e),
+                undrained_dispatches: 0,
+            };
+        }
+    };
 
     let (cancellation_tx, cancellation_rx) = rimap_audit::cancellation_channel();
     let drainer_handle = rimap_audit::spawn_drainer(cancellation_rx, audit.clone());
 
     let mcp_server = server::ImapMcpServer::new(registry, audit.clone(), cancellation_tx);
+    // Taken before `rmcp::serve_server` consumes the server below.
+    let dispatch_drain = mcp_server.dispatch_drain();
     // Wrap stdio with #277 envelope validator: rejects malformed frames
     // before rmcp sees them. Destructure so `supervisor` is its own
     // binding (its methods take `&mut self` / consume `self`).
@@ -253,16 +332,34 @@ async fn serve_mcp(
 
     let service = match init_result {
         Ok(svc) => svc,
+        // Both init-failure arms drain *before* touching the supervisor, so the
+        // three exits that have a drain to order — these two and the normal one
+        // below — share the one order this function's doc calls load-bearing.
+        // The fourth exit, the registry failure above, returns before the drain
+        // exists. Init never completed on these paths, so rmcp spawned no
+        // handler and the drain finds nothing to cancel — but that exemption is
+        // a fact about today's code, not a property of the arm, and keeping the
+        // order uniform means a dispatch that later becomes reachable before
+        // init returns is counted rather than silently affirmed as zero.
         Err(InitOutcome::Bridge(bridge_result)) => {
             let primary = bridge_result.err().map_or_else(
                 || anyhow::anyhow!("validator bridges exited before init completed"),
                 |e| anyhow::anyhow!("validator bridge during init: {e}"),
             );
+            let undrained_dispatches = drain_dispatches(&dispatch_drain).await;
             let _ = supervisor.shutdown_after_failure().await;
-            return Err(primary);
+            return ServeOutcome {
+                result: Err(primary),
+                undrained_dispatches,
+            };
         }
         Err(InitOutcome::Rmcp(boxed)) => {
-            return handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
+            let undrained_dispatches = drain_dispatches(&dispatch_drain).await;
+            let result = handle_init_failure(*boxed, &stdout_for_preinit, supervisor).await;
+            return ServeOutcome {
+                result,
+                undrained_dispatches,
+            };
         }
     };
     // waiting() takes ownership of service, consuming it and dropping the
@@ -298,6 +395,17 @@ async fn serve_mcp(
     // client may keep stdin open while waiting for the error
     // response.
     drop(service_fut);
+
+    // rmcp spawns each request handler as a detached task, so the drop above
+    // released the transport but not the handlers. Cancel and drain them here,
+    // while the process is still inside `serve_mcp` — that is, before the
+    // drainer join below and before `run_server` writes `process_end`. Leaving
+    // them to `Runtime::shutdown_background` sequenced a shutdown-cut connect's
+    // `auth` record *after* the `process_end` of its own process (#645), and a
+    // dispatch still holding a cancellation sender kept the drainer join
+    // waiting for that command's full timeout.
+    let undrained = drain_dispatches(&dispatch_drain).await;
+
     let shutdown_outcome = match &service_outcome {
         Ok(()) => supervisor.drain().await,
         Err(_) => supervisor.shutdown_after_failure().await,
@@ -312,27 +420,70 @@ async fn serve_mcp(
         (Ok(()), Ok(())) => Ok(()),
     };
 
-    // All senders dropped above. Wait for the drainer to flush any
-    // remaining queued cancellation records before the runtime exits.
-    if let Err(e) = drainer_handle.await {
-        tracing::error!(error = %e, "cancellation drainer join error");
+    join_drainer(drainer_handle, undrained).await;
+    ServeOutcome {
+        result: mcp_result,
+        undrained_dispatches: undrained,
     }
-    mcp_result
+}
+
+/// Wait, bounded, for the cancellation drainer to flush its queue.
+///
+/// Every cancellation sender has dropped by the time this runs, so on the clean
+/// path the join returns at once. The bound only matters when the dispatch drain
+/// timed out: an undrained dispatch still owns a sender clone, and an unbounded
+/// join would hold the whole process exit for that command's timeout.
+///
+/// `abort` on expiry, not just a dropped handle: dropping a `JoinHandle`
+/// *detaches* the task, so the drainer would keep looping and keep appending
+/// `tool_end` records — after `process_end`, which is the ordering this whole
+/// path exists to establish.
+///
+/// The records an abort drops reach no counter on `process_end`; `undrained` is
+/// already latched by now and the drainer's own write is untracked. That hole is
+/// stderr-only and tracked in #725 — see `docs/audit-log.md`.
+async fn join_drainer(mut drainer_handle: tokio::task::JoinHandle<()>, undrained: u64) {
+    match tokio::time::timeout(DRAINER_JOIN_BUDGET, &mut drainer_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(error = %e, "cancellation drainer join error"),
+        Err(_) => {
+            drainer_handle.abort();
+            tracing::warn!(
+                undrained,
+                "cancellation drainer did not finish within the join budget; \
+                 queued cancellation records are lost, and any write already \
+                 handed to the blocking pool is sequenced after process_end",
+            );
+        }
+    }
 }
 
 /// Emit the `process_end` audit record at process shutdown. Reason
 /// reflects whether the MCP server loop completed cleanly (`Eof`)
 /// or with an error (`Error`). Failures to write are logged but do
 /// not propagate.
-fn emit_process_end(audit: &rimap_audit::AuditWriter, mcp_result: &anyhow::Result<()>) {
+///
+/// `undrained_dispatches` is [`ServeOutcome::undrained_dispatches`], threaded
+/// out of `serve_mcp` rather than read off the writer: unlike the other two
+/// counters it is not the audit writer's to know (#680).
+fn emit_process_end(
+    audit: &rimap_audit::AuditWriter,
+    mcp_result: &anyhow::Result<()>,
+    undrained_dispatches: u64,
+) {
     let reason = match mcp_result {
         Ok(()) => rimap_audit::ProcessEndReason::Eof,
         Err(_) => rimap_audit::ProcessEndReason::Error,
     };
-    let process_end = rimap_audit::ProcessEnd {
+    // Last chance to state that this file has a hole in it, or that it is not
+    // terminal for this process: both counters live only in memory, and the
+    // process is about to exit (#647, #680).
+    let process_end = rimap_audit::ProcessEnd::new(
         reason,
-        total_tool_calls: audit.total_tool_calls(),
-    };
+        audit.total_tool_calls(),
+        audit.suppressed_failures(),
+        undrained_dispatches,
+    );
     match audit.log_process_end(process_end) {
         Ok(seq) => tracing::info!(seq = %seq, "process_end audit record written"),
         Err(e) => tracing::error!(error = %e, "failed to write process_end audit record"),
@@ -370,10 +521,23 @@ async fn emit_pre_init_error_envelope(
 
 /// Dispatch an `rmcp::serve_server` init failure: emit the pre-init
 /// envelope (when applicable), classify `InitializeFailed`, then shut
-/// down the validator supervisor. Every failure path runs
-/// `shutdown_after_failure` so the bridge tasks are awaited (or
-/// aborted) before the runtime drops; otherwise inbound's blocking
-/// stdin read can prevent the process from exiting promptly.
+/// down the validator supervisor. `shutdown_after_failure` awaits (or
+/// aborts) the bridge tasks before the runtime drops; otherwise
+/// inbound's blocking stdin read can prevent the process from exiting
+/// promptly.
+///
+/// **The pre-init write-failure arm is the one exception.** When
+/// `emit_pre_init_error_envelope` itself fails — broken pipe, i.e. the
+/// client's stdout reader is already gone — `?` propagates before
+/// `shutdown_after_failure` is reached, detaching both bridge
+/// `JoinHandle`s. Left as-is on purpose (#722): the shutdown would be
+/// inert on this arm. `drop(init_fut)` above has already dropped rmcp's
+/// write half, so outbound has reached EOF on its own, and the inbound
+/// abort could not stop a blocking stdin read anyway — `run_server`'s
+/// `Runtime::shutdown_background` is what makes this process exit. What
+/// the operator needs from this arm is the write error, undisplaced by
+/// any bridge-shutdown outcome; `mcp_wire_negative`'s
+/// `pre_initialize_envelope_write_failure_records_error` pins that.
 async fn handle_init_failure(
     error: ServerInitializeError,
     stdout_for_preinit: &std::sync::Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
@@ -478,6 +642,11 @@ async fn build_registry(
     let mut account_states = std::collections::BTreeMap::new();
     let auth_sink: Arc<dyn rimap_core::auth_sink::AuthEventSink> = Arc::new(audit.clone());
     for (id, acfg) in &multi.accounts {
+        // Emitted before the guard is built so an account that fails to come
+        // up still leaves its effective matrix on the record (#632).
+        rimap_server::boot::tool_matrix::log_account_matrix(
+            &rimap_server::boot::tool_matrix::account_tool_matrix(acfg),
+        );
         let guard = build_account_guard(acfg).context("building dispatch guard")?;
         let conn_cfg = registry::build_account_connection(id, acfg);
         let resolver: Arc<dyn rimap_core::CredentialResolver> =
@@ -697,24 +866,18 @@ mod resolve_download_dir_tests {
     use super::resolve_download_dir_multi;
     use rimap_config::model::{AttachmentsConfig, AuditConfig};
     use rimap_config::validate::ValidatedMultiConfig;
-    use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn minimal_multi(download_dir: String) -> ValidatedMultiConfig {
-        ValidatedMultiConfig {
-            accounts: BTreeMap::new(),
-            audit: AuditConfig {
-                path: PathBuf::from("/tmp/unused-audit.log"),
-                rotate_bytes: 10_485_760,
-                rotate_keep: 5,
-                retention_seconds: None,
-                provenance_window_seconds: 60,
-                fail_open: false,
-                allowed_base_dir: None,
+        ValidatedMultiConfig::new_for_tests(
+            AuditConfig::new(PathBuf::from("/tmp/unused-audit.log")),
+            {
+                let mut attachments = AttachmentsConfig::default();
+                attachments.download_dir = download_dir;
+                attachments
             },
-            attachments: AttachmentsConfig { download_dir },
-        }
+        )
     }
 
     #[test]
@@ -741,6 +904,52 @@ mod resolve_download_dir_tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
+    }
+}
+
+#[cfg(test)]
+mod process_end_tests {
+    #![expect(clippy::expect_used, reason = "unit tests")]
+
+    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::{AuditWriter, Seq};
+
+    use super::emit_process_end;
+
+    /// The undrained count `serve_mcp` measured must land on the record
+    /// verbatim. `emit_process_end` is the last hop and the only production
+    /// `ProcessEnd::new` call site, so an argument dropped here is a durable
+    /// zero claiming a clean drain that was never observed (#680).
+    ///
+    /// A distinctive value, not `1`: the constructor takes three adjacent
+    /// `u64`s and this is the pin that the fourth reaches the fourth field.
+    #[test]
+    fn the_undrained_count_reaches_the_record_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let writer = AuditWriter::open(&AuditOptions {
+            path: path.clone(),
+            rotate_bytes: 10 * 1024 * 1024,
+            rotate_keep: 5,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: Seq::FIRST,
+        })
+        .expect("audit writer opens");
+
+        emit_process_end(&writer, &Ok(()), 7);
+
+        let line = std::fs::read_to_string(&path).expect("audit file readable");
+        assert!(
+            line.contains(r#""undrained_dispatches":7"#),
+            "the count passed in must be the count on disk; got: {line}",
+        );
+        // Pinned together so a transposition of the two counters fails here
+        // rather than silently swapping which one an operator alerts on.
+        assert!(
+            line.contains(r#""records_lost":0"#),
+            "records_lost must stay its own field; got: {line}",
+        );
     }
 }
 

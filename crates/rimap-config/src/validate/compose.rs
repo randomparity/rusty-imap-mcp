@@ -6,7 +6,8 @@
 //! (`identity`, `limits`, `paths`, `rules`) and are invoked from
 //! `validate_account`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr as _;
 
 use rimap_core::account::AccountId;
 use rimap_core::tls::TlsFingerprint;
@@ -21,7 +22,14 @@ use crate::model::{
 use super::{identity, limits, paths, rules};
 
 /// Validated per-account config with resolved overrides and fingerprint.
+///
+/// `#[non_exhaustive]`: adding a field here is additive, not a breaking
+/// change (#707). Downstream crates cannot write a struct expression for
+/// this type — including functional-update syntax, which rustc rejects
+/// with E0639 — so a value is obtained from [`validate_multi`] /
+/// [`validate_legacy_as_multi`] and adjusted by field assignment.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ValidatedAccountConfig {
     /// Account identity.
     pub id: AccountId,
@@ -35,6 +43,18 @@ pub struct ValidatedAccountConfig {
     pub limits: LimitsConfig,
     /// Resolved per-tool overrides.
     pub tool_overrides: BTreeMap<ToolName, Verdict>,
+    /// The subset of [`Self::tool_overrides`] this account wrote itself, in
+    /// its own `[accounts.security.tools]` block. Every other key of
+    /// `tool_overrides` was inherited from `[defaults.security.tools]`.
+    ///
+    /// Kept beside the merged map because
+    /// [`AccountSecurityOverrides::merge_onto`](crate::model::AccountSecurityOverrides::merge_onto)
+    /// folds both layers into one map and nothing downstream can recover
+    /// which layer wrote a given key. That distinction is what the
+    /// boot-time tool-matrix log and audit record report (#632) — an
+    /// inherited `allow` on an account the operator tightened to
+    /// `posture = "readonly"` is the case worth seeing.
+    pub account_written_tools: BTreeSet<ToolName>,
     /// Parsed pinned TLS fingerprint.
     pub tls_fingerprint: Option<TlsFingerprint>,
     /// Credential fallback policy (see #78).
@@ -42,7 +62,13 @@ pub struct ValidatedAccountConfig {
 }
 
 /// Validated multi-account config — the canonical output of config loading.
+///
+/// `#[non_exhaustive]` for the same reason as [`ValidatedAccountConfig`]
+/// (#707): the field set is expected to grow, and no downstream crate
+/// should be able to mint a "validated" config that never ran through
+/// [`validate_multi`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ValidatedMultiConfig {
     /// Per-account validated configs, keyed by account id.
     pub accounts: BTreeMap<AccountId, ValidatedAccountConfig>,
@@ -50,6 +76,57 @@ pub struct ValidatedMultiConfig {
     pub audit: AuditConfig,
     /// Global attachment download settings.
     pub attachments: AttachmentsConfig,
+}
+
+/// Test fixture for [`ValidatedAccountConfig`].
+///
+/// Gated behind `test-support` on purpose, as is the sibling fixture on
+/// [`ValidatedMultiConfig`]. In production these types are obtainable
+/// only from the validation entry points, which is what makes
+/// "validated" mean something; the gate keeps that true while still
+/// letting downstream test code build a fixture without a config file
+/// and a filesystem probe. Same rationale and same gate as
+/// [`validate_multi_allowing_empty`].
+#[cfg(feature = "test-support")]
+impl ValidatedAccountConfig {
+    /// Build a fixture account from the two fields that have no
+    /// meaningful default. Every remaining field starts at its own
+    /// default (no SMTP, default posture and limits, no overrides, no
+    /// pinned fingerprint); fields are `pub`, so a caller adjusts what
+    /// it cares about by assignment.
+    #[must_use]
+    pub fn new_for_tests(id: AccountId, imap: ImapConfig) -> Self {
+        Self {
+            id,
+            imap,
+            smtp: None,
+            security: SecurityConfig::default(),
+            limits: LimitsConfig::default(),
+            tool_overrides: BTreeMap::new(),
+            account_written_tools: BTreeSet::new(),
+            tls_fingerprint: None,
+            fallback_mode: FallbackMode::default(),
+        }
+    }
+}
+
+/// Test fixture for [`ValidatedMultiConfig`] — same gate and same
+/// rationale as the [`ValidatedAccountConfig`] fixture above.
+#[cfg(feature = "test-support")]
+impl ValidatedMultiConfig {
+    /// Build a fixture multi-account config with no accounts. `audit`
+    /// and `attachments` are required because neither has a default that
+    /// is safe to invent — an audit path in particular is what the
+    /// writer opens. Add accounts by assigning to
+    /// [`Self::accounts`].
+    #[must_use]
+    pub fn new_for_tests(audit: AuditConfig, attachments: AttachmentsConfig) -> Self {
+        Self {
+            accounts: BTreeMap::new(),
+            audit,
+            attachments,
+        }
+    }
 }
 
 /// Validate a multi-account config.
@@ -96,6 +173,15 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
         // `[defaults.limits]` rather than reverting it to the built-in
         // default (#624, ADR-0013). Same for `[accounts.security]` and
         // `[accounts.credentials]`.
+        // Captured before the merge consumes `raw.security`: once
+        // `merge_onto` has run, the account's own keys are indistinguishable
+        // from the inherited ones (#632).
+        let account_written_tool_keys: BTreeSet<String> = raw
+            .security
+            .as_ref()
+            .and_then(|overrides| overrides.tools.as_ref())
+            .map(|tools| tools.keys().cloned().collect())
+            .unwrap_or_default();
         let security = raw.security.map_or_else(
             || config.defaults.security.clone(),
             |overrides| overrides.merge_onto(config.defaults.security.clone()),
@@ -116,6 +202,7 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
             security,
             limits,
             fallback_mode,
+            account_written_tool_keys,
         })?;
         accounts.insert(id, validated);
     }
@@ -159,6 +246,10 @@ fn export_messages_enabled<'a>(accounts: impl Iterator<Item = &'a ValidatedAccou
 /// Returns `ConfigError` on any validation failure.
 pub fn validate_legacy_as_multi(config: Config) -> Result<ValidatedMultiConfig, ConfigError> {
     let id = AccountId::default_account();
+    // A flat config has no `[defaults]` layer, so every `[security.tools]`
+    // key belongs to the sole account by construction.
+    let account_written_tool_keys: BTreeSet<String> =
+        config.security.tools.keys().cloned().collect();
     let account = validate_account(ValidateAccountInputs {
         id: id.clone(),
         imap: config.imap,
@@ -166,6 +257,7 @@ pub fn validate_legacy_as_multi(config: Config) -> Result<ValidatedMultiConfig, 
         security: config.security,
         limits: config.limits,
         fallback_mode: FallbackMode::default(),
+        account_written_tool_keys,
     })?;
     paths::validate_audit_config(&config.audit)?;
     paths::validate_paths_multi(&config.audit, &config.attachments)?;
@@ -184,9 +276,9 @@ pub fn validate_legacy_as_multi(config: Config) -> Result<ValidatedMultiConfig, 
     })
 }
 
-/// Inputs to [`validate_account`]. Bundles the six per-account fields
-/// a caller would otherwise pass positionally, matching the workspace
-/// `*Inputs` convention (see `AuditWriter::log_*` family).
+/// Inputs to [`validate_account`]. Bundles the per-account fields a caller
+/// would otherwise pass positionally, matching the workspace `*Inputs`
+/// convention (see `AuditWriter::log_*` family).
 struct ValidateAccountInputs {
     id: AccountId,
     imap: ImapConfig,
@@ -194,6 +286,10 @@ struct ValidateAccountInputs {
     security: SecurityConfig,
     limits: LimitsConfig,
     fallback_mode: FallbackMode,
+    /// Raw `[accounts.security.tools]` keys this account wrote itself, as
+    /// observed before the merge with `[defaults.security.tools]`. Resolved
+    /// to [`ToolName`] alongside the merged map.
+    account_written_tool_keys: BTreeSet<String>,
 }
 
 /// Validate a single account's worth of config fields.
@@ -205,6 +301,7 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
         security,
         limits,
         fallback_mode,
+        account_written_tool_keys,
     } = inputs;
 
     let tls_fingerprint = identity::parse_fingerprint(imap.tls_fingerprint_sha256.as_deref())?;
@@ -217,6 +314,14 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
     limits::validate_tool_call_ceiling(&imap, smtp.as_ref(), &limits)?;
     rules::validate_folder_safety(&security)?;
     let tool_overrides = rules::resolve_tool_overrides(&security)?;
+    // These keys are a subset of the merged map `resolve_tool_overrides`
+    // just accepted, so the parse cannot introduce a new failure; resolving
+    // them here rather than matching on `ToolName::as_str` keeps the two
+    // maps keyed identically whatever spellings `from_str` accepts.
+    let account_written_tools = account_written_tool_keys
+        .iter()
+        .map(|name| ToolName::from_str(name))
+        .collect::<Result<BTreeSet<_>, _>>()?;
     rules::validate_smtp_required(&security, &tool_overrides, smtp.as_ref())?;
     rules::validate_smtp_encryption(smtp.as_ref())?;
 
@@ -227,6 +332,7 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
         security,
         limits,
         tool_overrides,
+        account_written_tools,
         tls_fingerprint,
         fallback_mode,
     })
@@ -335,6 +441,22 @@ mod tests {
         assert_eq!(
             v.tool_overrides.get(&ToolName::DeleteMessage),
             Some(&Verdict::Allow)
+        );
+    }
+
+    #[test]
+    fn flat_config_tool_overrides_are_all_account_written() {
+        // A flat config has no `[defaults]` layer to inherit from, so the
+        // sole account owns every key it declares (#632).
+        let dir = TempDir::new().unwrap();
+        let mut cfg = base_config(dir.path());
+        cfg.security
+            .tools
+            .insert("delete_message".into(), Verdict::Allow);
+        let v = validate(cfg).unwrap();
+        assert_eq!(
+            v.account_written_tools.iter().copied().collect::<Vec<_>>(),
+            vec![ToolName::DeleteMessage],
         );
     }
 
@@ -1264,6 +1386,86 @@ search = "allow"
             acct.tool_overrides.get(&ToolName::Search),
             Some(&Verdict::Allow),
             "account's own",
+        );
+    }
+
+    #[test]
+    fn account_written_tools_names_only_the_accounts_own_keys() {
+        // #632: the merged map cannot say which layer wrote a key, so
+        // composition records the account's own key set alongside it.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security.tools]
+delete_message = "allow"
+"#,
+            r#"
+[accounts.security]
+posture = "readonly"
+
+[accounts.security.tools]
+search = "deny"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert_eq!(acct.security.posture, Posture::Readonly);
+        assert!(
+            acct.account_written_tools.contains(&ToolName::Search),
+            "search is written in [accounts.security.tools]",
+        );
+        assert!(
+            !acct
+                .account_written_tools
+                .contains(&ToolName::DeleteMessage),
+            "delete_message is inherited from [defaults.security.tools]",
+        );
+        // Both still reach the effective override map.
+        assert_eq!(
+            acct.tool_overrides.get(&ToolName::DeleteMessage),
+            Some(&Verdict::Allow),
+        );
+    }
+
+    #[test]
+    fn restating_an_inherited_verdict_counts_as_account_written() {
+        // An account that writes the same verdict the default already had
+        // still wrote it: the operator made that choice locally.
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security.tools]
+mark_read = "deny"
+"#,
+            r#"
+[accounts.security.tools]
+mark_read = "deny"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert!(acct.account_written_tools.contains(&ToolName::MarkRead));
+    }
+
+    #[test]
+    fn account_with_no_tools_block_writes_no_tools() {
+        let dir = TempDir::new().unwrap();
+        let cfg = multi_toml(
+            dir.path(),
+            r#"
+[defaults.security.tools]
+mark_read = "deny"
+"#,
+            r#"
+[accounts.security]
+posture = "readonly"
+"#,
+        );
+        let acct = work_account(cfg);
+        assert!(acct.account_written_tools.is_empty());
+        assert_eq!(
+            acct.tool_overrides.get(&ToolName::MarkRead),
+            Some(&Verdict::Deny),
         );
     }
 

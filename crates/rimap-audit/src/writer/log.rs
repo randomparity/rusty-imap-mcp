@@ -10,11 +10,20 @@
 //!   record has no derived fields and the caller can construct it
 //!   verbatim. Adding a `<Kind>Inputs` shim would be a redirect with
 //!   no behavior.
-//! - **`<Kind>Inputs` shim with `From<Inputs> for record::<Kind>`**
-//!   ([`ProcessStartInputs`], [`ToolStartInputs`], [`ToolEndInputs`])
-//!   — the on-disk record carries derived state (`PostureEffective::
-//!   from_optional`, inode-change computation) that the caller would
-//!   otherwise have to re-derive at every site.
+//! - **`<Kind>Inputs` shim** ([`ProcessStartInputs`], [`ToolStartInputs`],
+//!   [`ToolEndInputs`]) — the on-disk record carries derived state
+//!   (`PostureEffective::from_optional`, inode-change computation) that the
+//!   caller would otherwise have to re-derive at every site.
+//!
+//!   [`ToolStartInputs`] and [`ToolEndInputs`] convert through
+//!   `From<Inputs> for record::<Kind>`. [`ProcessStartInputs`] does not: its
+//!   conversion is written out inside [`AuditWriter::log_process_start`],
+//!   because the derivation needs `trailing` and `current_inode` together to
+//!   compute `audit_file_inode_changed` and to split `trailing` across three
+//!   record fields. That hand-written mapping is the one place a field can be
+//!   miswired without the compiler noticing — it moves three `String`s whose
+//!   order the type system cannot check — so it is pinned field-by-field in
+//!   `tests/non_exhaustive_record.rs`.
 //!
 //! New `log_*` methods MUST follow this rule: pick the record struct
 //! directly when no translation is needed; introduce a `*Inputs` shim
@@ -65,7 +74,8 @@ impl AuthEventSink for AuditWriter {
     /// "a record that should be on disk is not, and no caller was told".
     /// Distinguishing them would need a second counter for no decision an
     /// operator makes differently — either way the audit trail has a hole and
-    /// the cause is in the logs.
+    /// the cause is in the logs. That merged count is what `process_end`
+    /// persists as `records_lost` (#647).
     fn note_auth_write_lost(&self) {
         self.count_suppressed_failure();
     }
@@ -161,6 +171,7 @@ impl AuditWriter {
             git_commit: inputs.git_commit,
             posture: inputs.posture,
             accounts: inputs.accounts,
+            tool_matrix: inputs.tool_matrix,
             config_path: inputs.config_path,
             config_hash_sha256: inputs.config_hash_sha256,
             previous_last_seq: inputs.trailing.last_seq,
@@ -173,7 +184,12 @@ impl AuditWriter {
 }
 
 /// Inputs to [`AuditWriter::log_tool_end`].
+///
+/// `#[non_exhaustive]` for the same reason the record it builds is: this is
+/// the seam a new `tool_end` field arrives through, and #632 showed that
+/// widening only the record leaves the inputs struct as a second break.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ToolEndInputs {
     /// Seq returned by the paired [`AuditWriter::log_tool_start`].
     pub start_seq: crate::record::ids::Seq,
@@ -191,6 +207,48 @@ pub struct ToolEndInputs {
     pub result_summary: crate::record::ResultSummary,
     /// Recently-read message IDs and window.
     pub provenance: crate::record::Provenance,
+}
+
+impl ToolEndInputs {
+    /// Describe a completed tool call.
+    ///
+    /// `error_code` is a parameter, beside the `status` it has to agree with.
+    /// `ToolEnd::error_code` is documented as "the stable error code on
+    /// `status = Error`; `None` on success", so a defaulted `None` on a failed
+    /// call is not an absent value — it is a record asserting *this call
+    /// failed and carries no code*, which on the line is indistinguishable
+    /// from a success's `null` and leaves post-incident triage unable to
+    /// classify the failure. Same rule as
+    /// [`crate::record::ProcessEnd::new`]'s `records_lost`. Pass `None` with
+    /// [`ToolStatus::Ok`](crate::record::ToolStatus::Ok) and
+    /// `Some(code)` with `Error` or `Cancelled`.
+    ///
+    /// `account` and `result_summary` stay defaulted. `start_seq` names the
+    /// paired `tool_start`, which carries the account and the posture that
+    /// governed the dispatch, so a `tool_end` that omits the account is
+    /// recoverable rather than misleading — it is duplicated onto this record
+    /// only so a single line reads on its own. An empty `result_summary` is
+    /// the correct record for a tool that returned nothing.
+    #[must_use]
+    pub fn new(
+        start_seq: crate::record::ids::Seq,
+        tool: rimap_core::tool::ToolName,
+        status: crate::record::ToolStatus,
+        error_code: Option<rimap_core::ErrorCode>,
+        duration_ms: u64,
+        provenance: crate::record::Provenance,
+    ) -> Self {
+        Self {
+            start_seq,
+            tool,
+            account: None,
+            status,
+            error_code,
+            duration_ms,
+            result_summary: crate::record::ResultSummary::default(),
+            provenance,
+        }
+    }
 }
 
 impl From<ToolEndInputs> for crate::record::ToolEnd {
@@ -213,6 +271,7 @@ impl From<ToolEndInputs> for crate::record::ToolEnd {
 /// Mirrors [`ToolEndInputs`] so the call sites use a consistent
 /// construction shape instead of a long positional argument list.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ToolStartInputs {
     /// Which tool is being dispatched.
     pub tool: rimap_core::tool::ToolName,
@@ -228,6 +287,43 @@ pub struct ToolStartInputs {
     /// SHA-256 of the canonical JSON serialization of the *unredacted*
     /// payload, hex-encoded.
     pub arguments_hash_sha256: String,
+}
+
+impl ToolStartInputs {
+    /// Describe a tool call entering dispatch.
+    ///
+    /// `account` and `posture_effective` are parameters rather than defaulted
+    /// fields, for the reason [`crate::record::ProcessEnd::new`] takes
+    /// `records_lost`: `None` is not an absent value here. It is rendered on
+    /// disk as the literal `"infrastructure"`, whose documented meaning is
+    /// that this dispatch bypassed per-account posture gating by design
+    /// (`use_account`, `list_accounts`). A caller that left the field to a
+    /// default would record an account-scoped, posture-gated call as exempt
+    /// from gating. Passing `(None, None)` is the explicit way to say
+    /// "infrastructure".
+    ///
+    /// The two are expected to travel together -- an infrastructure tool has
+    /// neither, an account-scoped dispatch has both -- but the signature does
+    /// not enforce that, and `new(tool, Some(account), None, ..)` still
+    /// compiles into a record claiming an account-scoped call was exempt from
+    /// gating. Making that unrepresentable needs a two-variant scope
+    /// parameter rather than two `Option`s; no current caller gets it wrong.
+    #[must_use]
+    pub fn new(
+        tool: rimap_core::tool::ToolName,
+        account: Option<String>,
+        posture_effective: Option<rimap_core::Posture>,
+        arguments_redacted: serde_json::Value,
+        arguments_hash_sha256: String,
+    ) -> Self {
+        Self {
+            tool,
+            account,
+            posture_effective,
+            arguments_redacted,
+            arguments_hash_sha256,
+        }
+    }
 }
 
 impl From<ToolStartInputs> for crate::record::ToolStart {
@@ -247,6 +343,7 @@ impl From<ToolStartInputs> for crate::record::ToolStart {
 /// [`crate::writer::self_check::read_trailing_state`] (run before `open`) and the
 /// current inode (run after `open`, via [`crate::writer::self_check::current_inode`]).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ProcessStartInputs {
     /// `CARGO_PKG_VERSION` of the running binary.
     pub version: String,
@@ -260,6 +357,10 @@ pub struct ProcessStartInputs {
     pub posture: Option<rimap_core::Posture>,
     /// Per-account summaries (multi-account mode).
     pub accounts: Option<Vec<crate::record::AccountSummary>>,
+    /// Per-account posture and explicit per-tool verdicts with provenance
+    /// (#632). One entry per account regardless of single- or
+    /// multi-account mode.
+    pub tool_matrix: Vec<crate::record::AccountToolMatrix>,
     /// Absolute path of the loaded config file.
     pub config_path: std::path::PathBuf,
     /// SHA-256 of the config file contents at load time, hex-encoded.
@@ -269,6 +370,45 @@ pub struct ProcessStartInputs {
     /// Inode of the audit file as observed AFTER this writer was opened
     /// (call `crate::writer::self_check::current_inode` on the path).
     pub current_inode: u64,
+}
+
+impl ProcessStartInputs {
+    /// Describe a starting process.
+    ///
+    /// `posture`, `accounts` and `tool_matrix` start empty: they are the
+    /// mode-dependent fields (`posture` for single-account, `accounts` for
+    /// multi-account, `tool_matrix` for both), and boot assigns whichever it
+    /// resolved. The six parameters are the ones every start has.
+    ///
+    /// They stay defaulted rather than joining the signature the way
+    /// [`ToolStartInputs::new`]'s `posture_effective` did, for two reasons. An
+    /// empty `tool_matrix` is not a claim: it is `#[serde(default)]` precisely
+    /// because records written before #632 carry no such field, so a reader
+    /// already cannot distinguish "no overrides" from "written by an older
+    /// build" and does not read it as "no account had an override". And at
+    /// nine parameters a constructor is harder to call correctly than the
+    /// struct it builds, which is the problem this type exists to solve.
+    #[must_use]
+    pub fn new(
+        version: String,
+        git_commit: String,
+        config_path: std::path::PathBuf,
+        config_hash_sha256: String,
+        trailing: crate::writer::self_check::TrailingState,
+        current_inode: u64,
+    ) -> Self {
+        Self {
+            version,
+            git_commit,
+            posture: None,
+            accounts: None,
+            tool_matrix: Vec::new(),
+            config_path,
+            config_hash_sha256,
+            trailing,
+            current_inode,
+        }
+    }
 }
 
 #[cfg(test)]

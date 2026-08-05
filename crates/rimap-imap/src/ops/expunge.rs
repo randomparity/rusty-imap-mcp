@@ -43,6 +43,14 @@ pub(crate) fn expunge_strategy(has_uidplus: bool) -> ExpungeStrategy {
 /// folder-wide EXPUNGE (server lacks both MOVE and UIDPLUS) — the data-loss
 /// condition. Distinct from `used_fallback` (`!has_move`), which is also
 /// true on the safe scoped-UID-EXPUNGE path.
+///
+/// Both arguments come from destructuring a
+/// [`crate::connection::ServerCapabilities::Known`], via
+/// [`crate::connection::ServerCapabilities::require_known`] — the only way to
+/// obtain them. So `(false, false)` here means the server *said* it has
+/// neither, never "the probe told us nothing": that state is
+/// [`crate::connection::ServerCapabilities::Unknown`] and its callers refuse
+/// before reaching this predicate (#649).
 pub(crate) fn fallback_uses_folder_wide_expunge(has_move: bool, has_uidplus: bool) -> bool {
     !has_move && !has_uidplus
 }
@@ -149,6 +157,37 @@ mod tests {
     fn folder_wide_expunge_only_when_no_move_and_no_uidplus() {
         // The data-loss condition is exactly (!has_move && !has_uidplus).
         assert!(fallback_uses_folder_wide_expunge(false, false));
+    }
+
+    #[test]
+    fn unknown_capabilities_cannot_reach_the_data_loss_predicate() {
+        use crate::connection::ServerCapabilities;
+
+        // The predicate above takes bools, and `(false, false)` selects the
+        // destructive branch. This pins the one gate that decides whether
+        // those bools can exist at all: `Unknown` yields no pair, so no
+        // caller can hand `(false, false)` to it on the strength of a probe
+        // that established nothing (#649).
+        assert!(ServerCapabilities::Unknown.require_known("test").is_err());
+
+        let affirmative_neither = ServerCapabilities::Known {
+            has_move: false,
+            has_uidplus: false,
+        }
+        .require_known("test")
+        .ok();
+        assert_eq!(
+            affirmative_neither,
+            Some((false, false)),
+            "an affirmative `neither` is a known state and must still yield \
+             its pair",
+        );
+        assert!(
+            fallback_uses_folder_wide_expunge(false, false),
+            "a server that advertised neither extension still takes the \
+             folder-wide path — the fix narrows what can reach it, it does \
+             not remove the path",
+        );
     }
 
     #[test]

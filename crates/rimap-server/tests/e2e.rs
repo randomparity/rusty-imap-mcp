@@ -40,7 +40,7 @@ use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
 use rimap_authz::rate_limit::Governor;
 use rimap_config::credential::CredentialStore;
-use rimap_config::model::{ImapConfig, ImapEncryption, LimitsConfig, SecurityConfig};
+use rimap_config::model::{ImapConfig, ImapEncryption};
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::account::AccountId;
 use rimap_core::posture::Posture;
@@ -129,36 +129,22 @@ fn build_test_env(harness: DovecotHarness) -> TestEnv {
 }
 
 fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
-    ValidatedAccountConfig {
-        id: AccountId::default_account(),
-        imap: ImapConfig {
-            host: "127.0.0.1".into(),
-            port: harness.port(),
-            username: "rimap-test".into(),
-            encryption: ImapEncryption::Tls,
-            tls_fingerprint_sha256: None,
-            connect_timeout_seconds: 10,
-            command_timeout_seconds: 30,
-        },
-        smtp: None,
-        security: SecurityConfig {
-            posture: Posture::DraftSafe,
-            ..SecurityConfig::default()
-        },
-        limits: LimitsConfig::default(),
-        // Enable the default-deny `export_messages` tool — the equivalent of
-        // `[security.tools] export_messages = true` in a real config.
-        tool_overrides: {
-            let mut o = BTreeMap::new();
-            o.insert(
-                rimap_core::tool::ToolName::ExportMessages,
-                rimap_config::model::Verdict::Allow,
-            );
-            o
-        },
-        tls_fingerprint: Some(*harness.fingerprint()),
-        fallback_mode: rimap_config::model::FallbackMode::default(),
-    }
+    let mut cfg = ValidatedAccountConfig::new_for_tests(AccountId::default_account(), {
+        let mut imap = ImapConfig::new("127.0.0.1".into(), harness.port(), "rimap-test".into());
+        imap.encryption = ImapEncryption::Tls;
+        imap
+    });
+    cfg.security.posture = Posture::DraftSafe;
+    // Enable the default-deny `export_messages` tool — the equivalent of
+    // `[security.tools] export_messages = true` in a real config.
+    cfg.tool_overrides.insert(
+        rimap_core::tool::ToolName::ExportMessages,
+        rimap_config::model::Verdict::Allow,
+    );
+    cfg.account_written_tools
+        .insert(rimap_core::tool::ToolName::ExportMessages);
+    cfg.tls_fingerprint = Some(*harness.fingerprint());
+    cfg
 }
 
 fn test_connection(harness: &DovecotHarness, audit: &AuditWriter) -> Connection {

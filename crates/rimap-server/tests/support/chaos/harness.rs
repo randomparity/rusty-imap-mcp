@@ -3,7 +3,9 @@
 //! toxics (latency, resets, byte-trickle) can be injected between the server and
 //! Dovecot. Reuses the `DovecotHarness` scaffolding (runtime autodetect,
 //! `ReservedPort`, `uuid_like` project names, fingerprint hand-off, Drop
-//! teardown). See `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`
+//! teardown), and takes its runtime gate from `rimap-container-gate` (#675) —
+//! only the three-tier `RIMAP_CHAOS`/skip/loud policy below is local.
+//! See `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`
 //! and `AGENTS.md` "Container runtime for integration tests".
 
 #![expect(clippy::expect_used, reason = "integration tests")]
@@ -13,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use rimap_container_gate::{RuntimeProbe, probe_runtime, runtime, unusable_reason};
 use rimap_core::TlsFingerprint;
 
 /// Compose file for the chaos stack (relative to the shared dovecot fixture dir).
@@ -25,7 +28,8 @@ const COMPOSE_FILE: &str = "docker-compose.chaos.yml";
 pub enum ChaosSkip {
     /// `RIMAP_CHAOS` is unset — the suite is nightly-only and opted out here.
     Disabled,
-    /// `RIMAP_CHAOS=1` but no container runtime and `RIMAP_REQUIRE_DOCKER` unset.
+    /// `RIMAP_CHAOS=1` but no usable container runtime — no binary, or one
+    /// whose daemon did not respond — and `RIMAP_REQUIRE_DOCKER` unset.
     DockerUnavailable,
 }
 
@@ -36,12 +40,20 @@ fn check_gate() -> Result<(), ChaosSkip> {
     if std::env::var("RIMAP_CHAOS").is_err() {
         return Err(ChaosSkip::Disabled);
     }
-    if !runtime_available() {
-        return Err(loud_or_skip(
-            "RIMAP_CHAOS=1 but no docker/podman runtime found",
-        ));
+    match gate_reason(runtime(), probe_runtime()) {
+        None => Ok(()),
+        Some(reason) => Err(loud_or_skip(&reason)),
     }
-    Ok(())
+}
+
+/// The unusable-runtime message for a probe outcome, or `None` when the
+/// runtime is usable. Split out from `check_gate` so the classification is
+/// unit-testable without touching `RIMAP_CHAOS`/`RIMAP_REQUIRE_DOCKER` (env
+/// mutation is process-global and races other tests in the same binary).
+/// The `RIMAP_CHAOS=1` prefix is this suite's own: reaching here at all means
+/// chaos was asked for, so the runtime being unusable is worth naming loudly.
+fn gate_reason(tool: &str, probe: RuntimeProbe) -> Option<String> {
+    unusable_reason(tool, probe).map(|reason| format!("RIMAP_CHAOS=1 but {reason}"))
 }
 
 /// Under `RIMAP_REQUIRE_DOCKER=1` a real infrastructure failure must fail loudly;
@@ -54,36 +66,6 @@ fn loud_or_skip(context: &str) -> ChaosSkip {
         "chaos: {context}"
     );
     ChaosSkip::DockerUnavailable
-}
-
-fn runtime() -> &'static str {
-    static TOOL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    TOOL.get_or_init(|| {
-        match std::env::var("RIMAP_CONTAINER_TOOL").as_deref() {
-            Ok("docker") => return "docker",
-            Ok("podman") => return "podman",
-            _ => {}
-        }
-        if binary_present("docker") {
-            "docker"
-        } else if binary_present("podman") {
-            "podman"
-        } else {
-            "docker"
-        }
-    })
-}
-
-fn binary_present(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn runtime_available() -> bool {
-    binary_present("docker") || binary_present("podman")
 }
 
 fn dovecot_container_name(project: &str) -> String {
@@ -412,4 +394,48 @@ fn is_port_collision(stderr: &str) -> bool {
     s.contains("port is already allocated")
         || s.contains("address already in use")
         || s.contains("bind for 127.0.0.1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RuntimeProbe, gate_reason, is_port_collision};
+
+    /// A reachable binary with a dead daemon is an unusable runtime, so the
+    /// chaos gate must reach `loud_or_skip` rather than proceed to compose
+    /// (#636). `loud_or_skip` then skips, or panics under
+    /// `RIMAP_REQUIRE_DOCKER=1`.
+    #[test]
+    fn gate_reason_rejects_an_unreachable_daemon() {
+        let reason = gate_reason("podman", RuntimeProbe::DaemonDown);
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.contains("daemon") && r.contains("podman")),
+            "daemon-down must name its cause and runtime, got {reason:?}"
+        );
+    }
+
+    /// The `RIMAP_CHAOS=1` prefix is what tells the reader the suite was asked
+    /// for and could not run, rather than being opted out of.
+    #[test]
+    fn gate_reason_rejects_a_missing_binary_and_admits_a_ready_runtime() {
+        let missing = gate_reason("docker", RuntimeProbe::NoBinary);
+        assert!(
+            missing
+                .as_deref()
+                .is_some_and(|r| r.contains("RIMAP_CHAOS=1") && r.contains("docker")),
+            "got {missing:?}"
+        );
+        assert!(gate_reason("docker", RuntimeProbe::Ready).is_none());
+    }
+
+    /// Address-pool exhaustion is a live daemon refusing work, not an absent
+    /// one: it happens after the gate, and must neither be retried as a port
+    /// collision nor skipped.
+    #[test]
+    fn address_pool_exhaustion_is_not_a_port_collision() {
+        assert!(!is_port_collision(
+            "Error response from daemon: all predefined address pools have been fully subnetted"
+        ));
+    }
 }

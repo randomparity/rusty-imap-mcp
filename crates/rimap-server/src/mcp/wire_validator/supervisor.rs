@@ -78,9 +78,13 @@ impl ValidatorSupervisor {
     /// rejections. Returns the first error from the outbound path;
     /// inbound cancellation is expected and ignored.
     ///
-    /// Used on EVERY failure path — pre-init `ExpectedInitializeRequest`,
-    /// `InitializeFailed`, post-init bridge race error, and post-init
-    /// `service.waiting()` error.
+    /// Called from every failure path — pre-init
+    /// `ExpectedInitializeRequest`, `InitializeFailed`, post-init bridge
+    /// race error, and post-init `service.waiting()` error — but do not
+    /// read that as "always runs". The pre-init arm reaches the call
+    /// only when the envelope write succeeds; a write failure there
+    /// propagates first and detaches both bridge `JoinHandle`s.
+    /// `main.rs::handle_init_failure` documents why that is inert (#722).
     ///
     /// **Already-consumed handles are skipped.** Same contract as
     /// `drain` — re-polling a completed `JoinHandle` panics, so the

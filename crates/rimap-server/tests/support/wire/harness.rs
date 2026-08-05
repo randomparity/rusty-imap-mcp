@@ -11,7 +11,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 use rmcp::model::ProtocolVersion;
@@ -37,7 +37,10 @@ pub(crate) const MCP_SCHEMA_JSON: &str =
 /// already-connected IMAP session. Measured at 0.4-6 ms for a `tools/call`
 /// against the in-process fake, so 2 s fails fast on a real hang with three
 /// orders of magnitude of headroom. Does NOT cover the first read after spawn
-/// — see [`COLD_START_TIMEOUT`].
+/// — see [`COLD_START_TIMEOUT`] — and is raised to a floor on CI's coverage
+/// arm, where the same 2 s proved too tight in #671; see
+/// [`INSTRUMENTED_READ_FLOOR`]. This value is what the uninstrumented arm
+/// keeps, and keeping it tight there is the point of scoping the floor.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Budget for the **first** response read of a freshly spawned child, which is
@@ -65,21 +68,211 @@ pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 // can exceed a tight 1 s budget on CPU-contended runners. 5 s remains
 // tight enough to fail-fast on a real hang while absorbing scheduling
 // jitter when other tests are spawning binaries / parsers concurrently.
+//
+// Deliberately NOT floored on the coverage arm the way the read budgets are
+// (`INSTRUMENTED_READ_FLOOR`), and that is a measured decision rather than a
+// scope boundary. An instrumented process dumps a `.profraw` on the way out, so
+// the exit path is where instrumentation plausibly costs the most — but across
+// the same paired full-workspace runs, the wait this budget covers ran to a
+// 6.3 ms instrumented median against 5.4 ms uninstrumented (1.18x), and the
+// instrumented worst case was *lower* than the uninstrumented one (249 vs
+// 308 ms). There is nothing here to absorb. `DETACHED_EXIT_TIMEOUT` is left
+// alone for the same reason.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Budget for reaping a [`DetachedStdoutHarness`] child, which is the only wait
+/// in this harness that spans the process's **entire** lifetime — spawn, the
+/// request, and exit — in a single call.
+///
+/// [`Harness::spawn_with_closed_stdout`] drops the stdout read end before the
+/// child writes anything, which is the whole point of that variant. So there is
+/// no *stdout* readiness handshake, and [`read_deadline`] — which keys off
+/// stdout output — cannot pay for start-up on a separate read the way it does
+/// for a piped harness. Cold start is therefore inside the exit wait.
+///
+/// Hence the sum: [`COLD_START_TIMEOUT`] for `exec`, dynamic linking, config
+/// parse and credential resolution, plus [`SHUTDOWN_TIMEOUT`] for the exit slice
+/// that follows the failed envelope write.
+///
+/// What #638 actually establishes about the size: the child had **not** exited
+/// 5 s after the request write, and `nextest` reported 8.826 s for the whole
+/// case — of which 5 s was that elapsed timeout. The child's true exit time was
+/// never observed, so the run bounds the envelope from below and no further.
+/// The size argument is therefore the cost model, not that log line: start-up
+/// is the cost class [`COLD_START_TIMEOUT`] is calibrated for, and the exit
+/// slice that follows it is what [`SHUTDOWN_TIMEOUT`] is calibrated for.
+///
+/// The remaining ~3.8 s of that case is **unattributed**, and worth resisting
+/// the urge to assign. It is not the parent-side prefix: measured with the
+/// instrument `wait_for_exit` now prints, that prefix is single-digit
+/// milliseconds (6.7 ms observed), which even at the ~20x amplification below
+/// reaches ~0.13 s. Two costs inside `nextest`'s per-case number sit outside
+/// this harness's own clock entirely and are the plausible homes for it:
+/// `nextest`'s spawn of the debug test binary, and post-panic teardown —
+/// unwinding, then the `kill_on_drop` SIGKILL and reap of a child that by
+/// construction had *not* exited, then tempdir removal. If the residue is
+/// teardown, that is seconds spent reaping a live child, which is weak
+/// affirmative evidence for the stall hypothesis below rather than for
+/// contention. #660 carries that.
+///
+/// Be precise about how far that model goes, because it does not go all the
+/// way. Measured here, this case costs 0.22-0.28 s end to end across 12 samples
+/// at host load 20-119, so a 5 s timeout implies roughly 20x amplification —
+/// more than the >9x #621 recorded. This harness is also cheaper at boot than
+/// the ones #621 measured: `accounts = []` with `--allow-empty-accounts` skips
+/// credential resolution and the IMAP boot entirely, so it pays only `exec`,
+/// dynamic linking and config parse. The budget is sized on the assumption that
+/// the failing runner was contended well past anything reproduced locally. The
+/// competing explanation — an intermittent stall in the server's own
+/// broken-pipe shutdown path, which a wider budget would mask rather than fix —
+/// is *not* excluded by anything here; it is tracked in #660.
+///
+/// The discriminator is the distribution of the exit wait: clustered near 0.2 s
+/// supports contention, bimodal with multi-second outliers supports a stall.
+/// `wait_for_exit` prints that number — but **CI cannot supply the
+/// distribution** under the current profile, because `nextest` drops a passing
+/// test's stderr by default (see the call site). Collecting it takes a
+/// deliberate instrumented run on a contended host, not passive accumulation
+/// over green CI, and #660 says so.
+///
+/// Note what this budget does *not* cover. It starts at the `wait_for_exit`
+/// call, so the parent-side prefix — tempdir, config write, `cargo_bin`
+/// resolution, `Command::spawn`, the request write — sits outside it. That
+/// prefix is small (single-digit ms measured), and leaving it unbudgeted is
+/// deliberate: `nextest`'s slow-timeout is
+/// advisory and `.config/nextest.toml` sets no `terminate-after`, so a slow
+/// prefix produces a SLOW marker rather than a failure, and wrapping it in a
+/// second timeout would cost more than the risk it removes. Its duration
+/// reaches a reader through the `wait_for_exit` panic message on the timeout
+/// path, and through the explicit-output run named at that call site otherwise.
+///
+/// Composed from the two named constants rather than hand-tuned to a third
+/// number so each cost stays individually documented and tunable. Widening
+/// `SHUTDOWN_TIMEOUT` to cover this instead would also loosen the two waits
+/// that are correctly scoped today (`response_or_close` and
+/// [`Harness::shutdown_and_wait`]), whose callers have already paid start-up.
+///
+/// **Considered and rejected:** the child fsyncs a `process_start` audit record
+/// during boot and this harness already holds `audit_path`, so polling that file
+/// under `COLD_START_TIMEOUT` *would* give a readiness handshake off stdout and
+/// let the exit wait keep the tight `SHUTDOWN_TIMEOUT`.
+///
+/// State its benefit accurately, because it is not mainly about latency: with
+/// the exit slice back on `SHUTDOWN_TIMEOUT`, a 5-15 s stall between the failed
+/// envelope write and process exit stays a *test failure*, whereas a summed
+/// budget cannot fail one. That is the cost being accepted here — the summed
+/// budget masks the very hypothesis #660 is open on, and the printed
+/// measurement is a weaker substitute for a failing assertion. Not built
+/// anyway: a polling loop is materially more code than a summed constant, and
+/// #660 is the place to weigh it once the distribution is known. Revisit this
+/// if that distribution turns out bimodal.
+pub const DETACHED_EXIT_TIMEOUT: Duration = COLD_START_TIMEOUT.saturating_add(SHUTDOWN_TIMEOUT);
+
+/// Environment variable `cargo llvm-cov` exports into the processes it runs.
+/// Its value is a profile-output pattern, not a flag, so only its presence is
+/// meaningful here.
+const LLVM_PROFILE_FILE_ENV: &str = "LLVM_PROFILE_FILE";
+
+/// Floor applied to every stdout read budget while this test process is
+/// running under `cargo llvm-cov` — in CI, the `SonarQube` job and nothing
+/// else.
+///
+/// **Name it for what it is scoped to, not for a cost it was measured from.**
+/// #671 proposed this as an instrumentation-overhead allowance. Measurement
+/// does not support that reading, so the constant is deliberately documented
+/// against the weaker claim it can actually carry.
+///
+/// What was measured (two full-workspace runs, 2219 tests each, same host at
+/// load average ~96 on 18 cores, matched 2161-sample read distributions —
+/// `cargo nextest` with and without `cargo llvm-cov`):
+///
+/// - steady-state read, median 0.10 ms both ways — instrumented/uninstrumented
+///   ratio **1.08x**; at p99, 5.5 vs 5.3 ms, **1.02x**; worst sample 22.2 vs
+///   17.6 ms, **1.27x**.
+/// - the first read after spawn: 240 vs 226 ms median, **1.06x**.
+/// - not one read of 2115 steady-state samples reached even 100 ms under
+///   instrumentation.
+///
+/// So [`REQUEST_TIMEOUT`] already carried **90x** headroom over the worst
+/// instrumented read observed, and instrumentation contributes 1.27x of the
+/// ~90x outlier the #671 failure required. Scaling the budget by the measured
+/// ratio would yield ~2.5 s and would not have saved that run. **The cause of
+/// that failure is not established, and this constant does not claim to
+/// address it** — see the follow-up note below.
+///
+/// What the floor *is* good for is scoping. `LLVM_PROFILE_FILE` is a reliable
+/// proxy for "this is the coverage job", and that job differs from
+/// `test (stable)` in three ways at once, only one of which is instrumentation:
+/// it drives `cargo test` rather than `cargo nextest --profile ci`, so every
+/// test in a binary is co-scheduled inside one process and none of
+/// `.config/nextest.toml`'s concurrency groups apply; and it passes
+/// `--all-features`. Under `cargo test` the three `e2e_wire` cases run
+/// together — three `worker_threads = 4` Tokio runtimes and three Dovecot
+/// containers — on a 4-vCPU runner. Widening on this signal widens exactly the
+/// arm that flaked and leaves every other arm's budget alone; it does not
+/// assert which of the three differences did the damage.
+///
+/// Value: 10 s, i.e. 5x [`REQUEST_TIMEOUT`]. Not computed from the ratios
+/// above — they would justify no widening at all. It is a tail allowance for a
+/// cost that measurement could not reproduce, sized to the same order as
+/// [`COLD_START_TIMEOUT`] for the same reason that one is 10 s: large enough
+/// that it is not the thing that fails, small enough that a genuinely hung
+/// `tools/call` still fails the coverage job in single-digit seconds rather
+/// than hanging it. The numeric match with [`COLD_START_TIMEOUT`] is a
+/// coincidence of order, not a shared derivation, which is why this is its own
+/// constant and not a reuse of that one.
+///
+/// **Known limit, stated because a widened timeout always looks like a fix.**
+/// The #671 run timed out at 2 s, so how long the read would have taken is
+/// unobserved — the same epistemic hole [`DETACHED_EXIT_TIMEOUT`] documents for
+/// #638. A discrete intermittent stall in the `tools/call` path is *not*
+/// excluded by anything measured here, and if that is what happened, this floor
+/// masks it for stalls under 10 s and does not help at all beyond that. The
+/// evidence for shipping it is a soak plus the scoping argument, not a
+/// reproduced failure.
+const INSTRUMENTED_READ_FLOOR: Duration = Duration::from_secs(10);
+
+/// True when this test process was launched by `cargo llvm-cov`.
+///
+/// `cargo llvm-cov` exports [`LLVM_PROFILE_FILE_ENV`] into the test process,
+/// which then inherits down to the spawned server binary — that inheritance is
+/// how the child's own coverage is collected, and it was confirmed for this
+/// harness rather than assumed: the binary `cargo_bin` resolves under
+/// `target/llvm-cov-target/` carries `__llvm_prf_*` sections, and a single
+/// `e2e_wire` run produced 63 `.profraw` files across parent and children.
+fn coverage_instrumented() -> bool {
+    std::env::var_os(LLVM_PROFILE_FILE_ENV).is_some()
+}
 
 /// Deadline to apply to one stdout read: the caller's `requested` budget,
 /// widened to [`COLD_START_TIMEOUT`] while the child has not yet produced any
-/// output.
+/// output, and to [`INSTRUMENTED_READ_FLOOR`] on the coverage arm.
 ///
-/// `max` rather than a substitution because chaos scenarios pass deadlines well
-/// above the cold-start grace via `request_within`; shrinking those to the
-/// grace would reintroduce the fast-fail cap they exist to escape.
+/// Reads the ambient environment, so it is a thin wrapper over
+/// [`read_deadline_for`], which holds the logic and the tests. Callers want the
+/// wrapper; the unit tests want the pure function, because they themselves run
+/// under `cargo llvm-cov` in the `SonarQube` job.
 fn read_deadline(first_output_seen: bool, requested: Duration) -> Duration {
-    if first_output_seen {
-        requested
-    } else {
-        requested.max(COLD_START_TIMEOUT)
+    read_deadline_for(first_output_seen, requested, coverage_instrumented())
+}
+
+/// The two graces, applied to `requested` independently.
+///
+/// `max` rather than a substitution, for both: chaos scenarios pass deadlines
+/// well above either grace via `request_within` (15 s today), and shrinking
+/// those would reintroduce the fast-fail cap they exist to escape. Composing
+/// with `max` also means the graces stack correctly rather than one shadowing
+/// the other — a first read on the coverage arm takes whichever is larger, not
+/// whichever is checked last.
+fn read_deadline_for(first_output_seen: bool, requested: Duration, instrumented: bool) -> Duration {
+    let mut deadline = requested;
+    if !first_output_seen {
+        deadline = deadline.max(COLD_START_TIMEOUT);
     }
+    if instrumented {
+        deadline = deadline.max(INSTRUMENTED_READ_FLOOR);
+    }
+    deadline
 }
 
 /// Possible outcomes when probing the server for "either a
@@ -108,9 +301,10 @@ pub enum CloseOrResponse {
     ///
     /// The budget is reported rather than left to the caller to name, because
     /// it is not always the `request_dur` the caller passed: a first read after
-    /// spawn is widened to `COLD_START_TIMEOUT`, so a caller interpolating its
-    /// own constant into the panic message would understate how long the
-    /// server actually had.
+    /// spawn is widened to `COLD_START_TIMEOUT`, and on CI's coverage arm every
+    /// read is floored at `INSTRUMENTED_READ_FLOOR`. A caller interpolating its
+    /// own constant into the panic message would understate how long the server
+    /// actually had — by 5x on the arm where that matters most.
     Hung(Duration),
 }
 
@@ -147,7 +341,9 @@ pub struct Harness {
     /// false, response reads are widened to `COLD_START_TIMEOUT` because they
     /// are still paying for process start-up; once true every read runs on the
     /// caller's own budget so genuine hangs stay fast-fail. Start-up is a
-    /// once-per-process cost, so it is charged to exactly one read.
+    /// once-per-process cost, so it is charged to exactly one read. The
+    /// coverage arm's `INSTRUMENTED_READ_FLOOR` is independent of this flag —
+    /// it applies to every read, not just the first.
     first_output_seen: bool,
     // Hold the tempdir until the harness drops so the audit log path
     // remains valid for the lifetime of the spawned process.
@@ -196,13 +392,13 @@ fn force_use_for_dead_code_link() {
     // test), not by other binaries.
     let _ = Harness::spawn_with_closed_stdout;
     // DetachedStdoutHarness methods used by mcp_wire_negative, not by
-    // other binaries. The pub `child` / `stdin` fields are read by the
-    // pre-initialize write-failure test only; reference them here so
-    // every test-binary compilation sees them as used.
+    // other binaries. The pub `stdin` field is written by the
+    // pre-initialize write-failure test only; reference it here so
+    // every test-binary compilation sees it as used.
     let _ = DetachedStdoutHarness::audit_path;
     let _ = DetachedStdoutHarness::captured_stderr;
+    let _ = DetachedStdoutHarness::wait_for_exit;
     let _ = |h: &DetachedStdoutHarness| {
-        let _ = &h.child;
         let _ = &h.stdin;
     };
     // Methods used by mcp_wire_negative and e2e_wire_cancellation, not
@@ -310,6 +506,9 @@ allowed_base_dir = "{}"
     /// to exercise the propagated-error path on transport failure.
     #[expect(clippy::unused_async, reason = "uniform async surface")]
     pub async fn spawn_with_closed_stdout() -> DetachedStdoutHarness {
+        // Before the tempdir, so `setup_began` covers every parent-side item
+        // the #638 log lumped in with the child's lifetime.
+        let setup_began = Instant::now();
         let tempdir = TempDir::new().expect("tempdir");
         let config_path = tempdir.path().join("config.toml");
         let audit_path = tempdir.path().join("audit.jsonl");
@@ -351,6 +550,7 @@ allowed_base_dir = "{}"
             stdin,
             stderr_log,
             audit_path,
+            setup_began,
             _tempdir: tempdir,
         }
     }
@@ -406,14 +606,16 @@ allowed_base_dir = "{}"
     }
 
     /// Read exactly one parsed envelope from stdout under the default 2s
-    /// `REQUEST_TIMEOUT`. Shared by `request` and `recv_until_id`.
+    /// `REQUEST_TIMEOUT` — subject to both widenings in [`read_deadline`].
+    /// Shared by `request` and `recv_until_id`.
     async fn read_one_envelope(&mut self, caller: &str) -> Value {
         self.read_one_envelope_within(caller, REQUEST_TIMEOUT).await
     }
 
     /// Read exactly one parsed envelope from stdout, bounding the read by
     /// `read_timeout` — widened to `COLD_START_TIMEOUT` if the child has not
-    /// produced any output yet. Skips notifications (which have a `method` and
+    /// produced any output yet, and to `INSTRUMENTED_READ_FLOOR` on CI's
+    /// coverage arm. Skips notifications (which have a `method` and
     /// absent/null `id`) but does NOT skip responses; returns the first
     /// response observed. Panics on timeout, EOF, or parse failure with stderr
     /// included in the diagnostic.
@@ -472,8 +674,9 @@ allowed_base_dir = "{}"
     /// Send a JSON-RPC request and return the parsed response value, bounding the
     /// response read by the shared [`REQUEST_TIMEOUT`] — or by
     /// [`COLD_START_TIMEOUT`] if this is the first read after spawn, which is
-    /// still paying for process start-up. Panics on timeout, EOF before a
-    /// response arrives, or non-JSON output.
+    /// still paying for process start-up, or by [`INSTRUMENTED_READ_FLOOR`] when
+    /// running under coverage. Panics on timeout, EOF before a response arrives,
+    /// or non-JSON output.
     pub async fn request(&mut self, method: &str, params: Value) -> Value {
         self.request_within(method, params, REQUEST_TIMEOUT).await
     }
@@ -484,8 +687,11 @@ allowed_base_dir = "{}"
     /// cap — used for both the fault call and reconnect-bearing recovery calls.
     ///
     /// A `deadline` below [`COLD_START_TIMEOUT`] is still widened to it on the
-    /// first read after spawn; larger ones are passed through untouched, which
-    /// is the case these callers rely on.
+    /// first read after spawn, and one below [`INSTRUMENTED_READ_FLOOR`] is
+    /// widened to that under coverage; larger ones are passed through
+    /// untouched, which is the case these callers rely on. The 15 s the chaos
+    /// scenarios pass today clears both graces, so they are unaffected by
+    /// either.
     pub async fn request_within(
         &mut self,
         method: &str,
@@ -676,6 +882,11 @@ allowed_base_dir = "{}"
     }
 
     /// Assert no bytes arrive on stdout for the given duration.
+    ///
+    /// Bypasses [`read_deadline`] on purpose: this is a negative assertion, so
+    /// the coverage arm's floor would only make it wait longer to prove the
+    /// same thing. Instrumentation delays responses, which can only make an
+    /// "expected nothing" window easier to satisfy, never harder.
     pub async fn assert_no_response_within(&mut self, dur: Duration) {
         let mut buf = String::new();
         match timeout(dur, self.stdout.read_line(&mut buf)).await {
@@ -745,10 +956,16 @@ allowed_base_dir = "{}"
 /// it exists only to drive stdin, wait for the child exit, and read
 /// the resulting audit log + captured stderr.
 pub struct DetachedStdoutHarness {
-    pub child: Child,
+    child: Child,
     pub stdin: ChildStdin,
     stderr_log: PathBuf,
     audit_path: PathBuf,
+    // Start of `spawn_with_closed_stdout`, i.e. before the tempdir, config
+    // write, `cargo_bin` resolution and `Command::spawn`. Read on the
+    // `wait_for_exit` timeout path to separate that parent-side setup from the
+    // budgeted wait — #638 was hard to attribute precisely because the failing
+    // run reported one wall-clock number covering both.
+    setup_began: Instant,
     // Held until drop so the audit log path stays valid.
     _tempdir: TempDir,
 }
@@ -763,18 +980,97 @@ impl DetachedStdoutHarness {
     pub fn captured_stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_log).unwrap_or_default()
     }
+
+    /// Await the child's exit on the whole-lifetime budget
+    /// ([`DETACHED_EXIT_TIMEOUT`]) and return its status.
+    ///
+    /// The wait lives here rather than at the call site so the budget is chosen
+    /// next to the rationale for its size — a caller reaching for a bare
+    /// `timeout(.., child.wait())` has no way to see that this harness has no
+    /// readiness handshake and so pays start-up inside the exit wait.
+    ///
+    /// Panics if the child has not exited within the budget (a genuine hang) or
+    /// if the wait itself fails, reporting captured stderr either way.
+    ///
+    /// The timeout message separates the budgeted wait from the parent-side
+    /// setup that precedes it, because the budget starts here — at the call —
+    /// not at spawn. #638's log conflated the two, which is what made the
+    /// failure read as an 8.8 s child lifetime when 5 s of it was the elapsed
+    /// timeout; see [`DETACHED_EXIT_TIMEOUT`] for why the remainder is
+    /// unattributed.
+    pub async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let wait_began = Instant::now();
+        let waited = timeout(DETACHED_EXIT_TIMEOUT, self.child.wait()).await;
+        let setup = wait_began.saturating_duration_since(self.setup_began);
+        let Ok(reaped) = waited else {
+            panic!(
+                "child did not exit within {DETACHED_EXIT_TIMEOUT:?} of the exit wait; \
+                 harness setup and the request write took {setup:?} before it\n\
+                 --- captured stderr ---\n{}",
+                self.captured_stderr(),
+            );
+        };
+        // Record the distribution on the success path too. The budget was
+        // widened here without the exit wait ever having been measured on a
+        // failing run (#638 timed out, so it observed only a lower bound); this
+        // is the number that says whether 15 s is generous, marginal, or hiding
+        // a real server-side stall.
+        //
+        // This line does NOT appear in an ordinary run. `nextest` captures a
+        // passing test's stderr and then drops it under its `success-output =
+        // "never"` default, which `--profile ci` inherits and
+        // `.config/nextest.toml` does not override. #660 must therefore collect
+        // the distribution with an explicit run:
+        //
+        //   cargo nextest run -p rimap-server \
+        //     -E 'binary(mcp_wire_negative)' --success-output final
+        //
+        // The timeout path does not reach here at all — it panics above, and
+        // that panic carries the budget and the setup prefix instead.
+        #[expect(
+            clippy::print_stderr,
+            reason = "budget calibration measurement collected by #660"
+        )]
+        {
+            eprintln!(
+                "detached child exited after {:?} of exit wait ({setup:?} of setup before it, \
+                 budget {DETACHED_EXIT_TIMEOUT:?})",
+                wait_began.elapsed(),
+            );
+        }
+        reaped.unwrap_or_else(|err| {
+            panic!(
+                "wait for child exit failed: {err}\n\
+                 --- captured stderr ---\n{}",
+                self.captured_stderr(),
+            )
+        })
+    }
 }
 
 #[cfg(test)]
 mod read_deadline_tests {
-    use super::{COLD_START_TIMEOUT, Duration, REQUEST_TIMEOUT, read_deadline};
+    use super::{
+        COLD_START_TIMEOUT, Duration, INSTRUMENTED_READ_FLOOR, REQUEST_TIMEOUT,
+        coverage_instrumented, read_deadline, read_deadline_for,
+    };
+
+    /// Every case below drives [`read_deadline_for`] with an explicit
+    /// `instrumented` argument rather than [`read_deadline`], which reads the
+    /// ambient environment. That is not stylistic: CI's `SonarQube` job runs
+    /// this very unit test under `cargo llvm-cov`, so an assertion keyed off
+    /// the env-reading wrapper would flip its expected value depending on
+    /// which job ran it. Only `wiring_matches_the_detected_environment` below
+    /// touches the wrapper, and it asserts agreement rather than a value.
+    const UNINSTRUMENTED: bool = false;
+    const INSTRUMENTED: bool = true;
 
     /// The flake in #621: the first read after spawn pays for process
     /// start-up, so it must not run on the steady-state budget.
     #[test]
     fn first_read_is_widened_to_the_cold_start_budget() {
         assert_eq!(
-            read_deadline(false, REQUEST_TIMEOUT),
+            read_deadline_for(false, REQUEST_TIMEOUT, UNINSTRUMENTED),
             COLD_START_TIMEOUT,
             "the first read after spawn must get the cold-start grace",
         );
@@ -785,7 +1081,7 @@ mod read_deadline_tests {
     #[test]
     fn later_reads_keep_the_callers_budget() {
         assert_eq!(
-            read_deadline(true, REQUEST_TIMEOUT),
+            read_deadline_for(true, REQUEST_TIMEOUT, UNINSTRUMENTED),
             REQUEST_TIMEOUT,
             "the grace is a once-per-process cost, not a blanket increase",
         );
@@ -796,7 +1092,76 @@ mod read_deadline_tests {
     #[test]
     fn a_larger_caller_budget_is_never_shrunk() {
         let chaos = COLD_START_TIMEOUT + Duration::from_secs(20);
-        assert_eq!(read_deadline(false, chaos), chaos);
-        assert_eq!(read_deadline(true, chaos), chaos);
+        assert_eq!(read_deadline_for(false, chaos, UNINSTRUMENTED), chaos);
+        assert_eq!(read_deadline_for(true, chaos, UNINSTRUMENTED), chaos);
+        assert_eq!(read_deadline_for(false, chaos, INSTRUMENTED), chaos);
+        assert_eq!(read_deadline_for(true, chaos, INSTRUMENTED), chaos);
+    }
+
+    /// #671: on the coverage arm a steady-state read gets the instrumented
+    /// floor, because that arm's whole cost profile — not just instrumentation
+    /// — differs from the uninstrumented one.
+    #[test]
+    fn steady_reads_get_the_instrumented_floor_on_the_coverage_arm() {
+        assert_eq!(
+            read_deadline_for(true, REQUEST_TIMEOUT, INSTRUMENTED),
+            INSTRUMENTED_READ_FLOOR,
+            "a tools/call under coverage must not run on the bare 2s budget",
+        );
+    }
+
+    /// The half of #671 that matters most: the floor is scoped to the arm that
+    /// flaked. An uninstrumented steady-state read keeps the tight fast-fail
+    /// budget, so a real hang still fails in 2s on `test (stable)`.
+    #[test]
+    fn the_floor_does_not_loosen_the_uninstrumented_case() {
+        assert_eq!(
+            read_deadline_for(true, REQUEST_TIMEOUT, UNINSTRUMENTED),
+            REQUEST_TIMEOUT,
+            "the instrumented floor must not leak into the uninstrumented arm",
+        );
+        assert!(
+            REQUEST_TIMEOUT < INSTRUMENTED_READ_FLOOR,
+            "the floor is only meaningful if it is above the bare budget",
+        );
+    }
+
+    /// The two graces compose rather than override: the first read on the
+    /// coverage arm pays start-up *and* the arm's tail, so it must clear both
+    /// lower bounds.
+    ///
+    /// Asserted as two bounds rather than against
+    /// `COLD_START_TIMEOUT.max(INSTRUMENTED_READ_FLOOR)`, which would only
+    /// restate the implementation — and, while both constants sit at 10 s,
+    /// would hold even if one grace overrode the other. These bounds keep
+    /// biting if either constant moves.
+    #[test]
+    fn the_cold_start_grace_and_the_floor_compose() {
+        let deadline = read_deadline_for(false, REQUEST_TIMEOUT, INSTRUMENTED);
+        assert!(
+            deadline >= COLD_START_TIMEOUT,
+            "the first instrumented read must still cover process start-up; \
+             got {deadline:?}",
+        );
+        assert!(
+            deadline >= INSTRUMENTED_READ_FLOOR,
+            "the first instrumented read must still clear the coverage-arm \
+             floor; got {deadline:?}",
+        );
+    }
+
+    /// Pins the wrapper to the pure function without asserting a value, so
+    /// this case holds under either CI arm. Without it, nothing checks that
+    /// `read_deadline` actually consults `coverage_instrumented()` — the two
+    /// could drift apart and every other case here would still pass.
+    #[test]
+    fn wiring_matches_the_detected_environment() {
+        for first_output_seen in [false, true] {
+            assert_eq!(
+                read_deadline(first_output_seen, REQUEST_TIMEOUT),
+                read_deadline_for(first_output_seen, REQUEST_TIMEOUT, coverage_instrumented()),
+                "read_deadline must be read_deadline_for under the detected environment",
+            );
+        }
     }
 }
