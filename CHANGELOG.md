@@ -42,6 +42,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: `rimap_config::validate::ValidatedAccountConfig` and
+  `ValidatedMultiConfig` are now `#[non_exhaustive]` (#707).** These are the
+  two `pub` structs the validation pipeline outputs, and both are still
+  growing: #632 broke them one field ago by adding `account_written_tools`.
+  Marking them makes a future field additive. Sibling of #665, which applied
+  the same policy to `rimap_config::model`.
+
+  Downstream impact: the struct literal is no longer available outside the
+  crate, and **that includes functional-update syntax** — `..Default::default()`
+  is still a struct expression, so rustc rejects it too (E0639). Neither type
+  gains a `Default`: in production a validated config is obtainable only from
+  `validate_multi` / `validate_legacy_as_multi` / `load_and_validate`, which is
+  what makes "validated" mean something, and a `Default` would mint the
+  unvalidated state those entry points exist to reject. Adjust a value from
+  one of those entry points by field assignment; pattern matches need a
+  trailing `..`.
+
+  For test code, the `test-support` feature adds
+  `ValidatedAccountConfig::new_for_tests(id, imap)` and
+  `ValidatedMultiConfig::new_for_tests(audit, attachments)` — each takes the
+  fields with no meaningful default and fills the rest with the value the
+  validator resolves for an omitted key, leaving the remainder to field
+  assignment. They sit behind the same gate as `validate_multi_allowing_empty`
+  so the production surface keeps offering exactly one way in.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after

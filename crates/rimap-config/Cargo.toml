@@ -46,5 +46,11 @@ tracing = { workspace = true }
 dbus-secret-service = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Self dev-dep enables `test-support` unconditionally for this crate's own
+# integration tests, so `tests/non_exhaustive_validate.rs` sees the fixture
+# constructors without `cargo test -p rimap-config --features test-support`.
+# Path-only (no version): cargo drops path-only dev-deps from the published
+# manifest, so `cargo publish` verify never resolves a not-yet-published self.
+rimap-config = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
 temp-env = { workspace = true }

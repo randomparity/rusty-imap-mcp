@@ -764,14 +764,12 @@ mod resolve_download_dir_tests {
     use super::resolve_download_dir_multi;
     use rimap_config::model::{AttachmentsConfig, AuditConfig};
     use rimap_config::validate::ValidatedMultiConfig;
-    use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn minimal_multi(download_dir: String) -> ValidatedMultiConfig {
-        ValidatedMultiConfig {
-            accounts: BTreeMap::new(),
-            audit: AuditConfig {
+        ValidatedMultiConfig::new_for_tests(
+            AuditConfig {
                 path: PathBuf::from("/tmp/unused-audit.log"),
                 rotate_bytes: 10_485_760,
                 rotate_keep: 5,
@@ -780,8 +778,8 @@ mod resolve_download_dir_tests {
                 fail_open: false,
                 allowed_base_dir: None,
             },
-            attachments: AttachmentsConfig { download_dir },
-        }
+            AttachmentsConfig { download_dir },
+        )
     }
 
     #[test]
