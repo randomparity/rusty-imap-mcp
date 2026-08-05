@@ -11,16 +11,12 @@ use rimap_audit::{ProcessId, Seq, Timestamp};
 use tempfile::TempDir;
 
 fn make_record(seq: u64) -> AuditRecord {
-    AuditRecord {
-        seq: Seq(seq),
-        ts: Timestamp::now(),
-        process_id: ProcessId::new_now(),
-        payload: Payload::ProcessEnd(ProcessEnd {
-            reason: ProcessEndReason::Eof,
-            total_tool_calls: seq,
-            records_lost: 0,
-        }),
-    }
+    AuditRecord::new(
+        Seq(seq),
+        Timestamp::now(),
+        ProcessId::new_now(),
+        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, seq, 0)),
+    )
 }
 
 fn lock_parent_readonly(parent: &std::path::Path) {

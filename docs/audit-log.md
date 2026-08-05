@@ -24,6 +24,69 @@ One JSON object per line (JSONL). Every record shares a common header:
 | `process_id` | ULID generated at process start, stable for the process lifetime |
 | `kind` | Record type discriminator |
 
+## Compatibility contract
+
+This is the normative statement of what a reader of an audit file may assume,
+and of what "additive" means for a record. It exists because the record types
+are `#[non_exhaustive]` (#706): adding a field to one is no longer a breaking
+change *to the Rust API*, and that must not be mistaken for a licence to change
+the file.
+
+**What a reader may assume.**
+
+- Every line is one complete JSON object, and `seq`, `ts`, `process_id`, and
+  `kind` are present on all of them.
+- A field it does not recognize is a field added after it was written. Ignore
+  it; do not treat the line as corrupt.
+- A `kind` it does not recognize is a record type added after it was written.
+  It should skip the line rather than treat the file as corrupt.
+
+  **The bundled reader does not yet do this.** `stream_records` — and so
+  `rimap audit merge` — aborts with a read error on any non-trailing line it
+  cannot parse, and an unrecognized `kind` is a parse failure, because the
+  record enum has no catch-all variant. So a `v0.2` binary reading a file that
+  a later version wrote stops at the first unknown record instead of skipping
+  it. Only a malformed *trailing* line is tolerated, which covers a torn write
+  at the tail, not forward compatibility. Tracked in #717. Until it lands,
+  treat "skip unknown kinds" as the contract third-party readers should
+  implement and as a known gap in this one, and do not merge files written by
+  a newer version than the binary doing the merging.
+- A field it expects and does not find was added after *that line* was written.
+  Every such field has a documented read-as value in the tables below --
+  `records_lost` reads as `0`, `tool_matrix` as empty -- and a reader that
+  substitutes it gets the same answer the writer would have given.
+- Fields it does find keep their spelling, their type, and their position on
+  the line. Records already on disk are never rewritten in place.
+
+**What counts as an additive change.** A field addition is additive only if
+*both* halves hold, and a change that satisfies one without the other is a
+format break wearing an additive label:
+
+1. **The Rust half.** The struct is `#[non_exhaustive]`, so no downstream crate
+   named the full field set in a struct expression and none has to be
+   recompiled against a wider one. This is what #706 bought.
+2. **The on-disk half.** The new field carries `#[serde(default)]`, so lines
+   written before it parse unchanged; and it carries
+   `#[serde(skip_serializing_if = ...)]` unless it is genuinely present on
+   every record from now on, so lines that do not populate it keep the bytes
+   they had. A reader of the old shape must stay correct without being taught
+   about the field.
+
+Anything else -- renaming a field, changing its type or its serialized
+spelling, reordering fields, removing a field, or repurposing an existing
+`kind` -- is a **format break**. It requires a new `kind` or an explicitly
+versioned file, not a field edit, because the files it invalidates are already
+written and are append-only by design.
+
+`crates/rimap-audit/tests/non_exhaustive_record.rs` holds this contract as
+byte-exact golden lines. A diff there means the format moved.
+
+**One known asymmetry.** A record whose `ts` lands exactly on a second boundary
+is rewritten as `12:00:00Z` rather than `12:00:00.000Z` when it passes through
+[`audit merge`](#audit-merge-subcommand): the RFC 3339 formatter elides a zero
+subsecond. Both forms parse to the same instant, and the value is stable under
+further rewrites. No other field is altered by a merge.
+
 ## Record types
 
 ### `process_start`

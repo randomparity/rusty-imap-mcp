@@ -149,13 +149,8 @@ impl ImapMcpServer {
         let join = self
             .drain
             .spawn_blocking_tracked(move || {
-                audit.log_tool_start(ToolStartInputs {
-                    tool,
-                    account,
-                    posture_effective,
-                    arguments_redacted: redacted,
-                    arguments_hash_sha256: hash,
-                })
+                let inputs = ToolStartInputs::new(tool, account, posture_effective, redacted, hash);
+                audit.log_tool_start(inputs)
             })
             .await;
         match join {
@@ -192,20 +187,17 @@ impl ImapMcpServer {
         // The provenance ring buffer is not yet wired for multi-account.
         // Record an empty snapshot with the window placeholder until a
         // per-account buffer lands.
-        let provenance = Provenance {
-            window_seconds: 60,
-            message_ids_recently_read: Vec::new(),
-        };
-        let inputs = rimap_audit::ToolEndInputs {
+        let provenance = Provenance::new(60, Vec::new());
+        let mut inputs = rimap_audit::ToolEndInputs::new(
             start_seq,
             tool,
-            account,
-            status: outcome.status,
-            error_code: outcome.error_code,
+            outcome.status,
+            outcome.error_code,
             duration_ms,
-            result_summary: outcome.result_summary,
             provenance,
-        };
+        );
+        inputs.account = account;
+        inputs.result_summary = outcome.result_summary;
         let join = self
             .drain
             .spawn_blocking_tracked(move || audit.log_tool_end(inputs))
@@ -278,19 +270,15 @@ impl Drop for AuditEnvelopeGuard {
         // ToolName is Copy; capture it for the warning log before try_send
         // consumes the payload.
         let tool = inner.tool;
-        let cancellation = ToolEndInputs {
-            start_seq: inner.start_seq,
+        let mut cancellation = ToolEndInputs::new(
+            inner.start_seq,
             tool,
-            account: inner.account,
-            status: rimap_audit::record::ToolStatus::Cancelled,
-            error_code: Some(rimap_core::ErrorCode::Cancelled),
+            rimap_audit::record::ToolStatus::Cancelled,
+            Some(rimap_core::ErrorCode::Cancelled),
             duration_ms,
-            result_summary: rimap_audit::record::ResultSummary::default(),
-            provenance: Provenance {
-                window_seconds: 60,
-                message_ids_recently_read: Vec::new(),
-            },
-        };
+            Provenance::new(60, Vec::new()),
+        );
+        cancellation.account = inner.account;
         if let Err(e) = inner.sender.try_send(cancellation) {
             tracing::warn!(
                 error = %e,
@@ -346,15 +334,14 @@ mod tests {
         let writer = test_writer(path.clone());
 
         // Prime a tool_start so the resulting tool_end references a real seq.
-        let start_seq = writer
-            .log_tool_start(ToolStartInputs {
-                tool: ToolName::Search,
-                account: Some("test".to_string()),
-                posture_effective: Some(rimap_core::Posture::Readonly),
-                arguments_redacted: serde_json::Value::Object(serde_json::Map::new()),
-                arguments_hash_sha256: "0".repeat(64),
-            })
-            .unwrap();
+        let inputs = ToolStartInputs::new(
+            ToolName::Search,
+            Some("test".to_string()),
+            Some(rimap_core::Posture::Readonly),
+            serde_json::Value::Object(serde_json::Map::new()),
+            "0".repeat(64),
+        );
+        let start_seq = writer.log_tool_start(inputs).unwrap();
 
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());

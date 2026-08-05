@@ -1,6 +1,14 @@
 //! Strongly-typed identifiers and timestamp newtype used throughout the
 //! audit record schema. Keeping these distinct from raw integers and strings
 //! prevents accidental argument-swap bugs when building records by hand.
+//!
+//! Unlike the payload structs in [`super`], these are deliberately **not**
+//! `#[non_exhaustive]`. Each is a `#[serde(transparent)]` newtype whose single
+//! field *is* its identity: there is no second field to add later, so the
+//! attribute would guard against a change that cannot happen while costing
+//! every caller the ability to write `Seq(1)`. A second field here would be a
+//! redesign of the on-disk header, not an additive change, and would go
+//! through the same review either way.
 
 use core::fmt;
 

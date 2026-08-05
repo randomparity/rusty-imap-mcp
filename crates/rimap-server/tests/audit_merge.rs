@@ -14,16 +14,12 @@ use rimap_audit::{
 use tempfile::TempDir;
 
 fn record(seq: u64, pid: ProcessId) -> AuditRecord {
-    AuditRecord {
-        seq: Seq(seq),
-        ts: Timestamp::now(),
-        process_id: pid,
-        payload: Payload::ProcessEnd(ProcessEnd {
-            reason: ProcessEndReason::Eof,
-            total_tool_calls: seq,
-            records_lost: 0,
-        }),
-    }
+    AuditRecord::new(
+        Seq(seq),
+        Timestamp::now(),
+        pid,
+        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, seq, 0)),
+    )
 }
 
 #[test]
@@ -46,19 +42,16 @@ fn audit_merge_round_trips_synthetic_log() {
         // Seq 1: process_start record, as required by the audit format.
         let trailing = read_trailing_state(&path).unwrap();
         let inode = current_inode(&path).unwrap();
-        writer
-            .log_process_start(ProcessStartInputs {
-                version: "0.0.0-test".to_string(),
-                git_commit: String::new(),
-                posture: Some(rimap_core::Posture::Readonly),
-                accounts: None,
-                tool_matrix: Vec::new(),
-                config_path: config_path.clone(),
-                config_hash_sha256: String::new(),
-                trailing,
-                current_inode: inode,
-            })
-            .unwrap();
+        let mut start = ProcessStartInputs::new(
+            "0.0.0-test".to_string(),
+            String::new(),
+            config_path.clone(),
+            String::new(),
+            trailing,
+            inode,
+        );
+        start.posture = Some(rimap_core::Posture::Readonly);
+        writer.log_process_start(start).unwrap();
         // Seqs 2–8: synthetic process_end records.
         let pid = ProcessId::new_now();
         for seq in 2_u64..=8 {
