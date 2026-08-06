@@ -1,7 +1,7 @@
 //! UID MOVE with COPY+DELETE fallback for servers without the MOVE
 //! extension (RFC 6851).
 
-use crate::connection::{ImapSession, ServerCapabilities};
+use crate::connection::{ImapSession, SessionEntry};
 use crate::error::ImapError;
 use crate::ops::store;
 use crate::types::{Flag, FlagAction, MoveResult, Uid};
@@ -39,6 +39,10 @@ pub struct MoveOutcome {
 
 /// Move `uids` from the currently selected folder to `dest_folder`.
 ///
+/// Takes the whole [`SessionEntry`] rather than a session and an advertisement,
+/// so the pair this branches on is the one that will serve the move and a
+/// caller has nowhere to pass a separately-read advertisement (#704).
+///
 /// When the serving session advertised MOVE, UID MOVE is used directly. A BAD
 /// response in this case is propagated as an error (the server lied about its
 /// capabilities).
@@ -46,7 +50,8 @@ pub struct MoveOutcome {
 /// When it advertised no MOVE, the COPY+DELETE fallback is used immediately
 /// without attempting UID MOVE.
 ///
-/// When `capabilities` is [`ServerCapabilities::Unknown`] the move is refused
+/// When the entry's advertisement is
+/// [`crate::connection::ServerCapabilities::Unknown`] the move is refused
 /// rather than served, because the fallback it would otherwise pick can issue
 /// a folder-wide EXPUNGE — see the refusal below and #649.
 ///
@@ -58,17 +63,16 @@ pub struct MoveOutcome {
 /// # Errors
 ///
 /// Returns `ImapError::BatchTooLarge` if `uids.len() > MAX_BATCH`.
-/// Returns `ImapError::CapabilitiesUnknown` if `capabilities` is
-/// [`ServerCapabilities::Unknown`].
+/// Returns `ImapError::CapabilitiesUnknown` if the entry's advertisement is
+/// [`crate::connection::ServerCapabilities::Unknown`].
 /// Returns `ImapError::UidValidityChanged` on a UIDVALIDITY mismatch.
 /// Propagates connection-lost or protocol errors from async-imap.
 pub(crate) async fn move_messages(
-    session: &mut ImapSession,
+    entry: &mut SessionEntry,
     src_folder: &str,
     dest_folder: &str,
     uids: &[Uid],
     expected_source_uidvalidity: Option<u32>,
-    capabilities: ServerCapabilities,
 ) -> Result<MoveOutcome, ImapError> {
     crate::ops::folders::validate_server_folder_name(dest_folder)?;
     if uids.len() > MAX_BATCH {
@@ -93,7 +97,13 @@ pub(crate) async fn move_messages(
     // gets a refusal, not that branch by default (#649). Ahead of the STATUS
     // probe and every mutation, so a refused move leaves the mailbox as it
     // found it.
-    let (has_move, has_uidplus) = capabilities.require_known("move")?;
+    let (has_move, has_uidplus) = entry.capabilities().require_known("move")?;
+
+    // Borrowed after the read above, not before: this `&mut` lives to the end
+    // of the function, so taking it first would make the `entry.capabilities()`
+    // read a borrow error. The order the refusal needs is the only one that
+    // compiles.
+    let session = entry.session();
 
     // UIDVALIDITY guard: STATUS does not require SELECT and does not
     // perturb the session's currently selected mailbox.

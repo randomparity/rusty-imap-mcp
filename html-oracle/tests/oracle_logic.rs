@@ -115,3 +115,38 @@ fn empty_corpus_plumbing_proof_greens() {
         serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
     assert_eq!(json["corpus"]["total"], 0);
 }
+
+/// A run that loads nothing at all must fail, not green.
+///
+/// `corpus::load` treats a missing input directory as "not an error", so a
+/// refactor that moves or renames `fuzz/corpus/content_html` and
+/// `tests/injection-corpus` would leave the oracle comparing zero inputs and
+/// exiting 0. That was survivable while the oracle ran only in the nightly
+/// behind a `--corpus-min-compared` floor; the PR gate added in #699 carries no
+/// floor, so the inert check is the only thing standing between this crate and
+/// exactly the vacuously-green check the gate exists to abolish.
+#[test]
+fn empty_repo_root_fails_rather_than_greening() {
+    let tmp = tempfile::tempdir().unwrap(); // deliberately *not* seeded
+    // `--report` into the tempdir, like every test above: the default path is
+    // `html-oracle/report.json` in the source tree, which would clobber a real
+    // report and, in CI, leave an all-zeros one for the failure-upload step.
+    let out = Command::new(env!("CARGO_BIN_EXE_html-oracle"))
+        .args(["--repo-root"])
+        .arg(tmp.path())
+        .args(["--report"])
+        .arg(tmp.path().join("report.json"))
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a run with zero comparable inputs must fail, not green"
+    );
+    // Pin *why* it failed — `!success()` alone would also pass for a report
+    // write error or an allowlist parse error, neither of which is this test.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("oracle inert"),
+        "expected the inert diagnostic, got: {stderr}"
+    );
+}

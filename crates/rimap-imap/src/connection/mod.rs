@@ -183,10 +183,15 @@ pub struct Connection {
 /// discarded session, and a connect that logged in and then failed on its own
 /// audit write, which no reset covered at all.
 ///
-/// What this does *not* buy is a compile error for reading
-/// [`Connection::capabilities`] outside a command and passing the result in.
-/// See that method.
-pub(super) struct SessionEntry {
+/// Pairing them also removes the hoist, because an op that branches on a
+/// capability takes the entry rather than a [`ServerCapabilities`] (#704).
+/// There is no signature in the crate a separately-read advertisement fits,
+/// so a caller cannot read one outside a command and pass it into one.
+///
+/// `pub(crate)` rather than `pub(super)` for that reason: `ops::` has to name
+/// this type to take it, which couples those two modules the way `ImapSession`
+/// already does. It stays crate-private — nothing here is exported.
+pub(crate) struct SessionEntry {
     session: ImapSession,
     capabilities: ServerCapabilities,
 }
@@ -195,6 +200,10 @@ impl SessionEntry {
     /// Pair a freshly logged-in session with the advertisement it answered
     /// with. `imap_login` is the only caller, and it is the only place a
     /// [`ServerCapabilities`] value is produced.
+    ///
+    /// The one signature in the crate that takes a free-standing
+    /// [`ServerCapabilities`], because it is where the pair is formed. Every
+    /// later reader takes the entry instead.
     pub(super) fn new(session: ImapSession, capabilities: ServerCapabilities) -> Self {
         Self {
             session,
@@ -203,13 +212,13 @@ impl SessionEntry {
     }
 
     /// The session itself, for the command about to run against it.
-    pub(super) fn session(&mut self) -> &mut ImapSession {
+    pub(crate) fn session(&mut self) -> &mut ImapSession {
         &mut self.session
     }
 
     /// What [`Self::session`] advertised at login. Read from the same value,
     /// so it cannot describe a different session.
-    pub(super) fn capabilities(&self) -> ServerCapabilities {
+    pub(crate) fn capabilities(&self) -> ServerCapabilities {
         self.capabilities
     }
 }
@@ -562,14 +571,15 @@ impl Connection {
     /// `dispatch::delete_message` are the only two that branch on a capability
     /// and both do exactly that.
     ///
-    /// Reading this and passing the result into a command still compiles: the
-    /// pair travels with the session, but [`ServerCapabilities`] is a plain
-    /// `Copy` value once extracted, and `ops::move_message::move_messages` and
-    /// `ops::delete::delete_message` take one as a parameter. So the value read
-    /// here can go stale in the usual way — the command lazy-connects, and the
-    /// connect it triggers replaces the session and its advertisement in
-    /// between. What #652 removed is the *inconsistent* pair; the *hoist* is
-    /// still convention.
+    /// Reading this and passing the result into a command no longer compiles
+    /// (#704). `ops::move_message::move_messages` and
+    /// `ops::delete::delete_message` take the `&mut SessionEntry` and read the
+    /// advertisement off it themselves, so there is no parameter this value
+    /// fits. That closes the stale read the pairing alone did not: the command
+    /// lazy-connects, and the connect it triggers can replace the session and
+    /// its advertisement between the read here and the branch there. #652
+    /// removed the *inconsistent* pair; the hoist is now a type error rather
+    /// than a convention.
     ///
     /// ## Do not call this from inside a `with_session` body
     ///

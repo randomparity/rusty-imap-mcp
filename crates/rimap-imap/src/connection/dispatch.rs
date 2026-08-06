@@ -494,14 +494,12 @@ impl Connection {
         self.with_session("move", Idempotency::Mutating, || {
             async |entry| {
                 crate::ops::folders::select(entry.session(), source_folder, false).await?;
-                let capabilities = entry.capabilities();
                 crate::ops::move_message::move_messages(
-                    entry.session(),
+                    entry,
                     source_folder,
                     dest_folder,
                     uids,
                     expected_source_uidvalidity,
-                    capabilities,
                 )
                 .await
             }
@@ -573,15 +571,8 @@ impl Connection {
                 let selected = crate::ops::folders::select(entry.session(), folder, false).await?;
                 let uid_validity = selected.uid_validity;
                 crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
-                let capabilities = entry.capabilities();
-                let result = crate::ops::delete::delete_message(
-                    entry.session(),
-                    uid,
-                    folder,
-                    trash_folder,
-                    capabilities,
-                )
-                .await?;
+                let result =
+                    crate::ops::delete::delete_message(entry, uid, folder, trash_folder).await?;
                 Ok((result, uid_validity))
             }
         })

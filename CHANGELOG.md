@@ -27,16 +27,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The number of tool dispatches that outlived the shutdown drain now reaches
-  the audit trail, as `process_end.undrained_dispatches`. It used to go to a
-  `tracing::warn!` and nowhere else — and stderr is the channel an MCP client
-  routinely discards, so a reader holding only the audit file could not tell a
-  run that drained cleanly from one that left dispatches running past
-  `process_end`. A non-zero count is the record stating that terminality is
-  *unverified* for its own run — it measures an exceeded bound, not a sighting
-  of a record following `process_end`. Records written before this field parse
-  unchanged, and a clean run states its zero explicitly rather than omitting
-  it. See #680, #645 / ADR-0015, and `docs/audit-log.md`.
+- The registrations still outstanding when the shutdown drain's budget expired
+  now reach the audit trail, as `process_end.undrained_dispatches`. They used
+  to go to a `tracing::warn!` and nowhere else — and stderr is the channel an
+  MCP client routinely discards, so a reader holding only the audit file could
+  not tell a run that drained cleanly from one that left dispatches running
+  past `process_end`. A non-zero count is the record stating that terminality
+  is *unverified* for its own run — it measures an exceeded bound, not a
+  sighting of a record following `process_end`. Records written before this
+  field parse unchanged, and a clean run states its zero explicitly rather
+  than omitting it. See #680, #645 / ADR-0015, and `docs/audit-log.md`.
+- The shutdown-drain warning on stderr no longer calls its count a number of
+  tool dispatches. A registration is a tool dispatch *or* an audit write one
+  of them offloaded, so the count bounds the dispatches involved from above
+  rather than equalling them — an operator alerting on the value, or comparing
+  it against `total_tool_calls`, read it as more dispatches than were actually
+  cut. The warning now reads `outstanding registrations outlived the shutdown
+  drain` and states the bound; alerting keyed on the old text needs re-keying.
+  No behaviour change, and `process_end.undrained_dispatches` is unaffected.
+  See #691 and `docs/audit-log.md`.
 - `process_end` is now the terminal audit record of its process. The server
   cancels and drains in-flight tool dispatches before writing it, so a connect
   the shutdown cuts records its `auth` entry (`ERR_CANCELLED`) *before*

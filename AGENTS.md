@@ -193,13 +193,40 @@ silent-drop bug). Run locally:
 cargo run --manifest-path html-oracle/Cargo.toml -- --repo-root .
 ```
 
-Exits non-zero only on a HARD (silent-drop) divergence; writes
+Exits non-zero on a HARD (silent-drop) divergence, and on an inert run — zero
+comparable inputs fails rather than greening (#699). Writes
 `html-oracle/report.json`. Warning-explained (SOFT) drops stay green and land in
-the report for triage. Being excluded, it never touches the PR gates
-(`clippy --all-features`, `test-msrv`, `cargo-deny`); the nightly workflow
-(`.github/workflows/nightly-html-oracle.yml`) runs it and a scoped `cargo deny`
-on its own graph. Spec:
-`docs/superpowers/specs/2026-07-10-issue-529-differential-html-oracle-design.md`.
+the report for triage.
+
+Being excluded, the crate is invisible to `cargo fmt --all`,
+`clippy --workspace` and the root `cargo-deny`, so `ci.yml` carries a dedicated
+`html-oracle checks` job (#699) that runs `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, the
+oracle over the in-repo fixtures, and a `deny.toml`-scoped `cargo deny` — all
+against `html-oracle`'s own manifest and lockfile, on every PR. `test-msrv` is
+the one gap that stays open, and deliberately: the crate pins
+`rust-version = "1.94.0"`, well above the workspace MSRV.
+
+The job is not `paths:`-filtered, because a path-filtered required check never
+reports on PRs that miss those paths and wedges them. Corpus scale stays the
+nightly's job: the PR gate uses the in-repo fixtures only, while the nightly
+workflow (`.github/workflows/nightly-html-oracle.yml`) runs the oracle against
+the private corpus with the comparison floor.
+
+Two things that bite when the job goes red:
+
+- **`--locked` failure after a workspace dependency bump.** The oracle
+  path-depends on `rimap-content`/`rimap-core`, whose requirements come from the
+  root `[workspace.dependencies]`, so a root bump across a semver boundary
+  leaves `html-oracle/Cargo.lock` unsatisfiable. `check-fuzz-lock-parity` does
+  not cover this lockfile. Fix with `just realign-oracle-lock`.
+- **CI sets `RUSTFLAGS: -D warnings` workflow-wide**, and the path deps are not
+  `--cap-lints`'d. Prefix the local command with `RUSTFLAGS="-D warnings"` to
+  reproduce a warning-only failure.
+
+Spec:
+`docs/superpowers/specs/2026-07-10-issue-529-differential-html-oracle-design.md`
+(its "No PR-gating" non-goal is superseded — see the amendment at its end).
 
 The nightly also checks out the private `rusty-imap-mcp-corpus` repo at a pinned
 SHA into `corpus/` and runs with `--repo-root . --corpus-root corpus` (issue
@@ -339,12 +366,18 @@ are the ones that trip people up or aren't obvious from the lint set.
   underlying issue — do not `--no-verify`. Do not `--amend` commits that have
   been pushed.
 - **PR workflow:** feature branch -> push -> PR against `main`. `main` requires
-  thirteen status checks, strict (the branch must be up to date before merging):
-  `rustfmt`, `clippy`, `check (macOS)`, `test (stable)`, `test (MSRV 1.88.0)`,
-  `cargo-deny`, `zizmor self-check`, `SonarQube`, `mcp-conformance (Node)`,
-  `publish checks`, `tool-schema drift`, `tools-doc drift`, `semver-checks`. A
-  separate release workflow triggers on `v*` tags and builds binaries for five
-  platform targets.
+  thirteen status checks today, strict (the branch must be up to date before
+  merging): `rustfmt`, `clippy`, `check (macOS)`, `test (stable)`,
+  `test (MSRV 1.88.0)`, `cargo-deny`, `zizmor self-check`, `SonarQube`,
+  `mcp-conformance (Node)`, `publish checks`, `tool-schema drift`,
+  `tools-doc drift`, `semver-checks` — fourteen once `html-oracle checks` is
+  added. A separate release workflow triggers on `v*` tags and builds binaries
+  for five platform targets.
+  - `html-oracle checks` landed with #699 but is added to protection as a
+    separate operator action, so the contexts list still reads thirteen until
+    someone does it. Add the **display name** `html-oracle checks`, not the job
+    key `html-oracle`, which is `nightly-html-oracle.yml`'s check run and would
+    never report on a PR.
 - **A CI job outside that list runs without enforcing.** It goes red and the PR
   merges anyway, so adding a gate to an unrequired job silently disarms it
   (issue #613). Before wiring a new check into a job, confirm the job's

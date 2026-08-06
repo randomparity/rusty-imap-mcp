@@ -147,8 +147,10 @@ async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
         tracing::warn!(
             undrained,
             budget = ?DISPATCH_DRAIN_BUDGET,
-            "tool dispatches outlived the shutdown drain; any audit record they \
-             still write is sequenced after process_end or lost",
+            "outstanding registrations outlived the shutdown drain; the count \
+             is an upper bound on the tool dispatches involved, and any audit \
+             record those dispatches still write is sequenced after \
+             process_end or lost",
         );
     }
     // Lossless on every supported target: `usize` is at most 64 bits.

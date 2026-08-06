@@ -397,6 +397,38 @@ check-fuzz-lock-parity:
 realign-fuzz-locks:
     ./scripts/check-fuzz-lock-parity.sh --fix
 
+# Restore html-oracle/Cargo.lock after a workspace dependency bump. The oracle
+# is workspace-excluded but path-depends on rimap-content/rimap-core, whose
+# requirements come from the root `[workspace.dependencies]` — so a root bump
+# across a semver boundary leaves the oracle lockfile unsatisfiable and the
+# `html-oracle checks` CI job fails on `--locked` with a bare cargo error.
+# `check-fuzz-lock-parity` deliberately does not cover this lockfile (the
+# oracle's own deps are meant to float), so this is the manual fix path (#699).
+# `-w` is the minimal form: it relocks the path deps and what they pulled in,
+# not the oracle's own registry pins. scripts/post-release-bump.sh does the
+# same re-resolution for the version-bump case; keep the two in step.
+realign-oracle-lock:
+    cargo update --manifest-path html-oracle/Cargo.toml --workspace
+    cargo check --locked --all-targets --manifest-path html-oracle/Cargo.toml
+
+# The workspace-excluded html-oracle crate (#529, #699). `fmt-check`, `lint`,
+# `test` and `deny` above are all `--workspace`/`--all`, and none descends into
+# an excluded member, so without these two recipes `just ci` would go green
+# while the required `html-oracle checks` job goes red — breaking this file's
+# golden rule. The CI job runs exactly these, so the two cannot drift.
+oracle-checks:
+    cargo fmt --manifest-path html-oracle/Cargo.toml -- --check
+    cargo clippy --locked --all-targets --manifest-path html-oracle/Cargo.toml -- -D warnings
+    cargo test --locked --all-targets --manifest-path html-oracle/Cargo.toml
+    cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root .
+
+# Scoped to the oracle's own dependency graph via html-oracle/deny.toml, which
+# the root `deny` recipe cannot see. Separate from `oracle-checks` so CI can run
+# it even when a build step above failed — a compile break must not mask an
+# advisory on the dependency-bump PRs this gate exists for.
+oracle-deny:
+    cargo deny --locked --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
+
 # Unit-test check-fuzz-lock-parity.sh against synthetic lockfiles (containment
 # vs. equality, drift in both directions, malformed input). No cargo or repo
 # state. Mirrored in the `publish-checks` CI job.
@@ -445,7 +477,7 @@ test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer test-prune-containers semver-checks
+ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer test-prune-containers semver-checks oracle-checks oracle-deny
     typos
 
 # Re-run pre-commit hooks across all files.
