@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mail_parser::{MessageParser, PartType};
-use rimap_audit::{AuditOptions, AuditWriter};
+use rimap_audit::{AuditOptions, AuditWriter, Seq};
 use rimap_authz::DispatchGuard;
 use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
@@ -93,8 +93,11 @@ fn build_server_real(
     let audit_dir = TempDir::new().expect("audit tempdir");
     let download_dir = TempDir::new().expect("download tempdir");
 
-    let audit = AuditWriter::open(&AuditOptions::new(audit_dir.path().join("audit.jsonl")))
-        .expect("audit open");
+    let audit = AuditWriter::open(&AuditOptions::new(
+        audit_dir.path().join("audit.jsonl"),
+        Seq::FIRST,
+    ))
+    .expect("audit open");
 
     let account_cfg = test_account_config(dovecot);
     let imap = test_connection(dovecot, &audit);

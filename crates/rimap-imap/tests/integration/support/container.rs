@@ -608,7 +608,7 @@ fn uuid_like() -> String {
     format!("{nanos:x}-{pid:x}-{n:x}")
 }
 
-use rimap_audit::{AuditOptions, AuditWriter};
+use rimap_audit::{AuditOptions, AuditWriter, Seq};
 use rimap_config::credential::{CredentialStore, KeyringCredentialResolver};
 use rimap_core::auth_sink::AuthEventSink;
 use rimap_core::credential::CredentialResolver;
@@ -657,7 +657,8 @@ impl ConnectedHarness {
         let harness = DovecotHarness::try_start()?;
         let audit_dir = TempDir::new().expect("tempdir");
         let audit_path = audit_dir.path().join("audit.jsonl");
-        let audit = AuditWriter::open(&AuditOptions::new(audit_path)).expect("audit open");
+        let audit =
+            AuditWriter::open(&AuditOptions::new(audit_path, Seq::FIRST)).expect("audit open");
 
         let pinned = match pin_with {
             PinChoice::Correct => Some(harness.pinned_fingerprint()),

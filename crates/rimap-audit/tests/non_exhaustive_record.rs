@@ -47,7 +47,8 @@
 //! just as well without the attribute, so it documents the idiom but enforces
 //! nothing, while a `compile_fail` doctest fails loudly the moment the
 //! attribute is dropped -- see `record/mod.rs` for the established shape.
-//! This applies to the reader-summary struct #717 introduces.
+//! #717 is the next change due to add public reader surface; if what it adds
+//! is a struct, this is the rule it is born under.
 //!
 //! Sibling of `rimap-config`'s `non_exhaustive_model.rs` (#665) and
 //! `non_exhaustive_validate.rs` (#707).
@@ -343,8 +344,11 @@ fn process_start_multi_account_line_is_byte_exact() {
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("audit.jsonl");
-    let writer = rimap_audit::AuditWriter::open(&rimap_audit::AuditOptions::new(path.clone()))
-        .expect("writer opens");
+    let writer = rimap_audit::AuditWriter::open(&rimap_audit::AuditOptions::new(
+        path.clone(),
+        rimap_audit::Seq::FIRST,
+    ))
+    .expect("writer opens");
     writer
         .log_process_start(inputs)
         .expect("process_start write succeeds");
@@ -420,7 +424,8 @@ fn process_start_inputs_map_onto_the_fields_they_name() {
     let path = dir.path().join("audit.jsonl");
 
     let trailing = read_trailing_state(&path).expect("empty file has trailing state");
-    let writer = AuditWriter::open(&AuditOptions::new(path.clone())).expect("writer opens");
+    let writer =
+        AuditWriter::open(&AuditOptions::new(path.clone(), Seq::FIRST)).expect("writer opens");
     let inode = current_inode(&path).expect("inode readable after open");
 
     writer
@@ -505,47 +510,72 @@ fn a_line_read_off_disk_reserializes_unchanged() {
 // 3. Downstream construction contract: the non-record pub structs (#715)
 // ---------------------------------------------------------------------------
 
-/// `AuditOptions::new(path)` plus field assignment is the only downstream way
-/// to configure the writer, and what it leaves unassigned is part of the
-/// contract: a caller that names only `path` gets rotation off, no retention,
-/// fail-closed, and `Seq::FIRST`. Those are deliberately *not* the
-/// config-layer defaults (10 MiB / keep 5), so this pins the values rather
-/// than leaving "the defaults" to mean whichever layer the reader had in mind.
+/// `AuditOptions::new(path, initial_seq)` plus field assignment is the only
+/// downstream way to configure the writer, and what it leaves unassigned is
+/// part of the contract: the three policy knobs come out inert -- rotation
+/// off, no retention, fail-closed. Those are deliberately *not* the
+/// config-layer defaults (`AuditConfig::new` fills 10 MiB / keep 5), so this
+/// pins the values rather than leaving "the defaults" to mean whichever layer
+/// the reader had in mind.
+///
+/// `initial_seq` is a parameter, not a defaulted field, and the assertion at
+/// the bottom is why: `AuditWriter::open` plumbs it into the sequence counter
+/// unchecked, so a defaulted `Seq::FIRST` against a file that already has
+/// records would put duplicate `seq` values into an append-only log. This
+/// test passes a non-first value and proves it reaches the record on disk.
 ///
 /// The `AuditWriter::open` call is what makes this more than a field check:
 /// the options built here have to be accepted by the real constructor, on the
 /// real path, from outside the crate.
 #[test]
 fn audit_options_new_configures_a_working_writer() {
-    use rimap_audit::{AuditOptions, AuditWriter};
+    use rimap_audit::{AuditOptions, AuditWriter, Seq};
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("audit.jsonl");
 
-    let mut options = AuditOptions::new(path.clone());
+    let mut options = AuditOptions::new(path.clone(), Seq(41));
     assert_eq!(options.path, path);
     assert_eq!(options.rotate_bytes, 0, "rotation is off unless asked for");
     assert_eq!(options.rotate_keep, 0);
     assert_eq!(options.retention_seconds, None);
     assert!(!options.fail_open, "fail-closed is the safe default");
-    assert_eq!(options.initial_seq, Seq::FIRST);
+    assert_eq!(options.initial_seq, Seq(41), "the constructor took this");
 
-    // Field assignment is the supported way to depart from those values.
-    options.rotate_bytes = 4096;
-    options.initial_seq = Seq(41);
+    // Field assignment is the supported way to depart from those values. A
+    // 200-byte threshold against ~150-byte records rotates on the second
+    // write, so the assignment is load-bearing rather than decorative.
+    options.rotate_bytes = 200;
 
     let writer = AuditWriter::open(&options).expect("writer opens");
-    writer
-        .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0))
-        .expect("process_end write succeeds");
+    for _ in 0..3 {
+        writer
+            .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0))
+            .expect("process_end write succeeds");
+    }
     drop(writer);
 
-    let line = std::fs::read_to_string(&path).expect("audit file readable");
-    let record: AuditRecord = serde_json::from_str(line.trim_end()).expect("written line parses");
+    let rotated: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("audit dir readable")
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .filter(|name| name != "audit.jsonl")
+        .collect();
+    assert!(
+        !rotated.is_empty(),
+        "the assigned rotate_bytes must take effect; found no rotated sibling",
+    );
+
+    let first_line = std::fs::read_to_string(dir.path().join(&rotated[0]))
+        .expect("rotated sibling readable")
+        .lines()
+        .next()
+        .expect("rotated sibling has a line")
+        .to_string();
+    let record: AuditRecord = serde_json::from_str(&first_line).expect("written line parses");
     assert_eq!(
         record.seq,
         Seq(41),
-        "the assigned initial_seq must reach the file, not the default",
+        "the initial_seq passed to `new` must reach the file, not Seq::FIRST",
     );
 }
 
@@ -587,7 +617,7 @@ fn filter_default_plus_assignment_narrows_a_match() {
 /// the rest pattern below is the pinned idiom rather than incidental style.
 #[test]
 fn trailing_state_is_read_and_destructured_with_a_rest_pattern() {
-    use rimap_audit::{TrailingState, read_trailing_state};
+    use rimap_audit::{Seq, TrailingState, read_trailing_state};
 
     let dir = tempfile::TempDir::new().expect("tempdir");
     let absent = dir.path().join("never-written.jsonl");
