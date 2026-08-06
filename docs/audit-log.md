@@ -227,16 +227,18 @@ Read the exception before building on the rule.
 
 - **A dispatch that outlived the drain budget.** If a dispatch cannot be
   unwound in time -- it is inside an uncancelable blocking call, say -- the
-  server logs `tool dispatches outlived the shutdown drain` with the count and
-  proceeds. Anything those dispatches write afterwards keeps the old behaviour:
-  sequenced after `process_end`, or lost to process exit. This one is
-  **announced in the file**, as `process_end.undrained_dispatches`: a non-zero
-  count is the record saying terminality is not backed for its own run, so a
-  reader holding nothing but the audit log can tell. Treat such a run as
-  suspect and alert on it. An audit write still queued on the blocking pool
-  when the budget expires holds a registration of its own, so it is counted
-  there too rather than silently absorbed. The same count is still logged to
-  stderr, which is now the redundant copy rather than the only one.
+  server logs `outstanding registrations outlived the shutdown drain` with
+  the count and proceeds. Anything those dispatches write afterwards keeps
+  the old behaviour: sequenced after `process_end`, or lost to process exit.
+  This one is **announced in the file**, as
+  `process_end.undrained_dispatches`: a non-zero count is the record saying
+  terminality is not backed for its own run, so a reader holding nothing but
+  the audit log can tell. Treat such a run as suspect and alert on it. An
+  audit write still queued on the blocking pool when the budget expires holds
+  a registration of its own, so it is counted there too rather than silently
+  absorbed -- which is why the warning names registrations rather than
+  dispatches. The same count is still logged to stderr, which is now the
+  redundant copy rather than the only one.
 
   **The count measures an exceeded bound, not an observed disorder.** Every
   counted dispatch had already been cancelled when the count was read, and the
