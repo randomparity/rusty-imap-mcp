@@ -644,8 +644,10 @@ as a **rate**, recomputed and recorded after each wave's first nightly:
 - **Rollback:** revert the main-repo `--corpus-root` + checkout change; the
   nightly falls back to the hermetic `--repo-root .` run (the current behaviour).
   The corpus repo can be archived independently. Nothing in the shipped supply
-  chain or PR gates depends on any of it (the oracle crate is workspace-excluded
-  and nightly-only).
+  chain depends on any of it (the oracle crate is workspace-excluded). Nor do
+  the PR gates depend on *the corpus*: since #699 the oracle crate itself is a
+  required check, but that job runs `--repo-root .` only — no corpus checkout,
+  no `--corpus-min-compared` floor — so this rollback stays PR-gate-neutral.
 
 ## Follow-up issues (filed after this spec is approved)
 

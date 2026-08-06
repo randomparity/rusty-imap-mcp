@@ -115,3 +115,26 @@ fn empty_corpus_plumbing_proof_greens() {
         serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
     assert_eq!(json["corpus"]["total"], 0);
 }
+
+/// A run that loads nothing at all must fail, not green.
+///
+/// `corpus::load` treats a missing input directory as "not an error", so a
+/// refactor that moves or renames `fuzz/corpus/content_html` and
+/// `tests/injection-corpus` would leave the oracle comparing zero inputs and
+/// exiting 0. That was survivable while the oracle ran only in the nightly
+/// behind a `--corpus-min-compared` floor; the PR gate added in #699 carries no
+/// floor, so the inert check is the only thing standing between this crate and
+/// exactly the vacuously-green check the gate exists to abolish.
+#[test]
+fn empty_repo_root_fails_rather_than_greening() {
+    let tmp = tempfile::tempdir().unwrap(); // deliberately *not* seeded
+    let status = Command::new(env!("CARGO_BIN_EXE_html-oracle"))
+        .args(["--repo-root"])
+        .arg(tmp.path())
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "a run with zero comparable inputs must fail, not green"
+    );
+}
