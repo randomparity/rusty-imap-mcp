@@ -46,47 +46,76 @@ not a preference. Pushes authenticated with `GITHUB_TOKEN` do not trigger
 workflows, so a realigned head would carry no CI runs at all and the required
 checks would sit permanently "expected" — strictly worse than the red check it
 replaced. The secret is a fine-grained PAT scoped to this repository with
-`Contents: read and write`. **Without it the workflow fails on its first step
-with that instruction**; a silent skip was rejected, because a warning nobody
-reads reinstates exactly the manual step this removes.
+`Contents: read and write`, held on a `fuzz-lock-realign` **environment** rather
+than at repository scope, so it is readable by this job alone and each use lands
+in the deployment log. The environment must carry no required reviewers: an
+approval gate would reinstate the manual step. **Without the secret the workflow
+fails on its first step with that instruction**; a silent skip was rejected,
+because a warning nobody reads reinstates that step just as surely.
+
+The PAT should be issued from an account holding *write*, not admin. `main`'s
+protection has `enforce_admins` disabled, so an admin-owned PAT would, if ever
+disclosed, be equivalent to unrestricted push to `main`. Tracked separately.
 
 `pull_request_target` combined with a write credential and PR-head content is
 the most exploited pattern in GitHub Actions, so the safety argument is the
-substance of this decision, not a footnote. Four independent properties hold,
-and no single one is load-bearing alone:
+substance of this decision, not a footnote. One property carries it:
 
-1. **Fork PRs cannot reach the job.** The job condition requires
-   `github.event.pull_request.user.login == 'dependabot[bot]'` — the PR
-   *author*, fixed at open time and unmovable by a third party — **and**
-   `head.repo.full_name == github.repository`, so the head branch must live in
-   this repository. Pushing a branch here already requires write access, which
-   excludes the entire untrusted-contributor population.
+> **No file from the PR head is ever executed.**
 
-2. **`GITHUB_TOKEN` cannot push and the PAT is not in scope during the work.**
-   Workflow-level `permissions` is `{}`; the job asks for `contents: read`,
-   which is the minimum `actions/checkout` needs. The checkout runs with
-   `persist-credentials: false`, so no credential is in `.git/config` while PR
-   content is on disk. `FUZZ_LOCK_REALIGN_TOKEN` enters the environment in the
-   final step only, after every read of PR content has completed.
+The job checks out the *base* commit and runs the base branch's `justfile` and
+`scripts/` in that tree. From the head it copies in exactly the files named
+`Cargo.toml` and `Cargo.lock` — data that cargo reads, never code it runs —
+and then reads them with `cargo metadata`, which resolves and downloads but
+never compiles, so no `build.rs` and no proc-macro executes either. That was
+verified empirically against a crate whose `build.rs` writes a sentinel file:
+after `cargo metadata` the sentinel does not exist. Everything the head could
+otherwise use to obtain execution — `.cargo/config.toml` and its `build.rustc`
+hook, a build script, the `justfile`, `scripts/` — stays at the base branch's
+version, because the overlay never copies it. To push, the job restores the
+pristine head tree and writes back only the two realigned lockfiles, so it
+still executes nothing from the head.
 
-3. **The diff must be cargo manifests and lockfiles, and nothing else.** Before
-   any tool interprets PR content, the job lists the PR's files from the API
-   and fails unless every path matches `Cargo.toml` or `Cargo.lock`. This is
-   what excludes `.cargo/config.toml` — whose `build.rustc` and
-   `build.rustc-wrapper` settings are arbitrary-command hooks that `cargo`
-   honours — along with any added `build.rs`, and any edit to the `justfile` or
-   `scripts/` the job then runs. Passing this gate is what proves those files
-   are byte-identical to the base branch's.
+Every commit the job touches is pinned to `github.event.pull_request.head.sha`
+from the event payload: the diff that is inspected, the manifests that are
+copied in, and the tree that is committed are one tree. An earlier draft
+checked out that pinned SHA but read the file list from
+`GET /pulls/{n}/files`, which describes the *current* head — validating one
+tree and executing another, with a window an attacker holding push access
+could widen. Deriving both from the same pinned SHA closes it structurally.
 
-4. **`cargo metadata` does not compile.** The realign copies the workspace
-   lockfile over each fuzz lockfile and runs `cargo metadata`, which resolves
-   the graph and downloads `.crate` files to read their manifests. It runs no
-   build script and builds no proc-macro. This was verified empirically against
-   a crate whose `build.rs` writes a sentinel file — after `cargo metadata` the
-   sentinel does not exist — rather than taken from documentation.
+Three supporting controls narrow the attacker population and limit blast
+radius. None of them is load-bearing, and none would stop code execution on its
+own — that is the property above:
+
+- **Fork PRs cannot reach the job.** The condition requires
+  `github.event.pull_request.user.login == 'dependabot[bot]'` — the PR
+  *author*, fixed at open time and unmovable by a third party, and
+  unimpersonable because `[` and `]` are not legal in a GitHub login — **and**
+  `head.repo.full_name == github.repository`, so the head branch must live in
+  this repository. Pushing a branch here already requires write access.
+
+- **`GITHUB_TOKEN` cannot push.** Workflow-level `permissions` is `{}`; the job
+  asks for `contents: read`, the minimum `actions/checkout` needs. The checkout
+  runs with `persist-credentials: false`. `FUZZ_LOCK_REALIGN_TOKEN` lives on a
+  `fuzz-lock-realign` environment rather than at repository scope, enters the
+  environment in the final step only, is passed in the push URL rather than
+  written to `.git/config`, and that step disables git hooks. Note what this is
+  and is not: steps share one VM and one uid, so step-scoped `env` bounds which
+  step's environment holds the secret — it is not an isolation boundary.
+
+- **The diff must be cargo manifests and lockfiles, and nothing else.** This is
+  a *scope* guard, not the security control: it stops the workflow pushing an
+  automated commit to a PR that is not an ordinary Dependabot bump. It compares
+  against the merge base rather than the base tip, because a two-dot diff also
+  reports every commit that landed on main after the PR branched — which, with
+  `strict` branch protection here, is most PRs. An empty file list fails rather
+  than passes, the same rule `scripts/check-fuzz-lock-parity.sh` applies to
+  itself.
 
 The workflow file is read from the base branch on `pull_request_target`, so
-every inline `run:` block in it is trusted code by construction.
+every inline `run:` block in it is trusted code by construction — and, with the
+restructure above, those blocks no longer shell out to head-provided files.
 
 **Loop containment.** The push is authenticated as the PAT's owner, so the
 `synchronize` it fires carries a human actor and the third job condition,
@@ -121,11 +150,13 @@ is scoped to that single expression, and zizmor's recommended replacement,
   head would carry no CI runs.
 
 - **Split into two jobs**, one that runs `cargo metadata` with no access to the
-  secret and one that downloads the result as an artifact and pushes it.
-  Rejected: the artifact would then be the trust boundary, and validating it in
-  the pushing job reproduces the same path checks against more moving parts.
-  Step-scoped `env` already keeps the credential out of the environment that
-  processes PR content, which is the property the split would buy.
+  secret and one that downloads the result as an artifact and pushes it. This
+  is genuinely stronger than step-scoped `env`, and for an honest reason: two
+  jobs are two VMs, so the credential is out of reach of anything the first job
+  left running, which no arrangement of steps within one job can achieve.
+  Declined on complexity, not on security — and only because the property it
+  defends against, code execution from the head, is already excluded by
+  construction. It is the right next move if that ever stops being true.
 
 - **A GitHub App token** (`actions/create-github-app-token`) instead of a PAT.
   Better in principle — installation tokens are short-lived and
@@ -140,7 +171,8 @@ is scoped to that single expression, and zizmor's recommended replacement,
   required check re-run on the realigned head, because the push is not
   `GITHUB_TOKEN`-authenticated.
 
-- **The repository must carry a `FUZZ_LOCK_REALIGN_TOKEN` secret.** Until it
+- **A `fuzz-lock-realign` environment must carry a `FUZZ_LOCK_REALIGN_TOKEN`
+  secret.** Until it
   exists, every Dependabot cargo PR gains one failing non-required check whose
   message says how to create it. This is a deployment prerequisite, not a
   degraded mode.
@@ -167,8 +199,17 @@ is scoped to that single expression, and zizmor's recommended replacement,
   produce more: the run after it resolves to the same versions and pushes
   nothing.
 
-- Nothing here is exercised until a real Dependabot PR triggers it. A
-  `pull_request_target` workflow does not run from a feature branch, so the
-  mechanism (`just realign-fuzz-locks` against live drift), the linters
-  (`actionlint`, `zizmor`) and the `cargo metadata` non-execution property were
-  verified directly, and the trigger, actor gate and push were not.
+- `required_status_checks.strict` is on, and this workflow's push is what stops
+  Dependabot auto-rebasing. So a PR that falls behind now costs an
+  `@dependabot rebase` (which drops the realign commit), a re-realign and a
+  re-push — two extra CI rounds. It converges; it is not free.
+
+- Nothing here is exercised as a *workflow* until a real Dependabot PR triggers
+  it, because `pull_request_target` does not run from a feature branch. What
+  was verified directly: the whole job body, replayed step by step against
+  PR #713's live 11-package drift in a scratch clone — base checkout, merge-base
+  gate, manifest overlay, realign, parity re-check, lockfile save/restore onto
+  the pristine head tree, and the resulting commit, which passes
+  `just check-fuzz-lock-parity` on its own tree; the `cargo metadata`
+  non-execution property; and `actionlint` plus `zizmor`. What was not: the
+  trigger, the actor gate, the environment secret, and the push.
