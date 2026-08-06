@@ -195,10 +195,17 @@ cargo run --manifest-path html-oracle/Cargo.toml -- --repo-root .
 
 Exits non-zero only on a HARD (silent-drop) divergence; writes
 `html-oracle/report.json`. Warning-explained (SOFT) drops stay green and land in
-the report for triage. Being excluded, it never touches the PR gates
-(`clippy --all-features`, `test-msrv`, `cargo-deny`); the nightly workflow
-(`.github/workflows/nightly-html-oracle.yml`) runs it and a scoped `cargo deny`
-on its own graph. Spec:
+the report for triage. Being excluded, it is invisible to the workspace PR gates
+(`clippy --all-features`, `test-msrv`, `cargo-deny`), so `ci.yml` carries a
+dedicated `html-oracle checks` job (#699) that runs `cargo check --all-targets`,
+`cargo test`, the oracle itself over the in-repo fixtures, and a
+`deny.toml`-scoped `cargo deny` — all against `html-oracle`'s own manifest and
+lockfile, on every PR. Unfiltered by path, because a
+`paths:`-filtered required check never reports on PRs that miss those paths and
+wedges them. Corpus scale stays the nightly's job: the PR gate uses the in-repo
+fixtures only, while the nightly workflow
+(`.github/workflows/nightly-html-oracle.yml`) runs the oracle against the
+private corpus with the comparison floor. Spec:
 `docs/superpowers/specs/2026-07-10-issue-529-differential-html-oracle-design.md`.
 
 The nightly also checks out the private `rusty-imap-mcp-corpus` repo at a pinned
