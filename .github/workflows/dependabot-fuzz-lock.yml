@@ -1,0 +1,353 @@
+name: Dependabot fuzz-lock realign
+
+# Every Dependabot PR that moves the workspace `Cargo.lock` is born red on the
+# required `cargo-deny` check, because the two tracked fuzz lockfiles are gated
+# for parity with it (ADR-0011) and nothing updates them. This workflow runs
+# `just realign-fuzz-locks` on the PR and pushes the result, so the chore stops
+# being manual. See docs/ADR/0016-dependabot-fuzz-lock-auto-realign.md.
+#
+# `pull_request_target` + a write credential + PR-head content is the most
+# exploited pattern in GitHub Actions. The one property that contains it here:
+#
+#   NO FILE FROM THE PR HEAD IS EVER EXECUTED.
+#
+# The job checks out the *base* commit and runs the base branch's `justfile`
+# and `scripts/` against it. From the PR head it copies in exactly the files
+# named `Cargo.toml` and `Cargo.lock`, which cargo reads as data — and reads
+# with `cargo metadata`, which resolves and downloads but never compiles, so no
+# `build.rs` and no proc-macro runs either. Everything the head could use to
+# obtain execution — `.cargo/config.toml` and its `build.rustc` hook, a build
+# script, the `justfile`, `scripts/` — stays at the base branch's version
+# because it is never copied over.
+#
+# Supporting controls, none of which the above depends on:
+#   * Fork PRs cannot satisfy the job condition (see it for why).
+#   * `GITHUB_TOKEN` is scoped to `contents: read` and cannot push. The write
+#     credential is a separate PAT, in the environment of the final step only.
+#   * A PR whose diff reaches past cargo manifests is refused outright, so the
+#     workflow only ever pushes to the kind of PR it was built for.
+#
+# The workflow file itself is always read from the base branch on
+# `pull_request_target`, so every inline `run:` block below is trusted code.
+
+on:
+  # zizmor: ignore[dangerous-triggers]
+  # `pull_request` is not usable: the `GITHUB_TOKEN` issued to a run on a
+  # Dependabot-authored PR is read-only, so it cannot push the fix. Pushing
+  # with `GITHUB_TOKEN` would not work either — pushes made with it do not
+  # trigger workflows, so the realigned head would carry no CI runs at all and
+  # the required checks would sit permanently "expected". See the header above
+  # for why the elevated-token-on-untrusted-head hazard does not apply.
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'Cargo.lock'
+
+# Nothing at workflow level. The one job below asks for the read scope
+# `actions/checkout` needs and nothing more.
+permissions: {}
+
+concurrency:
+  group: fuzz-lock-realign-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # The implicit shell is `bash -e {0}` — no `pipefail`. Naming it explicitly
+    # gets `bash --noprofile --norc -eo pipefail {0}`, so a failure on the left
+    # of a pipe below is not swallowed by the exit status of the right.
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  realign:
+    name: realign fuzz lockfiles
+    # Two conditions carry the security weight, and each excludes an untrusted
+    # head on its own.
+    #
+    # `pull_request.user.login` is the PR *author*, fixed when the PR is opened.
+    # Unlike `github.actor` it does not change when a third party pushes to the
+    # branch or re-runs the workflow, so it cannot be moved by anyone else.
+    # `dependabot[bot]` is unimpersonable: `[` and `]` are not legal in a
+    # GitHub login.
+    #
+    # `head.repo.full_name == github.repository` requires the head branch to
+    # live in this repository rather than a fork — which excludes the entire
+    # untrusted-contributor population, since pushing a branch here already
+    # requires write access. A deleted fork yields `head.repo: null`, which
+    # compares false.
+    #
+    # `github.actor` carries none of that weight. Its job is to stop the
+    # workflow reacting to its own push: that push is authenticated as the
+    # PAT's owner, so the `synchronize` it triggers has a human actor and this
+    # job does not re-enter. zizmor flags it as spoofable (`bot-conditions`)
+    # and is right in general; here spoofing it can only cause the job to
+    # *run*, which still requires both conditions above. The ignore is scoped
+    # to this one expression, and zizmor's recommended replacement,
+    # `github.event.pull_request.user.login`, is already the first condition.
+    if: >-  # zizmor: ignore[bot-conditions]
+      github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.actor == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    # Scopes the PAT to this job rather than to every workflow in the
+    # repository, and puts each use in the deployment log. Do not attach
+    # required reviewers to this environment — a human approval gate would
+    # reinstate the manual step the workflow removes.
+    environment: fuzz-lock-realign
+    permissions:
+      contents: read
+    # `cargo metadata` must reach the registry, and a manifest in the PR may
+    # name a slow or unreachable git source. Fail rather than hold the
+    # concurrency group for the six-hour default.
+    timeout-minutes: 15
+    steps:
+      # First, before anything is checked out. A missing credential is a hard
+      # failure rather than a silent skip: the whole point of the workflow is
+      # that nobody has to notice the chore, and a warning nobody reads would
+      # restore exactly the manual step this removes.
+      - name: Require the realign credential
+        env:
+          REALIGN_TOKEN: ${{ secrets.FUZZ_LOCK_REALIGN_TOKEN }}
+        run: |
+          if [ -z "$REALIGN_TOKEN" ]; then
+            echo "::error::FUZZ_LOCK_REALIGN_TOKEN is not configured. This" \
+                 "workflow needs a credential that can push to branches in" \
+                 "this repository; GITHUB_TOKEN cannot be used because pushes" \
+                 "made with it do not re-trigger CI. Create a fine-grained PAT" \
+                 "scoped to this repository with Contents: read and write, and" \
+                 "store it as a secret named FUZZ_LOCK_REALIGN_TOKEN on the" \
+                 "'fuzz-lock-realign' environment. See" \
+                 "docs/ADR/0016-dependabot-fuzz-lock-auto-realign.md."
+            exit 1
+          fi
+
+      # The BASE commit — trusted code, and the tree everything below runs in.
+      # `persist-credentials: false` keeps `GITHUB_TOKEN` out of `.git/config`;
+      # the push step supplies its own credential and does not store it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          # The gate below needs the merge base of the two commits, which a
+          # shallow clone does not have.
+          fetch-depth: 0
+
+      # Fetch the head as an object, without checking it out. Everything from
+      # here on is pinned to this one SHA — the diff that is inspected, the
+      # manifests that are copied in, and the commit that is pushed are all the
+      # same tree, so there is no window in which the branch can move between
+      # what was validated and what was used.
+      #
+      # The checkout left no credential behind, so this fetch is anonymous and
+      # works because the repository is public. It fails closed if that ever
+      # changes.
+      - name: Fetch the PR head
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch --no-tags origin "$HEAD_SHA"
+
+      # A scope guard, not the security control — the security control is that
+      # nothing from the head is executed. This exists so the workflow only
+      # ever pushes an automated commit to the kind of PR it was built for: an
+      # ordinary Dependabot cargo bump, which changes manifests and lockfiles
+      # and nothing else. Anything wider is somebody's hand-edit and gets the
+      # manual treatment.
+      #
+      # The list comes from `git diff` between the two pinned SHAs rather than
+      # from the API, which has a 3000-file response cap that truncates
+      # silently. An empty list is a failure, not a pass: a gate that
+      # under-reads its input passes vacuously, which is the same rule
+      # scripts/check-fuzz-lock-parity.sh applies to itself.
+      #
+      # The comparison is against the *merge base*, not the base tip. A plain
+      # two-dot `git diff BASE HEAD` also reports every commit that landed on
+      # main after the PR branched, so it rejects any PR that is merely behind
+      # — which, with `strict` branch protection on this repo, is most of them.
+      - name: Require a cargo-manifest-only diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          echo "comparing $HEAD_SHA against merge base $merge_base"
+          git diff --name-only "$merge_base" "$HEAD_SHA" \
+            > "$RUNNER_TEMP/pr-files.txt"
+          echo "PR touches:"
+          sed 's/^/  /' "$RUNNER_TEMP/pr-files.txt"
+          if [ ! -s "$RUNNER_TEMP/pr-files.txt" ]; then
+            echo "::error::the diff between the base and the PR head is" \
+                 "empty, which cannot be true of a PR that changed" \
+                 "Cargo.lock. Refusing to proceed on an unread diff."
+            exit 1
+          fi
+          if grep -vqE '^(.*/)?Cargo\.(toml|lock)$' "$RUNNER_TEMP/pr-files.txt"
+          then
+            echo "::error::this PR changes files other than cargo manifests" \
+                 "and lockfiles, so it is not an ordinary Dependabot cargo" \
+                 "bump. Refusing to push an automated commit to it; realign" \
+                 "by hand with 'just realign-fuzz-locks' after reviewing the" \
+                 "diff."
+            grep -vE '^(.*/)?Cargo\.(toml|lock)$' "$RUNNER_TEMP/pr-files.txt"
+            exit 1
+          fi
+          # A path regex cannot see a file's *mode*, and the overlay below
+          # materializes whatever the head has. A manifest committed as a
+          # symlink (mode 120000) would be recreated as a real symlink, and
+          # the realign's `shutil.copyfile` writes *through* it — an arbitrary
+          # out-of-tree write of head-controlled content, which is enough to
+          # poison ~/.gitconfig and get execution out of the next `git` call.
+          # Reject anything that is not a regular blob; 160000 covers a
+          # manifest swapped for a submodule.
+          #
+          # Filtered with grep rather than with pathspecs, because `ls-tree`
+          # does not run the full pathspec machinery: `*/Cargo.lock` matches
+          # nothing there and `:(glob)` is rejected outright, so a pathspec
+          # form of this check silently never fires. `checkout` and `ls-files`
+          # do glob, which is why they are used that way elsewhere in this file.
+          git ls-tree -r --format='%(objectmode) %(path)' "$HEAD_SHA" \
+            > "$RUNNER_TEMP/head-tree.txt"
+          if grep -qE '^1[26]0000 (.*/)?Cargo\.(toml|lock)$' \
+               "$RUNNER_TEMP/head-tree.txt"; then
+            echo "::error::a cargo manifest in the PR head is a symlink or a" \
+                 "submodule, not a regular file. Refusing to process it."
+            grep -E '^1[26]0000 (.*/)?Cargo\.(toml|lock)$' \
+              "$RUNNER_TEMP/head-tree.txt"
+            exit 1
+          fi
+
+      # The only bytes from the PR head that reach the working tree. Two
+      # pathspecs per filename rather than `*Cargo.toml`, which would also
+      # match `NotCargo.toml`; git's default wildmatch lets `*` cross `/`, so
+      # `*/Cargo.lock` reaches the nested fuzz workspace. Every manifest is
+      # taken from the head, not just the changed ones, so the resulting set is
+      # the head's by construction and does not depend on the diff above.
+      #
+      # `git reset` unstages them: the index stays at the base commit, so the
+      # parity script's `git ls-files` discovery still enumerates the tracked
+      # fuzz lockfiles.
+      #
+      # `core.symlinks=false` makes git write a symlink blob as an ordinary
+      # file containing its target text rather than as a link, so nothing here
+      # can be turned into a write that escapes the tree. The mode check in the
+      # gate above already refuses such a blob; this is the second lock on the
+      # same door, because it is the door the whole design stands behind. The
+      # repo tracks no symlinks at all, so it changes nothing in the normal
+      # case.
+      - name: Overlay the PR's cargo manifests
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git -c core.symlinks=false checkout "$HEAD_SHA" -- \
+            'Cargo.toml' 'Cargo.lock' '*/Cargo.toml' '*/Cargo.lock'
+          git reset --quiet
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: 1.94.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+        with:
+          tool: just
+
+      # The base branch's recipe, the base branch's script. Underneath it is
+      # `cargo metadata`: it seeds each fuzz lockfile from the workspace one,
+      # resolves the fuzz graph against it, and downloads `.crate` files to
+      # read their manifests. It compiles nothing, so nothing in the dependency
+      # graph executes. The script restores the original lockfile if cargo
+      # fails, so a red job never leaves a half-realigned tree.
+      - name: Realign the fuzz lockfiles
+        run: just realign-fuzz-locks
+
+      # Against the head's workspace lockfile, which is what the overlay put
+      # in place — the same comparison the required `cargo-deny` job will make.
+      # Nothing is pushed that would not pass the gate this exists to satisfy.
+      - name: Re-check parity
+        run: just check-fuzz-lock-parity
+
+      # Lift the realigned lockfiles out, then throw the whole working tree
+      # away. What gets committed is built from the pristine head tree plus
+      # these two files, so nothing else the realign or the overlay touched can
+      # reach the PR even by accident.
+      - name: Save the realigned lockfiles
+        run: |
+          git ls-files 'fuzz/Cargo.lock' '*/fuzz/Cargo.lock' \
+            > "$RUNNER_TEMP/fuzz-locks.txt"
+          if [ ! -s "$RUNNER_TEMP/fuzz-locks.txt" ]; then
+            echo "::error::no tracked fuzz lockfiles found; nothing to save."
+            exit 1
+          fi
+          while IFS= read -r lock; do
+            mkdir -p "$RUNNER_TEMP/locks/$(dirname "$lock")"
+            cp "$lock" "$RUNNER_TEMP/locks/$lock"
+          done < "$RUNNER_TEMP/fuzz-locks.txt"
+
+      # This checkout needs no `core.symlinks=false`: the gate rejected a
+      # symlinked manifest, and every non-manifest path in the head is
+      # identical to the base — which tracks no symlinks. Forcing it off here
+      # would instead corrupt the commit if the repo ever did track one.
+      - name: Restore the PR head and apply the realignment
+        id: apply
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git checkout --force "$HEAD_SHA"
+          git clean -fdq
+          while IFS= read -r lock; do
+            cp "$RUNNER_TEMP/locks/$lock" "$lock"
+          done < "$RUNNER_TEMP/fuzz-locks.txt"
+          git status --porcelain > "$RUNNER_TEMP/status.txt"
+          if [ ! -s "$RUNNER_TEMP/status.txt" ]; then
+            echo "the fuzz lockfiles are already in parity; nothing to push"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "about to commit:"
+          sed 's/^/  /' "$RUNNER_TEMP/status.txt"
+          # Belt and braces: by construction only the saved lockfiles were
+          # written back, so anything else here means an assumption broke.
+          if cut -c4- "$RUNNER_TEMP/status.txt" \
+              | grep -vqE '^(.*/)?fuzz/Cargo\.lock$'; then
+            echo "::error::the tree carries changes outside the tracked fuzz" \
+                 "lockfiles. Refusing to push."
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # The credential enters the environment here and nowhere else, after all
+      # PR content has been read. It is passed to `git push` in the URL rather
+      # than written into `.git/config`, so no later step inherits a
+      # credentialed remote. Hooks are disabled: `.git/hooks` is base-branch
+      # content and nothing untrusted ran, but a credentialed `git commit` is
+      # not the place to rely on that.
+      #
+      # The push is a plain fast-forward. If Dependabot moved the branch since
+      # this run started it fails rather than clobbering, and the resulting
+      # `synchronize` starts a fresh run against the new head.
+      #
+      # Note this push makes Dependabot stop auto-rebasing the PR — it treats a
+      # branch someone else has pushed to as no longer solely its own. Comment
+      # `@dependabot rebase` to hand it back; the force-push that follows fires
+      # `synchronize` and this workflow realigns the new head.
+      - name: Commit and push the realignment
+        if: steps.apply.outputs.changed == 'true'
+        env:
+          REALIGN_TOKEN: ${{ secrets.FUZZ_LOCK_REALIGN_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config --local core.hooksPath /dev/null
+          git config --local user.name 'github-actions[bot]'
+          git config --local user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          # The same two pathspecs the parity script discovers the tracked set
+          # with (FUZZ_LOCK_GLOBS). Plain pathspecs, not `:(glob)` magic —
+          # git's default wildmatch lets `*` cross `/`, which is what reaches
+          # the nested `crates/rimap-server/fuzz/Cargo.lock`.
+          git add -- 'fuzz/Cargo.lock' '*/fuzz/Cargo.lock'
+          git commit -m 'deps(fuzz): realign the fuzz lockfiles with the bumped workspace lock' \
+                     -m 'Automated by .github/workflows/dependabot-fuzz-lock.yml (issue #698).'
+          git push "https://x-access-token:${REALIGN_TOKEN}@github.com/${GH_REPO}.git" \
+            "HEAD:refs/heads/${HEAD_REF}"
