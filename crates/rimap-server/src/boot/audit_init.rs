@@ -65,10 +65,18 @@ pub fn init_audit_writer_multi(
     // exactly as worth recording for one account as for five, and a reader
     // reconstructing a boot should not have to branch on account count to
     // find it (#632).
+    //
+    // `None` for the discovered folder names, and it is the only honest
+    // answer here: this record is written before the account registry is
+    // built, so no IMAP `LIST` has run and no special-use folder is known
+    // yet. The recorded `protected_folders` is therefore the configured
+    // list; the union the `FolderGuard` is built from reaches the operator
+    // through the `effective folder policy` boot log line, once discovery
+    // has actually happened (#696).
     let tool_matrix = multi
         .accounts
         .values()
-        .map(crate::boot::tool_matrix::account_tool_matrix)
+        .map(|acfg| crate::boot::tool_matrix::account_tool_matrix(acfg, None))
         .collect();
 
     let mut inputs = ProcessStartInputs::new(
@@ -256,6 +264,107 @@ allowed_base_dir = "{base}"
             .expect("account-written search verdict missing");
         assert_eq!(search["allow"], false);
         assert_eq!(search["source"], "account");
+    }
+
+    /// Two-account config whose `[defaults.security]` names both folder
+    /// lists and whose `work` account writes a partial `[accounts.security]`
+    /// block that restates neither. Post-#624 that account inherits both —
+    /// including an `expunge_folders` making `Trash` expungeable, which is
+    /// the widening #696 exists to surface. `personal` writes its own
+    /// `expunge_folders`, so the two provenances appear in one record.
+    fn write_inherited_folders_config(dir: &TempDir) -> std::path::PathBuf {
+        let config_path = dir.path().join("config.toml");
+        let body = format!(
+            r#"
+[defaults.security]
+posture = "draft-safe"
+protected_folders = ["INBOX", "Sent"]
+expunge_folders = ["Trash"]
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[accounts.security]
+posture = "readonly"
+
+[[accounts]]
+name = "personal"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@personal.test"
+
+[accounts.security]
+expunge_folders = ["Junk"]
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        );
+        std::fs::write(&config_path, body).unwrap();
+        config_path
+    }
+
+    #[test]
+    fn process_start_records_inherited_and_account_written_folder_lists() {
+        // Acceptance criteria for #696. Asserted against the raw JSONL line
+        // for the same reason as the #632 test above: both fields are
+        // `#[serde(default)]`, so a lenient parse would report an absent
+        // list as an empty one.
+        let dir = TempDir::new().unwrap();
+        let config_path = write_inherited_folders_config(&dir);
+        let validated = rimap_config::loader::load_and_validate(&config_path).unwrap();
+        let audit_path = validated.audit.path.clone();
+        {
+            init_audit_writer_multi(&validated, &config_path).unwrap();
+        }
+
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        let line = contents.lines().next().unwrap();
+        assert!(
+            line.contains(r#""protected_folders""#) && line.contains(r#""expunge_folders""#),
+            "process_start must carry both folder lists:\n{line}",
+        );
+        let first: serde_json::Value = serde_json::from_str(line).unwrap();
+        let matrix = first["tool_matrix"].as_array().unwrap();
+        let work = matrix
+            .iter()
+            .find(|m| m["account"] == "work")
+            .expect("the work account");
+
+        // The whole point: `Trash` is expungeable on an account whose own
+        // block never said so.
+        let expunge = work["expunge_folders"].as_array().unwrap();
+        assert_eq!(expunge.len(), 1, "{expunge:?}");
+        assert_eq!(expunge[0]["folder"], "Trash");
+        assert_eq!(expunge[0]["source"], "inherited");
+
+        let protected = work["protected_folders"].as_array().unwrap();
+        assert_eq!(protected.len(), 2, "{protected:?}");
+        assert_eq!(protected[0]["folder"], "INBOX");
+        assert_eq!(protected[0]["source"], "inherited");
+        assert!(
+            protected.iter().all(|p| p["source"] != "discovered"),
+            "no IMAP session exists when process_start is written:\n{protected:?}",
+        );
+
+        // The same record distinguishes the account that asked for it.
+        let personal = matrix
+            .iter()
+            .find(|m| m["account"] == "personal")
+            .expect("the personal account");
+        let personal_expunge = personal["expunge_folders"].as_array().unwrap();
+        assert_eq!(personal_expunge[0]["folder"], "Junk");
+        assert_eq!(personal_expunge[0]["source"], "account");
     }
 
     #[test]

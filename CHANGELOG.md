@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rusty-imap-mcp --dry-run`. All three render the same rows from one producer.
   `process_start` records written before this field parse unchanged. See #632
   and `docs/audit-log.md`.
+- Boot now also reports each account's resolved `protected_folders` and
+  `expunge_folders`, marking every entry `account`, `inherited`, or
+  `discovered`. An `inherited` entry under `expunge_folders` is the #624
+  widening that makes a folder expungeable on an account that never asked for
+  it, and it now appears in the `tool_matrix` entries of the `process_start`
+  audit record and in two new `--dry-run` sections. `protected_folders` also
+  grows server-declared RFC 6154 special-use names at boot; that union is
+  logged per account under `effective folder policy` once the `FolderGuard`
+  is built. The `process_start` record and `--dry-run` are both written before
+  any such folder is known, so they carry the configured list and say so.
+  Records written before these fields parse unchanged, and an absent list
+  reads as *unknown*, not as an empty one. See #696 and `docs/audit-log.md`.
 - crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
   new `publish-crates` release job. Publishes in dependency order with an
   idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by
@@ -78,6 +90,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: `rimap_audit::record::AccountToolMatrix::new` takes two further
+  arguments (#696).** The signature is now
+  `new(account, posture, tools, protected_folders, expunge_folders)`. Adding
+  the fields is additive — `AccountToolMatrix` is `#[non_exhaustive]` (#706)
+  and both are `#[serde(default)]`, so the on-disk format is unchanged for
+  existing records — but neither list defaults, because for each of them an
+  empty value is an affirmative claim ("nothing protected", "nothing
+  expungeable") a caller must make deliberately. New `FolderEntry` (also
+  `#[non_exhaustive]`) and `FolderSource` types come with them.
+  `rimap_config::validate::ValidatedAccountConfig` gains
+  `account_written_protected_folders` / `account_written_expunge_folders`,
+  which is additive (that type is `#[non_exhaustive]` since #707). Absorbed by
+  the planned `0.2.0`; no version bump.
 - **API break: `rimap_audit::stream_records` returns `StreamSummary` instead of
   `usize` (#717).** The new type carries `matched` — the old return value — plus
   `skipped_unknown_kind`, the count of lines skipped because their `kind` is not
@@ -276,15 +301,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlap an account's own `expunge_folders`.
 
   Run `rusty-imap-mcp --dry-run` before and after upgrading and diff the
-  per-account effective matrix it prints. **That covers the tool-verdict
-  widening only.** `--dry-run` prints posture, per-tool verdicts,
-  infrastructure tools, IMAP capabilities, and the TLS fingerprint — it does
-  **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
-  field, so the folder-list widenings above are invisible in its output.
-  Review those two lists by hand against your `[defaults.security]` for every
-  account carrying a partial `[accounts.security]` block. #632 added a
-  boot-time record of the resolved *tool verdicts* with their provenance; the
-  resolved folder lists are still recorded nowhere.
+  per-account output. It prints posture, per-tool verdicts, infrastructure
+  tools, both folder lists, IMAP capabilities, and the TLS fingerprint, each
+  verdict and folder marked `account` or `inherited` — so all three widenings
+  above are visible without reading your config. Look for
+  `Trash(inherited)`-style entries under `Expunge folders:`: that is a folder
+  made expungeable by `[defaults.security]` on an account that never asked
+  for it. No `[limits]` field is printed, so limit changes still need a
+  by-hand diff. See #632 and #696.
 - `rimap-config`: `RawAccountConfig::{security, limits, credentials}` change
   type to the new `AccountSecurityOverrides` / `AccountLimitsOverrides` /
   `AccountCredentialsOverrides` mirror structs. Breaking for direct consumers

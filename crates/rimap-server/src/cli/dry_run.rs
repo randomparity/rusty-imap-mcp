@@ -23,6 +23,11 @@
 //! Explicit tool overrides:
 //!   delete_message=allow(inherited)
 //!   search=deny(account)
+//! Protected folders (configured; server special-use folders are added at boot):
+//!   INBOX(inherited)
+//!   Sent(inherited)
+//! Expunge folders:
+//!   Trash(inherited)
 //! Capabilities (imap.example.com:993):
 //!   [ok ] IMAP4REV1
 //!   [ok ] IDLE
@@ -113,7 +118,7 @@ fn write_explicit_overrides_section<W: Write>(
     out: &mut W,
     acfg: &rimap_config::validate::ValidatedAccountConfig,
 ) -> std::io::Result<()> {
-    let matrix = crate::boot::tool_matrix::account_tool_matrix(acfg);
+    let matrix = crate::boot::tool_matrix::account_tool_matrix(acfg, None);
     if matrix.tools.is_empty() {
         writeln!(out, "Explicit tool overrides: none")?;
         return Ok(());
@@ -124,6 +129,56 @@ fn write_explicit_overrides_section<W: Write>(
             out,
             "  {}",
             crate::boot::tool_matrix::render_verdict(verdict)
+        )?;
+    }
+    Ok(())
+}
+
+/// Print the two folder-policy sections for one account.
+///
+/// Rows come from the same producer as the boot log line and the
+/// `process_start` record, so an `inherited` entry reads identically wherever
+/// an operator meets it (#696).
+///
+/// `--dry-run` has no IMAP session, so the producer is asked for the
+/// configured lists (`None`) and the header says so outright. Printing the
+/// configured list under a bare `Protected folders:` would understate what
+/// the running server protects, because boot appends the server's RFC 6154
+/// special-use folders to it — and understating protection is the direction
+/// that misleads.
+fn write_folder_policy_sections<W: Write>(
+    out: &mut W,
+    acfg: &rimap_config::validate::ValidatedAccountConfig,
+) -> std::io::Result<()> {
+    let matrix = crate::boot::tool_matrix::account_tool_matrix(acfg, None);
+    write_folder_section(
+        out,
+        "Protected folders (configured; server special-use folders are added at boot)",
+        &matrix.protected_folders,
+    )?;
+    write_folder_section(out, "Expunge folders", &matrix.expunge_folders)
+}
+
+/// Print one folder list under `header`, or `<header>: none` when empty.
+///
+/// An empty `expunge_folders` prints `none` rather than an empty section:
+/// "nothing in this account may be expunged" is the single most reassuring
+/// line in this output and it should be stated, not inferred from silence.
+fn write_folder_section<W: Write>(
+    out: &mut W,
+    header: &str,
+    entries: &[rimap_audit::record::FolderEntry],
+) -> std::io::Result<()> {
+    if entries.is_empty() {
+        writeln!(out, "{header}: none")?;
+        return Ok(());
+    }
+    writeln!(out, "{header}:")?;
+    for entry in entries {
+        writeln!(
+            out,
+            "  {}",
+            crate::boot::tool_matrix::render_folder_entry(entry)
         )?;
     }
     Ok(())
@@ -174,6 +229,7 @@ pub async fn run<W: Write>(path: &Path, out: &mut W) -> anyhow::Result<()> {
             writeln!(out, "  [ok ] {tool}")?;
         }
         write_explicit_overrides_section(out, acfg)?;
+        write_folder_policy_sections(out, acfg)?;
 
         // Errors are reported inline but do not abort the dry-run — a
         // multi-account config may have one unreachable host and still
@@ -378,6 +434,99 @@ allowed_base_dir = "{base}"
         assert!(
             text.contains("search=deny(account)"),
             "account-written deny not marked:\n{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dry_run_prints_inherited_folder_lists() {
+        // Acceptance criteria for #696: the two folder lists the #624
+        // migration note told operators to review by hand are now printed,
+        // each entry marked with the layer that put it there.
+        let dir = tight_tempdir();
+        let config_path = dir.path().join("config.toml");
+        let body = format!(
+            r#"
+[defaults.security]
+posture = "draft-safe"
+protected_folders = ["INBOX", "Sent"]
+expunge_folders = ["Trash"]
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[accounts.security]
+posture = "readonly"
+
+[[accounts]]
+name = "personal"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@personal.test"
+
+[accounts.security]
+expunge_folders = ["Junk"]
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        );
+        std::fs::write(&config_path, body).unwrap();
+
+        let mut out = Vec::new();
+        run(&config_path, &mut out).await.unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains(
+                "Protected folders (configured; server special-use folders are added at boot):"
+            ),
+            "protected section header missing:\n{text}"
+        );
+        assert!(
+            text.contains("  INBOX(inherited)"),
+            "inherited protected entry missing:\n{text}"
+        );
+        // `work` never wrote expunge_folders; post-#624 it holds one anyway.
+        assert!(
+            text.contains("Expunge folders:") && text.contains("  Trash(inherited)"),
+            "inherited expunge entry missing:\n{text}"
+        );
+        // `personal` wrote its own, and reads differently.
+        assert!(
+            text.contains("  Junk(account)"),
+            "account-written expunge entry missing:\n{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dry_run_reports_an_empty_expunge_list_as_none() {
+        // The default config makes nothing expungeable. Saying so is the
+        // point — an absent section would read as missing information.
+        let dir = tight_tempdir();
+        let path = write_minimal_config(&dir);
+        let mut out = Vec::new();
+        run(&path, &mut out).await.unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Expunge folders: none"),
+            "expected the empty-expunge line:\n{text}"
+        );
+        // A flat config has no `[defaults]` layer to inherit from.
+        assert!(
+            text.contains("  INBOX(account)"),
+            "flat-config protected entry missing:\n{text}"
         );
     }
 

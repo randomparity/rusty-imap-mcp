@@ -49,6 +49,10 @@
 //! attribute is dropped -- see `record/mod.rs` for the established shape.
 //! #717 was the first change to arrive under this rule: `StreamSummary` was
 //! born `#[non_exhaustive]`, with its doctest on the type and its case below.
+//! #696's `FolderEntry` is the second, and it is a *record* component rather
+//! than a helper, so its construction case belongs with the record types in
+//! section 1 and its bytes are pinned by the golden in section 2 — section 3
+//! is only for `pub` structs with no on-disk component.
 //!
 //! Sibling of `rimap-config`'s `non_exhaustive_model.rs` (#665) and
 //! `non_exhaustive_validate.rs` (#707).
@@ -56,8 +60,9 @@
 #![expect(clippy::expect_used, reason = "integration test")]
 
 use rimap_audit::record::{
-    AccountToolMatrix, AttachmentProvenance, AuditRecord, Payload, ProcessEnd, ProcessEndReason,
-    Provenance, ResultSummary, ToolEnd, ToolStatus, ToolVerdict, VerdictSource,
+    AccountToolMatrix, AttachmentProvenance, AuditRecord, FolderEntry, FolderSource, Payload,
+    ProcessEnd, ProcessEndReason, Provenance, ResultSummary, ToolEnd, ToolStatus, ToolVerdict,
+    VerdictSource,
 };
 use rimap_audit::{ProcessId, Seq, Timestamp};
 use rimap_core::{Posture, tool::ToolName};
@@ -95,9 +100,16 @@ fn record_types_are_built_through_constructors_and_field_assignment() {
             false,
             VerdictSource::Account,
         )],
+        vec![FolderEntry::new(
+            "INBOX".to_string(),
+            FolderSource::Inherited,
+        )],
+        vec![FolderEntry::new("Trash".to_string(), FolderSource::Account)],
     );
     assert_eq!(matrix.account, "work");
     assert_eq!(matrix.tools.len(), 1);
+    assert_eq!(matrix.protected_folders.len(), 1);
+    assert_eq!(matrix.expunge_folders[0].source, FolderSource::Account);
 
     // `ResultSummary` is the one type whose constructor is `Default`: every
     // field is `#[serde(default)]`, so there is nothing a `new` would have to
@@ -313,7 +325,11 @@ fn auth_line_is_byte_exact() {
 /// array and a populated `tool_matrix`. The single-account, empty-matrix shape
 /// is covered by the round-trip goldens; this pins the nested structures --
 /// including `tool_matrix`, the #632 field whose addition is the reason this
-/// issue exists.
+/// issue exists, and its `protected_folders` / `expunge_folders` (#696).
+///
+/// This golden moved once, in #696, and only by gaining those two keys on the
+/// `tool_matrix` entry. That is what an additive change looks like on disk:
+/// every byte that was here before is still here, in the same order.
 #[test]
 fn process_start_multi_account_line_is_byte_exact() {
     let mut inputs = rimap_audit::ProcessStartInputs::new(
@@ -340,6 +356,14 @@ fn process_start_multi_account_line_is_byte_exact() {
             true,
             VerdictSource::Inherited,
         )],
+        vec![
+            FolderEntry::new("INBOX".to_string(), FolderSource::Inherited),
+            FolderEntry::new("[Gmail]/Sent Mail".to_string(), FolderSource::Discovered),
+        ],
+        vec![FolderEntry::new(
+            "Trash".to_string(),
+            FolderSource::Inherited,
+        )],
     )];
 
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -363,7 +387,7 @@ fn process_start_multi_account_line_is_byte_exact() {
     record.process_id = fixed_pid();
     assert_golden(
         &record,
-        r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"abc123","accounts":[{"name":"work","posture":"readonly","imap_host":"imap.example.com"}],"tool_matrix":[{"account":"work","posture":"readonly","tools":[{"tool":"delete_message","allow":true,"source":"inherited"}]}],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
+        r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"abc123","accounts":[{"name":"work","posture":"readonly","imap_host":"imap.example.com"}],"tool_matrix":[{"account":"work","posture":"readonly","tools":[{"tool":"delete_message","allow":true,"source":"inherited"}],"protected_folders":[{"folder":"INBOX","source":"inherited"},{"folder":"[Gmail]/Sent Mail","source":"discovered"}],"expunge_folders":[{"folder":"Trash","source":"inherited"}]}],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
     );
 }
 
