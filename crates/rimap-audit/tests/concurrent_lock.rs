@@ -11,25 +11,9 @@ use tempfile::TempDir;
 fn concurrent_open_fails_fast_with_locked() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
-    let _first = AuditWriter::open(&AuditOptions {
-        path: path.clone(),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
-    })
-    .unwrap();
+    let _first = AuditWriter::open(&AuditOptions::new(path.clone())).unwrap();
 
-    let err = AuditWriter::open(&AuditOptions {
-        path: path.clone(),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
-    })
-    .unwrap_err();
+    let err = AuditWriter::open(&AuditOptions::new(path.clone())).unwrap_err();
     match err {
         AuditError::Locked { path: p } => assert_eq!(p, path),
         other => panic!("expected Locked, got {other:?}"),
@@ -41,23 +25,7 @@ fn lock_released_after_drop_allows_reopen() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
     {
-        let _first = AuditWriter::open(&AuditOptions {
-            path: path.clone(),
-            rotate_bytes: 0,
-            rotate_keep: 0,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: rimap_audit::Seq::FIRST,
-        })
-        .unwrap();
+        let _first = AuditWriter::open(&AuditOptions::new(path.clone())).unwrap();
     }
-    let _second = AuditWriter::open(&AuditOptions {
-        path,
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
-    })
-    .unwrap();
+    let _second = AuditWriter::open(&AuditOptions::new(path)).unwrap();
 }

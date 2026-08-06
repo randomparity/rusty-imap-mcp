@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimap_audit::{AuditOptions, AuditWriter, Seq};
+use rimap_audit::{AuditOptions, AuditWriter};
 use rimap_config::credential::{CredentialStore, KeyringCredentialResolver, PASSWORD_ENV_VAR};
 use rimap_config::model::FallbackMode;
 use rimap_imap::{Connection, ConnectionConfig, ImapEncryption};
@@ -1025,15 +1025,8 @@ async fn seed_multipart_message(dovecot: &DovecotHarness) {
 /// HTML-alternative seeds so both reference the same connection setup.
 async fn append_seed_to_inbox(dovecot: &DovecotHarness, raw: &[u8]) {
     let audit_dir = TempDir::new().expect("seed-audit tempdir");
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_dir.path().join("seed.jsonl"),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
-    .expect("audit open");
+    let audit = AuditWriter::open(&AuditOptions::new(audit_dir.path().join("seed.jsonl")))
+        .expect("audit open");
 
     let cfg = ConnectionConfig {
         account: None,

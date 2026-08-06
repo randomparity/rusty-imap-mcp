@@ -911,8 +911,8 @@ mod resolve_download_dir_tests {
 mod process_end_tests {
     #![expect(clippy::expect_used, reason = "unit tests")]
 
+    use rimap_audit::AuditWriter;
     use rimap_audit::writer::AuditOptions;
-    use rimap_audit::{AuditWriter, Seq};
 
     use super::emit_process_end;
 
@@ -927,15 +927,10 @@ mod process_end_tests {
     fn the_undrained_count_reaches_the_record_verbatim() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let writer = AuditWriter::open(&AuditOptions {
-            path: path.clone(),
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit writer opens");
+        let mut options = AuditOptions::new(path.clone());
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        let writer = AuditWriter::open(&options).expect("audit writer opens");
 
         emit_process_end(&writer, &Ok(()), 7);
 

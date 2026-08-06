@@ -8,7 +8,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimap_audit::{AuditOptions, AuditWriter, Seq};
+use rimap_audit::{AuditOptions, AuditWriter};
 use rimap_config::credential::CredentialStore;
 use rimap_core::TlsFingerprint;
 use rimap_imap::types::FetchSpec;
@@ -61,15 +61,7 @@ fn require_proton() -> Option<ProtonConfig> {
 
 fn build_connection(cfg: &ProtonConfig) -> Connection {
     let dir = tempfile::tempdir().unwrap();
-    let audit = AuditWriter::open(&AuditOptions {
-        path: dir.path().join("audit.jsonl"),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
-    .unwrap();
+    let audit = AuditWriter::open(&AuditOptions::new(dir.path().join("audit.jsonl"))).unwrap();
     let conn_cfg = ConnectionConfig {
         account: None,
         account_id: rimap_core::account::AccountId::default_account(),

@@ -27,7 +27,43 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// Result of reading the trailing state of an existing audit file. Every
 /// field is `None` when the file is empty or the last line cannot be parsed.
+///
+/// `#[non_exhaustive]`: this is an *output* type — downstream reads it from
+/// [`read_trailing_state`], it never builds one — and it grows a field
+/// whenever a new tamper signal is peeled off the trailing line. Reading a
+/// field is unaffected; only construction and exhaustive destructuring are
+/// gated, and destructuring needs a trailing `..`. `Default` is retained as
+/// the "nothing readable" state the reader itself returns. No constructor:
+/// no caller outside this crate has a reason to mint one.
+///
+/// A struct expression is rejected outside this crate:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::TrailingState {
+///     last_seq: None,
+///     last_process_id: None,
+///     last_recorded_inode: None,
+/// };
+/// ```
+///
+/// And so is functional-update syntax — `..Default::default()` is still a
+/// struct expression (E0639):
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::TrailingState {
+///     last_recorded_inode: Some(7),
+///     ..Default::default()
+/// };
+/// ```
+///
+/// Reading and `Default` both keep working:
+///
+/// ```
+/// let state = rimap_audit::TrailingState::default();
+/// assert!(state.last_seq.is_none());
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TrailingState {
     /// `seq` of the last valid record.
     pub last_seq: Option<Seq>,

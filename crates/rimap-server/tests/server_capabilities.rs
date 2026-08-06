@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimap_audit::{AuditOptions, AuditWriter, Seq};
+use rimap_audit::{AuditOptions, AuditWriter};
 use rimap_authz::DispatchGuard;
 use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
@@ -55,15 +55,7 @@ impl CredentialStore for StaticCreds {
 fn open_test_audit() -> (AuditWriter, TempDir) {
     let audit_dir = TempDir::new().expect("audit tempdir");
     let audit_path = audit_dir.path().join("audit.jsonl");
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_path,
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
-    .expect("audit open");
+    let audit = AuditWriter::open(&AuditOptions::new(audit_path)).expect("audit open");
     (audit, audit_dir)
 }
 

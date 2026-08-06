@@ -16,7 +16,44 @@ use fs4::{FileExt, TryLockError};
 use crate::AuditError;
 
 /// Options for opening an audit writer.
+///
+/// `#[non_exhaustive]`: this is the writer's whole configuration surface and
+/// it grows whenever a rotation or retention knob is added, so a downstream
+/// struct literal would make every such addition a breaking change. Build one
+/// with [`AuditOptions::new`] and assign the fields that differ.
+///
+/// A struct expression is rejected outside this crate:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::AuditOptions {
+///     path: std::path::PathBuf::from("audit.jsonl"),
+///     rotate_bytes: 0,
+///     rotate_keep: 0,
+///     retention_seconds: None,
+///     fail_open: false,
+///     initial_seq: rimap_audit::Seq::FIRST,
+/// };
+/// ```
+///
+/// And so is functional-update syntax — `..Default::default()` is still a
+/// struct expression, and there is no `Default` here to spread from either:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::AuditOptions {
+///     rotate_bytes: 4096,
+///     ..Default::default()
+/// };
+/// ```
+///
+/// The supported form is [`AuditOptions::new`] plus field assignment:
+///
+/// ```
+/// let mut opts = rimap_audit::AuditOptions::new("audit.jsonl".into());
+/// opts.rotate_bytes = 10 * 1024 * 1024;
+/// assert_eq!(opts.rotate_keep, 0);
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AuditOptions {
     /// Path to the active audit file.
     pub path: PathBuf,
@@ -41,6 +78,36 @@ pub struct AuditOptions {
     /// `read_trailing_state(path).last_seq.map(Seq::next).unwrap_or(Seq::FIRST)`
     /// before calling `open`.
     pub initial_seq: crate::record::ids::Seq,
+}
+
+impl AuditOptions {
+    /// Options for `path` with every policy knob inert: rotation disabled,
+    /// no time-based retention, fail-closed, and sequencing from
+    /// [`Seq::FIRST`](crate::Seq::FIRST).
+    ///
+    /// `path` is the parameter because it is the one field with no defensible
+    /// default — an empty path is not a log file. The rest are deliberately
+    /// **not** the config-layer defaults (`rotate_bytes` 10 MiB, `rotate_keep`
+    /// 5): those belong to `rimap_config::model::AuditConfig`, and a caller
+    /// that wants them reads them from a loaded config, as `rimap-server`'s
+    /// boot path does. Defaulting to them here would mean a caller who wrote
+    /// `new(path)` and nothing else silently got a rotation policy it never
+    /// asked for.
+    ///
+    /// Continuing an existing file additionally requires `initial_seq`, from
+    /// `read_trailing_state(path).last_seq.map_or(Seq::FIRST, Seq::next)` —
+    /// leaving it at `Seq::FIRST` restarts the sequence and breaks the chain.
+    #[must_use]
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            rotate_bytes: 0,
+            rotate_keep: 0,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq: crate::record::ids::Seq::FIRST,
+        }
+    }
 }
 
 /// Test-only failure injection hook. When `fail_next` is set, the next
