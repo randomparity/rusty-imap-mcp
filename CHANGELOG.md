@@ -27,6 +27,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The audit reader now skips a record whose `kind` it does not recognize
+  instead of treating the file as corrupt. `docs/audit-log.md` has told readers
+  to do this since #706, but the bundled one did not: an unrecognized `kind` is
+  a serde failure, and `stream_records` aborted on any non-trailing parse
+  failure — so `rimap audit merge` on a fleet whose files include one written
+  by a newer version stopped at the first record it did not know, and adding a
+  record kind was a de facto breaking change for every reader in the field. The
+  skip is not silent: `stream_records` returns a `StreamSummary` (`matched` and
+  `skipped_unknown_kind`) in place of a bare count, and `audit merge` prints
+  the skipped count to stderr, so a merge that read *past* records is
+  distinguishable from one that read the whole file. **The tolerance stops
+  there.** A line malformed for any other reason — invalid JSON, a missing or
+  non-string `kind`, a known `kind` whose payload will not deserialize — still
+  aborts with its line number, because an audit trail that swallowed those
+  would hide the corruption it exists to expose. A torn trailing line is still
+  separately tolerated. See #717 and `docs/audit-log.md`.
+
 - The registrations still outstanding when the shutdown drain's budget expired
   now reach the audit trail, as `process_end.undrained_dispatches`. They used
   to go to a `tracing::warn!` and nowhere else — and stderr is the channel an
@@ -61,6 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: `rimap_audit::stream_records` returns `StreamSummary` instead of
+  `usize` (#717).** The new type carries `matched` — the old return value — plus
+  `skipped_unknown_kind`, the count of lines skipped because their `kind` is not
+  one the running binary recognizes. A bare count could not express the
+  difference between a file read whole and one read past, which is the whole
+  point of the skip. `StreamSummary` is `#[non_exhaustive]` with no constructor
+  and no `Default`, so a later pass can report another number additively and
+  nothing downstream can mint an all-zero summary asserting a skip-free read it
+  never performed. Absorbed by the planned `0.2.0`; no version bump.
 - **API break: `rimap_audit::record::ProcessEnd::new` takes a fourth argument
   (#680).** The signature is now
   `new(reason, total_tool_calls, records_lost, undrained_dispatches)`. Adding

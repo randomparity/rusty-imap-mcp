@@ -42,16 +42,23 @@ the file. Every `kind` is covered.
 - A `kind` it does not recognize is a record type added after it was written.
   It should skip the line rather than treat the file as corrupt.
 
-  **The bundled reader does not yet do this.** `stream_records` — and so
-  `rimap audit merge` — aborts with a read error on any non-trailing line it
-  cannot parse, and an unrecognized `kind` is a parse failure, because the
-  record enum has no catch-all variant. So a `v0.2` binary reading a file that
-  a later version wrote stops at the first unknown record instead of skipping
-  it. Only a malformed *trailing* line is tolerated, which covers a torn write
-  at the tail, not forward compatibility. Tracked in #717. Until it lands,
-  treat "skip unknown kinds" as the contract third-party readers should
-  implement and as a known gap in this one, and do not merge files written by
-  a newer version than the binary doing the merging.
+  **The bundled reader does this** (#717). `stream_records` — and so
+  `rimap audit merge` — skips a line whose `kind` is not one the running
+  binary knows, warns on stderr naming the file and line, and returns the
+  count in `StreamSummary::skipped_unknown_kind`. `audit merge` prints that
+  count to stderr when it is non-zero, so a merge that read past records is
+  distinguishable from one that read the whole file. **A merge is not a
+  faithful copy of a file written by a newer version:** the unknown records
+  are absent from the output, and the count on stderr is the only trace.
+  Re-run the merge with a binary at or above the writer's version to get
+  them.
+
+  **The tolerance stops there, on purpose.** A line malformed for any other
+  reason — invalid JSON, a missing or non-string `kind`, a `kind` the binary
+  *does* know whose payload will not deserialize — still aborts the read with
+  the offending line number, exactly as before. Skipping those would hide the
+  corruption an audit trail exists to expose. A malformed *trailing* line
+  remains separately tolerated as a torn write at the tail.
 - A field it expects and does not find was added after *that line* was written.
   Every such field has a documented read-as value in the tables below --
   `records_lost` reads as `0`, `undrained_dispatches` as `0`, `tool_matrix` as
@@ -114,6 +121,11 @@ every line it copies.
    not-measured from measured, which the counters' own note above depends on.
 
 No field's existing value is altered by a merge.
+
+Neither of those is a *loss*. The one thing a merge can drop is a whole record
+whose `kind` the merging binary does not recognize, which is covered above:
+the count reaches stderr, never stdout, so a merged file read on its own
+cannot reveal that anything is missing.
 
 ## Record types
 
@@ -560,6 +572,19 @@ piped to `jq`.
 
 Trailing malformed lines (from a mid-record crash) produce a stderr
 warning and are skipped.
+
+Records whose `kind` this binary does not recognize — written by a newer
+version — are skipped too, and the count is reported on stderr when it is
+non-zero:
+
+```
+warning: skipped 3 record(s) of an unrecognized kind in /path/audit.jsonl; ...
+```
+
+Stdout still carries only records this binary understood, so treat that
+warning as saying the merge is incomplete. Any *other* malformed line still
+aborts the merge with the offending line number — see "Compatibility
+contract" above for why the tolerance stops where it does.
 
 ### Example
 

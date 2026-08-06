@@ -31,13 +31,14 @@
 //! matched, which is what makes "the format did not move" an executed result
 //! rather than an argument from the shape of the diff.
 //!
-//! Section 3 extends the same construction contract to the crate's three
-//! non-record `pub` structs -- `AuditOptions`, `Filter`, `TrailingState`
-//! (#715). They have no on-disk component, so only property 1 applies to
-//! them. Section 4 does the same for `AuthEvent` (#716), the `auth` payload
-//! defined in `rimap-core` and only re-exported here; it has both properties,
-//! and its goldens sit with the others in section 2. The file keeps its name
-//! because renaming it would break every inbound reference for no gain.
+//! Section 3 extends the same construction contract to the crate's non-record
+//! `pub` structs -- `AuditOptions`, `Filter`, `TrailingState` (#715) and
+//! `StreamSummary` (#717). They have no on-disk component, so only property 1
+//! applies to them. Section 4 does the same for `AuthEvent` (#716), the `auth`
+//! payload defined in `rimap-core` and only re-exported here; it has both
+//! properties, and its goldens sit with the others in section 2. The file
+//! keeps its name because renaming it would break every inbound reference for
+//! no gain.
 //!
 //! ## Convention for new `pub` structs in this crate
 //!
@@ -49,8 +50,8 @@
 //! just as well without the attribute, so it documents the idiom but enforces
 //! nothing, while a `compile_fail` doctest fails loudly the moment the
 //! attribute is dropped -- see `record/mod.rs` for the established shape.
-//! #717 is the next change due to add public reader surface; if what it adds
-//! is a struct, this is the rule it is born under.
+//! #717 was the first change to arrive under this rule: `StreamSummary` was
+//! born `#[non_exhaustive]`, with its doctest on the type and its case below.
 //!
 //! The rule reaches `AuthEvent` too even though `rimap-core` defines it: it is
 //! a `pub` type this crate re-exports as part of its own record surface, so a
@@ -545,7 +546,7 @@ fn a_line_read_off_disk_reserializes_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Downstream construction contract: the non-record pub structs (#715)
+// 3. Downstream construction contract: the non-record pub structs (#715, #717)
 // ---------------------------------------------------------------------------
 
 /// `AuditOptions::new(path, initial_seq)` plus field assignment is the only
@@ -638,6 +639,82 @@ fn filter_default_plus_assignment_narrows_a_match() {
 
     by_kind.kind = Some("tool_end".to_owned());
     assert!(!by_kind.matches(&record));
+}
+
+/// `StreamSummary` is the other output type, and stricter than
+/// `TrailingState`: it has no `Default` either, so there is no downstream way
+/// to mint an all-zero summary at all. That is deliberate -- a zeroed summary
+/// asserts *this pass skipped nothing*, and only a completed pass is entitled
+/// to say so (#715's constructor rule, applied to a defaulted field rather
+/// than a constructor parameter).
+///
+/// Its `skipped_unknown_kind` is also the #717 behaviour seen from outside the
+/// crate: a line whose `kind` this build does not know is skipped and counted,
+/// while a line malformed for any other reason still aborts.
+#[test]
+fn stream_summary_is_read_from_a_pass_and_destructured_with_a_rest_pattern() {
+    use rimap_audit::{Filter, StreamSummary, stream_records};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("audit.jsonl");
+
+    let known = serde_json::to_string(&AuditRecord::new(
+        Seq(1),
+        fixed_ts(),
+        fixed_pid(),
+        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0)),
+    ))
+    .expect("record serializes");
+    // A kind no version of this binary defines, in the shape a later one might.
+    let future = r#"{"seq":2,"ts":"2026-05-05T12:00:01.000Z","process_id":"01HM0000000000000000000000","kind":"policy","rule":"deny-all"}"#;
+    std::fs::write(&path, format!("{known}\n{future}\n")).expect("fixture written");
+
+    let summary = stream_records(&path, &Filter::default(), |_| Ok(()))
+        .expect("an unknown kind is not fatal");
+    assert_eq!(summary.matched, 1);
+    assert_eq!(summary.skipped_unknown_kind, 1);
+
+    // The rest pattern is the pinned downstream idiom; without it this
+    // destructuring is rejected (E0639).
+    let StreamSummary {
+        matched,
+        skipped_unknown_kind,
+        ..
+    } = summary;
+    assert_eq!(matched, 1);
+    assert_eq!(skipped_unknown_kind, 1);
+}
+
+/// A line malformed for any reason *other* than an unrecognized `kind` must
+/// still abort. This is the half of #717 that is easy to lose: widening the
+/// tolerance to "skip anything unparseable" would make the reader hide the
+/// corruption an audit trail exists to expose. Pinned from outside the crate
+/// because it is a promise to downstream readers, not an implementation
+/// detail.
+#[test]
+fn a_line_malformed_for_any_other_reason_still_aborts() {
+    use rimap_audit::{Filter, stream_records};
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("audit.jsonl");
+
+    let known = serde_json::to_string(&AuditRecord::new(
+        Seq(1),
+        fixed_ts(),
+        fixed_pid(),
+        Payload::ProcessEnd(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0)),
+    ))
+    .expect("record serializes");
+    // A `kind` this build *does* know, whose payload will not deserialize.
+    let corrupt = r#"{"seq":2,"ts":"2026-05-05T12:00:01.000Z","process_id":"01HM0000000000000000000000","kind":"auth"}"#;
+    std::fs::write(&path, format!("{corrupt}\n{known}\n")).expect("fixture written");
+
+    let err = stream_records(&path, &Filter::default(), |_| Ok(()))
+        .expect_err("a corrupt known-kind line must still abort");
+    assert!(
+        format!("{err}").contains("line 1"),
+        "the error must name the offending line: {err}",
+    );
 }
 
 /// `TrailingState` is an output type: downstream reads it from
