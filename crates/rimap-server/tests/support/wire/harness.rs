@@ -302,6 +302,25 @@ fn read_probe_line(caller: &str, first_read: bool, elapsed: Duration, budget: Du
     )
 }
 
+/// Label a request carries into its read sample.
+///
+/// The bare JSON-RPC method is not enough to rule on #692. The first hosted
+/// runner distribution put every read above 100 ms on `tools/call` and none on
+/// `initialize` or `tools/list` — but `tools/call` covers both a cache-served
+/// `list_folders` and a `fetch_message` that pulls a multipart body off
+/// Dovecot, so pooled under one label a slow-but-correct IMAP round trip is
+/// indistinguishable from a stall. The tool name is what separates them.
+///
+/// Only `tools/call` carries a `name`; every other method labels as itself
+/// rather than growing a synthetic suffix that would have to be stripped
+/// again on the way out.
+fn request_label(method: &str, params: &Value) -> String {
+    match params.get("name").and_then(Value::as_str) {
+        Some(tool) => format!("{method}:{tool}"),
+        None => method.to_owned(),
+    }
+}
+
 /// Possible outcomes when probing the server for "either a
 /// response or a close." Codex review finding #1 verified that
 /// a simple `Option<String>` could not distinguish a panic
@@ -750,6 +769,9 @@ allowed_base_dir = "{}"
     ) -> Value {
         self.next_id += 1;
         let id = self.next_id;
+        // Taken before `params` is moved into the envelope, not cloned back
+        // out of it afterwards.
+        let label = request_label(method, &params);
         let envelope = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -763,7 +785,7 @@ allowed_base_dir = "{}"
             .expect("write request");
         self.stdin.flush().await.expect("flush request");
 
-        let envelope = self.read_one_envelope_within(method, deadline).await;
+        let envelope = self.read_one_envelope_within(&label, deadline).await;
         assert_eq!(envelope["id"], json!(id), "response id must match request");
         super::schema::assert_envelope_valid(&envelope);
         envelope
@@ -1218,7 +1240,10 @@ mod read_deadline_tests {
 
 #[cfg(test)]
 mod read_probe_tests {
-    use super::{Duration, READ_PROBE_PREFIX, coverage_instrumented, read_probe_line};
+    use super::{
+        Duration, READ_PROBE_PREFIX, Value, coverage_instrumented, json, read_probe_line,
+        request_label,
+    };
 
     /// The sample is only useful if a dump can be reduced to it by one grep,
     /// so the prefix is part of the contract, not decoration.
@@ -1273,6 +1298,40 @@ mod read_probe_tests {
         assert!(
             line.ends_with("caller=tools/call fetch_message"),
             "got {line:?}"
+        );
+    }
+
+    /// The tail #692 rules on is entirely `tools/call`, and `tools/call`
+    /// spans a cache-served `list_folders` and a `fetch_message` that pulls a
+    /// multipart body off Dovecot. Without the tool name a slow-but-correct
+    /// round trip and a stall land in the same bucket.
+    #[test]
+    fn a_tool_call_is_labelled_with_the_tool_it_invoked() {
+        assert_eq!(
+            request_label(
+                "tools/call",
+                &json!({"name": "fetch_message", "arguments": {}})
+            ),
+            "tools/call:fetch_message",
+        );
+    }
+
+    /// Methods with no `name` must stay labelled as themselves rather than
+    /// grow a placeholder suffix a parser would have to strip again.
+    #[test]
+    fn a_method_without_a_tool_name_labels_as_itself() {
+        assert_eq!(request_label("initialize", &json!({})), "initialize");
+        assert_eq!(request_label("tools/list", &Value::Null), "tools/list");
+    }
+
+    /// `name` is only a tool name when it is a string; a params object that
+    /// happens to carry a non-string `name` must not produce a label built
+    /// from its debug rendering.
+    #[test]
+    fn a_non_string_name_does_not_become_a_label() {
+        assert_eq!(
+            request_label("tools/call", &json!({"name": 7})),
+            "tools/call",
         );
     }
 

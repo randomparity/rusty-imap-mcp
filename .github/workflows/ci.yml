@@ -538,6 +538,19 @@ jobs:
       # `INSTRUMENTED_READ_FLOOR`) were sized without one. Same trap as #638,
       # where the discarded output was what would have identified the cause.
       # The samples are prefixed (`wire-read-probe`), so the tail is one grep.
+      #
+      # The capacity they were collected on is recorded alongside them, because
+      # a latency distribution is not interpretable without it and every
+      # previous read-budget issue (#621, #638, #671, #692) argued about runner
+      # contention from the runner *label* rather than a measurement. It also
+      # bounds what `.config/nextest.toml` can do here: nextest's default test
+      # concurrency is the logical CPU count, so a test-group whose
+      # `max-threads` equals that count cannot bind on this runner at all.
+      - name: Record runner capacity
+        run: |
+          echo "logical CPUs: $(nproc)"
+          cat /proc/loadavg
+          free -m
       - name: Generate coverage report
         run: |
           cargo llvm-cov nextest --locked --workspace --all-features \
