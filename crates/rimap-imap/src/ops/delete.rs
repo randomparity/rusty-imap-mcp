@@ -54,8 +54,10 @@ pub(crate) async fn delete_message(
     // being refused, merely deferred.
     let (has_move, has_uidplus) = entry.capabilities().require_known("delete_message")?;
 
-    // Read after the advertisement, so the branch above is decided from the
-    // entry before anything below reaches the wire through it.
+    // Borrowed after the read above, not before: this `&mut` lives to the end
+    // of the function, so taking it first would make the `entry.capabilities()`
+    // read a borrow error. The order the refusal needs is the only one that
+    // compiles.
     let session = entry.session();
 
     // Step 3: STORE +FLAGS (\Deleted)
