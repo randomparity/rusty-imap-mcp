@@ -29,15 +29,7 @@ struct TestFixture {
 fn build_test_server() -> TestFixture {
     let audit_dir = TempDir::new().expect("audit tempdir");
     let audit_path = audit_dir.path().join("audit.jsonl");
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_path.clone(),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
-    .expect("audit open");
+    let audit = AuditWriter::open(&AuditOptions::new(audit_path.clone())).expect("audit open");
 
     let registry = AccountRegistry::new(BTreeMap::new());
     let (cancellation_sender, _cancellation_rx) = rimap_audit::cancellation_channel();
@@ -211,19 +203,13 @@ async fn drop_during_body_enqueues_cancellation_tool_end() {
 
     let audit_dir = tempfile::TempDir::new().expect("audit tempdir");
     let audit_path = audit_dir.path().join("audit.jsonl");
-    let audit = rimap_audit::AuditWriter::open(&rimap_audit::AuditOptions {
-        path: audit_path.clone(),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        // Deliberately not `Seq::FIRST`: the assertions below join `tool_end`
-        // to `tool_start` on `seq`, and with the default start every record
-        // in this test would be seq 1 — so a guard that hardcoded
-        // `Seq::FIRST` instead of carrying the real seq would still pass.
-        initial_seq: Seq(41),
-    })
-    .expect("audit open");
+    let mut options = rimap_audit::AuditOptions::new(audit_path.clone());
+    // Deliberately not `Seq::FIRST`: the assertions below join `tool_end`
+    // to `tool_start` on `seq`, and with the default start every record
+    // in this test would be seq 1 — so a guard that hardcoded
+    // `Seq::FIRST` instead of carrying the real seq would still pass.
+    options.initial_seq = Seq(41);
+    let audit = rimap_audit::AuditWriter::open(&options).expect("audit open");
 
     let registry =
         rimap_server::boot::registry::AccountRegistry::new(std::collections::BTreeMap::new());

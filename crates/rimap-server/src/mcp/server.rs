@@ -1328,7 +1328,7 @@ mod instructions_selection_tests {
 
     use std::collections::BTreeMap;
 
-    use rimap_audit::{AuditOptions, AuditWriter, Seq};
+    use rimap_audit::{AuditOptions, AuditWriter};
     use rmcp::handler::server::ServerHandler;
     use tempfile::TempDir;
 
@@ -1340,15 +1340,7 @@ mod instructions_selection_tests {
     fn make_server(registry: AccountRegistry) -> (ImapMcpServer, TempDir) {
         let audit_dir = TempDir::new().expect("audit tempdir");
         let audit_path = audit_dir.path().join("audit.jsonl");
-        let audit = AuditWriter::open(&AuditOptions {
-            path: audit_path,
-            rotate_bytes: 0,
-            rotate_keep: 0,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit open");
+        let audit = AuditWriter::open(&AuditOptions::new(audit_path)).expect("audit open");
         let (cancellation_sender, _rx) = rimap_audit::cancellation_channel();
         (
             ImapMcpServer::new(registry, audit, cancellation_sender),
@@ -1800,7 +1792,7 @@ mod tool_call_ceiling_tests {
     use std::time::Duration;
 
     use rimap_audit::writer::AuditOptions;
-    use rimap_audit::{AuditWriter, Seq, cancellation_channel, spawn_drainer};
+    use rimap_audit::{AuditWriter, cancellation_channel, spawn_drainer};
     use rimap_core::tool::ToolName;
     use tempfile::tempdir;
 
@@ -1867,15 +1859,10 @@ mod tool_call_ceiling_tests {
 
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let writer = AuditWriter::open(&AuditOptions {
-            path: path.clone(),
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit open");
+        let mut options = AuditOptions::new(path.clone());
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        let writer = AuditWriter::open(&options).expect("audit open");
 
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());
@@ -1970,7 +1957,7 @@ mod dispatch_drain_tests {
     use std::time::{Duration, Instant};
 
     use rimap_audit::writer::AuditOptions;
-    use rimap_audit::{AuditWriter, Seq, cancellation_channel, spawn_drainer};
+    use rimap_audit::{AuditWriter, cancellation_channel, spawn_drainer};
     use rimap_core::tool::ToolName;
     use rmcp::model::{CallToolResult, ErrorData};
 
@@ -2106,15 +2093,10 @@ mod dispatch_drain_tests {
     async fn an_undrained_count_reaches_process_end_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let writer = AuditWriter::open(&AuditOptions {
-            path: path.clone(),
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit writer opens");
+        let mut options = AuditOptions::new(path.clone());
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        let writer = AuditWriter::open(&options).expect("audit writer opens");
 
         let drain = DispatchDrain::new();
         let entered = Arc::new(AtomicBool::new(false));
@@ -2305,15 +2287,10 @@ mod dispatch_drain_tests {
             .build()
             .expect("runtime builds");
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = AuditWriter::open(&AuditOptions {
-            path: dir.path().join("audit.jsonl"),
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit writer opens");
+        let mut options = AuditOptions::new(dir.path().join("audit.jsonl"));
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        let writer = AuditWriter::open(&options).expect("audit writer opens");
         (rt, dir, writer)
     }
 

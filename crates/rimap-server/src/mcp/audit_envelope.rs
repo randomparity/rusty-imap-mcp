@@ -308,15 +308,11 @@ mod tests {
     /// record under test is always seq 1, so the join also holds for a bug
     /// that hardcoded [`Seq::FIRST`] instead of carrying the real seq.
     fn test_writer_from_seq(path: std::path::PathBuf, initial_seq: Seq) -> AuditWriter {
-        AuditWriter::open(&AuditOptions {
-            path,
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq,
-        })
-        .unwrap()
+        let mut options = AuditOptions::new(path);
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        options.initial_seq = initial_seq;
+        AuditWriter::open(&options).unwrap()
     }
 
     /// A never-completing tool body that signals `entered` on its first poll.
@@ -347,15 +343,11 @@ mod tests {
     }
 
     fn test_writer_fail_open(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
-        AuditWriter::open(&AuditOptions {
-            path,
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open,
-            initial_seq: Seq::FIRST,
-        })
-        .unwrap()
+        let mut options = AuditOptions::new(path);
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        options.fail_open = fail_open;
+        AuditWriter::open(&options).unwrap()
     }
 
     /// Dropping an `AuditEnvelopeGuard` without disarming enqueues a

@@ -644,7 +644,7 @@ mod tests {
     async fn infrastructure_tool_emits_tool_start_and_tool_end() {
         use std::collections::BTreeMap;
 
-        use rimap_audit::{AuditOptions, AuditWriter, Seq};
+        use rimap_audit::{AuditOptions, AuditWriter};
         use tempfile::TempDir;
 
         use crate::boot::registry::AccountRegistry;
@@ -652,15 +652,7 @@ mod tests {
 
         let tmp = TempDir::new().expect("tempdir");
         let audit_path = tmp.path().join("audit.jsonl");
-        let audit = AuditWriter::open(&AuditOptions {
-            path: audit_path.clone(),
-            rotate_bytes: 0,
-            rotate_keep: 0,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit open");
+        let audit = AuditWriter::open(&AuditOptions::new(audit_path.clone())).expect("audit open");
 
         let registry = AccountRegistry::new(BTreeMap::new());
         let (cancellation_sender, _cancellation_rx) = rimap_audit::cancellation_channel();

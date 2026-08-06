@@ -13,7 +13,44 @@ use crate::AuditError;
 use crate::record::{AuditRecord, Payload};
 
 /// Filter predicate for `audit merge`. Empty fields mean "no constraint".
+///
+/// `#[non_exhaustive]`: every new `audit merge` filter dimension is a field
+/// here, so a downstream struct literal would make each one a breaking
+/// change. `Default` is the all-`None` "match everything" predicate, which is
+/// the correct starting point for building one; assign the fields to
+/// constrain. No constructor: nothing about this type is required.
+///
+/// A struct expression is rejected outside this crate:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::Filter {
+///     since: None,
+///     until: None,
+///     tool: None,
+///     kind: None,
+///     process: None,
+///     account: None,
+/// };
+/// ```
+///
+/// And so is functional-update syntax — `..Default::default()` is still a
+/// struct expression (E0639), which is the premise that is easy to get wrong:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::Filter {
+///     kind: Some("tool_end".to_owned()),
+///     ..Default::default()
+/// };
+/// ```
+///
+/// The supported form is [`Filter::default`] plus field assignment:
+///
+/// ```
+/// let mut filter = rimap_audit::Filter::default();
+/// filter.kind = Some("tool_end".to_owned());
+/// ```
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Filter {
     /// Inclusive lower bound on `ts`.
     pub since: Option<OffsetDateTime>,

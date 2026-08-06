@@ -35,15 +35,10 @@ fn unlock_parent(parent: &std::path::Path) {
 fn fail_open_false_propagates_rotation_failure() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
-    let writer = AuditWriter::open(&AuditOptions {
-        path: path.clone(),
-        rotate_bytes: 10,
-        rotate_keep: 5,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
-    .unwrap();
+    let mut options = AuditOptions::new(path.clone());
+    options.rotate_bytes = 10;
+    options.rotate_keep = 5;
+    let writer = AuditWriter::open(&options).unwrap();
 
     lock_parent_readonly(dir.path());
 
@@ -63,15 +58,11 @@ fn fail_open_false_propagates_rotation_failure() {
 fn fail_open_true_suppresses_rotation_failure_and_counts_it() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
-    let writer = AuditWriter::open(&AuditOptions {
-        path: path.clone(),
-        rotate_bytes: 10,
-        rotate_keep: 5,
-        retention_seconds: None,
-        fail_open: true,
-        initial_seq: Seq::FIRST,
-    })
-    .unwrap();
+    let mut options = AuditOptions::new(path.clone());
+    options.rotate_bytes = 10;
+    options.rotate_keep = 5;
+    options.fail_open = true;
+    let writer = AuditWriter::open(&options).unwrap();
 
     lock_parent_readonly(dir.path());
 
