@@ -28,9 +28,10 @@ One JSON object per line (JSONL). Every record shares a common header:
 
 This is the normative statement of what a reader of an audit file may assume,
 and of what "additive" means for a record. It exists because the record types
-are `#[non_exhaustive]` (#706): adding a field to one is no longer a breaking
+are `#[non_exhaustive]` (#706, and `AuthEvent` — the `auth` payload, defined
+in `rimap-core` — under #716): adding a field to one is no longer a breaking
 change *to the Rust API*, and that must not be mistaken for a licence to change
-the file.
+the file. Every `kind` is covered.
 
 **What a reader may assume.**
 

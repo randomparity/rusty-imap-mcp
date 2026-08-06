@@ -737,6 +737,7 @@ mod tests {
                 Some("ab".repeat(32)),
                 Some(true),
                 None,
+                None,
             ))
             .unwrap();
 
@@ -779,6 +780,7 @@ mod tests {
                 None,
                 None,
                 Some(rimap_core::ErrorCode::Tls),
+                None,
             )
         };
         writer.log_auth(make()).unwrap();

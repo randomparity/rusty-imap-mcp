@@ -241,19 +241,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The constructor is
   `AuthEvent::new(result, host, port, username, tls_fingerprint_sha256,
-  fingerprint_match, error_code)`, and `account` and `credential_source` are
-  reached by assignment. The split follows one rule, which is the sharper form
-  of what `ProcessEnd::new` and `AuditOptions::new` did: **a field is a
-  parameter when its `None` still reaches the JSONL line.** The three `Option`
-  parameters have no `skip_serializing_if`, so an unassigned one is written as
-  an explicit `null` and the record affirms something regardless — *nothing
-  was observed*, *the config pinned nothing*, *no error code* — which a
-  caller who never established it would publish anyway. `account` and
-  `credential_source` are skipped when absent, so leaving them unset makes the
-  record silent rather than wrong; `credential_source` is in any case
-  ambiguous on disk between "resolution never ran" and "record predates #78",
-  which is why a reader cannot act on its absence alone. Construct as
-  `let mut e = AuthEvent::new(…); e.account = …; e.credential_source = …;`.
+  fingerprint_match, error_code, credential_source)`, and `account` is reached
+  by assignment: `let mut e = AuthEvent::new(…); e.account = …;`. The split
+  follows the rule `ProcessEnd::new` and `AuditOptions::new` established — a
+  default that asserts something is a parameter — and each of the four
+  `Option`s has a load-bearing `None`: *no fingerprint was observed*, *the
+  config pinned nothing*, *no error code*, *the attempt ended before
+  credential resolution ran*. `credential_source` is a parameter even though
+  `skip_serializing_if` omits it when absent, because an omitted key is not a
+  neutral silence: `docs/audit-log.md` binds a reader to treat an absent field
+  as *unknown* rather than benign, so a forgotten assignment would be
+  indistinguishable on disk from the genuine pre-resolution failure the field
+  documents. `account` stays assignment-reached because it is an operator
+  label rather than a security fact — `None` is the ordinary shape of a
+  single-account deployment.
 
   **No on-disk change.** `#[non_exhaustive]` is a Rust-visibility construct
   that serde never sees, and neither is a constructor, so an `auth` line
@@ -267,7 +268,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries `compile_fail,E0639` doctests as the enforcing half; both were
   confirmed to fail with `Test compiled successfully, but it's marked
   compile_fail` when the attribute is removed. The module docs and re-export
-  comment in `rimap_audit::record` no longer carve `auth` out.
+  comment in `rimap_audit::record` no longer carve `auth` out, and
+  `docs/audit-log.md` now names `auth` as covered.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after

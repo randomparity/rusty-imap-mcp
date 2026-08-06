@@ -680,6 +680,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 );
                 event.account = Some("bob".to_string());
                 event

@@ -788,6 +788,7 @@ mod tests {
                 Some("ab".repeat(32)),
                 Some(true),
                 None,
+                None,
             )),
         };
         let json = serde_json::to_string(&rec).unwrap();

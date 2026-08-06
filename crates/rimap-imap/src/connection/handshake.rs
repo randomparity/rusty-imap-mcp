@@ -454,6 +454,7 @@ mod tests {
             None,
             None,
             Some(rimap_core::ErrorCode::Internal),
+            None,
         )
     }
 

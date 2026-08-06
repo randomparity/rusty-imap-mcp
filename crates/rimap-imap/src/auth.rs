@@ -42,9 +42,8 @@ impl AuthContext<'_> {
     ///
     /// `AuthEvent` is `#[non_exhaustive]` (#716), so a struct literal is not
     /// available from this crate — functional update included (E0639). The
-    /// constructor takes the fields whose `None` is written to disk as an
-    /// explicit `null`; `account` and `credential_source` are skipped when
-    /// absent, so they are assigned here.
+    /// constructor takes every field a reader of the trail draws a conclusion
+    /// from; `account` is the operator label it leaves to assignment.
     fn event(&self, result: AuthResult, error_code: Option<rimap_core::ErrorCode>) -> AuthEvent {
         let mut event = AuthEvent::new(
             result,
@@ -54,9 +53,9 @@ impl AuthContext<'_> {
             self.observed_hex(),
             self.fingerprint_match(),
             error_code,
+            self.credential_source,
         );
         event.account = self.account.map(str::to_string);
-        event.credential_source = self.credential_source;
         event
     }
 }
@@ -84,9 +83,13 @@ mod tests {
     /// Every `AuthContext` field has to land on the `AuthEvent` field of the
     /// same name. Since #716 the mapping runs through `AuthEvent::new`'s
     /// positional parameters, where `host` and `username` are both `String`
-    /// and a transposition compiles — so each value here names its own field,
-    /// and `account` and `credential_source` are checked because the
-    /// constructor leaves them unset and the builder assigns them afterwards.
+    /// and a transposition compiles — so each value here names its own field.
+    /// `account` is checked separately because it is the one field the
+    /// constructor does not take and the builder assigns afterwards.
+    ///
+    /// Both builders are exercised: they share `AuthContext::event`, so a
+    /// mapping defect would reach every `auth` record the process writes, and
+    /// only the `result`/`error_code` pair differs between them.
     #[test]
     fn context_fields_land_on_the_event_fields_they_name() {
         let ctx = AuthContext {
@@ -99,15 +102,30 @@ mod tests {
             credential_source: Some(rimap_core::CredentialSource::EnvVar),
         };
 
-        let rec = auth_success(&ctx);
-        assert_eq!(rec.account.as_deref(), Some("ACCOUNT-goes-here"));
-        assert_eq!(rec.host, "HOST-goes-here");
-        assert_eq!(rec.username, "USERNAME-goes-here");
-        assert_eq!(rec.port, 1993);
+        for rec in [
+            auth_success(&ctx),
+            auth_failure(&ctx, rimap_core::ErrorCode::Auth),
+        ] {
+            assert_eq!(rec.account.as_deref(), Some("ACCOUNT-goes-here"));
+            assert_eq!(rec.host, "HOST-goes-here");
+            assert_eq!(rec.username, "USERNAME-goes-here");
+            assert_eq!(rec.port, 1993);
+            assert_eq!(
+                rec.credential_source,
+                Some(rimap_core::CredentialSource::EnvVar),
+                "the resolved credential source must reach the record",
+            );
+        }
+
+        assert_eq!(auth_success(&ctx).result, AuthResult::Success);
+        assert_eq!(auth_success(&ctx).error_code, None);
         assert_eq!(
-            rec.credential_source,
-            Some(rimap_core::CredentialSource::EnvVar),
-            "a resolved credential source must survive the constructor's default",
+            auth_failure(&ctx, rimap_core::ErrorCode::Auth).result,
+            AuthResult::Failure,
+        );
+        assert_eq!(
+            auth_failure(&ctx, rimap_core::ErrorCode::Auth).error_code,
+            Some(rimap_core::ErrorCode::Auth),
         );
     }
 

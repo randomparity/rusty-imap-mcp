@@ -474,6 +474,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         event.account = Some("alice".to_string());
 

@@ -33,17 +33,17 @@
 //!
 //! Section 3 extends the same construction contract to the crate's three
 //! non-record `pub` structs -- `AuditOptions`, `Filter`, `TrailingState`
-//! (#715) -- and to `AuthEvent` (#716), the `auth` payload that is defined in
-//! `rimap-core` and only re-exported here. The first three have no on-disk
-//! component, so only property 1 applies to them; `AuthEvent` has both, and
-//! its goldens sit with the others in section 2. The file keeps its name
+//! (#715). They have no on-disk component, so only property 1 applies to
+//! them. Section 4 does the same for `AuthEvent` (#716), the `auth` payload
+//! defined in `rimap-core` and only re-exported here; it has both properties,
+//! and its goldens sit with the others in section 2. The file keeps its name
 //! because renaming it would break every inbound reference for no gain.
 //!
 //! ## Convention for new `pub` structs in this crate
 //!
 //! **Every `pub` struct `rimap-audit` adds is born `#[non_exhaustive]`, with
 //! a `compile_fail,E0639` doctest on the type itself and a construction case
-//! in section 3 below.** Retrofitting one costs a breaking change and a
+//! in sections 3-4 below.** Retrofitting one costs a breaking change and a
 //! call-site sweep (#706, #715); adding the attribute at birth costs a line.
 //! The doctest is the load-bearing half: an integration test here compiles
 //! just as well without the attribute, so it documents the idiom but enforces
@@ -306,6 +306,7 @@ fn auth_line_is_byte_exact() {
         Some("ab".repeat(32)),
         Some(true),
         None,
+        None,
     );
     event.account = Some("work".to_string());
 
@@ -321,14 +322,14 @@ fn auth_line_is_byte_exact() {
 /// `credential_source`.
 ///
 /// `credential_source` is the field `AuthEvent` already grew once (#78) and
-/// the reason its `#[serde(default)]` retrofit was needed, so it is worth a
-/// line of its own. It is also the field `AuthEvent::new` leaves at `None`
-/// deliberately -- being `skip_serializing_if`, an unassigned one leaves no
-/// key at all rather than writing a claim -- which makes this the test that a
-/// caller who *does* assign it reaches the wire, and in the right position.
+/// the reason its `#[serde(default)]` retrofit was needed, so its position on
+/// the line -- last, after `error_code` -- is worth pinning. It is also the
+/// only `skip_serializing_if` field `AuthEvent::new` still takes, so this is
+/// what proves a passed value reaches the wire rather than being dropped by
+/// the omit-when-absent rule.
 #[test]
 fn auth_failure_line_is_byte_exact() {
-    let mut event = rimap_audit::record::AuthEvent::new(
+    let event = rimap_audit::record::AuthEvent::new(
         rimap_audit::record::AuthResult::Failure,
         "imap.example.com".to_string(),
         993,
@@ -336,8 +337,8 @@ fn auth_failure_line_is_byte_exact() {
         None,
         None,
         Some(rimap_core::ErrorCode::Auth),
+        Some(rimap_core::CredentialSource::Keyring),
     );
-    event.credential_source = Some(rimap_core::CredentialSource::Keyring);
 
     let record = AuditRecord::new(Seq(3), fixed_ts(), fixed_pid(), Payload::Auth(event));
     assert_golden(
@@ -677,14 +678,13 @@ fn trailing_state_is_read_and_destructured_with_a_rest_pattern() {
 /// does -- through the same public path, from outside both crates -- which is
 /// what makes the attribute observable here.
 ///
-/// The split between parameter and assignment is the contract being pinned,
-/// and it follows one rule: a field is a parameter when its `None` still
-/// reaches the JSONL line. `tls_fingerprint_sha256`, `fingerprint_match`, and
-/// `error_code` have no `skip_serializing_if`, so the record affirms
-/// something about each of them whatever the caller does -- "nothing was
-/// observed", "nothing was pinned", "no error". `account` and
-/// `credential_source` are skipped when absent, so leaving them unassigned
-/// leaves the record silent rather than wrong, and they are assigned.
+/// The split between parameter and assignment is the contract being pinned:
+/// every field a reader draws a conclusion from is stated, and `account` --
+/// an operator label whose `None` is the ordinary shape of a single-account
+/// deployment -- is the one left to assignment. `credential_source` is a
+/// parameter despite being `skip_serializing_if`, because an omitted key
+/// means *unknown* under `docs/audit-log.md`, which a forgotten assignment
+/// would be indistinguishable from.
 #[test]
 fn auth_event_is_built_through_its_constructor_and_field_assignment() {
     use rimap_audit::record::{AuthEvent, AuthResult};
@@ -698,20 +698,17 @@ fn auth_event_is_built_through_its_constructor_and_field_assignment() {
         Some("cd".repeat(32)),
         Some(false),
         Some(rimap_core::ErrorCode::Tls),
+        Some(CredentialSource::EnvVar),
     );
 
     assert_eq!(
         event.account, None,
         "an unassigned account is skipped on the line, not defaulted to a name",
     );
-    assert_eq!(
-        event.credential_source, None,
-        "likewise credential_source: absent means unstated, not 'no store'",
-    );
+    assert_eq!(event.credential_source, Some(CredentialSource::EnvVar));
 
     event.account = Some("work".to_string());
-    event.credential_source = Some(CredentialSource::EnvVar);
-    assert_eq!(event.credential_source, Some(CredentialSource::EnvVar));
+    assert_eq!(event.account.as_deref(), Some("work"));
 
     // A downstream match needs a rest pattern; without the `..` this stops
     // compiling, which is what stops a later field from silently changing
@@ -746,6 +743,7 @@ fn auth_event_new_maps_each_argument_onto_the_field_it_names() {
         Some("FINGERPRINT-goes-here".to_string()),
         Some(true),
         Some(rimap_core::ErrorCode::Auth),
+        Some(rimap_core::CredentialSource::LegacyKeyring),
     );
 
     assert_eq!(event.host, "HOST-goes-here");
@@ -757,5 +755,9 @@ fn auth_event_new_maps_each_argument_onto_the_field_it_names() {
     );
     assert_eq!(event.fingerprint_match, Some(true));
     assert_eq!(event.error_code, Some(rimap_core::ErrorCode::Auth));
+    assert_eq!(
+        event.credential_source,
+        Some(rimap_core::CredentialSource::LegacyKeyring),
+    );
     assert_eq!(event.result, AuthResult::Success);
 }

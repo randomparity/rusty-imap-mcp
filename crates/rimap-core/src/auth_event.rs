@@ -72,6 +72,7 @@ pub enum AuthResult {
 ///         None,
 ///         None,
 ///         None,
+///         None,
 ///     )
 /// };
 /// ```
@@ -85,6 +86,7 @@ pub enum AuthResult {
 ///     "imap.example.com".to_string(),
 ///     993,
 ///     "alice@example.com".to_string(),
+///     None,
 ///     None,
 ///     None,
 ///     None,
@@ -133,31 +135,40 @@ pub struct AuthEvent {
 impl AuthEvent {
     /// Build an auth event from the fields whose value a caller must state.
     ///
-    /// The line between a parameter and a field left to assignment is drawn by
-    /// what the record says on disk when the field is `None`, because that is
-    /// what a reader of the audit trail acts on:
+    /// Every field a reader of the audit trail draws a conclusion from is a
+    /// parameter, following the rule `rimap_audit`'s `ProcessEnd::new`
+    /// (`records_lost`, #706) and `AuditOptions::new` (`initial_seq`, #715)
+    /// established: **a default that asserts something is a parameter.** Each
+    /// of the four `Option`s here has a load-bearing `None` — *no fingerprint
+    /// was observed*, *the config pinned nothing to compare against*, *this
+    /// attempt carried no error code*, *the attempt ended before credential
+    /// resolution ran*. A caller who never assigned one would publish that
+    /// claim without having established it.
     ///
-    /// - The three `Option` parameters — `tls_fingerprint_sha256`,
-    ///   `fingerprint_match`, `error_code` — have no `skip_serializing_if`, so
-    ///   a `None` is written out as an explicit `null`. The record makes a
-    ///   claim either way: *no fingerprint was observed*, *the config pinned
-    ///   nothing to compare against*, *this attempt carried no error code*. A
-    ///   caller who never assigned them would publish those claims without
-    ///   having established any of them, so they are required.
-    /// - `account` and `credential_source` carry `skip_serializing_if`, so a
-    ///   `None` leaves no key on the line at all — the record is silent rather
-    ///   than affirmative. `credential_source` is additionally ambiguous by
-    ///   construction: its absence means *resolution never ran* **or** *this
-    ///   record predates #78*, which is why a reader cannot act on it alone.
-    ///   Both are reached by assignment.
+    /// `credential_source` earns its place despite being
+    /// `skip_serializing_if`: an omitted key is not a neutral silence, because
+    /// `docs/audit-log.md` binds a reader to treat an absent field as
+    /// *unknown* rather than as benign, and a forgotten assignment would be
+    /// indistinguishable on disk from the genuine pre-resolution failure it
+    /// documents. Passing `None` explicitly is at least a checkable claim.
     ///
-    /// Same rule as `rimap_audit`'s `ProcessEnd::new` taking `records_lost`
-    /// (#706) and `AuditOptions::new` taking `initial_seq` (#715): a default
-    /// that asserts something is a parameter.
+    /// `account` is the one field left to assignment. It is an operator label
+    /// rather than a security fact — `None` is the ordinary shape of a
+    /// single-account deployment, not an assertion about what happened — and
+    /// it is skipped on the line when absent.
     ///
     /// `username` is a login identity and **must never** be passed credential
-    /// material; see the field's own documentation.
+    /// material; see the field's own documentation. `host` and `username` are
+    /// adjacent `String` parameters, so transposing them type-checks — the
+    /// mapping is pinned by
+    /// `rimap-audit/tests/non_exhaustive_record.rs::auth_event_new_maps_each_argument_onto_the_field_it_names`.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "8 of the 9 fields carry a claim a reader acts on, so each is \
+                  stated rather than defaulted; a parameter-object type here \
+                  would be a second public shape in rimap-core for one caller"
+    )]
     pub fn new(
         result: AuthResult,
         host: String,
@@ -166,6 +177,7 @@ impl AuthEvent {
         tls_fingerprint_sha256: Option<String>,
         fingerprint_match: Option<bool>,
         error_code: Option<ErrorCode>,
+        credential_source: Option<CredentialSource>,
     ) -> Self {
         Self {
             account: None,
@@ -176,7 +188,7 @@ impl AuthEvent {
             tls_fingerprint_sha256,
             fingerprint_match,
             error_code,
-            credential_source: None,
+            credential_source,
         }
     }
 }
