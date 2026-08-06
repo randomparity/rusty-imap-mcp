@@ -232,26 +232,26 @@ const LLVM_PROFILE_FILE_ENV: &str = "LLVM_PROFILE_FILE";
 /// anything measured here", was true only because nothing had measured *this*
 /// arm. It has now been measured on the runner that flaked, via the sample
 /// [`read_probe_line`] emits and `--success-output final` on the coverage step:
-/// 6363 steady-state instrumented reads across three coverage runs.
+/// 8484 steady-state instrumented reads across four coverage runs.
 ///
-/// - p50 **0.43 ms**, p90 **0.73 ms**, p99 **169 ms**, p99.9 **374 ms**,
-///   worst sample **379 ms**.
+/// - p50 **0.40 ms**, p90 **0.70 ms**, p99 **169 ms**, p99.9 **374 ms**,
+///   worst sample **449 ms**.
 /// - Two modes, and the second one is *work*, not a stall. 94% of reads land
-///   under 1 ms; a discrete population of 31 reads per run sits at 120-380 ms.
+///   under 1 ms; a discrete population of ~31 reads per run sits at 100-450 ms.
 ///   Every member of it is a `tools/call` naming a tool that makes an IMAP
 ///   round trip to the Dovecot container — `list_folders`, `search`,
 ///   `fetch_message`, `expunge`, `move_message`, `download_attachment`. Not one
 ///   is `initialize` or `tools/list`.
-/// - It is deterministic. Three independent runs produced **exactly 31**
-///   samples over 100 ms each, with p99 within 1.5 ms and worst case within
-///   5 ms of each other. Starvation does not reproduce to the sample.
+/// - It is deterministic. Four independent runs produced 31, 31, 31 and 33
+///   samples over 100 ms, with p99 spread across 167-170 ms. Starvation does
+///   not reproduce to the sample.
 ///
-/// So the worst read this arm produces is **26x** under this floor and **5.3x**
+/// So the worst read this arm produces is **22x** under this floor and **4.5x**
 /// under the bare [`REQUEST_TIMEOUT`] it replaces. On the measured
 /// distribution, `REQUEST_TIMEOUT` alone would have been sufficient, and this
-/// floor is pure tail allowance. Keep it anyway: 6363 samples bound a *rate*,
-/// not a possibility, and the #671 event needed a read 5x beyond anything here.
-/// Zero events in 6363 reads puts only a 95% upper bound of ~4.7e-4 per read on
+/// floor is pure tail allowance. Keep it anyway: 8484 samples bound a *rate*,
+/// not a possibility, and the #671 event needed a read 4x beyond anything here.
+/// Zero events in 8484 reads puts only a 95% upper bound of ~3.5e-4 per read on
 /// such an event — too weak to call it impossible, which is why the probe is
 /// permanent rather than a one-off. Every future coverage run now appends ~2121
 /// samples to the record, and a multi-second read is visible in the log even
@@ -312,30 +312,35 @@ const READ_PROBE_PREFIX: &str = "wire-read-probe";
 /// One read-latency sample, formatted for machine parsing.
 ///
 /// A pure function rather than an inline `eprintln!` because the *format* is
-/// the contract #692 consumes — the arm is identified in the line itself, so a
-/// dump that mixes the coverage job's reads with an uninstrumented job's stays
-/// separable, and `phase` keeps the first read after spawn out of the
-/// steady-state population it would otherwise dominate.
+/// the contract #692 consumes: `phase` keeps the first read after spawn out of
+/// the steady-state population it would otherwise dominate, and the whole
+/// record has to survive a `grep` over a `--success-output final` dump.
+///
+/// The arm is not a field. Every sample is emitted on the instrumented arm and
+/// nowhere else — see the gate at the call site — so a column that always reads
+/// `true` would be noise.
 ///
 /// Microseconds, not nextest's `Duration` debug form: the steady-state median
-/// measured for #692 is 0.10 ms, which `{:?}` renders as `100µs` in one sample
+/// measured for #692 is 0.43 ms, which `{:?}` renders as `430µs` in one sample
 /// and `1.03ms` in the next. A single integer unit makes the tail computable
 /// without parsing suffixes.
 fn read_probe_line(caller: &str, first_read: bool, elapsed: Duration, budget: Duration) -> String {
     let phase = if first_read { "first" } else { "steady" };
     format!(
-        "{READ_PROBE_PREFIX} phase={phase} instrumented={} elapsed_us={} budget_us={} \
-         caller={caller}",
-        coverage_instrumented(),
+        "{READ_PROBE_PREFIX} phase={phase} elapsed_us={} budget_us={} caller={caller}",
         elapsed.as_micros(),
         budget.as_micros(),
     )
 }
 
+/// Longest label a sample will carry. Real tool names are well under this;
+/// the cap exists so a generated one cannot dominate the log line.
+const MAX_LABEL_LEN: usize = 64;
+
 /// Label a request carries into its read sample.
 ///
-/// The bare JSON-RPC method is not enough to rule on #692. The first hosted
-/// runner distribution put every read above 100 ms on `tools/call` and none on
+/// The bare JSON-RPC method is not enough to rule on #692. The hosted-runner
+/// distribution put every read above 100 ms on `tools/call` and none on
 /// `initialize` or `tools/list` — but `tools/call` covers both a cache-served
 /// `list_folders` and a `fetch_message` that pulls a multipart body off
 /// Dovecot, so pooled under one label a slow-but-correct IMAP round trip is
@@ -344,11 +349,31 @@ fn read_probe_line(caller: &str, first_read: bool, elapsed: Duration, budget: Du
 /// Only `tools/call` carries a `name`; every other method labels as itself
 /// rather than growing a synthetic suffix that would have to be stripped
 /// again on the way out.
+///
+/// **The name is sanitized, because it is not always a tool name.**
+/// `mcp_wire_proptest` generates `params["name"]` from a `proptest` strategy,
+/// so the value reaching this function is arbitrary. Today that strategy's
+/// charset excludes control characters, but nothing enforces that, and a label
+/// carrying a newline could forge a second [`READ_PROBE_PREFIX`] record inside
+/// one sample and silently corrupt the distribution a reader greps out. Bound
+/// the length and replace anything outside the tool-name charset rather than
+/// trusting the callers to stay well-behaved.
 fn request_label(method: &str, params: &Value) -> String {
-    match params.get("name").and_then(Value::as_str) {
-        Some(tool) => format!("{method}:{tool}"),
-        None => method.to_owned(),
-    }
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return method.to_owned();
+    };
+    let tool: String = name
+        .chars()
+        .take(MAX_LABEL_LEN)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "_.-".contains(c) {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    format!("{method}:{tool}")
 }
 
 /// Possible outcomes when probing the server for "either a
@@ -700,10 +725,18 @@ allowed_base_dir = "{}"
     /// a start-up notification arriving ahead of the response cannot consume
     /// the cold-start grace and leave the response itself on the tight budget.
     ///
-    /// Every completed read emits a [`read_probe_line`] sample on stderr, which
-    /// is what supplies #692 with the read-latency distribution the timeout
-    /// panic path cannot: a run that never times out observes nothing at all,
-    /// and #671's failure observed only the lower bound its budget imposed.
+    /// On the coverage arm — and only there — every completed read emits a
+    /// [`read_probe_line`] sample on stderr, which is what supplies #692 with
+    /// the read-latency distribution the timeout panic path cannot: a run that
+    /// never times out observes nothing at all, and #671's failure observed
+    /// only the lower bound its budget imposed.
+    ///
+    /// The gate is not just scoping. `mcp-fuzz-nightly.yml` drives
+    /// `mcp_wire_proptest` at `PROPTEST_CASES = 100000` under `--nocapture`
+    /// and accumulates the whole stream into a shell variable, so an
+    /// unconditional sample here would add order 10^5 lines to a job that has
+    /// no use for them. The coverage arm is the one place the samples are both
+    /// wanted and retained.
     async fn read_one_envelope_within(&mut self, caller: &str, read_timeout: Duration) -> Value {
         let read_timeout = read_deadline(self.first_output_seen, read_timeout);
         loop {
@@ -732,15 +765,17 @@ allowed_base_dir = "{}"
                     self.captured_stderr(),
                 ),
             };
-            #[expect(
-                clippy::print_stderr,
-                reason = "read-latency distribution collected by #692"
-            )]
-            {
-                eprintln!(
-                    "{}",
-                    read_probe_line(caller, first_read, read_elapsed, read_timeout),
-                );
+            if coverage_instrumented() {
+                #[expect(
+                    clippy::print_stderr,
+                    reason = "read-latency distribution collected by #692"
+                )]
+                {
+                    eprintln!(
+                        "{}",
+                        read_probe_line(caller, first_read, read_elapsed, read_timeout),
+                    );
+                }
             }
             assert!(
                 read > 0,
@@ -1271,8 +1306,7 @@ mod read_deadline_tests {
 #[cfg(test)]
 mod read_probe_tests {
     use super::{
-        Duration, READ_PROBE_PREFIX, Value, coverage_instrumented, json, read_probe_line,
-        request_label,
+        Duration, MAX_LABEL_LEN, READ_PROBE_PREFIX, Value, json, read_probe_line, request_label,
     };
 
     /// The sample is only useful if a dump can be reduced to it by one grep,
@@ -1308,25 +1342,13 @@ mod read_probe_tests {
         assert!(line.contains("budget_us=2000000"), "got {line:?}");
     }
 
-    /// A dump can mix arms — the coverage job's reads and an uninstrumented
-    /// job's are the two populations #692 compares — so the arm has to be
-    /// recoverable from the sample rather than from which log it came out of.
-    #[test]
-    fn the_arm_is_recorded_in_the_sample() {
-        let line = read_probe_line("tools/call", false, Duration::from_micros(1), REQUEST);
-        assert!(
-            line.contains(&format!("instrumented={}", coverage_instrumented())),
-            "sample must record the detected arm; got {line:?}",
-        );
-    }
-
     /// The caller is the only field that says *which* request stalled, and
     /// #692's hypothesis 2 is specific to `tools/call`.
     #[test]
-    fn the_caller_is_preserved_verbatim() {
-        let line = read_probe_line("tools/call fetch_message", false, Duration::ZERO, REQUEST);
+    fn the_caller_is_the_last_field_so_it_cannot_be_truncated_by_a_reader() {
+        let line = read_probe_line("tools/call:fetch_message", false, Duration::ZERO, REQUEST);
         assert!(
-            line.ends_with("caller=tools/call fetch_message"),
+            line.ends_with("caller=tools/call:fetch_message"),
             "got {line:?}"
         );
     }
@@ -1363,6 +1385,43 @@ mod read_probe_tests {
             request_label("tools/call", &json!({"name": 7})),
             "tools/call",
         );
+    }
+
+    /// `mcp_wire_proptest` feeds a generated string into `params["name"]`, so
+    /// the label is not trusted input.
+    ///
+    /// Two properties close the forgery, and both are asserted because neither
+    /// is sufficient alone. One line per sample is what makes a line-oriented
+    /// reader correct. And `=` never surviving sanitization is what makes a
+    /// smuggled `phase=…` unparseable even to a reader that scans without
+    /// anchoring — the literal prefix *can* still appear inside a label, since
+    /// `-` is a legal tool-name character, so line integrity by itself would
+    /// leave a naive occurrence count double-counting.
+    #[test]
+    fn a_label_cannot_forge_a_second_record() {
+        let hostile = format!("x\r\n{READ_PROBE_PREFIX} phase=steady elapsed_us=1 budget_us=1");
+        let label = request_label("tools/call", &json!({ "name": hostile }));
+        let line = read_probe_line(&label, false, Duration::ZERO, REQUEST);
+        assert!(
+            !line.contains(['\n', '\r']),
+            "sample must stay one line; got {line:?}",
+        );
+        let (_, tool) = label
+            .split_once(':')
+            .expect("a tool call label has a suffix");
+        assert!(
+            !tool.contains('='),
+            "a label must not be able to smuggle a field; got {tool:?}",
+        );
+    }
+
+    /// The cap bounds a generated name's share of the line. Asserted on the
+    /// label rather than the raw name so it keeps holding if the sanitizer
+    /// changes shape.
+    #[test]
+    fn a_long_name_is_capped() {
+        let label = request_label("tools/call", &json!({"name": "a".repeat(500)}));
+        assert_eq!(label, format!("tools/call:{}", "a".repeat(MAX_LABEL_LEN)));
     }
 
     /// Stand-in for `REQUEST_TIMEOUT` so these cases assert a literal rather
