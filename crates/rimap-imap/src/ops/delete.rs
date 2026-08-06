@@ -1,11 +1,15 @@
 //! `delete_message`: STORE +FLAGS (\Deleted) + UID MOVE to Trash.
 
-use crate::connection::{ImapSession, ServerCapabilities};
+use crate::connection::SessionEntry;
 use crate::error::ImapError;
 use crate::ops::store;
 use crate::types::{Flag, FlagAction, Uid};
 
 /// Delete a message: flag it as `\Deleted` and move it to Trash.
+///
+/// Takes the whole [`SessionEntry`] rather than a session and an advertisement,
+/// so the pair this branches on is the one that will serve the delete and a
+/// caller has nowhere to pass a separately-read advertisement (#704).
 ///
 /// If the message is already in the Trash folder (case-insensitive match),
 /// only the `\Deleted` flag is applied — no move is attempted.
@@ -16,16 +20,15 @@ use crate::types::{Flag, FlagAction, Uid};
 ///
 /// Returns `ImapError::InvalidInput` if `source_folder` or `trash_folder`
 /// fails `validate_folder_name`.
-/// Returns `ImapError::CapabilitiesUnknown` when `capabilities` is
-/// [`ServerCapabilities::Unknown`] and a Trash move is required — see the
-/// refusal below.
+/// Returns `ImapError::CapabilitiesUnknown` when the entry's advertisement is
+/// [`crate::connection::ServerCapabilities::Unknown`] and a Trash move is
+/// required — see the refusal below.
 /// Propagates connection-lost or protocol errors from async-imap.
 pub(crate) async fn delete_message(
-    session: &mut ImapSession,
+    entry: &mut SessionEntry,
     uid: Uid,
     source_folder: &str,
     trash_folder: &str,
-    capabilities: ServerCapabilities,
 ) -> Result<DeleteResult, ImapError> {
     super::folder_management::validate_folder_name(source_folder)?;
     super::folder_management::validate_folder_name(trash_folder)?;
@@ -35,7 +38,7 @@ pub(crate) async fn delete_message(
     // an uninformative probe cannot endanger it — refusing here would cost
     // availability and buy nothing.
     if source_folder.eq_ignore_ascii_case(trash_folder) {
-        store::store(session, &[uid], &[Flag::Deleted], FlagAction::Add).await?;
+        store::store(entry.session(), &[uid], &[Flag::Deleted], FlagAction::Add).await?;
         return Ok(DeleteResult {
             uid,
             moved_to_trash: false,
@@ -49,7 +52,11 @@ pub(crate) async fn delete_message(
     // the `\Deleted` STORE: refusing after it would leave the message flagged
     // for deletion by whatever expunges the folder next, which is the outcome
     // being refused, merely deferred.
-    let (has_move, has_uidplus) = capabilities.require_known("delete_message")?;
+    let (has_move, has_uidplus) = entry.capabilities().require_known("delete_message")?;
+
+    // Read after the advertisement, so the branch above is decided from the
+    // entry before anything below reaches the wire through it.
+    let session = entry.session();
 
     // Step 3: STORE +FLAGS (\Deleted)
     store::store(session, &[uid], &[Flag::Deleted], FlagAction::Add).await?;
