@@ -116,9 +116,8 @@ fn write_fingerprint_section<W: Write>(
 /// the three renderings cannot report different provenance (#632).
 fn write_explicit_overrides_section<W: Write>(
     out: &mut W,
-    acfg: &rimap_config::validate::ValidatedAccountConfig,
+    matrix: &rimap_audit::record::AccountToolMatrix,
 ) -> std::io::Result<()> {
-    let matrix = crate::boot::tool_matrix::account_tool_matrix(acfg, None);
     if matrix.tools.is_empty() {
         writeln!(out, "Explicit tool overrides: none")?;
         return Ok(());
@@ -140,17 +139,15 @@ fn write_explicit_overrides_section<W: Write>(
 /// `process_start` record, so an `inherited` entry reads identically wherever
 /// an operator meets it (#696).
 ///
-/// `--dry-run` has no IMAP session, so the producer is asked for the
-/// configured lists (`None`) and the header says so outright. Printing the
-/// configured list under a bare `Protected folders:` would understate what
-/// the running server protects, because boot appends the server's RFC 6154
-/// special-use folders to it — and understating protection is the direction
-/// that misleads.
+/// `--dry-run` has no IMAP session, so `matrix` was built without one and the
+/// header says so outright. Printing the configured list under a bare
+/// `Protected folders:` would understate what the running server protects,
+/// because boot appends the server's RFC 6154 special-use folders to it — and
+/// understating protection is the direction that misleads.
 fn write_folder_policy_sections<W: Write>(
     out: &mut W,
-    acfg: &rimap_config::validate::ValidatedAccountConfig,
+    matrix: &rimap_audit::record::AccountToolMatrix,
 ) -> std::io::Result<()> {
-    let matrix = crate::boot::tool_matrix::account_tool_matrix(acfg, None);
     write_folder_section(
         out,
         "Protected folders (configured; server special-use folders are added at boot)",
@@ -228,8 +225,12 @@ pub async fn run<W: Write>(path: &Path, out: &mut W) -> anyhow::Result<()> {
         {
             writeln!(out, "  [ok ] {tool}")?;
         }
-        write_explicit_overrides_section(out, acfg)?;
-        write_folder_policy_sections(out, acfg)?;
+        // `None`: this path opens no IMAP session, so no special-use folder
+        // is known. Both sections below say so rather than presenting the
+        // configured list as the one boot will build the guard from (#696).
+        let policy = crate::boot::tool_matrix::account_tool_matrix(acfg, None);
+        write_explicit_overrides_section(out, &policy)?;
+        write_folder_policy_sections(out, &policy)?;
 
         // Errors are reported inline but do not abort the dry-run — a
         // multi-account config may have one unreachable host and still

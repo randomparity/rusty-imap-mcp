@@ -187,7 +187,7 @@ pub fn render_folder_entry(entry: &FolderEntry) -> String {
 
 /// Render one folder list for a single-line consumer, or `none` when empty.
 #[must_use]
-pub fn render_folder_list(entries: &[FolderEntry]) -> String {
+fn render_folder_list(entries: &[FolderEntry]) -> String {
     if entries.is_empty() {
         return "none".to_string();
     }
