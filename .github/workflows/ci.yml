@@ -478,11 +478,38 @@ jobs:
 
   sonarqube:
     name: SonarQube
-    # Skip on PRs from forks and from Dependabot (neither can access the
-    # SONAR_TOKEN secret). Skipped required checks satisfy branch protection.
+    # Skip on PRs from forks and on Dependabot's PRs. Neither may reach
+    # SONAR_TOKEN: this job runs `cargo llvm-cov nextest --all-features`, which
+    # compiles and executes every build script, proc macro and test in the
+    # dependency graph, and then hands the token to the scan step in the same
+    # job. On a Dependabot PR that graph is the freshly bumped one.
+    #
+    # Both conditions are read from the PR itself, never from `github.actor` —
+    # the actor is whoever triggered the *current* event, so clicking "Update
+    # branch", re-running a job, or the realign push from
+    # dependabot-fuzz-lock.yml each replace it with a human or App identity and
+    # un-skip the job. That was not theoretical: runs 31044452478, 31045404875
+    # and 31046690877 are Dependabot PRs where "Update branch" made this job
+    # `success` rather than `skipped` (#754). `pull_request.user.login` is the
+    # PR author, fixed when the PR opens and unmovable by a later pusher, and
+    # `dependabot[bot]` is unimpersonable because `[` and `]` are illegal in a
+    # GitHub login. Same two properties dependabot-fuzz-lock.yml gates on.
+    #
+    # `head.repo.full_name == github.repository` rather than `head.repo.fork ==
+    # false`: a PR from a since-deleted fork has `head.repo: null`, and GitHub
+    # coerces both `null` and `false` to 0, so that comparison reads true and
+    # runs the job on a fork PR. Comparing against a string fails closed.
+    #
+    # On `push` both `github.event.pull_request` terms are null, which the
+    # `github.event_name` guard keeps from mattering; the job runs, as before.
+    # Every event that can produce a PR still reaches this job and reports
+    # `success` or `skipped`, so the required check is never simply absent —
+    # a skipped required check satisfies branch protection, a missing one
+    # wedges it.
     if: >-
-      github.actor != 'dependabot[bot]'
-      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+      github.event.pull_request.user.login != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     # SONAR_TOKEN lives in the `sonarcloud` environment for future hardening
     # (branch restrictions, required reviewers) without changing the workflow.
