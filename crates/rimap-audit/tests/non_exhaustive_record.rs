@@ -524,6 +524,11 @@ fn a_line_read_off_disk_reserializes_unchanged() {
 /// records would put duplicate `seq` values into an append-only log. This
 /// test passes a non-first value and proves it reaches the record on disk.
 ///
+/// Note `rotate_keep` defaults to `0`, which means "delete every rotated
+/// sibling immediately" -- so a test that provoked a rotation here would have
+/// nothing on disk to find. Rotation has its own suite in `tests/rotation.rs`;
+/// what this one owes is that an assigned field reaches the writer.
+///
 /// The `AuditWriter::open` call is what makes this more than a field check:
 /// the options built here have to be accepted by the real constructor, on the
 /// real path, from outside the crate.
@@ -542,36 +547,25 @@ fn audit_options_new_configures_a_working_writer() {
     assert!(!options.fail_open, "fail-closed is the safe default");
     assert_eq!(options.initial_seq, Seq(41), "the constructor took this");
 
-    // Field assignment is the supported way to depart from those values. A
-    // 200-byte threshold against ~150-byte records rotates on the second
-    // write, so the assignment is load-bearing rather than decorative.
-    options.rotate_bytes = 200;
+    // Field assignment is the supported way to depart from those values, and
+    // `rotate_bytes` is the one departure the writer exposes an accessor for,
+    // so the assignment is observed rather than merely written.
+    options.rotate_bytes = 4096;
 
     let writer = AuditWriter::open(&options).expect("writer opens");
-    for _ in 0..3 {
-        writer
-            .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0))
-            .expect("process_end write succeeds");
-    }
-    drop(writer);
-
-    let rotated: Vec<_> = std::fs::read_dir(dir.path())
-        .expect("audit dir readable")
-        .filter_map(|e| e.ok().map(|e| e.file_name()))
-        .filter(|name| name != "audit.jsonl")
-        .collect();
-    assert!(
-        !rotated.is_empty(),
-        "the assigned rotate_bytes must take effect; found no rotated sibling",
+    assert_eq!(
+        writer.rotate_bytes(),
+        4096,
+        "the assigned rotate_bytes must reach the writer, not `new`'s default",
     );
 
-    let first_line = std::fs::read_to_string(dir.path().join(&rotated[0]))
-        .expect("rotated sibling readable")
-        .lines()
-        .next()
-        .expect("rotated sibling has a line")
-        .to_string();
-    let record: AuditRecord = serde_json::from_str(&first_line).expect("written line parses");
+    writer
+        .log_process_end(ProcessEnd::new(ProcessEndReason::Eof, 0, 0, 0))
+        .expect("process_end write succeeds");
+    drop(writer);
+
+    let line = std::fs::read_to_string(&path).expect("audit file readable");
+    let record: AuditRecord = serde_json::from_str(line.trim_end()).expect("written line parses");
     assert_eq!(
         record.seq,
         Seq(41),
