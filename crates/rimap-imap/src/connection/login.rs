@@ -170,20 +170,55 @@ impl Connection {
     ///   proxy, a mid-restart server — yields `Ok(<empty set>)`. That set is
     ///   indistinguishable from a parsed listing by type alone.
     ///
-    /// What separates them is `IMAP4rev1`: RFC 3501 §7.2.1 requires the
-    /// CAPABILITY response to include it, so a listing that lacks it is not a
-    /// listing this client can read. That check is what makes an
+    /// What separates them is a revision atom: RFC 3501 §7.2.1 requires the
+    /// CAPABILITY response to include `IMAP4rev1` and RFC 9051 §7.2.2 requires
+    /// `IMAP4rev2` of a server implementing it, so a listing carrying neither
+    /// is not a listing this client can read. That check is what makes an
     /// `IMAP4rev1`-only server (a genuine "neither extension") land on `Known {
     /// false, false }` while a `BAD` lands on `Unknown`, which is the whole
     /// distinction #649 is about.
     ///
-    /// A server advertising only `IMAP4rev2` (RFC 9051) is therefore `Unknown`
-    /// too, and its deletes and moves are refused rather than served. That is
-    /// the safe side of a gap, not a fix for it: RFC 9051 folds MOVE and
-    /// UIDPLUS into the base protocol and stops advertising them, so reading
-    /// such a server as "advertises neither" would have selected the
-    /// folder-wide `EXPUNGE` against a server that in fact supports `UID
-    /// EXPUNGE`. Real `IMAP4rev2` support is #686.
+    /// ## Why `IMAP4rev2` alone advertises MOVE and UIDPLUS
+    ///
+    /// RFC 9051 Appendix E folds MOVE (RFC 6851) and UIDPLUS (RFC 4315) into
+    /// the base protocol, so a conforming `IMAP4rev2` server need not list
+    /// either atom. Reading such a listing atom-by-atom yields `Known { false,
+    /// false }` — the one pair
+    /// [`crate::ops::expunge::fallback_uses_folder_wide_expunge`] selects the
+    /// folder-wide RFC 3501 `EXPUNGE` on, against a server that in fact
+    /// supports `UID EXPUNGE`. That is #649's data-loss path reached by a
+    /// different route, so `rev2` is folded into both flags (#686).
+    ///
+    /// A server advertising *both* revisions — the compatibility shape RFC 9051
+    /// Appendix A names — serves RFC 3501 semantics until the client issues
+    /// `ENABLE IMAP4rev2`, which this client never does. Folding anyway is the
+    /// safe direction of that ambiguity, and the asymmetry is the whole
+    /// argument: such a server implements `UID MOVE` and `UID EXPUNGE`
+    /// whichever mode it is in, so the worst case of folding is a tagged `NO`
+    /// on a command it chose not to advertise, while the worst case of not
+    /// folding is every `\Deleted` message in the mailbox removed. Appendix A
+    /// also expects such a server to advertise the folded extensions
+    /// separately, so against a conforming one this changes nothing.
+    ///
+    /// ## What is still not supported
+    ///
+    /// A listing advertising `IMAP4rev2` and *not* `IMAP4rev1` never reaches
+    /// this function. `imap-proto`'s `capability_data` parser (read against
+    /// 0.16.7) runs every parsed `CAPABILITY` response through
+    /// `ensure_capabilities_contains_imap4rev`, which rejects any that lacks
+    /// the `IMAP4rev1` atom — so the line fails to parse and the *pre-login*
+    /// `CAPABILITY` command fails the whole connect with
+    /// [`ImapError::Protocol`], before login. An RFC 9051-only server is
+    /// therefore unreachable for reasons this crate cannot fix; #686 tracks the
+    /// upstream work. The `rev2` term in the readability gate below is written
+    /// for correctness under this function's own contract rather than for a
+    /// case it can currently observe.
+    ///
+    /// Both probes are also literal-case: `has_str` special-cases `IMAP4rev1`
+    /// case-insensitively but compares every other atom exactly, so a server
+    /// spelling it `IMAP4REV2` reads as absent. That is #735, and it is a
+    /// fail-safe direction — the listing degrades to whatever its other atoms
+    /// say.
     async fn read_capabilities(session: &mut ImapSession) -> ServerCapabilities {
         let caps = match session.capabilities().await {
             Ok(caps) => caps,
@@ -198,21 +233,25 @@ impl Connection {
             }
         };
 
-        if !caps.has_str("IMAP4rev1") {
+        let rev2 = caps.has_str("IMAP4rev2");
+
+        if !caps.has_str("IMAP4rev1") && !rev2 {
             tracing::warn!(
                 advertised = caps.len(),
-                "post-login CAPABILITY reply omitted IMAP4rev1, so it is not a \
-                 capability listing this client can read (RFC 3501 7.2.1); \
-                 MOVE/UIDPLUS support is unknown for this session and \
-                 operations that would otherwise fall back to a folder-wide \
-                 EXPUNGE will refuse",
+                "post-login CAPABILITY reply omitted both IMAP4rev1 and \
+                 IMAP4rev2, so it is not a capability listing this client can \
+                 read (RFC 3501 7.2.1, RFC 9051 7.2.2); MOVE/UIDPLUS support \
+                 is unknown for this session and operations that would \
+                 otherwise fall back to a folder-wide EXPUNGE will refuse",
             );
             return ServerCapabilities::Unknown;
         }
 
+        // RFC 9051 Appendix E folds MOVE and UIDPLUS into the base protocol, so
+        // an IMAP4rev2 server advertises both by advertising the revision.
         ServerCapabilities::Known {
-            has_move: caps.has_str("MOVE"),
-            has_uidplus: caps.has_str("UIDPLUS"),
+            has_move: caps.has_str("MOVE") || rev2,
+            has_uidplus: caps.has_str("UIDPLUS") || rev2,
         }
     }
 
