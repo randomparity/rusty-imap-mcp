@@ -366,17 +366,18 @@ are the ones that trip people up or aren't obvious from the lint set.
   underlying issue — do not `--no-verify`. Do not `--amend` commits that have
   been pushed.
 - **PR workflow:** feature branch -> push -> PR against `main`. `main` requires
-  fourteen status checks, strict (the branch must be up to date before merging):
-  `rustfmt`, `clippy`, `check (macOS)`, `test (stable)`, `test (MSRV 1.88.0)`,
-  `cargo-deny`, `zizmor self-check`, `SonarQube`, `mcp-conformance (Node)`,
-  `publish checks`, `tool-schema drift`, `tools-doc drift`, `semver-checks`,
-  `html-oracle checks`. A separate release workflow triggers on `v*` tags and
-  builds binaries for five platform targets.
-  - `html-oracle checks` is the newest (#699) and is added to protection as a
-    separate operator action after that PR merges — the contexts list reads
-    thirteen until then. Add the **display name** `html-oracle checks`, not the
-    job key `html-oracle`, which is `nightly-html-oracle.yml`'s check run and
-    would never report on a PR.
+  thirteen status checks today, strict (the branch must be up to date before
+  merging): `rustfmt`, `clippy`, `check (macOS)`, `test (stable)`,
+  `test (MSRV 1.88.0)`, `cargo-deny`, `zizmor self-check`, `SonarQube`,
+  `mcp-conformance (Node)`, `publish checks`, `tool-schema drift`,
+  `tools-doc drift`, `semver-checks` — fourteen once `html-oracle checks` is
+  added. A separate release workflow triggers on `v*` tags and builds binaries
+  for five platform targets.
+  - `html-oracle checks` landed with #699 but is added to protection as a
+    separate operator action, so the contexts list still reads thirteen until
+    someone does it. Add the **display name** `html-oracle checks`, not the job
+    key `html-oracle`, which is `nightly-html-oracle.yml`'s check run and would
+    never report on a PR.
 - **A CI job outside that list runs without enforcing.** It goes red and the PR
   merges anyway, so adding a gate to an unrequired job silently disarms it
   (issue #613). Before wiring a new check into a job, confirm the job's

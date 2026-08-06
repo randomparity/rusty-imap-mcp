@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.94.0"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "Nightly differential HTML→text sanitizer oracle for rusty-imap-mcp."
+description = "Differential HTML→text sanitizer oracle for rusty-imap-mcp."
 
 [[bin]]
 name = "html-oracle"

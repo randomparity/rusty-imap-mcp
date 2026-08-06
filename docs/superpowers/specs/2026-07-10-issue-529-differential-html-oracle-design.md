@@ -510,7 +510,9 @@ Why the non-goal was reversed: it assumed the nightly's lag was acceptable
 because oracle-only changes would be rare. Dependabot's weekly
 `deps(html-oracle)` PRs made them routine, and because the crate is
 workspace-excluded none of the thirteen required checks compiled it — #664
-merged on eleven green checks that never built the crate the PR changed. The
+merged on thirteen green checks that never built the crate the PR changed (the
+issue body's "11 SUCCESS / 1 SKIPPED" was a mid-run snapshot; `gh pr checks 664`
+reports thirteen, all SUCCESS). The
 non-goal traded a real signal for a cost (a few minutes of PR CI) that measured
 smaller than assumed.
 

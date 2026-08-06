@@ -421,33 +421,27 @@ jobs:
       # must already be installed by then.
       - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
-          tool: cargo-deny@0.19.0
-      # `cargo fmt --all` and `clippy --workspace` in the jobs above do not
-      # descend into an excluded member, so these are the only place the crate's
-      # own `[lints.clippy]` table (`unwrap_used = "warn"`, promoted to an error
-      # by `-D warnings`) is evaluated at all. Clippy also subsumes a plain
-      # `cargo check --all-targets`, so there is no separate check step.
-      - name: Format the oracle crate
-        run: cargo fmt --manifest-path html-oracle/Cargo.toml -- --check
-      - name: Lint the oracle crate
-        run: cargo clippy --locked --all-targets --manifest-path html-oracle/Cargo.toml -- -D warnings
-      - name: Test the oracle crate
-        run: cargo test --locked --all-targets --manifest-path html-oracle/Cargo.toml
-      # `cargo test` only proves the crate compiles and its unit tests hold — it
-      # never runs the differential comparison, because those tests build their
-      # own synthetic tempdir corpora. This step is what actually diffs the
-      # production sanitizer against `lol_html` (51 in-repo fixtures, 26
-      # compared), so a dependency bump that shifts tokenization surfaces here
-      # instead of in the next nightly. Deterministic: no network, no corpus
-      # checkout. Exits non-zero on a HARD (silent-drop) divergence, and on an
-      # inert run — zero comparable inputs fails rather than greening, so this
-      # gate cannot repeat the vacuous-green failure that motivated it.
-      - name: Differential oracle (in-repo fixtures)
-        run: cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root .
-      # Scoped to the oracle's own graph via `html-oracle/deny.toml`, which the
-      # root `cargo-deny` job cannot see. Runs even when a step above failed: a
-      # compile break must not mask an advisory on a dependency bump, which is
-      # the exact PR shape this job exists for.
+          tool: just,cargo-deny@0.19.0
+      # Both steps run recipes rather than re-typed command strings, so `just ci`
+      # covers this job exactly and the justfile's golden rule stays true.
+      #
+      # `oracle-checks` is fmt + clippy + test + the oracle itself. The first
+      # three are the only place the excluded crate is fmt'd, linted against its
+      # own `[lints.clippy]` table, or compiled at all. The fourth is the one
+      # that matters most: `cargo test` never runs the differential comparison,
+      # because those tests build synthetic tempdir corpora, so this is what
+      # actually diffs the production sanitizer against `lol_html` (51 in-repo
+      # fixtures, 26 compared). Deterministic — no network, no corpus checkout.
+      # Exits non-zero on a HARD (silent-drop) divergence and on an inert run;
+      # zero comparable inputs fails rather than greening, so this gate cannot
+      # repeat the vacuous-green failure that motivated it.
+      - name: Check, lint, test and run the oracle
+        run: just oracle-checks
+      # Runs even when the step above failed: a compile break must not mask an
+      # advisory on a dependency bump, which is the exact PR shape this job
+      # exists for. (This is also why `install-action` sits above the build
+      # steps — a step with no `if:` is skipped on failure, so moving it down
+      # would leave this one with no cargo-deny binary.)
       #
       # `advisories` is included, matching the root `cargo-deny` job, which is
       # already a required check running it. That means this gate can go red with
@@ -457,7 +451,7 @@ jobs:
       # `html-oracle/deny.toml`'s `[advisories] ignore`.
       - name: Supply-chain audit (oracle graph)
         if: ${{ !cancelled() }}
-        run: cargo deny --locked --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
+        run: just oracle-deny
       # A HARD divergence prints one line per input to stderr; the report carries
       # the per-input detail that makes it diagnosable. Mirrors the nightly's
       # upload, narrowed to failures so green runs store nothing.
