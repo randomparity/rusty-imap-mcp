@@ -1,6 +1,9 @@
 # cargo-deny policy for the excluded html-oracle crate (#529). The oracle's
 # dependency graph (lol_html + transitives) is invisible to the main workspace
-# gate, so the nightly workflow runs this scoped check. Concerns: advisories,
+# gate, so this scoped check covers it. Since #699 it runs on every PR (the
+# `html-oracle checks` job, via `just oracle-deny`) as well as in the nightly —
+# so a finding here blocks merges, it does not just redden a scheduled run.
+# Concerns: advisories,
 # licenses, sources. Version-unification (multiple-versions) is `warn` here, not
 # `deny`: strict unification matters for the shipped binary, not a nightly test
 # tool, and lol_html transitives may legitimately duplicate versions against
@@ -21,8 +24,8 @@ yanked = "deny"
 ignore = []
 
 # Trimmed to exactly the licenses present in the oracle's own dependency graph
-# (lol_html + transitives). A dep bump introducing a new license fails the
-# nightly deny step loudly — the intended behavior for a scoped supply-chain gate.
+# (lol_html + transitives). A dep bump introducing a new license fails the deny
+# step loudly — the intended behavior for a scoped supply-chain gate.
 [licenses]
 version = 2
 allow = [

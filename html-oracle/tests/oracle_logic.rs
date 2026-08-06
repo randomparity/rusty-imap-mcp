@@ -128,13 +128,25 @@ fn empty_corpus_plumbing_proof_greens() {
 #[test]
 fn empty_repo_root_fails_rather_than_greening() {
     let tmp = tempfile::tempdir().unwrap(); // deliberately *not* seeded
-    let status = Command::new(env!("CARGO_BIN_EXE_html-oracle"))
+    // `--report` into the tempdir, like every test above: the default path is
+    // `html-oracle/report.json` in the source tree, which would clobber a real
+    // report and, in CI, leave an all-zeros one for the failure-upload step.
+    let out = Command::new(env!("CARGO_BIN_EXE_html-oracle"))
         .args(["--repo-root"])
         .arg(tmp.path())
-        .status()
+        .args(["--report"])
+        .arg(tmp.path().join("report.json"))
+        .output()
         .unwrap();
     assert!(
-        !status.success(),
+        !out.status.success(),
         "a run with zero comparable inputs must fail, not green"
+    );
+    // Pin *why* it failed — `!success()` alone would also pass for a report
+    // write error or an allowlist parse error, neither of which is this test.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("oracle inert"),
+        "expected the inert diagnostic, got: {stderr}"
     );
 }
