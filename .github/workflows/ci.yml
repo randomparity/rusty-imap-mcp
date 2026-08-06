@@ -527,10 +527,21 @@ jobs:
       # tests is not a failure. nextest does not run doctests, and neither did
       # the `cargo test` this replaces: cargo-llvm-cov excludes them unless
       # `--doctests` is passed, so nothing is lost here (relevant to #708).
+      #
+      # `--success-output final` is load-bearing, not verbosity. nextest's
+      # default is `success-output = "never"` and `--profile ci` inherits it,
+      # so a *passing* test's stderr is captured and dropped — which is how the
+      # #660 exit-wait probe and the #692 read-latency probe can both exist in
+      # the harness and still emit nothing observable here. This arm is the
+      # only place either distribution can be sampled on a hosted runner rather
+      # than a developer host, and both budgets it feeds (`DETACHED_EXIT_TIMEOUT`,
+      # `INSTRUMENTED_READ_FLOOR`) were sized without one. Same trap as #638,
+      # where the discarded output was what would have identified the cause.
+      # The samples are prefixed (`wire-read-probe`), so the tail is one grep.
       - name: Generate coverage report
         run: |
           cargo llvm-cov nextest --locked --workspace --all-features \
-            --no-tests=pass --profile ci \
+            --no-tests=pass --profile ci --success-output final \
             --lcov --output-path lcov.info
       # The scanner treats an empty or truncated lcov.info as "no coverage
       # data" and still exits 0, so a report that silently stopped being

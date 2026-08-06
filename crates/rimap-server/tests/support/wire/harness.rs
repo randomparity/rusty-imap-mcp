@@ -275,6 +275,33 @@ fn read_deadline_for(first_output_seen: bool, requested: Duration, instrumented:
     deadline
 }
 
+/// Prefix every read sample carries, so one `grep` separates the distribution
+/// from the rest of a `--success-output final` dump.
+const READ_PROBE_PREFIX: &str = "wire-read-probe";
+
+/// One read-latency sample, formatted for machine parsing.
+///
+/// A pure function rather than an inline `eprintln!` because the *format* is
+/// the contract #692 consumes — the arm is identified in the line itself, so a
+/// dump that mixes the coverage job's reads with an uninstrumented job's stays
+/// separable, and `phase` keeps the first read after spawn out of the
+/// steady-state population it would otherwise dominate.
+///
+/// Microseconds, not nextest's `Duration` debug form: the steady-state median
+/// measured for #692 is 0.10 ms, which `{:?}` renders as `100µs` in one sample
+/// and `1.03ms` in the next. A single integer unit makes the tail computable
+/// without parsing suffixes.
+fn read_probe_line(caller: &str, first_read: bool, elapsed: Duration, budget: Duration) -> String {
+    let phase = if first_read { "first" } else { "steady" };
+    format!(
+        "{READ_PROBE_PREFIX} phase={phase} instrumented={} elapsed_us={} budget_us={} \
+         caller={caller}",
+        coverage_instrumented(),
+        elapsed.as_micros(),
+        budget.as_micros(),
+    )
+}
+
 /// Possible outcomes when probing the server for "either a
 /// response or a close." Codex review finding #1 verified that
 /// a simple `Option<String>` could not distinguish a panic
@@ -623,11 +650,24 @@ allowed_base_dir = "{}"
     /// The deadline is resolved once, before the notification-skipping loop, so
     /// a start-up notification arriving ahead of the response cannot consume
     /// the cold-start grace and leave the response itself on the tight budget.
+    ///
+    /// Every completed read emits a [`read_probe_line`] sample on stderr, which
+    /// is what supplies #692 with the read-latency distribution the timeout
+    /// panic path cannot: a run that never times out observes nothing at all,
+    /// and #671's failure observed only the lower bound its budget imposed.
     async fn read_one_envelope_within(&mut self, caller: &str, read_timeout: Duration) -> Value {
         let read_timeout = read_deadline(self.first_output_seen, read_timeout);
         loop {
             let mut buf = String::new();
+            // Sampled before the read, because the read is what clears it. The
+            // first read after spawn is still paying for process start-up and
+            // is a different population from the steady-state reads; #692's
+            // verdict is about the steady-state one, so the two must be
+            // separable in the log rather than pooled.
+            let first_read = !self.first_output_seen;
+            let read_began = Instant::now();
             let read_result = timeout(read_timeout, self.stdout.read_line(&mut buf)).await;
+            let read_elapsed = read_began.elapsed();
             self.first_output_seen |= read_result.is_ok();
             let read = match read_result {
                 Ok(io_result) => io_result.unwrap_or_else(|e| {
@@ -643,6 +683,16 @@ allowed_base_dir = "{}"
                     self.captured_stderr(),
                 ),
             };
+            #[expect(
+                clippy::print_stderr,
+                reason = "read-latency distribution collected by #692"
+            )]
+            {
+                eprintln!(
+                    "{}",
+                    read_probe_line(caller, first_read, read_elapsed, read_timeout),
+                );
+            }
             assert!(
                 read > 0,
                 "stdout closed before responding to {caller}\n\
@@ -1164,4 +1214,69 @@ mod read_deadline_tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+mod read_probe_tests {
+    use super::{Duration, READ_PROBE_PREFIX, coverage_instrumented, read_probe_line};
+
+    /// The sample is only useful if a dump can be reduced to it by one grep,
+    /// so the prefix is part of the contract, not decoration.
+    #[test]
+    fn every_sample_carries_the_grep_prefix() {
+        let line = read_probe_line("tools/call", false, Duration::from_micros(103), REQUEST);
+        assert!(
+            line.starts_with(READ_PROBE_PREFIX),
+            "sample must lead with the prefix; got {line:?}",
+        );
+    }
+
+    /// #692 rules on the *steady-state* distribution. Pooling the first read
+    /// after spawn into it would move the median by two orders of magnitude
+    /// (0.10 ms vs 240 ms as measured), so the two phases must be told apart
+    /// from the line alone.
+    #[test]
+    fn the_phase_separates_the_first_read_from_the_steady_state() {
+        let first = read_probe_line("initialize", true, Duration::from_millis(240), REQUEST);
+        let steady = read_probe_line("initialize", false, Duration::from_millis(240), REQUEST);
+        assert!(first.contains("phase=first"), "got {first:?}");
+        assert!(steady.contains("phase=steady"), "got {steady:?}");
+    }
+
+    /// Microseconds as a bare integer: a mixed-unit `Duration` debug rendering
+    /// cannot be summed or sorted without parsing suffixes, and the whole
+    /// point of the sample is the tail of a sorted distribution.
+    #[test]
+    fn elapsed_and_budget_are_bare_microsecond_integers() {
+        let line = read_probe_line("tools/call", false, Duration::from_micros(103), REQUEST);
+        assert!(line.contains("elapsed_us=103"), "got {line:?}");
+        assert!(line.contains("budget_us=2000000"), "got {line:?}");
+    }
+
+    /// A dump can mix arms — the coverage job's reads and an uninstrumented
+    /// job's are the two populations #692 compares — so the arm has to be
+    /// recoverable from the sample rather than from which log it came out of.
+    #[test]
+    fn the_arm_is_recorded_in_the_sample() {
+        let line = read_probe_line("tools/call", false, Duration::from_micros(1), REQUEST);
+        assert!(
+            line.contains(&format!("instrumented={}", coverage_instrumented())),
+            "sample must record the detected arm; got {line:?}",
+        );
+    }
+
+    /// The caller is the only field that says *which* request stalled, and
+    /// #692's hypothesis 2 is specific to `tools/call`.
+    #[test]
+    fn the_caller_is_preserved_verbatim() {
+        let line = read_probe_line("tools/call fetch_message", false, Duration::ZERO, REQUEST);
+        assert!(
+            line.ends_with("caller=tools/call fetch_message"),
+            "got {line:?}"
+        );
+    }
+
+    /// Stand-in for `REQUEST_TIMEOUT` so these cases assert a literal rather
+    /// than restating the constant they would be checking.
+    const REQUEST: Duration = Duration::from_secs(2);
 }
