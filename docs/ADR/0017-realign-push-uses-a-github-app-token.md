@@ -74,12 +74,22 @@ Three properties are the reason, and only the first is about convenience:
   The suppression is scoped to `GITHUB_TOKEN`; an App installation token is
   named as one of the two documented ways out of it.
 
-- **It is a separate identity that branch protection applies to.** An App
-  installation is not the repository owner. `enforce_admins: false` exempts
-  admins; it does not exempt an App. So a disclosed installation token is
-  bounded by `main`'s protection in a way a disclosed admin PAT is not. This is
-  what closes #742's core risk structurally rather than by a policy nobody can
-  enforce with one human account.
+- **It is a separate identity that branch protection applies to, with its own
+  ceiling.** An App installation is not the repository owner. `enforce_admins:
+  false` exempts admins; it does not exempt an App. So a disclosed installation
+  token is bounded by `main`'s protection in a way a disclosed admin PAT is
+  not.
+
+  The sharper version of the argument is about *where the ceiling comes from*.
+  A PAT can never exceed the privileges of the human who issued it, but on a
+  single-owner repository that human is the admin, so the ceiling is admin. An
+  App's ceiling is the App's own grant, independent of any human account. The
+  App registered for this is **`Contents: Read and write` and nothing else**,
+  installed on `rusty-imap-mcp` alone, with its webhook inactive. That is the
+  whole ceiling: it cannot administer the repository, cannot change protection,
+  cannot read or write secrets, cannot touch Actions or workflows, and cannot
+  reach another repository. This is what closes #742's core risk structurally,
+  rather than by a policy nobody can enforce with one human account.
 
 - **It is short-lived and minted per run.** An installation token expires in
   about an hour, and `actions/create-github-app-token` revokes it in its
@@ -186,16 +196,29 @@ code change. It will produce a deprecation annotation on each run until then.
 - **A GitHub App must exist, be installed on this repository only, and hold
   `Contents: read and write`; its App ID and a private key must be stored as
   `REALIGN_APP_ID` and `REALIGN_APP_KEY` on the `fuzz-lock-realign`
-  environment.** Until they exist, every Dependabot cargo PR gains one failing
-  non-required check whose message says how to create them. This is a
-  deployment prerequisite, not a degraded mode — the same posture ADR-0016 took
-  toward its own secret. Two secrets where the PAT needed one; that setup cost
-  is the price ADR-0016 declined to pay and this ADR accepts.
+  environment.** This was done on 2026-08-06: the App is registered with that
+  single permission and no webhook, installed on `rusty-imap-mcp` only, and
+  both secrets exist on the environment, which carries zero protection rules.
+  Had they not, every Dependabot cargo PR would gain one failing non-required
+  check whose message says how to create them — a deployment prerequisite, not
+  a degraded mode, the same posture ADR-0016 took toward its own secret. Two
+  secrets where the PAT needed one; that setup cost is the price ADR-0016
+  declined to pay and this ADR accepts.
+
+  **The installation itself is operator-confirmed, not machine-verified, and
+  cannot be made otherwise from here.** `GET /repos/{owner}/{repo}/installation`
+  requires a JWT signed by the App's private key, which nobody outside a run
+  holding `REALIGN_APP_KEY` has — deliberately — and `GET /user/installations`
+  rejects a classic PAT. So the App ID, the key, and the environment were
+  verified; the grant and the installation target were not. The first real
+  Dependabot cargo PR is what proves them, and it proves them by working.
 
 - **`FUZZ_LOCK_REALIGN_TOKEN` should be deleted from the `fuzz-lock-realign`
-  environment and revoked** once the App is in place. Nothing reads it after
+  environment and revoked.** The App is in place, so nothing reads it after
   this change, and leaving an admin-owned push credential in the environment
   the workflow already has access to would keep the exact risk this ADR closes.
+  Deleting it is also the cheapest confirmation that the App path works: if the
+  realign still succeeds with the PAT gone, it was never the credential in use.
 
 - The commits the workflow pushes are attributed to `github-actions[bot]` as
   before (the `user.name` / `user.email` git config is unchanged), while the
@@ -241,11 +264,15 @@ code change. It will produce a deprecation annotation on each run until then.
   reviewer gate, is compatible with this workflow.
 
 - Nothing here is exercised as a *workflow* until a real Dependabot PR triggers
-  it with the App installed, because `pull_request_target` does not run from a
-  feature branch and an App token cannot be minted outside a run holding the
-  secrets. What was verified for this change: `actionlint` and `zizmor` on the
-  revised file, the pinned action SHA resolved against
-  `actions/create-github-app-token`'s `v3.2.0` tag, the documented
+  it, because `pull_request_target` does not run from a feature branch and an
+  App token cannot be minted outside a run holding the secrets. What was
+  verified for this change: `actionlint` and `zizmor` on the revised file, the
+  pinned action SHA resolved against `actions/create-github-app-token`'s
+  `v3.2.0` tag, its token-scoping and log-masking behaviour read from the
+  action's source at that SHA rather than its README, the documented
   trigger-on-push behaviour cited above, and a `ci-cd-security-reviewer` pass.
-  What was not: the mint, the push, the resulting `synchronize`, and the actor
-  value on it. ADR-0016's own unverified list is unchanged by this ADR.
+  What was not: the mint, the push, the resulting `synchronize`, and the
+  `github.actor` value on it — which is the one the loop-containment argument
+  turns on. Dependabot PR #713 is open and red on exactly this parity check, so
+  it is the live test case as soon as it is re-synchronized. ADR-0016's own
+  unverified list is unchanged by this ADR.

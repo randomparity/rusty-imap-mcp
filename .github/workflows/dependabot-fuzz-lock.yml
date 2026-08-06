@@ -128,11 +128,13 @@ jobs:
                  "configured. This workflow needs a credential that can push" \
                  "to branches in this repository; GITHUB_TOKEN cannot be used" \
                  "because pushes made with it do not re-trigger CI. Register a" \
-                 "GitHub App owned by this account with the repository" \
-                 "permission Contents: read and write, install it on this" \
-                 "repository only, and store its App ID as REALIGN_APP_ID and" \
-                 "a generated private key (the whole PEM) as REALIGN_APP_KEY," \
-                 "both on the 'fuzz-lock-realign' environment. See" \
+                 "GitHub App owned by this account holding the repository" \
+                 "permission Contents: read and write AND NOTHING ELSE — that" \
+                 "narrowness is the point, since it is the token's whole" \
+                 "ceiling. Install it on this repository only, and store its" \
+                 "App ID as REALIGN_APP_ID and a generated private key (the" \
+                 "whole PEM) as REALIGN_APP_KEY, both on the" \
+                 "'fuzz-lock-realign' environment. See" \
                  "docs/ADR/0017-realign-push-uses-a-github-app-token.md."
             exit 1
           fi
