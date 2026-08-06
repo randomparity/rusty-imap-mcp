@@ -358,6 +358,70 @@ jobs:
         with:
           command: check advisories licenses bans sources
 
+  # `html-oracle/` is excluded from the workspace (root `Cargo.toml`) and carries
+  # its own `Cargo.lock` and `deny.toml`, so every job above compiles past it.
+  # Until this job existed, a PR touching only `html-oracle/**` collected a full
+  # set of green required checks that never built the thing it changed — and
+  # Dependabot opens `deps(html-oracle)` PRs weekly by design (#699). The
+  # scheduled `nightly-html-oracle.yml` was the first real verification, i.e.
+  # after merge.
+  #
+  # Deliberately NOT `paths:`-filtered. A required status check that is
+  # path-filtered never reports on PRs that miss those paths, and GitHub reads
+  # "never reported" as unsatisfied — which would wedge every unrelated PR under
+  # this repo's strict branch protection. `ci.yml` carries no `paths:` filter
+  # anywhere; keep it that way.
+  #
+  # Named distinctly from `nightly-html-oracle.yml`'s `html-oracle` job: a
+  # `workflow_dispatch` of the nightly on a branch would otherwise publish a
+  # check run under the same name and shadow this one's result.
+  #
+  # Corpus scale stays the nightly's job. This runs against the in-repo fixtures
+  # only — no `CORPUS_READ_TOKEN`, no `--corpus-min-compared` floor.
+  #
+  # Per the note on `deny` above: this only enforces once `html-oracle checks`
+  # is in main's required-status-check list.
+  html-oracle:
+    name: html-oracle checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # Pinned like every other job here, and matching the crate's
+      # `rust-version`. The nightly floats on `stable`; a required gate should
+      # not go red because a new stable landed.
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          workspaces: html-oracle
+          key: html-oracle
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+        with:
+          tool: cargo-deny
+      - name: Check the oracle crate
+        run: cargo check --locked --all-targets --manifest-path html-oracle/Cargo.toml
+      - name: Test the oracle crate
+        run: cargo test --locked --manifest-path html-oracle/Cargo.toml
+      # `cargo test` only proves the crate compiles and its unit tests hold — it
+      # never runs the differential comparison, because those tests build their
+      # own synthetic tempdir corpora. This step is what actually diffs the
+      # production sanitizer against `lol_html` (51 in-repo fixtures, 26
+      # compared), so a dependency bump that shifts tokenization surfaces here
+      # instead of in the next nightly. Deterministic: no network, no corpus
+      # checkout. Exits non-zero only on a HARD (silent-drop) divergence.
+      - name: Differential oracle (in-repo fixtures)
+        run: cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root .
+      # Scoped to the oracle's own graph via `html-oracle/deny.toml`, which the
+      # root `cargo-deny` job cannot see. Runs even when a step above failed: a
+      # compile break must not mask an advisory on a dependency bump, which is
+      # the exact PR shape this job exists for.
+      - name: Supply-chain audit (oracle graph)
+        if: ${{ !cancelled() }}
+        run: cargo deny --locked --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
+
   zizmor:
     name: zizmor self-check
     runs-on: ubuntu-24.04
