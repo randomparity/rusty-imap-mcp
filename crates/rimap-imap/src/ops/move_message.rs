@@ -99,8 +99,10 @@ pub(crate) async fn move_messages(
     // found it.
     let (has_move, has_uidplus) = entry.capabilities().require_known("move")?;
 
-    // Read after the advertisement, so the branch above is decided from the
-    // entry before anything reaches the wire through it.
+    // Borrowed after the read above, not before: this `&mut` lives to the end
+    // of the function, so taking it first would make the `entry.capabilities()`
+    // read a borrow error. The order the refusal needs is the only one that
+    // compiles.
     let session = entry.session();
 
     // UIDVALIDITY guard: STATUS does not require SELECT and does not
