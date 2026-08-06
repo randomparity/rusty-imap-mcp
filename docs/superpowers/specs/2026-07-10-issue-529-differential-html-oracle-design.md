@@ -490,3 +490,34 @@ how to run it locally.
   the retro so keep/kill is mechanical, not a judgment call.
 - **Rollback:** delete `html-oracle/`, the workflow, and the `exclude` entry.
   Nothing in the shipped supply chain or PR gates depends on it.
+
+## Amendment · 2026-08-05 · issue [#699](https://github.com/randomparity/rusty-imap-mcp/issues/699)
+
+The **No PR-gating** non-goal above no longer describes the repository. `ci.yml`
+now carries an `html-oracle checks` job that runs on every PR: `cargo fmt
+--check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
+--all-targets`, the oracle over the in-repo fixtures, and the `deny.toml`-scoped
+`cargo deny`. The scoped audit described under *Component 6* is therefore no
+longer the nightly's alone; both run it, against the same `html-oracle/deny.toml`.
+
+What did **not** change: corpus scale stays nightly-only. The PR gate takes no
+`CORPUS_READ_TOKEN`, checks out no corpus, and applies no
+`--corpus-min-compared` floor. The nightly remains the sole gate at corpus
+scale, and the *Rollback* line's "nothing in the shipped supply chain depends on
+it" is still true — only the "or PR gates" half is superseded.
+
+Why the non-goal was reversed: it assumed the nightly's lag was acceptable
+because oracle-only changes would be rare. Dependabot's weekly
+`deps(html-oracle)` PRs made them routine, and because the crate is
+workspace-excluded none of the thirteen required checks compiled it — #664
+merged on eleven green checks that never built the crate the PR changed. The
+non-goal traded a real signal for a cost (a few minutes of PR CI) that measured
+smaller than assumed.
+
+One behavioral change to the oracle came with it: a run that compares zero
+inputs now exits non-zero. Previously `inert` required `total > 0`, so a run
+that loaded nothing at all greened — survivable behind the nightly's corpus
+floor, not behind a floorless PR gate.
+
+The record above is left as written: it is what was true when the decision was
+made.

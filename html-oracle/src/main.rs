@@ -515,7 +515,11 @@ fn main() -> ExitCode {
         .cloned()
         .collect();
     outcome.totals.stale_allowlist_entries = stale.len();
-    let inert = outcome.totals.total > 0 && outcome.totals.compared_nonempty == 0;
+    // No `total > 0` guard: loading zero inputs is itself an inert run. Both
+    // corpus loaders treat a missing directory as "not an error", so a refactor
+    // that moves `fuzz/corpus/content_html` or `tests/injection-corpus` would
+    // otherwise green with nothing compared (#699).
+    let inert = outcome.totals.compared_nonempty == 0;
 
     let corpus = args.corpus_root.is_some().then(|| {
         let mut corpus = corpus_report(&outcome.corpus_records);

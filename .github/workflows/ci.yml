@@ -379,11 +379,24 @@ jobs:
   # Corpus scale stays the nightly's job. This runs against the in-repo fixtures
   # only — no `CORPUS_READ_TOKEN`, no `--corpus-min-compared` floor.
   #
+  # `--locked` throughout, on all four cargo steps. The oracle path-depends on
+  # `rimap-content`/`rimap-core`, whose requirements come from the root
+  # `[workspace.dependencies]`, so a root bump across a semver boundary
+  # invalidates `html-oracle/Cargo.lock` and fails this gate with a bare cargo
+  # error. That coupling is intended — it is what stops the two graphs drifting
+  # — but `scripts/check-fuzz-lock-parity.sh` deliberately excludes this
+  # lockfile, so there is no automatic realignment. The fix is
+  # `just realign-oracle-lock`, documented in AGENTS.md.
+  #
   # Per the note on `deny` above: this only enforces once `html-oracle checks`
   # is in main's required-status-check list.
   html-oracle:
     name: html-oracle checks
     runs-on: ubuntu-24.04
+    # Matches the nightly's budget for the same workload. Without it the job
+    # inherits GitHub's 360-minute default, and a hang holds every PR
+    # unmergeable under strict branch protection for six hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -394,33 +407,68 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: html-oracle
           key: html-oracle
+      # Version-pinned, not just SHA-pinned. `install-action` otherwise resolves
+      # to whatever cargo-deny is latest at run time, and a release that tightens
+      # a check reddens every open PR with no repo change — this repo already ate
+      # that once when 0.19 started flagging path-dep wildcards (see the
+      # `allow-wildcard-paths` note in html-oracle/deny.toml). Kept ahead of the
+      # build steps on purpose: the audit step below runs on failure, so its tool
+      # must already be installed by then.
       - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
         with:
-          tool: cargo-deny
-      - name: Check the oracle crate
-        run: cargo check --locked --all-targets --manifest-path html-oracle/Cargo.toml
+          tool: cargo-deny@0.19.0
+      # `cargo fmt --all` and `clippy --workspace` in the jobs above do not
+      # descend into an excluded member, so these are the only place the crate's
+      # own `[lints.clippy]` table (`unwrap_used = "warn"`, promoted to an error
+      # by `-D warnings`) is evaluated at all. Clippy also subsumes a plain
+      # `cargo check --all-targets`, so there is no separate check step.
+      - name: Format the oracle crate
+        run: cargo fmt --manifest-path html-oracle/Cargo.toml -- --check
+      - name: Lint the oracle crate
+        run: cargo clippy --locked --all-targets --manifest-path html-oracle/Cargo.toml -- -D warnings
       - name: Test the oracle crate
-        run: cargo test --locked --manifest-path html-oracle/Cargo.toml
+        run: cargo test --locked --all-targets --manifest-path html-oracle/Cargo.toml
       # `cargo test` only proves the crate compiles and its unit tests hold — it
       # never runs the differential comparison, because those tests build their
       # own synthetic tempdir corpora. This step is what actually diffs the
       # production sanitizer against `lol_html` (51 in-repo fixtures, 26
       # compared), so a dependency bump that shifts tokenization surfaces here
       # instead of in the next nightly. Deterministic: no network, no corpus
-      # checkout. Exits non-zero only on a HARD (silent-drop) divergence.
+      # checkout. Exits non-zero on a HARD (silent-drop) divergence, and on an
+      # inert run — zero comparable inputs fails rather than greening, so this
+      # gate cannot repeat the vacuous-green failure that motivated it.
       - name: Differential oracle (in-repo fixtures)
         run: cargo run --locked --manifest-path html-oracle/Cargo.toml -- --repo-root .
       # Scoped to the oracle's own graph via `html-oracle/deny.toml`, which the
       # root `cargo-deny` job cannot see. Runs even when a step above failed: a
       # compile break must not mask an advisory on a dependency bump, which is
       # the exact PR shape this job exists for.
+      #
+      # `advisories` is included, matching the root `cargo-deny` job, which is
+      # already a required check running it. That means this gate can go red with
+      # no repo change — a new RUSTSEC advisory or an upstream yank against a
+      # `lol_html` transitive reddens open PRs overnight. That is the repo's
+      # existing posture, not a new one; the escape hatch is a dated entry in
+      # `html-oracle/deny.toml`'s `[advisories] ignore`.
       - name: Supply-chain audit (oracle graph)
         if: ${{ !cancelled() }}
         run: cargo deny --locked --manifest-path html-oracle/Cargo.toml check advisories bans licenses sources
+      # A HARD divergence prints one line per input to stderr; the report carries
+      # the per-input detail that makes it diagnosable. Mirrors the nightly's
+      # upload, narrowed to failures so green runs store nothing.
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: html-oracle-pr-report
+          path: html-oracle/report.json
+          if-no-files-found: warn
+          retention-days: 7
 
   zizmor:
     name: zizmor self-check

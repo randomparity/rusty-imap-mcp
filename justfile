@@ -397,6 +397,17 @@ check-fuzz-lock-parity:
 realign-fuzz-locks:
     ./scripts/check-fuzz-lock-parity.sh --fix
 
+# Restore html-oracle/Cargo.lock after a workspace dependency bump. The oracle
+# is workspace-excluded but path-depends on rimap-content/rimap-core, whose
+# requirements come from the root `[workspace.dependencies]` — so a root bump
+# across a semver boundary leaves the oracle lockfile unsatisfiable and the
+# `html-oracle checks` CI job fails on `--locked` with a bare cargo error.
+# `check-fuzz-lock-parity` deliberately does not cover this lockfile (the
+# oracle's own deps are meant to float), so this is the manual fix path (#699).
+realign-oracle-lock:
+    cargo update --manifest-path html-oracle/Cargo.toml --workspace
+    cargo check --locked --all-targets --manifest-path html-oracle/Cargo.toml
+
 # Unit-test check-fuzz-lock-parity.sh against synthetic lockfiles (containment
 # vs. equality, drift in both directions, malformed input). No cargo or repo
 # state. Mirrored in the `publish-checks` CI job.
