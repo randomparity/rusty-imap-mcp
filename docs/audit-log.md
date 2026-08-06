@@ -121,6 +121,11 @@ every line it copies.
 
 No field's existing value is altered by a merge.
 
+Neither of those is a *loss*. The one thing a merge can drop is a whole record
+whose `kind` the merging binary does not recognize, which is covered above:
+the count reaches stderr, never stdout, so a merged file read on its own
+cannot reveal that anything is missing.
+
 ## Record types
 
 ### `process_start`

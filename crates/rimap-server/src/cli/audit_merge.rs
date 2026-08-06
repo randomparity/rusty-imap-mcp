@@ -78,6 +78,9 @@ pub fn parse_filter(args: &RunArgs<'_>) -> anyhow::Result<Filter> {
 /// - Any `AuditError` from opening / locking / reading the file.
 /// - Parse errors on `--since` / `--until` arguments.
 /// - Stdout I/O errors.
+/// - Failure to write the skipped-record note to stderr. A merge that dropped
+///   records and could not say so is not a success, so this fails the command
+///   rather than completing quietly.
 pub fn run(path: &Path, args: RunArgs<'_>) -> anyhow::Result<()> {
     let filter = parse_filter(&args)?;
 
