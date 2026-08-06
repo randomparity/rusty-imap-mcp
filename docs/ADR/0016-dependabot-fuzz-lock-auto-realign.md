@@ -76,6 +76,29 @@ version, because the overlay never copies it. To push, the job restores the
 pristine head tree and writes back only the two realigned lockfiles, so it
 still executes nothing from the head.
 
+**A path allowlist alone does not establish this, and an earlier draft of this
+ADR wrongly claimed it did.** A file's *name* says nothing about its *mode*. A
+manifest committed as a symlink (mode `120000`) still matches
+`^(.*/)?Cargo\.(toml|lock)$`; `git checkout` materializes it as a real link,
+and the realign's `shutil.copyfile` opens the destination for writing and
+follows it. That is an arbitrary out-of-tree write of head-controlled content —
+enough to overwrite `~/.gitconfig`, whose `core.fsmonitor` and `core.pager` are
+command hooks that the very next `git` invocation would run, inside the job that
+holds the push credential. It was reproduced against this repo before it was
+fixed: the path gate passed, and a file outside the checkout was overwritten
+with the workspace lockfile's contents.
+
+Two controls close it, either sufficient alone:
+
+- the gate rejects any manifest whose blob mode is not a regular file
+  (`120000` symlink, `160000` gitlink), which a path regex structurally cannot
+  see; and
+- the overlay checks out with `core.symlinks=false`, so git writes a symlink
+  blob as an ordinary file holding its target text rather than as a link.
+
+The lesson is worth keeping with the decision: "only these paths" is not the
+same statement as "only these bytes, as data".
+
 Every commit the job touches is pinned to `github.event.pull_request.head.sha`
 from the event payload: the diff that is inspected, the manifests that are
 copied in, and the tree that is committed are one tree. An earlier draft
@@ -210,6 +233,9 @@ is scoped to that single expression, and zizmor's recommended replacement,
   PR #713's live 11-package drift in a scratch clone — base checkout, merge-base
   gate, manifest overlay, realign, parity re-check, lockfile save/restore onto
   the pristine head tree, and the resulting commit, which passes
-  `just check-fuzz-lock-parity` on its own tree; the `cargo metadata`
-  non-execution property; and `actionlint` plus `zizmor`. What was not: the
-  trigger, the actor gate, the environment secret, and the push.
+  `just check-fuzz-lock-parity` on its own tree; the gate's rejection arm,
+  against a PR that is not a cargo bump; the symlink-overlay attack above, which
+  overwrites an out-of-tree file without the two controls and leaves it
+  untouched with them; the `cargo metadata` non-execution property; and
+  `actionlint` plus `zizmor`. What was not: the trigger, the actor gate, the
+  environment secret, and the push.
