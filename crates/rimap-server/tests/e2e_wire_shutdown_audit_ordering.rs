@@ -256,9 +256,9 @@ struct ScenarioRun {
     recorded: Vec<String>,
     /// The child's stderr. Carried because the audit log alone cannot separate
     /// a residue caused by a regression from one caused by a slow host: the
-    /// `tool dispatches outlived the shutdown drain` warning lands here, and a
-    /// failing assertion that prints only the JSONL costs a second run to
-    /// diagnose.
+    /// `outstanding registrations outlived the shutdown drain` warning lands
+    /// here, and a failing assertion that prints only the JSONL costs a second
+    /// run to diagnose.
     stderr: String,
     password: String,
 }
@@ -390,8 +390,9 @@ fn process_end_record(raw: &str) -> Value {
 /// the budget would make this assertion unfailable and delete the shipped
 /// constant's only end-to-end coverage in the same stroke. The assertion
 /// therefore prints the child's stderr, where the
-/// `tool dispatches outlived the shutdown drain` warning distinguishes a slow
-/// disk from a regression on the first run rather than the second.
+/// `outstanding registrations outlived the shutdown drain` warning
+/// distinguishes a slow disk from a regression on the first run rather than
+/// the second.
 #[tokio::test]
 async fn shutdown_cut_auth_record_precedes_process_end() {
     let run = run_parked_dispatch_scenario().await;
