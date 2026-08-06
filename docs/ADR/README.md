@@ -30,3 +30,4 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 | [0013](0013-per-field-defaults-merge.md) | `[defaults]` merges into an account field by field, through all-`Option` override structs | Accepted |
 | [0014](0014-synchronous-auth-audit-emission.md) | Every `auth` audit record is written synchronously, on the thread that produced it | Accepted |
 | [0015](0015-terminal-process-end-via-bounded-dispatch-drain.md) | `process_end` is terminal, enforced by a bounded dispatch drain | Accepted |
+| [0016](0016-dependabot-fuzz-lock-auto-realign.md) | Dependabot fuzz-lock realignment runs in CI on `pull_request_target` | Accepted |
