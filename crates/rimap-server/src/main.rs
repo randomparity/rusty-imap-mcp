@@ -647,7 +647,7 @@ async fn build_registry(
         // Emitted before the guard is built so an account that fails to come
         // up still leaves its effective matrix on the record (#632).
         rimap_server::boot::tool_matrix::log_account_matrix(
-            &rimap_server::boot::tool_matrix::account_tool_matrix(acfg),
+            &rimap_server::boot::tool_matrix::account_tool_matrix(acfg, None),
         );
         let guard = build_account_guard(acfg).context("building dispatch guard")?;
         let conn_cfg = registry::build_account_connection(id, acfg);
@@ -673,6 +673,14 @@ async fn build_registry(
 
         let folder_guard =
             rimap_authz::FolderGuard::new(&protected, &acfg.security.expunge_folders);
+
+        // Logged here rather than beside the tool matrix above because this
+        // is the first point at which `protected` is the discovery-derived
+        // union, which is the list the guard on the line above was built
+        // from (#696).
+        rimap_server::boot::tool_matrix::log_account_folder_policy(
+            &rimap_server::boot::tool_matrix::account_tool_matrix(acfg, Some(&protected)),
+        );
 
         let state = registry::AccountState {
             id: id.clone(),

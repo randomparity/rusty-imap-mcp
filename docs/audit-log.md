@@ -28,9 +28,10 @@ One JSON object per line (JSONL). Every record shares a common header:
 
 This is the normative statement of what a reader of an audit file may assume,
 and of what "additive" means for a record. It exists because the record types
-are `#[non_exhaustive]` (#706): adding a field to one is no longer a breaking
+are `#[non_exhaustive]` (#706, and `AuthEvent` — the `auth` payload, defined
+in `rimap-core` — under #716): adding a field to one is no longer a breaking
 change *to the Rust API*, and that must not be mistaken for a licence to change
-the file.
+the file. Every `kind` is covered.
 
 **What a reader may assume.**
 
@@ -60,8 +61,10 @@ the file.
   remains separately tolerated as a torn write at the tail.
 - A field it expects and does not find was added after *that line* was written.
   Every such field has a documented read-as value in the tables below --
-  `records_lost` reads as `0`, `undrained_dispatches` as `0`, `tool_matrix` as
-  empty -- so the line parses into the same struct a current writer produces.
+  `records_lost` reads as `0`, `undrained_dispatches` as `0`, `tool_matrix`
+  and a matrix entry's `protected_folders` / `expunge_folders` as empty,
+  `special_use_discovery` as `not_run` -- so the line parses into the same
+  struct a current writer produces.
 
   **That is a parse rule, not a measurement.** For the two counters it means
   *not measured*, not *measured as zero*: a binary predating `records_lost`
@@ -114,10 +117,16 @@ every line it copies.
    zero subsecond. Both forms parse to the same instant, and the value is
    stable under further rewrites.
 2. A `#[serde(default)]` field the line predates is **materialized at its
-   default** -- `records_lost` and `undrained_dispatches` as `0`, `tool_matrix`
-   as `[]`. The value is the one a reader was already told to substitute, so
+   default** -- `records_lost` and `undrained_dispatches` as `0`,
+   `tool_matrix` and a matrix entry's `protected_folders` / `expunge_folders`
+   as `[]`, `special_use_discovery` as `"not_run"`. The value is the one a
+   reader was already told to substitute, so
    nothing is misread as a *record*; what is lost is the ability to tell
    not-measured from measured, which the counters' own note above depends on.
+   The folder lists carry the same hazard in a sharper form: a merged line
+   claims `"expunge_folders": []` where the original said nothing at all, and
+   an empty list read as a statement means "nothing was expungeable" rather
+   than "this binary did not record it".
 
 No field's existing value is altered by a merge.
 
@@ -138,7 +147,7 @@ First record of every process invocation.
 | `git_commit` | Build-time git SHA (empty until wired) |
 | `posture` | Effective base posture at startup (single-account mode only) |
 | `accounts` | Per-account name/posture/IMAP host (multi-account mode only) |
-| `tool_matrix` | Per-account posture and explicit per-tool verdicts with provenance (absent on records written before this field existed; read as an empty list) |
+| `tool_matrix` | Per-account posture, explicit per-tool verdicts, and resolved folder lists, each with provenance (absent on records written before this field existed; read as an empty list) |
 | `config_path` | Absolute path of the loaded config file |
 | `config_hash_sha256` | SHA-256 hex of the config file contents at load time |
 | `previous_last_seq` | Last `seq` found in the file at startup (null if empty) |
@@ -160,6 +169,14 @@ One entry per account, in both single- and multi-account mode -- unlike
     "tools": [
       {"tool": "delete_message", "allow": true,  "source": "inherited"},
       {"tool": "search",         "allow": false, "source": "account"}
+    ],
+    "protected_folders": [
+      {"folder": "INBOX", "source": "inherited"},
+      {"folder": "Sent",  "source": "inherited"}
+    ],
+    "special_use_discovery": "not_run",
+    "expunge_folders": [
+      {"folder": "Trash", "source": "inherited"}
     ]
   }
 ]
@@ -172,6 +189,24 @@ One entry per account, in both single- and multi-account mode -- unlike
 | `tools[].tool` | The tool the verdict names |
 | `tools[].allow` | `true` for an explicit `allow`, `false` for an explicit `deny` |
 | `tools[].source` | `account` if the account's own `[accounts.security.tools]` wrote it, `inherited` if it came from `[defaults.security.tools]` |
+| `protected_folders[].folder` | A folder name in the resolved `protected_folders` list |
+| `protected_folders[].source` | `account`, `inherited`, or `discovered` (see below) |
+| `special_use_discovery` | `ran` if `protected_folders` reflects the server's special-use folders, `not_run` if discovery had not happened when the matrix was built |
+| `expunge_folders[].folder` | A folder name in the resolved `expunge_folders` list |
+| `expunge_folders[].source` | `account` or `inherited`; never `discovered` |
+
+Both folder arrays are absent on records written before they existed. As
+everywhere else in this file, **absent means unknown, not empty** -- an empty
+`expunge_folders` on a record that carries the key is the affirmative claim
+"nothing in this account may be expunged", and reading an absent key as the
+same claim is a misread.
+
+`special_use_discovery` reads as `not_run` when absent. On a record predating
+these fields that is vacuous rather than wrong: such a record carries no
+folder entries at all, so there is no list whose completeness it could
+misdescribe. `not_run` is **not** a statement that the server declares no
+special-use folders -- that claim is `"special_use_discovery": "ran"` with no
+`discovered` entry in the list.
 
 `tools` lists **explicit verdicts only**. A tool with no override follows
 `posture` through the posture table, which the record's `version` and
@@ -183,6 +218,41 @@ inherited from `[defaults.security.tools]` -- that is the documented merge
 semantics (ADR-0014), and this is where it becomes visible. The same rows are
 printed by `rusty-imap-mcp --dry-run` and logged at `info` level at boot under
 the message `effective tool matrix`.
+
+#### Folder-list provenance
+
+Unlike `[security.tools]`, the folder lists merge **whole-list**: an account
+that writes `expunge_folders` in its own `[accounts.security]` block replaces
+the inherited list outright rather than unioning with it. So the source is a
+property of the list, and every entry of one configured list shares it.
+
+| `source` | Meaning |
+|---|---|
+| `account` | The account's own `[accounts.security]` block wrote this list. Also used for a flat (single-account) config, which has no `[defaults]` layer to inherit from |
+| `inherited` | The account's own block did **not** write this list: it came from `[defaults.security]`, or -- when neither layer names it -- from the built-in default |
+| `discovered` | Appended at boot from an RFC 6154 special-use folder the IMAP server declared, not present in any config layer |
+
+**`expunge_folders` with `"source": "inherited"` is the line to look for
+here.** An inherited `expunge_folders` is the one way a folder becomes
+expungeable on an account that never asked for it (#624 / ADR-0013).
+
+**`process_start` never carries a `discovered` entry, and says so with
+`"special_use_discovery": "not_run"`.** The record is written before the
+account registry is built, so no IMAP `LIST` has run and no special-use folder
+is known yet; `protected_folders` on this record is the *configured* list.
+
+**The discovery-derived union reaches you in exactly one place: the boot log
+line.** It is emitted at `info` level, once per account, after the
+`FolderGuard` is built, under the message `effective folder policy`, and it
+carries `special_use_discovery=ran`. If you want to see which server folders
+your accounts actually protect, that line is what to grep for -- the audit log
+does not have it, and neither does `--dry-run`, which opens no IMAP session
+and prints the configured list under a header that says so.
+
+Getting the union into `process_start` would mean writing that record after
+IMAP boot, which would leave an account that fails to come up with no
+`process_start` at all. The trade is not worth it; tracked as the remaining
+half of #696.
 
 ### `process_end`
 

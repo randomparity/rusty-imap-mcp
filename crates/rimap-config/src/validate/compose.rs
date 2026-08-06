@@ -55,6 +55,24 @@ pub struct ValidatedAccountConfig {
     /// inherited `allow` on an account the operator tightened to
     /// `posture = "readonly"` is the case worth seeing.
     pub account_written_tools: BTreeSet<ToolName>,
+    /// Whether the account's own `[accounts.security]` block wrote
+    /// `protected_folders`. `false` means the list reached it from
+    /// `[defaults.security]` or, when neither layer names it, from the
+    /// built-in default.
+    ///
+    /// A bool rather than a key set: unlike `[security.tools]`, the folder
+    /// lists merge whole-list — an account that writes `protected_folders`
+    /// replaces the inherited list outright
+    /// ([`AccountSecurityOverrides::merge_onto`](crate::model::AccountSecurityOverrides::merge_onto))
+    /// — so the layer is a property of the list, not of its entries.
+    /// Recorded and printed by the boot folder-policy path (#696).
+    pub account_written_protected_folders: bool,
+    /// Whether the account's own `[accounts.security]` block wrote
+    /// `expunge_folders`. Same semantics as
+    /// [`Self::account_written_protected_folders`], and the one that
+    /// matters most: a `false` here on a non-empty list is the #624
+    /// widening that makes a folder expungeable that was not before.
+    pub account_written_expunge_folders: bool,
     /// Parsed pinned TLS fingerprint.
     pub tls_fingerprint: Option<TlsFingerprint>,
     /// Credential fallback policy (see #78).
@@ -104,6 +122,11 @@ impl ValidatedAccountConfig {
             limits: LimitsConfig::default(),
             tool_overrides: BTreeMap::new(),
             account_written_tools: BTreeSet::new(),
+            // The fixture's `security` is `SecurityConfig::default()`, which
+            // no account block wrote — so `false` is the accurate answer,
+            // not merely the convenient one.
+            account_written_protected_folders: false,
+            account_written_expunge_folders: false,
             tls_fingerprint: None,
             fallback_mode: FallbackMode::default(),
         }
@@ -182,6 +205,17 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
             .and_then(|overrides| overrides.tools.as_ref())
             .map(|tools| tools.keys().cloned().collect())
             .unwrap_or_default();
+        // Same reason, same timing: the folder lists replace whole-list, so
+        // after the merge a resolved list cannot say which layer wrote it
+        // (#696).
+        let account_written_protected_folders = raw
+            .security
+            .as_ref()
+            .is_some_and(|overrides| overrides.protected_folders.is_some());
+        let account_written_expunge_folders = raw
+            .security
+            .as_ref()
+            .is_some_and(|overrides| overrides.expunge_folders.is_some());
         let security = raw.security.map_or_else(
             || config.defaults.security.clone(),
             |overrides| overrides.merge_onto(config.defaults.security.clone()),
@@ -203,6 +237,8 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
             limits,
             fallback_mode,
             account_written_tool_keys,
+            account_written_protected_folders,
+            account_written_expunge_folders,
         })?;
         accounts.insert(id, validated);
     }
@@ -258,6 +294,12 @@ pub fn validate_legacy_as_multi(config: Config) -> Result<ValidatedMultiConfig, 
         limits: config.limits,
         fallback_mode: FallbackMode::default(),
         account_written_tool_keys,
+        // Likewise for the folder lists: with no `[defaults]` layer there is
+        // nothing for the sole account to have inherited them *from*, so
+        // reporting them as inherited would send an operator looking for a
+        // `[defaults.security]` block that does not exist (#696).
+        account_written_protected_folders: true,
+        account_written_expunge_folders: true,
     })?;
     paths::validate_audit_config(&config.audit)?;
     paths::validate_paths_multi(&config.audit, &config.attachments)?;
@@ -290,6 +332,12 @@ struct ValidateAccountInputs {
     /// observed before the merge with `[defaults.security.tools]`. Resolved
     /// to [`ToolName`] alongside the merged map.
     account_written_tool_keys: BTreeSet<String>,
+    /// Whether `[accounts.security] protected_folders` was written by this
+    /// account, observed before the merge erased the distinction.
+    account_written_protected_folders: bool,
+    /// Whether `[accounts.security] expunge_folders` was written by this
+    /// account, observed before the merge erased the distinction.
+    account_written_expunge_folders: bool,
 }
 
 /// Validate a single account's worth of config fields.
@@ -302,6 +350,8 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
         limits,
         fallback_mode,
         account_written_tool_keys,
+        account_written_protected_folders,
+        account_written_expunge_folders,
     } = inputs;
 
     let tls_fingerprint = identity::parse_fingerprint(imap.tls_fingerprint_sha256.as_deref())?;
@@ -333,6 +383,8 @@ fn validate_account(inputs: ValidateAccountInputs) -> Result<ValidatedAccountCon
         limits,
         tool_overrides,
         account_written_tools,
+        account_written_protected_folders,
+        account_written_expunge_folders,
         tls_fingerprint,
         fallback_mode,
     })
