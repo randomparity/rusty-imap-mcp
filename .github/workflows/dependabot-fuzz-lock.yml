@@ -23,7 +23,8 @@ name: Dependabot fuzz-lock realign
 # Supporting controls, none of which the above depends on:
 #   * Fork PRs cannot satisfy the job condition (see it for why).
 #   * `GITHUB_TOKEN` is scoped to `contents: read` and cannot push. The write
-#     credential is a separate PAT, in the environment of the final step only.
+#     credential is a separate GitHub App installation token, minted in the
+#     last two steps only and revoked when the job ends.
 #   * A PR whose diff reaches past cargo manifests is refused outright, so the
 #     workflow only ever pushes to the kind of PR it was built for.
 #
@@ -36,8 +37,11 @@ on:
   # Dependabot-authored PR is read-only, so it cannot push the fix. Pushing
   # with `GITHUB_TOKEN` would not work either — pushes made with it do not
   # trigger workflows, so the realigned head would carry no CI runs at all and
-  # the required checks would sit permanently "expected". See the header above
-  # for why the elevated-token-on-untrusted-head hazard does not apply.
+  # the required checks would sit permanently "expected". A GitHub App
+  # installation token is one of the two credentials GitHub documents as
+  # exempt from that suppression, which is why the push below uses one. See
+  # the header above for why the elevated-token-on-untrusted-head hazard does
+  # not apply.
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -82,8 +86,13 @@ jobs:
     #
     # `github.actor` carries none of that weight. Its job is to stop the
     # workflow reacting to its own push: that push is authenticated as the
-    # PAT's owner, so the `synchronize` it triggers has a human actor and this
-    # job does not re-enter. zizmor flags it as spoofable (`bot-conditions`)
+    # realign App's installation, so the `synchronize` it triggers has that
+    # App's bot login as its actor — never `dependabot[bot]`, which is a
+    # different account — and this job does not re-enter. The App push *does*
+    # start workflow runs, unlike a `GITHUB_TOKEN` push, so this gate is what
+    # bounds the loop rather than the platform's own recursion suppression.
+    # The realign is idempotent besides. zizmor flags it as spoofable
+    # (`bot-conditions`)
     # and is right in general; here spoofing it can only cause the job to
     # *run*, which still requires both conditions above. The ignore is scoped
     # to this one expression, and zizmor's recommended replacement,
@@ -93,8 +102,8 @@ jobs:
       && github.actor == 'dependabot[bot]'
       && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    # Scopes the PAT to this job rather than to every workflow in the
-    # repository, and puts each use in the deployment log. Do not attach
+    # Scopes the App credentials to this job rather than to every workflow in
+    # the repository, and puts each use in the deployment log. Do not attach
     # required reviewers to this environment — a human approval gate would
     # reinstate the manual step the workflow removes.
     environment: fuzz-lock-realign
@@ -111,17 +120,20 @@ jobs:
       # restore exactly the manual step this removes.
       - name: Require the realign credential
         env:
-          REALIGN_TOKEN: ${{ secrets.FUZZ_LOCK_REALIGN_TOKEN }}
+          REALIGN_APP_ID: ${{ secrets.REALIGN_APP_ID }}
+          REALIGN_APP_KEY: ${{ secrets.REALIGN_APP_KEY }}
         run: |
-          if [ -z "$REALIGN_TOKEN" ]; then
-            echo "::error::FUZZ_LOCK_REALIGN_TOKEN is not configured. This" \
-                 "workflow needs a credential that can push to branches in" \
-                 "this repository; GITHUB_TOKEN cannot be used because pushes" \
-                 "made with it do not re-trigger CI. Create a fine-grained PAT" \
-                 "scoped to this repository with Contents: read and write, and" \
-                 "store it as a secret named FUZZ_LOCK_REALIGN_TOKEN on the" \
-                 "'fuzz-lock-realign' environment. See" \
-                 "docs/ADR/0016-dependabot-fuzz-lock-auto-realign.md."
+          if [ -z "$REALIGN_APP_ID" ] || [ -z "$REALIGN_APP_KEY" ]; then
+            echo "::error::the realign GitHub App credentials are not" \
+                 "configured. This workflow needs a credential that can push" \
+                 "to branches in this repository; GITHUB_TOKEN cannot be used" \
+                 "because pushes made with it do not re-trigger CI. Register a" \
+                 "GitHub App owned by this account with the repository" \
+                 "permission Contents: read and write, install it on this" \
+                 "repository only, and store its App ID as REALIGN_APP_ID and" \
+                 "a generated private key (the whole PEM) as REALIGN_APP_KEY," \
+                 "both on the 'fuzz-lock-realign' environment. See" \
+                 "docs/ADR/0017-realign-push-uses-a-github-app-token.md."
             exit 1
           fi
 
@@ -316,9 +328,31 @@ jobs:
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
-      # The credential enters the environment here and nowhere else, after all
-      # PR content has been read. It is passed to `git push` in the URL rather
-      # than written into `.git/config`, so no later step inherits a
+      # The push credential is minted here — last, after every byte of PR
+      # content has been read, and only on the branch that actually pushes.
+      # It is an App *installation* token, so it is a distinct identity from
+      # any human account: branch protection applies to it, it expires in
+      # about an hour, and the action revokes it in its post-step when the job
+      # ends. `permission-contents: write` narrows it to the one scope the
+      # push needs even if the installation is later granted more; `owner` and
+      # `repositories` are left unset, which scopes the token to this
+      # repository alone.
+      - name: Mint the realign push token
+        id: app-token
+        if: steps.apply.outputs.changed == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          # `app-id` is deprecated upstream in favour of `client-id`, and
+          # still supported. It is used here because the stored secret holds
+          # the App ID; moving to `client-id` needs a different value, not a
+          # rename. Tracked in docs/ADR/0017.
+          app-id: ${{ secrets.REALIGN_APP_ID }}
+          private-key: ${{ secrets.REALIGN_APP_KEY }}
+          permission-contents: write
+
+      # The credential enters this step's environment and nowhere else, after
+      # all PR content has been read. It is passed to `git push` in the URL
+      # rather than written into `.git/config`, so no later step inherits a
       # credentialed remote. Hooks are disabled: `.git/hooks` is base-branch
       # content and nothing untrusted ran, but a credentialed `git commit` is
       # not the place to rely on that.
@@ -334,7 +368,7 @@ jobs:
       - name: Commit and push the realignment
         if: steps.apply.outputs.changed == 'true'
         env:
-          REALIGN_TOKEN: ${{ secrets.FUZZ_LOCK_REALIGN_TOKEN }}
+          REALIGN_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
