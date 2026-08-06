@@ -192,19 +192,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breaking changes that `cargo semver-checks` reported as clean, because it
   baselines on `v0.1.0` and a declared `0.2.0-dev` major bump permits any break
   (`0 checks: 0 pass, 253 skip`). Third of the `#[non_exhaustive]` siblings,
-  after #665 and #707; #716 (`AuthEvent`) carries the remainder, before
-  `v0.2.0` is tagged.
+  after #665 and #707.
 
-  **Two record-adjacent types are deliberately not covered.** `AuthEvent`
-  backs the `auth` kind but is defined in `rimap_core::auth_event` and only
-  re-exported from `rimap_audit::record`, because `rimap-imap` constructs it
-  without depending on `rimap-audit`; marking it needs a constructor in
-  `rimap-core` and a sweep of `rimap-imap`, so it is #716. Adding a field to
-  `AuthEvent` therefore remains a breaking change, and it has already grown
-  one that way (`credential_source`, #78). `AuditOptions`, `Filter`, and
-  `TrailingState` were #715, which has since landed — see the entry below.
-  Until #716 lands, `auth` records keep the hazard this entry describes
-  removing everywhere else.
+  **Two record-adjacent types were out of this change's scope**, and both have
+  since been covered by their own entries below. `AuthEvent` backs the `auth`
+  kind but is defined in `rimap_core::auth_event` and only re-exported from
+  `rimap_audit::record`, because `rimap-imap` constructs it without depending
+  on `rimap-audit`; marking it needed a constructor in `rimap-core` and a
+  sweep of `rimap-imap`, which is #716. `AuditOptions`, `Filter`, and
+  `TrailingState` were #715.
 
   Downstream impact: the struct literal is no longer available outside the
   crate, and **that includes functional-update syntax** — `..Default::default()`
@@ -250,7 +246,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `retention_seconds`, `fail_open`, `initial_seq`) and it grows whenever a
   rotation or retention knob is added, so every such addition was a breaking
   change the semver gate could not report. Fourth of the `#[non_exhaustive]`
-  siblings, after #665, #707, and #706; #716 (`AuthEvent`) is the remainder.
+  siblings, after #665, #707, and #706.
 
   Downstream impact: the struct literal is no longer available outside the
   crate, and **that includes functional-update syntax** — `..Default::default()`
@@ -288,6 +284,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test compiles just as well without the attribute. That file's header now
   states the convention for the crate: every new `pub` struct is born
   `#[non_exhaustive]` rather than retrofitted.
+- **API break: `rimap_core::AuthEvent` is now `#[non_exhaustive]` and gains
+  `AuthEvent::new` (#716).** This is the `auth` audit record's payload — the
+  last of the five `#[non_exhaustive]` siblings, after #665, #707, #706, and
+  #715, and the one payload the others could not reach: it is defined in
+  `rimap-core` (so `rimap-imap` can build one without depending on
+  `rimap-audit`) and only re-exported from `rimap_audit::record`. Adding a
+  field to it was a breaking change the semver gate could not report, and it
+  had already grown one that way (`credential_source`, #78). `AuthResult` is
+  an enum and stays exhaustive, matching #665 and #706.
+
+  Downstream impact: the struct literal is no longer available outside
+  `rimap-core`, and **that includes functional-update syntax** —
+  `..AuthEvent::new(…)` is still a struct expression, so rustc rejects it too
+  (E0639). Pattern matches need a trailing `..`.
+
+  The constructor is
+  `AuthEvent::new(result, host, port, username, tls_fingerprint_sha256,
+  fingerprint_match, error_code, credential_source)`, and `account` is reached
+  by assignment: `let mut e = AuthEvent::new(…); e.account = …;`. The split
+  follows the rule `ProcessEnd::new` and `AuditOptions::new` established — a
+  default that asserts something is a parameter — and each of the four
+  `Option`s has a load-bearing `None`: *no fingerprint was observed*, *the
+  config pinned nothing*, *no error code*, *the attempt ended before
+  credential resolution ran*. `credential_source` is a parameter even though
+  `skip_serializing_if` omits it when absent, because an omitted key is not a
+  neutral silence: `docs/audit-log.md` binds a reader to treat an absent field
+  as *unknown* rather than benign, so a forgotten assignment would be
+  indistinguishable on disk from the genuine pre-resolution failure the field
+  documents. `account` stays assignment-reached because it is an operator
+  label rather than a security fact — `None` is the ordinary shape of a
+  single-account deployment.
+
+  **No on-disk change.** `#[non_exhaustive]` is a Rust-visibility construct
+  that serde never sees, and neither is a constructor, so an `auth` line
+  already written still reads and re-writes byte-identically.
+  `crates/rimap-audit/tests/non_exhaustive_record.rs` keeps the pre-existing
+  success golden unchanged through the new construction path and adds a
+  failure-shape one pinning `error_code` and `credential_source`, plus a
+  section-4 construction contract and an argument-mapping test — `host` and
+  `username` are both `String` in the signature, and a transposition would
+  write a login identity into the host field of a forensic record. The type
+  carries `compile_fail,E0639` doctests as the enforcing half; both were
+  confirmed to fail with `Test compiled successfully, but it's marked
+  compile_fail` when the attribute is removed. The module docs and re-export
+  comment in `rimap_audit::record` no longer carve `auth` out, and
+  `docs/audit-log.md` now names `auth` as covered.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after

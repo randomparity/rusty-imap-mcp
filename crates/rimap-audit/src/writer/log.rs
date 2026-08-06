@@ -466,17 +466,17 @@ mod tests {
         })
         .unwrap();
 
-        let event = AuthEvent {
-            account: Some("alice".to_string()),
-            result: AuthResult::Success,
-            host: "127.0.0.1".to_string(),
-            port: 993,
-            username: "alice@example.test".to_string(),
-            tls_fingerprint_sha256: None,
-            fingerprint_match: None,
-            error_code: None,
-            credential_source: None,
-        };
+        let mut event = AuthEvent::new(
+            AuthResult::Success,
+            "127.0.0.1".to_string(),
+            993,
+            "alice@example.test".to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        event.account = Some("alice".to_string());
 
         // Drive through the trait method, not the inherent `log_auth`, so
         // the impl block under test is exercised.
