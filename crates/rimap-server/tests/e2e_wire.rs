@@ -1025,14 +1025,10 @@ async fn seed_multipart_message(dovecot: &DovecotHarness) {
 /// HTML-alternative seeds so both reference the same connection setup.
 async fn append_seed_to_inbox(dovecot: &DovecotHarness, raw: &[u8]) {
     let audit_dir = TempDir::new().expect("seed-audit tempdir");
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_dir.path().join("seed.jsonl"),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
+    let audit = AuditWriter::open(&AuditOptions::new(
+        audit_dir.path().join("seed.jsonl"),
+        Seq::FIRST,
+    ))
     .expect("audit open");
 
     let cfg = ConnectionConfig {

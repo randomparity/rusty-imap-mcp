@@ -24,15 +24,11 @@ fn tool_start_inputs() -> ToolStartInputs {
 #[test]
 fn fail_open_suppresses_write_failure_and_increments_counter() {
     let dir = tempdir().unwrap();
-    let writer = AuditWriter::open(&AuditOptions {
-        path: dir.path().join("audit.jsonl"),
-        rotate_bytes: 10 * 1024 * 1024,
-        rotate_keep: 5,
-        retention_seconds: None,
-        fail_open: true,
-        initial_seq: Seq::FIRST,
-    })
-    .unwrap();
+    let mut options = AuditOptions::new(dir.path().join("audit.jsonl"), Seq::FIRST);
+    options.rotate_bytes = 10 * 1024 * 1024;
+    options.rotate_keep = 5;
+    options.fail_open = true;
+    let writer = AuditWriter::open(&options).unwrap();
 
     // Inject one write failure. The next log_tool_start should encounter
     // AuditError::Write, which fail_open=true converts to Ok while
@@ -59,15 +55,10 @@ fn fail_open_false_propagates_write_failure() {
     // complementary contract so a regression in either direction trips a
     // test.
     let dir = tempdir().unwrap();
-    let writer = AuditWriter::open(&AuditOptions {
-        path: dir.path().join("audit.jsonl"),
-        rotate_bytes: 10 * 1024 * 1024,
-        rotate_keep: 5,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
-    .unwrap();
+    let mut options = AuditOptions::new(dir.path().join("audit.jsonl"), Seq::FIRST);
+    options.rotate_bytes = 10 * 1024 * 1024;
+    options.rotate_keep = 5;
+    let writer = AuditWriter::open(&options).unwrap();
 
     writer.force_next_write_failure();
 

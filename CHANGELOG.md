@@ -132,8 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breaking changes that `cargo semver-checks` reported as clean, because it
   baselines on `v0.1.0` and a declared `0.2.0-dev` major bump permits any break
   (`0 checks: 0 pass, 253 skip`). Third of the `#[non_exhaustive]` siblings,
-  after #665 and #707; #715 (`AuditOptions`, `Filter`, `TrailingState`) and
-  #716 (`AuthEvent`) carry the remainder, both before `v0.2.0` is tagged.
+  after #665 and #707; #716 (`AuthEvent`) carries the remainder, before
+  `v0.2.0` is tagged.
 
   **Two record-adjacent types are deliberately not covered.** `AuthEvent`
   backs the `auth` kind but is defined in `rimap_core::auth_event` and only
@@ -141,9 +141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without depending on `rimap-audit`; marking it needs a constructor in
   `rimap-core` and a sweep of `rimap-imap`, so it is #716. Adding a field to
   `AuthEvent` therefore remains a breaking change, and it has already grown
-  one that way (`credential_source`, #78). `AuditOptions` and `Filter` are
-  #715. Until both land, `auth` records and the writer's configuration
-  surface keep the hazard this entry describes removing everywhere else.
+  one that way (`credential_source`, #78). `AuditOptions`, `Filter`, and
+  `TrailingState` were #715, which has since landed — see the entry below.
+  Until #716 lands, `auth` records keep the hazard this entry describes
+  removing everywhere else.
 
   Downstream impact: the struct literal is no longer available outside the
   crate, and **that includes functional-update syntax** — `..Default::default()`
@@ -182,6 +183,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-exact golden lines, and `docs/audit-log.md` ("Compatibility contract")
   now states what "additive" means for a record on disk, which the Rust-level
   guarantee does not by itself provide.
+- **API break: `rimap_audit`'s three non-record `pub` structs are now
+  `#[non_exhaustive]` (#715).** `AuditOptions`, `Filter`, and `TrailingState`.
+  `AuditOptions` is the live risk: it is the audit writer's whole
+  configuration surface (`path`, `rotate_bytes`, `rotate_keep`,
+  `retention_seconds`, `fail_open`, `initial_seq`) and it grows whenever a
+  rotation or retention knob is added, so every such addition was a breaking
+  change the semver gate could not report. Fourth of the `#[non_exhaustive]`
+  siblings, after #665, #707, and #706; #716 (`AuthEvent`) is the remainder.
+
+  Downstream impact: the struct literal is no longer available outside the
+  crate, and **that includes functional-update syntax** — `..Default::default()`
+  is still a struct expression, so rustc rejects it too (E0639). Pattern
+  matches need a trailing `..`.
+
+  `AuditOptions` gains `AuditOptions::new(path, initial_seq)` — the two fields
+  with no defensible default — and leaves the rest inert: rotation disabled,
+  no retention, fail-closed. `initial_seq` is a parameter rather than a
+  defaulted `Seq::FIRST` for the reason `ProcessEnd::new` takes
+  `records_lost`: `AuditWriter::open` plumbs it into the sequence counter and
+  checks it against nothing, so a defaulted first-record value is an
+  affirmative claim that this is a fresh chain, and a caller who never checked
+  would put duplicate `seq` values into an append-only log. Continuing an
+  existing file means passing
+  `read_trailing_state(path)?.last_seq.map_or(Seq::FIRST, Seq::next)`.
+
+  The rotation and retention fields are deliberately *not* the config-layer
+  defaults (10 MiB / keep 5), which belong to
+  `rimap_config::model::AuditConfig::new`; a caller wanting them reads a
+  loaded config, as the server's boot path does. Note the two same-named
+  constructors differ on purpose. Depart from the inert values by assignment:
+  `let mut o = AuditOptions::new(path, Seq::FIRST); o.rotate_bytes = …;`.
+
+  `Filter` and `TrailingState` gain no constructor — both already derive
+  `Default`, which is the right starting point for each (all-`None` "match
+  everything", and "nothing readable" respectively), and `TrailingState` is an
+  output type callers read from `read_trailing_state` rather than build.
+
+  **No on-disk change:** none of the three is serialized to the audit file, so
+  unlike #706 there is no format contract to prove.
+  `crates/rimap-audit/tests/non_exhaustive_record.rs` gains a section pinning
+  the construction contract from outside the crate, and each type carries
+  `compile_fail,E0639` doctests — the enforcing half, since an integration
+  test compiles just as well without the attribute. That file's header now
+  states the convention for the crate: every new `pub` struct is born
+  `#[non_exhaustive]` rather than retrofitted.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after

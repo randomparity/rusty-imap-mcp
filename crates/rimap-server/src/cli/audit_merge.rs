@@ -55,14 +55,14 @@ pub fn parse_filter(args: &RunArgs<'_>) -> anyhow::Result<Filter> {
         .map(|s| OffsetDateTime::parse(s, &Rfc3339))
         .transpose()
         .with_context(|| format!("parsing --until `{}`", args.until.unwrap_or("")))?;
-    Ok(Filter {
-        since,
-        until,
-        tool: args.tool.map(str::to_string),
-        kind: args.kind.map(str::to_string),
-        process: args.process.map(str::to_string),
-        account: args.account.map(str::to_string),
-    })
+    let mut filter = Filter::default();
+    filter.since = since;
+    filter.until = until;
+    filter.tool = args.tool.map(str::to_string);
+    filter.kind = args.kind.map(str::to_string);
+    filter.process = args.process.map(str::to_string);
+    filter.account = args.account.map(str::to_string);
+    Ok(filter)
 }
 
 /// Run the `audit merge` subcommand.

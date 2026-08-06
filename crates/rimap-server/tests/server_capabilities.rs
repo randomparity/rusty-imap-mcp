@@ -55,15 +55,7 @@ impl CredentialStore for StaticCreds {
 fn open_test_audit() -> (AuditWriter, TempDir) {
     let audit_dir = TempDir::new().expect("audit tempdir");
     let audit_path = audit_dir.path().join("audit.jsonl");
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_path,
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
-    .expect("audit open");
+    let audit = AuditWriter::open(&AuditOptions::new(audit_path, Seq::FIRST)).expect("audit open");
     (audit, audit_dir)
 }
 

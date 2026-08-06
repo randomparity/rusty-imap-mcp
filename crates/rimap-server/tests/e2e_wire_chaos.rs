@@ -256,14 +256,10 @@ fn parse_encryption(encryption: &str) -> ImapEncryption {
 /// independent of the server's TOML cap, so an over-fetch-cap body still seeds.
 async fn seed_body_through_proxy(chaos: &ChaosHarness, port: u16, encryption: &str, raw: &[u8]) {
     let audit_dir = TempDir::new().expect("seed-audit tempdir");
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_dir.path().join("seed.jsonl"),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
+    let audit = AuditWriter::open(&AuditOptions::new(
+        audit_dir.path().join("seed.jsonl"),
+        Seq::FIRST,
+    ))
     .expect("seed audit open");
 
     let cfg = ConnectionConfig {

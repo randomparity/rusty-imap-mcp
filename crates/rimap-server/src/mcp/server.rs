@@ -1340,15 +1340,8 @@ mod instructions_selection_tests {
     fn make_server(registry: AccountRegistry) -> (ImapMcpServer, TempDir) {
         let audit_dir = TempDir::new().expect("audit tempdir");
         let audit_path = audit_dir.path().join("audit.jsonl");
-        let audit = AuditWriter::open(&AuditOptions {
-            path: audit_path,
-            rotate_bytes: 0,
-            rotate_keep: 0,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit open");
+        let audit =
+            AuditWriter::open(&AuditOptions::new(audit_path, Seq::FIRST)).expect("audit open");
         let (cancellation_sender, _rx) = rimap_audit::cancellation_channel();
         (
             ImapMcpServer::new(registry, audit, cancellation_sender),
@@ -1867,15 +1860,10 @@ mod tool_call_ceiling_tests {
 
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let writer = AuditWriter::open(&AuditOptions {
-            path: path.clone(),
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit open");
+        let mut options = AuditOptions::new(path.clone(), Seq::FIRST);
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        let writer = AuditWriter::open(&options).expect("audit open");
 
         let (tx, rx) = cancellation_channel();
         let drainer = spawn_drainer(rx, writer.clone());
@@ -2106,15 +2094,10 @@ mod dispatch_drain_tests {
     async fn an_undrained_count_reaches_process_end_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let writer = AuditWriter::open(&AuditOptions {
-            path: path.clone(),
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit writer opens");
+        let mut options = AuditOptions::new(path.clone(), Seq::FIRST);
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        let writer = AuditWriter::open(&options).expect("audit writer opens");
 
         let drain = DispatchDrain::new();
         let entered = Arc::new(AtomicBool::new(false));
@@ -2305,15 +2288,10 @@ mod dispatch_drain_tests {
             .build()
             .expect("runtime builds");
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = AuditWriter::open(&AuditOptions {
-            path: dir.path().join("audit.jsonl"),
-            rotate_bytes: 10 * 1024 * 1024,
-            rotate_keep: 5,
-            retention_seconds: None,
-            fail_open: false,
-            initial_seq: Seq::FIRST,
-        })
-        .expect("audit writer opens");
+        let mut options = AuditOptions::new(dir.path().join("audit.jsonl"), Seq::FIRST);
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        let writer = AuditWriter::open(&options).expect("audit writer opens");
         (rt, dir, writer)
     }
 

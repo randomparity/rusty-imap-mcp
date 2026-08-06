@@ -93,14 +93,10 @@ fn build_server_real(
     let audit_dir = TempDir::new().expect("audit tempdir");
     let download_dir = TempDir::new().expect("download tempdir");
 
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_dir.path().join("audit.jsonl"),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
+    let audit = AuditWriter::open(&AuditOptions::new(
+        audit_dir.path().join("audit.jsonl"),
+        Seq::FIRST,
+    ))
     .expect("audit open");
 
     let account_cfg = test_account_config(dovecot);

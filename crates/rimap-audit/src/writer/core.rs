@@ -16,7 +16,46 @@ use fs4::{FileExt, TryLockError};
 use crate::AuditError;
 
 /// Options for opening an audit writer.
+///
+/// `#[non_exhaustive]`: this is the writer's whole configuration surface and
+/// it grows whenever a rotation or retention knob is added, so a downstream
+/// struct literal would make every such addition a breaking change. Build one
+/// with [`AuditOptions::new`] and assign the fields that differ.
+///
+/// A struct expression is rejected outside this crate:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::AuditOptions {
+///     path: std::path::PathBuf::from("audit.jsonl"),
+///     rotate_bytes: 0,
+///     rotate_keep: 0,
+///     retention_seconds: None,
+///     fail_open: false,
+///     initial_seq: rimap_audit::Seq::FIRST,
+/// };
+/// ```
+///
+/// And so is functional-update syntax. There is no `Default` to spread from,
+/// so this spreads from the constructor — which makes E0639 the single reason
+/// it is rejected, and is also the likelier downstream mistake:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::AuditOptions {
+///     rotate_bytes: 4096,
+///     ..rimap_audit::AuditOptions::new("audit.jsonl".into(), rimap_audit::Seq::FIRST)
+/// };
+/// ```
+///
+/// The supported form is [`AuditOptions::new`] plus field assignment:
+///
+/// ```
+/// let mut opts =
+///     rimap_audit::AuditOptions::new("audit.jsonl".into(), rimap_audit::Seq::FIRST);
+/// opts.rotate_bytes = 10 * 1024 * 1024;
+/// assert_eq!(opts.rotate_keep, 0);
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AuditOptions {
     /// Path to the active audit file.
     pub path: PathBuf,
@@ -38,9 +77,50 @@ pub struct AuditOptions {
     /// flag — see the audit security model docs for the trade-off.
     pub fail_open: bool,
     /// First `Seq` value this writer will allocate. Callers compute this from
-    /// `read_trailing_state(path).last_seq.map(Seq::next).unwrap_or(Seq::FIRST)`
-    /// before calling `open`.
+    /// `read_trailing_state(path)?.last_seq.map_or(Seq::FIRST, Seq::next)`
+    /// before calling `open`. Set through [`AuditOptions::new`], which takes
+    /// it as a parameter rather than defaulting it.
     pub initial_seq: crate::record::ids::Seq,
+}
+
+impl AuditOptions {
+    /// Options for `path` starting at `initial_seq`, with every policy knob
+    /// inert: rotation disabled, no time-based retention, fail-closed.
+    ///
+    /// The two parameters are the two fields with no defensible default.
+    /// `path` because an empty path is not a log file. `initial_seq` because
+    /// [`AuditWriter::open`] plumbs it straight into the sequence counter and
+    /// cross-checks it against nothing: passing [`Seq::FIRST`](crate::Seq)
+    /// for a file that already has records restarts the sequence and puts
+    /// duplicate `seq` values into an append-only, tamper-evident log. A
+    /// defaulted `Seq::FIRST` would be an affirmative claim that this is a
+    /// fresh chain, published by a caller who never checked — the same reason
+    /// [`ProcessEnd::new`](crate::record::ProcessEnd::new) takes
+    /// `records_lost` rather than defaulting it. Continuing an existing file
+    /// means passing
+    /// `read_trailing_state(path)?.last_seq.map_or(Seq::FIRST, Seq::next)`.
+    ///
+    /// The remaining fields are deliberately **not** the config-layer defaults
+    /// (`rotate_bytes` 10 MiB, `rotate_keep` 5). Those belong to
+    /// `rimap_config::model::AuditConfig::new`, which fills them precisely
+    /// *because* it mirrors the TOML schema; a caller who wants them reads
+    /// them off a loaded config, as `rimap-server`'s boot path does. The two
+    /// same-named constructors therefore differ on purpose, and this is the
+    /// direction to differ in: defaulting to a rotation policy here would mean
+    /// a caller who named only `path` silently acquired retention pruning it
+    /// never asked for, on the one file whose whole value is that nothing
+    /// deletes it unbidden.
+    #[must_use]
+    pub fn new(path: PathBuf, initial_seq: crate::record::ids::Seq) -> Self {
+        Self {
+            path,
+            rotate_bytes: 0,
+            rotate_keep: 0,
+            retention_seconds: None,
+            fail_open: false,
+            initial_seq,
+        }
+    }
 }
 
 /// Test-only failure injection hook. When `fail_next` is set, the next

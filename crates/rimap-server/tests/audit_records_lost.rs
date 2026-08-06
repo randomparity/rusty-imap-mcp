@@ -22,15 +22,11 @@ use rimap_core::tool::ToolName;
 use tempfile::tempdir;
 
 fn open_writer(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
-    AuditWriter::open(&AuditOptions {
-        path,
-        rotate_bytes: 10 * 1024 * 1024,
-        rotate_keep: 5,
-        retention_seconds: None,
-        fail_open,
-        initial_seq: Seq::FIRST,
-    })
-    .unwrap()
+    let mut options = AuditOptions::new(path, Seq::FIRST);
+    options.rotate_bytes = 10 * 1024 * 1024;
+    options.rotate_keep = 5;
+    options.fail_open = fail_open;
+    AuditWriter::open(&options).unwrap()
 }
 
 fn tool_start_inputs() -> ToolStartInputs {

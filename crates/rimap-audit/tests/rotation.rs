@@ -28,15 +28,10 @@ const N: u64 = 25;
 fn writes_survive_multiple_rotations() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
-    let writer = AuditWriter::open(&AuditOptions {
-        path: path.clone(),
-        rotate_bytes: 300,
-        rotate_keep: 50,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
-    })
-    .unwrap();
+    let mut options = AuditOptions::new(path.clone(), Seq::FIRST);
+    options.rotate_bytes = 300;
+    options.rotate_keep = 50;
+    let writer = AuditWriter::open(&options).unwrap();
     for seq in 1..=N {
         writer.write_record(&record(seq)).unwrap();
     }
@@ -68,28 +63,15 @@ fn writes_survive_multiple_rotations() {
 fn lock_persists_across_rotations() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
-    let writer = AuditWriter::open(&AuditOptions {
-        path: path.clone(),
-        rotate_bytes: 300,
-        rotate_keep: 5,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
-    })
-    .unwrap();
+    let mut options = AuditOptions::new(path.clone(), Seq::FIRST);
+    options.rotate_bytes = 300;
+    options.rotate_keep = 5;
+    let writer = AuditWriter::open(&options).unwrap();
     for seq in 1_u64..=10 {
         writer.write_record(&record(seq)).unwrap();
     }
 
-    let err = AuditWriter::open(&AuditOptions {
-        path: path.clone(),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: rimap_audit::Seq::FIRST,
-    })
-    .unwrap_err();
+    let err = AuditWriter::open(&AuditOptions::new(path.clone(), Seq::FIRST)).unwrap_err();
     match err {
         AuditError::Locked { .. } => {}
         other => panic!("expected Locked, got {other:?}"),

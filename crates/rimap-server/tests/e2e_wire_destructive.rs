@@ -414,14 +414,10 @@ fn read_audit_records(path: &std::path::Path) -> Vec<Value> {
 /// the destructive path only needs one addressable message.
 async fn seed_plain_message(dovecot: &DovecotHarness) {
     let audit_dir = TempDir::new().expect("seed-audit tempdir");
-    let audit = AuditWriter::open(&AuditOptions {
-        path: audit_dir.path().join("seed.jsonl"),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
+    let audit = AuditWriter::open(&AuditOptions::new(
+        audit_dir.path().join("seed.jsonl"),
+        Seq::FIRST,
+    ))
     .expect("audit open");
 
     let cfg = ConnectionConfig {

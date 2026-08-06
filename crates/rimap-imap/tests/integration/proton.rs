@@ -61,14 +61,10 @@ fn require_proton() -> Option<ProtonConfig> {
 
 fn build_connection(cfg: &ProtonConfig) -> Connection {
     let dir = tempfile::tempdir().unwrap();
-    let audit = AuditWriter::open(&AuditOptions {
-        path: dir.path().join("audit.jsonl"),
-        rotate_bytes: 0,
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: Seq::FIRST,
-    })
+    let audit = AuditWriter::open(&AuditOptions::new(
+        dir.path().join("audit.jsonl"),
+        Seq::FIRST,
+    ))
     .unwrap();
     let conn_cfg = ConnectionConfig {
         account: None,
