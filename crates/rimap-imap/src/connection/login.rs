@@ -214,6 +214,15 @@ impl Connection {
     /// for correctness under this function's own contract rather than for a
     /// case it can currently observe.
     ///
+    /// Note also what a rev2 session does *not* do, because #686 asks for it in
+    /// those words: it never issues a scoped `UID EXPUNGE`. RFC 9051 folds MOVE
+    /// in alongside UIDPLUS, so `has_move` is true and both `delete_message` and
+    /// `move_messages` take the atomic `UID MOVE`, which expunges nothing. The
+    /// `UID EXPUNGE` form is only reachable from `Known { false, true }` — a
+    /// server with UIDPLUS and no MOVE — which no `IMAP4rev2` advertisement can
+    /// produce. That is a property of the fold, not of the parser blocker
+    /// above, and it holds however the upstream question is settled.
+    ///
     /// Both probes are also literal-case: `has_str` special-cases `IMAP4rev1`
     /// case-insensitively but compares every other atom exactly, so a server
     /// spelling it `IMAP4REV2` reads as absent. That is #735, and it is a
