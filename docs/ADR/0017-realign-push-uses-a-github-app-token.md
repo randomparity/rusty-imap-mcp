@@ -10,6 +10,14 @@
   overlay, the two symlink defences, the diff gate, the pinned-SHA discipline —
   is unchanged and is **not** superseded. ADR-0016 named this as "the upgrade
   path"; this is that path being taken.
+- **Back-pointer and index row pending.** ADR-0016 does not yet carry the
+  matching `Superseded-by` marker this repo's house style asks for, and
+  `docs/ADR/README.md` has no row for this ADR — both are deliberately left to
+  a separate change to avoid a conflict zone with concurrent branches, tracked
+  in [#756](https://github.com/randomparity/rusty-imap-mcp/issues/756). Until
+  they land, ADR-0016 still reads as instructing an operator to create
+  `FUZZ_LOCK_REALIGN_TOKEN`, which nothing reads after this change. Do not
+  create it.
 
 ## Context
 
@@ -113,13 +121,32 @@ in what carries the argument: an App push *does* start runs (that is the whole
 point), so the platform's own recursion suppression is not available here and
 this gate is doing the work.
 
-Two further bounds, unchanged, make termination independent of that gate: the
-`paths: ['Cargo.lock']` filter means only a push that moves the workspace
-lockfile can re-trigger at all, and the realign is idempotent — a second run
-finds parity restored, sets `changed=false`, mints no token and pushes nothing.
-So even with the actor gate hypothetically defeated, the sequence terminates
-after one additional run. The per-PR `concurrency` group with
-`cancel-in-progress` bounds overlap.
+**The `paths: ['Cargo.lock']` filter is not a loop bound**, and an earlier draft
+of this ADR wrongly listed it as one. For `pull_request_target`, GitHub
+evaluates `paths` against a three-dot diff of the *whole pull request* — "a
+comparison between the most recent version of the topic branch and the commit
+where the topic branch was last synced with the base branch"
+([workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpushpull_requestpull_request_targetpathspaths-ignore))
+— not against the incremental push. Dependabot's root `Cargo.lock` change is
+still in that diff after the realign, so the filter matches on every
+`synchronize`, including the one the App's own push fires. It is an *entry*
+filter: it keeps non-cargo Dependabot PRs out of the workflow entirely. It
+bounds nothing about recursion. (The realign commit itself touches only
+`fuzz/Cargo.lock` and `*/fuzz/Cargo.lock`, which match `paths: ['Cargo.lock']`
+under no reading — but that is irrelevant, because the filter never sees the
+push in isolation.)
+
+So termination rests on two legs, not three: the actor gate, and idempotency as
+its one independent backstop. The realign is idempotent — a second run finds
+parity restored, sets `changed=false`, mints no token and pushes nothing — so
+even with the actor gate hypothetically defeated the sequence terminates after
+one additional run. Anyone relaxing the actor gate must therefore be relying on
+idempotency alone, deliberately. The per-PR `concurrency` group with
+`cancel-in-progress` bounds overlap; note that the `synchronize` the App's push
+fires enters that same group and can cancel the run that pushed, which is one
+command wide but can skip the post-step revoke and leave a token valid for its
+remaining hour. Still bounded, and still strictly better than a PAT valid until
+someone rotates it.
 
 **`app-id` over `client-id`.** Upstream marks `app-id` deprecated in favour of
 `client-id`, and still supports it. `app-id` is used because the operator's
@@ -176,10 +203,42 @@ code change. It will produce a deprecation annotation on each run until then.
   only the latter determines `github.actor` on the resulting event, which is
   what loop containment reads.
 
-- One more moving part in the supply chain: `actions/create-github-app-token`
-  now runs in a job that holds a write credential. It is pinned to a 40-char
-  commit SHA like every other action here, and it runs *after* all PR content
-  has been read, so it cannot be reached by anything the head supplied.
+- **Third-party action code now handles the App private key, and the key
+  outlives any token it mints.** This is the one place the App is worse than
+  the PAT, and it runs the opposite way round from the usual worry. The action
+  is unreachable from PR content — it is SHA-pinned and runs after every byte
+  of the head has been read — but it is *handed* `REALIGN_APP_KEY` as an input.
+  With the PAT, no third-party code ever saw the credential: it went from
+  `secrets.` straight into a `git push` argv inside a base-branch-authored
+  `run:`. A future compromised release of `actions/create-github-app-token`
+  would exfiltrate not one hour-long token but the key that mints them
+  indefinitely. Dependabot proposes that bump as routine, which is exactly how
+  it would arrive. Mitigations: the action is `actions/`-owned, pinned to a
+  40-char commit SHA, and covered by the `github-actions` Dependabot ecosystem
+  with a cooldown. The escape hatch, if that ever stops being enough, is to
+  build the JWT with `openssl` and `curl` in a base-branch `run:` and drop the
+  third-party step entirely — about fifteen lines, declined here on
+  readability.
+
+- **The key's blast radius follows the App's installations, not a fixed
+  repository list.** A fine-grained PAT's repository scope is fixed at
+  issuance. `owner`/`repositories` being unset bounds the *token this workflow
+  mints* to this repository; it does not bound the key. Installing the App on a
+  second repository later silently gives the same `REALIGN_APP_KEY` write
+  access there. The key also has no expiry. So: install the App on this
+  repository only, and rotate the key if it is ever installed elsewhere.
+
+- Two residuals were found reviewing this change and deliberately left out of
+  it, because neither is introduced by the credential swap.
+  [#754](https://github.com/randomparity/rusty-imap-mcp/issues/754): the
+  SonarQube job in `ci.yml` is gated on `github.actor`, so the realign push
+  un-skips it on a Dependabot PR and exposes `SONAR_TOKEN` to a job that
+  compiles the freshly bumped dependency graph — true of the PAT too, and
+  named in neither ADR until now. It should land before the first real realign.
+  [#755](https://github.com/randomparity/rusty-imap-mcp/issues/755): no
+  environment here carries a deployment branch policy, so environment secrets
+  are readable from any branch; that is a free hardening and, unlike a
+  reviewer gate, is compatible with this workflow.
 
 - Nothing here is exercised as a *workflow* until a real Dependabot PR triggers
   it with the App installed, because `pull_request_target` does not run from a
