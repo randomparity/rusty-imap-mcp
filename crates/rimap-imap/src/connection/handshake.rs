@@ -446,17 +446,15 @@ mod tests {
     /// An event whose contents no assertion reads — the tests below are about
     /// what the sink does with the lock, not with the record.
     fn any_auth_event() -> AuthEvent {
-        AuthEvent {
-            account: None,
-            result: rimap_core::auth_event::AuthResult::Failure,
-            host: "127.0.0.1".to_string(),
-            port: 143,
-            username: "unused".to_string(),
-            tls_fingerprint_sha256: None,
-            fingerprint_match: None,
-            error_code: Some(rimap_core::ErrorCode::Internal),
-            credential_source: None,
-        }
+        AuthEvent::new(
+            rimap_core::auth_event::AuthResult::Failure,
+            "127.0.0.1".to_string(),
+            143,
+            "unused".to_string(),
+            None,
+            None,
+            Some(rimap_core::ErrorCode::Internal),
+        )
     }
 
     /// A poisoned lock must be *reported*, because [`AuthEventSink`] forbids

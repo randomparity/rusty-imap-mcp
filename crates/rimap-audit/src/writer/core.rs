@@ -729,17 +729,15 @@ mod tests {
         .unwrap();
 
         let seq = writer
-            .log_auth(AuthEvent {
-                account: None,
-                result: AuthResult::Success,
-                host: "127.0.0.1".to_string(),
-                port: 993,
-                username: "alice@example.test".to_string(),
-                tls_fingerprint_sha256: Some("ab".repeat(32)),
-                fingerprint_match: Some(true),
-                error_code: None,
-                credential_source: None,
-            })
+            .log_auth(AuthEvent::new(
+                AuthResult::Success,
+                "127.0.0.1".to_string(),
+                993,
+                "alice@example.test".to_string(),
+                Some("ab".repeat(32)),
+                Some(true),
+                None,
+            ))
             .unwrap();
 
         assert_eq!(seq, crate::record::ids::Seq::FIRST);
@@ -772,16 +770,16 @@ mod tests {
         .unwrap();
         let pid = writer.process_id();
 
-        let make = || AuthEvent {
-            account: None,
-            result: AuthResult::Failure,
-            host: "h".into(),
-            port: 1,
-            username: "u".into(),
-            tls_fingerprint_sha256: None,
-            fingerprint_match: None,
-            error_code: Some(rimap_core::ErrorCode::Tls),
-            credential_source: None,
+        let make = || {
+            AuthEvent::new(
+                AuthResult::Failure,
+                "h".into(),
+                1,
+                "u".into(),
+                None,
+                None,
+                Some(rimap_core::ErrorCode::Tls),
+            )
         };
         writer.log_auth(make()).unwrap();
         writer.log_auth(make()).unwrap();

@@ -5,22 +5,17 @@
 //!
 //! # Adding a field
 //!
-//! Every payload struct *defined* here is `#[non_exhaustive]`, so adding a
-//! field is additive at the Rust API level: no downstream crate can name the
-//! full set of fields in a struct expression, and none has to be recompiled
-//! against a wider one. It is additive on disk too, because readers tolerate
-//! an absent field via `#[serde(default)]`. Both halves are required — see
-//! `docs/audit-log.md` ("Compatibility contract"), which is the normative
-//! statement of what a reader may assume.
+//! Every payload struct is `#[non_exhaustive]`, so adding a field is additive
+//! at the Rust API level: no downstream crate can name the full set of fields
+//! in a struct expression, and none has to be recompiled against a wider one.
+//! It is additive on disk too, because readers tolerate an absent field via
+//! `#[serde(default)]`. Both halves are required — see `docs/audit-log.md`
+//! ("Compatibility contract"), which is the normative statement of what a
+//! reader may assume.
 //!
-//! **One payload is not covered.** [`AuthEvent`] backs the `auth` kind but is
-//! defined in `rimap_core::auth_event` and only re-exported here, because
-//! `rimap-imap` constructs it without depending on this crate. It is still
-//! exhaustive, so adding a field to it *is* a breaking change and the
-//! paragraph above does not apply to `auth` records. It has already grown one
-//! field this way (`credential_source`, #78). Tracked in #716; until that
-//! lands, treat `AuthEvent` as the pre-#706 hazard this module otherwise
-//! removes.
+//! That covers every kind, including `auth`: [`AuthEvent`] is *defined* in
+//! `rimap_core::auth_event` and only re-exported here, but it carries the
+//! attribute too (#716) and is built through `AuthEvent::new`.
 //!
 //! `#[non_exhaustive]` is a Rust-visibility construct only. It does not touch
 //! serde, so an unchanged record serializes to byte-identical JSONL. The
@@ -427,11 +422,11 @@ impl AuditRecord {
 // Re-exported here under their canonical names for ergonomic access
 // from within `rimap-audit` (writer, reader, on-disk format tests).
 //
-// NOTE: `AuthEvent` is the one payload in this module that is NOT
-// `#[non_exhaustive]` — it is defined in another crate, so #706 could not
-// mark it without a constructor there and a sweep of `rimap-imap`'s
-// construction sites. Adding a field to it is still a breaking change.
-// See the module docs and #716.
+// `AuthEvent` is `#[non_exhaustive]` like the payloads defined here (#716),
+// so the "Adding a field" note in the module docs covers it; its constructor
+// is `AuthEvent::new`. Being defined in another crate, the attribute is in
+// force on it *inside* `rimap-audit` too, unlike the local payloads.
+// `AuthResult` is an enum and stays exhaustive, matching #665 and #706.
 pub use rimap_core::auth_event::{AuthEvent, AuthResult};
 
 /// Payload of the `tool_start` kind. Recorded before dispatch begins so a
@@ -785,17 +780,15 @@ mod tests {
             seq: Seq(2),
             ts: Timestamp::now(),
             process_id: ProcessId::new_now(),
-            payload: Payload::Auth(crate::record::AuthEvent {
-                account: None,
-                result: crate::record::AuthResult::Success,
-                host: "127.0.0.1".to_string(),
-                port: 1143,
-                username: "alice@example.test".to_string(),
-                tls_fingerprint_sha256: Some("ab".repeat(32)),
-                fingerprint_match: Some(true),
-                error_code: None,
-                credential_source: None,
-            }),
+            payload: Payload::Auth(crate::record::AuthEvent::new(
+                crate::record::AuthResult::Success,
+                "127.0.0.1".to_string(),
+                1143,
+                "alice@example.test".to_string(),
+                Some("ab".repeat(32)),
+                Some(true),
+                None,
+            )),
         };
         let json = serde_json::to_string(&rec).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();

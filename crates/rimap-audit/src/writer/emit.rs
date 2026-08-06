@@ -227,17 +227,15 @@ mod tests {
     use crate::record::{Payload, ProcessEnd, ProcessEndReason, ProcessStart, ToolEnd, ToolStart};
 
     fn auth_payload() -> Payload {
-        Payload::Auth(AuthEvent {
-            account: None,
-            result: AuthResult::Success,
-            host: "h".to_string(),
-            port: 1,
-            username: "u".to_string(),
-            tls_fingerprint_sha256: None,
-            fingerprint_match: None,
-            error_code: None,
-            credential_source: None,
-        })
+        Payload::Auth(AuthEvent::new(
+            AuthResult::Success,
+            "h".to_string(),
+            1,
+            "u".to_string(),
+            None,
+            None,
+            None,
+        ))
     }
 
     fn process_start_payload() -> Payload {

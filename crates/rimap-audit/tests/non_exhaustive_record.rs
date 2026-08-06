@@ -33,9 +33,11 @@
 //!
 //! Section 3 extends the same construction contract to the crate's three
 //! non-record `pub` structs -- `AuditOptions`, `Filter`, `TrailingState`
-//! (#715). They have no on-disk component, so only property 1 applies to
-//! them; the file keeps its name because renaming it would break every
-//! inbound reference for no gain.
+//! (#715) -- and to `AuthEvent` (#716), the `auth` payload that is defined in
+//! `rimap-core` and only re-exported here. The first three have no on-disk
+//! component, so only property 1 applies to them; `AuthEvent` has both, and
+//! its goldens sit with the others in section 2. The file keeps its name
+//! because renaming it would break every inbound reference for no gain.
 //!
 //! ## Convention for new `pub` structs in this crate
 //!
@@ -49,6 +51,10 @@
 //! attribute is dropped -- see `record/mod.rs` for the established shape.
 //! #717 is the next change due to add public reader surface; if what it adds
 //! is a struct, this is the rule it is born under.
+//!
+//! The rule reaches `AuthEvent` too even though `rimap-core` defines it: it is
+//! a `pub` type this crate re-exports as part of its own record surface, so a
+//! field added to it lands in `rimap-audit`'s API and on its JSONL lines.
 //!
 //! Sibling of `rimap-config`'s `non_exhaustive_model.rs` (#665) and
 //! `non_exhaustive_validate.rs` (#707).
@@ -279,33 +285,64 @@ fn tool_start_infrastructure_line_is_byte_exact() {
 }
 
 /// The `auth` kind. Its payload is [`rimap_audit::record::AuthEvent`], which
-/// lives in `rimap-core` and is the one payload this change could not mark
-/// `#[non_exhaustive]` (#716) -- which makes pinning its bytes more important
-/// here, not less, since a field added to it is still a silent format change.
+/// lives in `rimap-core` and is re-exported here; #716 marked it
+/// `#[non_exhaustive]` and gave it a constructor, so this golden now goes
+/// through `AuthEvent::new` plus assignment like every other one.
+///
+/// The bytes below are unchanged from when #706 wrote them against a struct
+/// literal, which is the claim that matters: the attribute and the
+/// constructor are Rust-level constructs that serde never sees, so an `auth`
+/// line already on disk still reads and re-writes identically.
 ///
 /// `username` carries a login identity and must never carry credential
 /// material; the golden uses an obvious placeholder.
 #[test]
 fn auth_line_is_byte_exact() {
-    let record = AuditRecord::new(
-        Seq(2),
-        fixed_ts(),
-        fixed_pid(),
-        Payload::Auth(rimap_audit::record::AuthEvent {
-            account: Some("work".to_string()),
-            result: rimap_audit::record::AuthResult::Success,
-            host: "imap.example.com".to_string(),
-            port: 993,
-            username: "alice@example.com".to_string(),
-            tls_fingerprint_sha256: Some("ab".repeat(32)),
-            fingerprint_match: Some(true),
-            error_code: None,
-            credential_source: None,
-        }),
+    let mut event = rimap_audit::record::AuthEvent::new(
+        rimap_audit::record::AuthResult::Success,
+        "imap.example.com".to_string(),
+        993,
+        "alice@example.com".to_string(),
+        Some("ab".repeat(32)),
+        Some(true),
+        None,
     );
+    event.account = Some("work".to_string());
+
+    let record = AuditRecord::new(Seq(2), fixed_ts(), fixed_pid(), Payload::Auth(event));
     assert_golden(
         &record,
         r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"auth","account":"work","result":"success","host":"imap.example.com","port":993,"username":"alice@example.com","tls_fingerprint_sha256":"abababababababababababababababababababababababababababababababab","fingerprint_match":true,"error_code":null}"#,
+    );
+}
+
+/// The failing `auth` shape, which the success golden above cannot cover: an
+/// `error_code` present rather than `null`, and a populated
+/// `credential_source`.
+///
+/// `credential_source` is the field `AuthEvent` already grew once (#78) and
+/// the reason its `#[serde(default)]` retrofit was needed, so it is worth a
+/// line of its own. It is also the field `AuthEvent::new` leaves at `None`
+/// deliberately -- being `skip_serializing_if`, an unassigned one leaves no
+/// key at all rather than writing a claim -- which makes this the test that a
+/// caller who *does* assign it reaches the wire, and in the right position.
+#[test]
+fn auth_failure_line_is_byte_exact() {
+    let mut event = rimap_audit::record::AuthEvent::new(
+        rimap_audit::record::AuthResult::Failure,
+        "imap.example.com".to_string(),
+        993,
+        "alice@example.com".to_string(),
+        None,
+        None,
+        Some(rimap_core::ErrorCode::Auth),
+    );
+    event.credential_source = Some(rimap_core::CredentialSource::Keyring);
+
+    let record = AuditRecord::new(Seq(3), fixed_ts(), fixed_pid(), Payload::Auth(event));
+    assert_golden(
+        &record,
+        r#"{"seq":3,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"auth","result":"failure","host":"imap.example.com","port":993,"username":"alice@example.com","tls_fingerprint_sha256":null,"fingerprint_match":null,"error_code":"ERR_AUTH","credential_source":"keyring"}"#,
     );
 }
 
@@ -629,4 +666,96 @@ fn trailing_state_is_read_and_destructured_with_a_rest_pattern() {
     } = state;
     assert_eq!(last_seq, None);
     assert_eq!(last_recorded_inode, None);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Downstream construction contract: `AuthEvent` (#716)
+// ---------------------------------------------------------------------------
+
+/// `AuthEvent` is the `auth` payload, defined in `rimap-core` and re-exported
+/// from `rimap_audit::record`. This test constructs it the way `rimap-imap`
+/// does -- through the same public path, from outside both crates -- which is
+/// what makes the attribute observable here.
+///
+/// The split between parameter and assignment is the contract being pinned,
+/// and it follows one rule: a field is a parameter when its `None` still
+/// reaches the JSONL line. `tls_fingerprint_sha256`, `fingerprint_match`, and
+/// `error_code` have no `skip_serializing_if`, so the record affirms
+/// something about each of them whatever the caller does -- "nothing was
+/// observed", "nothing was pinned", "no error". `account` and
+/// `credential_source` are skipped when absent, so leaving them unassigned
+/// leaves the record silent rather than wrong, and they are assigned.
+#[test]
+fn auth_event_is_built_through_its_constructor_and_field_assignment() {
+    use rimap_audit::record::{AuthEvent, AuthResult};
+    use rimap_core::CredentialSource;
+
+    let mut event = AuthEvent::new(
+        AuthResult::Failure,
+        "imap.example.com".to_string(),
+        993,
+        "alice@example.com".to_string(),
+        Some("cd".repeat(32)),
+        Some(false),
+        Some(rimap_core::ErrorCode::Tls),
+    );
+
+    assert_eq!(
+        event.account, None,
+        "an unassigned account is skipped on the line, not defaulted to a name",
+    );
+    assert_eq!(
+        event.credential_source, None,
+        "likewise credential_source: absent means unstated, not 'no store'",
+    );
+
+    event.account = Some("work".to_string());
+    event.credential_source = Some(CredentialSource::EnvVar);
+    assert_eq!(event.credential_source, Some(CredentialSource::EnvVar));
+
+    // A downstream match needs a rest pattern; without the `..` this stops
+    // compiling, which is what stops a later field from silently changing
+    // what this destructuring means.
+    let AuthEvent {
+        result,
+        fingerprint_match,
+        ..
+    } = event;
+    assert_eq!(result, AuthResult::Failure);
+    assert_eq!(fingerprint_match, Some(false));
+}
+
+/// `AuthEvent::new` takes `host` and `username` as adjacent-in-meaning
+/// `String` parameters separated only by a `u16`, so transposing them
+/// compiles, type-checks, and writes a login identity into the host field of
+/// a forensic record forever. `port` sits between them, which makes the swap
+/// *look* implausible in the signature and no less possible at a call site
+/// that passes variables.
+///
+/// So each value here names the field it belongs in, and the same for the two
+/// `Option`s a reader acts on. This is the mapping the compiler cannot check.
+#[test]
+fn auth_event_new_maps_each_argument_onto_the_field_it_names() {
+    use rimap_audit::record::{AuthEvent, AuthResult};
+
+    let event = AuthEvent::new(
+        AuthResult::Success,
+        "HOST-goes-here".to_string(),
+        1993,
+        "USERNAME-goes-here".to_string(),
+        Some("FINGERPRINT-goes-here".to_string()),
+        Some(true),
+        Some(rimap_core::ErrorCode::Auth),
+    );
+
+    assert_eq!(event.host, "HOST-goes-here");
+    assert_eq!(event.username, "USERNAME-goes-here");
+    assert_eq!(event.port, 1993);
+    assert_eq!(
+        event.tls_fingerprint_sha256.as_deref(),
+        Some("FINGERPRINT-goes-here"),
+    );
+    assert_eq!(event.fingerprint_match, Some(true));
+    assert_eq!(event.error_code, Some(rimap_core::ErrorCode::Auth));
+    assert_eq!(event.result, AuthResult::Success);
 }

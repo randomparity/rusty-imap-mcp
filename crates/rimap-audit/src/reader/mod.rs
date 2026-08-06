@@ -671,16 +671,18 @@ mod tests {
             seq: crate::record::ids::Seq(1),
             ts: Timestamp::from_offset(datetime!(2026-04-07 14:22:01.000 UTC)),
             process_id: pid,
-            payload: Payload::Auth(AuthEvent {
-                account: Some("bob".to_string()),
-                result: AuthResult::Success,
-                host: "h".to_string(),
-                port: 993,
-                username: "u".to_string(),
-                tls_fingerprint_sha256: None,
-                fingerprint_match: None,
-                error_code: None,
-                credential_source: None,
+            payload: Payload::Auth({
+                let mut event = AuthEvent::new(
+                    AuthResult::Success,
+                    "h".to_string(),
+                    993,
+                    "u".to_string(),
+                    None,
+                    None,
+                    None,
+                );
+                event.account = Some("bob".to_string());
+                event
             }),
         };
         let path = write_lines(

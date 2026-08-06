@@ -37,36 +37,38 @@ impl AuthContext<'_> {
     fn observed_hex(&self) -> Option<String> {
         self.observed.map(|f| f.to_hex())
     }
+
+    /// The parts of an [`AuthEvent`] that do not depend on the outcome.
+    ///
+    /// `AuthEvent` is `#[non_exhaustive]` (#716), so a struct literal is not
+    /// available from this crate — functional update included (E0639). The
+    /// constructor takes the fields whose `None` is written to disk as an
+    /// explicit `null`; `account` and `credential_source` are skipped when
+    /// absent, so they are assigned here.
+    fn event(&self, result: AuthResult, error_code: Option<rimap_core::ErrorCode>) -> AuthEvent {
+        let mut event = AuthEvent::new(
+            result,
+            self.host.to_string(),
+            self.port,
+            self.username.to_string(),
+            self.observed_hex(),
+            self.fingerprint_match(),
+            error_code,
+        );
+        event.account = self.account.map(str::to_string);
+        event.credential_source = self.credential_source;
+        event
+    }
 }
 
 /// Build a successful [`AuthEvent`] record.
 pub(crate) fn auth_success(ctx: &AuthContext<'_>) -> AuthEvent {
-    AuthEvent {
-        account: ctx.account.map(str::to_string),
-        result: AuthResult::Success,
-        host: ctx.host.to_string(),
-        port: ctx.port,
-        username: ctx.username.to_string(),
-        tls_fingerprint_sha256: ctx.observed_hex(),
-        fingerprint_match: ctx.fingerprint_match(),
-        error_code: None,
-        credential_source: ctx.credential_source,
-    }
+    ctx.event(AuthResult::Success, None)
 }
 
 /// Build a failure [`AuthEvent`] record carrying the stable error code.
 pub(crate) fn auth_failure(ctx: &AuthContext<'_>, error_code: rimap_core::ErrorCode) -> AuthEvent {
-    AuthEvent {
-        account: ctx.account.map(str::to_string),
-        result: AuthResult::Failure,
-        host: ctx.host.to_string(),
-        port: ctx.port,
-        username: ctx.username.to_string(),
-        tls_fingerprint_sha256: ctx.observed_hex(),
-        fingerprint_match: ctx.fingerprint_match(),
-        error_code: Some(error_code),
-        credential_source: ctx.credential_source,
-    }
+    ctx.event(AuthResult::Failure, Some(error_code))
 }
 
 #[cfg(test)]
@@ -77,6 +79,36 @@ mod tests {
 
     fn fp(seed: &[u8]) -> TlsFingerprint {
         TlsFingerprint::from_cert_der(seed)
+    }
+
+    /// Every `AuthContext` field has to land on the `AuthEvent` field of the
+    /// same name. Since #716 the mapping runs through `AuthEvent::new`'s
+    /// positional parameters, where `host` and `username` are both `String`
+    /// and a transposition compiles — so each value here names its own field,
+    /// and `account` and `credential_source` are checked because the
+    /// constructor leaves them unset and the builder assigns them afterwards.
+    #[test]
+    fn context_fields_land_on_the_event_fields_they_name() {
+        let ctx = AuthContext {
+            account: Some("ACCOUNT-goes-here"),
+            host: "HOST-goes-here",
+            port: 1993,
+            username: "USERNAME-goes-here",
+            pinned: None,
+            observed: None,
+            credential_source: Some(rimap_core::CredentialSource::EnvVar),
+        };
+
+        let rec = auth_success(&ctx);
+        assert_eq!(rec.account.as_deref(), Some("ACCOUNT-goes-here"));
+        assert_eq!(rec.host, "HOST-goes-here");
+        assert_eq!(rec.username, "USERNAME-goes-here");
+        assert_eq!(rec.port, 1993);
+        assert_eq!(
+            rec.credential_source,
+            Some(rimap_core::CredentialSource::EnvVar),
+            "a resolved credential source must survive the constructor's default",
+        );
     }
 
     #[test]
