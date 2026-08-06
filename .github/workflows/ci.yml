@@ -482,9 +482,11 @@ jobs:
     # head branch lives in this repository. Fork PRs and Dependabot's PRs must
     # not reach SONAR_TOKEN: this job runs `cargo llvm-cov nextest
     # --all-features`, which compiles and executes every build script and proc
-    # macro in the dependency graph plus the whole workspace test suite, and
+    # macro in the dependency graph plus the workspace's test binaries, and
     # then hands the token to the scan step in the same job. On a Dependabot PR
-    # that graph is the freshly bumped one.
+    # that graph is the freshly bumped one. Splitting the compile from the scan
+    # so the token is never in the compiling job is #759; this gate narrows who
+    # reaches that job, it does not isolate it.
     #
     # Read from the PR itself, never from `github.actor`. The actor is whoever
     # triggered the *current* event, so clicking "Update branch" on a
@@ -539,15 +541,18 @@ jobs:
     # and gives a place to attach policy later. It does NOT currently scope the
     # secret: `SONAR_TOKEN` is a repository-level secret, and the `sonarcloud`
     # environment holds none, so any job in any workflow here can read it by
-    # naming it. Moving the secret onto this environment would make the scoping
-    # real and is tracked separately — do not read this line as if that had
-    # already happened.
+    # naming it. Moving the secret onto this environment would scope it to the
+    # jobs that name the environment; the branch dimension stays open either
+    # way, for the reason below. Tracked in #755 — do not read this line as if
+    # it had already happened.
     #
     # Do NOT add required reviewers or a deployment-branch policy here, which
     # an earlier version of this comment invited. SonarQube is a required
-    # status check on `main`: a branch policy matches no `refs/pull/N/merge`
-    # ref and so fails the job on every PR, and required reviewers park it in
-    # `waiting` until a human approves, pending the check on every PR.
+    # status check on `main`: a branch policy matches branch and tag names, so
+    # it matches no `refs/pull/N/merge` ref and fails the job on every PR, and
+    # required reviewers park it in `waiting` until a human approves, pending
+    # the check on every PR. #755 proposes branch policies across all four
+    # environments; its comment thread carves this one out for that reason.
     # dependabot-fuzz-lock.yml warns against required reviewers too, for a
     # different reason — that job is not a required check; a human gate would
     # simply reinstate the manual step it exists to remove.
