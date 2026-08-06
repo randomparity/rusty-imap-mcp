@@ -481,10 +481,10 @@ jobs:
     # Run on `push` to main; on a PR, run only for a non-Dependabot PR whose
     # head branch lives in this repository. Fork PRs and Dependabot's PRs must
     # not reach SONAR_TOKEN: this job runs `cargo llvm-cov nextest
-    # --all-features`, which compiles and executes every build script, proc
-    # macro and test in the dependency graph, and then hands the token to the
-    # scan step in the same job. On a Dependabot PR that graph is the freshly
-    # bumped one.
+    # --all-features`, which compiles and executes every build script and proc
+    # macro in the dependency graph plus the whole workspace test suite, and
+    # then hands the token to the scan step in the same job. On a Dependabot PR
+    # that graph is the freshly bumped one.
     #
     # Read from the PR itself, never from `github.actor`. The actor is whoever
     # triggered the *current* event, so clicking "Update branch" on a
@@ -512,13 +512,19 @@ jobs:
     # job on fork head code. Under the allowlist it skips instead: the scan is
     # silently lost until someone extends this line, which is the safe way to
     # be wrong. Naming `push` also keeps the condition free of any reliance on
-    # how GitHub coerces the null `github.event.pull_request` — on `push`
-    # neither PR term is evaluated at all.
+    # how GitHub coerces the null `github.event.pull_request` — on `push` the
+    # PR terms cannot change the result.
     #
-    # Every event that can produce a PR still reaches this job and reports
-    # `success` or `skipped`, so the required check is never simply absent — a
-    # skipped required check satisfies branch protection, a missing one wedges
-    # it.
+    # That first term is load-bearing, not redundant: delete it and `push` to
+    # `main` falls through to `head.repo.full_name == github.repository`, which
+    # is `null` against a string and therefore false. Main-branch analysis
+    # would stop silently and greenly, since nothing gates on a push run.
+    #
+    # Every PR into `main` still reaches this job and reports a conclusion, so
+    # the required check is never simply absent — a skipped required check
+    # satisfies branch protection, a missing one wedges it. (A PR based on any
+    # other branch does not start this workflow at all, and protection covers
+    # only `main`.)
     #
     # Consequence worth knowing: a maintainer who takes over a Dependabot PR
     # and pushes hand-written code to that branch gets no scan, permanently and
@@ -529,16 +535,22 @@ jobs:
       || (github.event.pull_request.user.login != 'dependabot[bot]'
           && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
-    # SONAR_TOKEN lives in the `sonarcloud` environment so it is scoped to this
-    # one job rather than to every workflow in the repository, and so each use
-    # lands in the deployment log.
+    # Naming an environment puts each use of the token in the deployment log
+    # and gives a place to attach policy later. It does NOT currently scope the
+    # secret: `SONAR_TOKEN` is a repository-level secret, and the `sonarcloud`
+    # environment holds none, so any job in any workflow here can read it by
+    # naming it. Moving the secret onto this environment would make the scoping
+    # real and is tracked separately — do not read this line as if that had
+    # already happened.
     #
     # Do NOT add required reviewers or a deployment-branch policy here, which
     # an earlier version of this comment invited. SonarQube is a required
-    # status check on `main`: a branch policy fails the job outright on a PR
-    # ref, reddening the check on every PR, and required reviewers leave it
-    # `waiting` forever, pending it on every PR. dependabot-fuzz-lock.yml
-    # carries the same warning for the same reason.
+    # status check on `main`: a branch policy matches no `refs/pull/N/merge`
+    # ref and so fails the job on every PR, and required reviewers park it in
+    # `waiting` until a human approves, pending the check on every PR.
+    # dependabot-fuzz-lock.yml warns against required reviewers too, for a
+    # different reason — that job is not a required check; a human gate would
+    # simply reinstate the manual step it exists to remove.
     environment: sonarcloud
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
