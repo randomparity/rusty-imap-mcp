@@ -14,8 +14,35 @@ container-backed = { max-threads = 4 }
 # the connect/command-timeout assertions). Nightly-only, so wall-time is fine.
 chaos-backed = { max-threads = 1 }
 
+# `rimap-server`'s own container-backed binaries belong in the group too, and
+# were outside it. Each of these calls `DovecotHarness::try_start`, which brings
+# up a per-test compose project — the exact thing the group exists to throttle —
+# and `e2e_smtp*` adds a Mailpit container on top. Only `e2e_wire_chaos` was
+# ever listed, via `chaos-backed` below.
+#
+# Be honest about what this buys and where. On CI it buys nothing: the coverage
+# runner reports 4 logical CPUs (#692 records the measurement in the SonarQube
+# job), and nextest's default test concurrency is the logical CPU count, so a
+# `max-threads = 4` cap can never bind there. It binds on a developer host,
+# which is where the daemon contention above was actually observed and where
+# these ten binaries have been running unthrottled. Raising CI's effective cap
+# is a separate calibration question, deliberately not answered here.
+#
+# Listed by exact name (`=`) rather than as the substring `binary(e2e)`, which
+# would also capture the `e2e_wire_*` binaries that spawn no container and
+# collide with `chaos-backed`'s claim on `e2e_wire_chaos`. The cost is that a
+# renamed or newly added container-backed binary must be added here; the
+# alternative silently throttles a dozen container-free binaries instead.
 [[profile.default.overrides]]
-filter = 'binary(dovecot) + binary(proton)'
+filter = '''
+  binary(dovecot) + binary(proton)
+  + binary(=e2e) + binary(=e2e_smtp) + binary(=e2e_smtp_real)
+  + binary(=e2e_wire) + binary(=e2e_wire_cancellation)
+  + binary(=e2e_wire_destructive) + binary(=e2e_wire_fault_injection)
+  + binary(=e2e_wire_folder_management)
+  + binary(=e2e_wire_multi_account_advertisement)
+  + binary(=e2e_wire_tool_advertisement)
+'''
 test-group = 'container-backed'
 
 [[profile.default.overrides]]

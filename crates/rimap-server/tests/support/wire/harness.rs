@@ -201,16 +201,21 @@ const LLVM_PROFILE_FILE_ENV: &str = "LLVM_PROFILE_FILE";
 /// address it** — see the follow-up note below.
 ///
 /// What the floor *is* good for is scoping. `LLVM_PROFILE_FILE` is a reliable
-/// proxy for "this is the coverage job", and that job differs from
-/// `test (stable)` in three ways at once, only one of which is instrumentation:
-/// it drives `cargo test` rather than `cargo nextest --profile ci`, so every
-/// test in a binary is co-scheduled inside one process and none of
-/// `.config/nextest.toml`'s concurrency groups apply; and it passes
-/// `--all-features`. Under `cargo test` the three `e2e_wire` cases run
-/// together — three `worker_threads = 4` Tokio runtimes and three Dovecot
-/// containers — on a 4-vCPU runner. Widening on this signal widens exactly the
-/// arm that flaked and leaves every other arm's budget alone; it does not
-/// assert which of the three differences did the damage.
+/// proxy for "this is the coverage job", and widening on that signal widens
+/// exactly the arm that flaked while leaving every other arm's budget alone.
+///
+/// That job used to differ from `test (stable)` in three ways at once, and this
+/// doc used to say so. Two of the three are gone: #693 moved the arm onto
+/// `cargo llvm-cov nextest --profile ci`, so each test gets its own process and
+/// `.config/nextest.toml`'s groups do apply here. What remains is
+/// instrumentation, `--all-features`, and a separate runner.
+///
+/// The runner is measured now rather than inferred from its label: the
+/// `Record runner capacity` step in the `SonarQube` job reports 4 logical CPUs
+/// and 16 GB. That bounds what the config can do — nextest's default test
+/// concurrency is the logical CPU count, so `container-backed`'s
+/// `max-threads = 4` cannot bind on this runner even now that the `e2e_wire*`
+/// binaries are inside it.
 ///
 /// Value: 10 s, i.e. 5x [`REQUEST_TIMEOUT`]. Not computed from the ratios
 /// above — they would justify no widening at all. It is a tail allowance for a
@@ -222,14 +227,39 @@ const LLVM_PROFILE_FILE_ENV: &str = "LLVM_PROFILE_FILE";
 /// coincidence of order, not a shared derivation, which is why this is its own
 /// constant and not a reuse of that one.
 ///
-/// **Known limit, stated because a widened timeout always looks like a fix.**
-/// The #671 run timed out at 2 s, so how long the read would have taken is
-/// unobserved — the same epistemic hole [`DETACHED_EXIT_TIMEOUT`] documents for
-/// #638. A discrete intermittent stall in the `tools/call` path is *not*
-/// excluded by anything measured here, and if that is what happened, this floor
-/// masks it for stalls under 10 s and does not help at all beyond that. The
-/// evidence for shipping it is a soak plus the scoping argument, not a
-/// reproduced failure.
+/// **Bounded, not unreproduced — #692.** The claim this doc used to carry, that
+/// "a discrete intermittent stall in the `tools/call` path is not excluded by
+/// anything measured here", was true only because nothing had measured *this*
+/// arm. It has now been measured on the runner that flaked, via the sample
+/// [`read_probe_line`] emits and `--success-output final` on the coverage step:
+/// 6363 steady-state instrumented reads across three coverage runs.
+///
+/// - p50 **0.43 ms**, p90 **0.73 ms**, p99 **169 ms**, p99.9 **374 ms**,
+///   worst sample **379 ms**.
+/// - Two modes, and the second one is *work*, not a stall. 94% of reads land
+///   under 1 ms; a discrete population of 31 reads per run sits at 120-380 ms.
+///   Every member of it is a `tools/call` naming a tool that makes an IMAP
+///   round trip to the Dovecot container — `list_folders`, `search`,
+///   `fetch_message`, `expunge`, `move_message`, `download_attachment`. Not one
+///   is `initialize` or `tools/list`.
+/// - It is deterministic. Three independent runs produced **exactly 31**
+///   samples over 100 ms each, with p99 within 1.5 ms and worst case within
+///   5 ms of each other. Starvation does not reproduce to the sample.
+///
+/// So the worst read this arm produces is **26x** under this floor and **5.3x**
+/// under the bare [`REQUEST_TIMEOUT`] it replaces. On the measured
+/// distribution, `REQUEST_TIMEOUT` alone would have been sufficient, and this
+/// floor is pure tail allowance. Keep it anyway: 6363 samples bound a *rate*,
+/// not a possibility, and the #671 event needed a read 5x beyond anything here.
+/// Zero events in 6363 reads puts only a 95% upper bound of ~4.7e-4 per read on
+/// such an event — too weak to call it impossible, which is why the probe is
+/// permanent rather than a one-off. Every future coverage run now appends ~2121
+/// samples to the record, and a multi-second read is visible in the log even
+/// when the test passes, which is precisely what #671 and #638 lacked.
+///
+/// What has *not* changed: for a stall under 10 s this floor still masks rather
+/// than reports. The mitigation is the probe, not the budget — a masked stall
+/// now shows up as a sample in the tail instead of nothing at all.
 const INSTRUMENTED_READ_FLOOR: Duration = Duration::from_secs(10);
 
 /// True when this test process was launched by `cargo llvm-cov`.
