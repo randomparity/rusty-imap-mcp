@@ -17,12 +17,12 @@
 mod support;
 
 use rimap_audit::record::{ProcessEnd, ProcessEndReason};
-use rimap_audit::{AuditOptions, AuditWriter, ToolStartInputs};
+use rimap_audit::{AuditOptions, AuditWriter, Seq, ToolStartInputs};
 use rimap_core::tool::ToolName;
 use tempfile::tempdir;
 
 fn open_writer(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
-    let mut options = AuditOptions::new(path);
+    let mut options = AuditOptions::new(path, Seq::FIRST);
     options.rotate_bytes = 10 * 1024 * 1024;
     options.rotate_keep = 5;
     options.fail_open = fail_open;

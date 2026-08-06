@@ -28,7 +28,7 @@ const N: u64 = 25;
 fn writes_survive_multiple_rotations() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
-    let mut options = AuditOptions::new(path.clone());
+    let mut options = AuditOptions::new(path.clone(), Seq::FIRST);
     options.rotate_bytes = 300;
     options.rotate_keep = 50;
     let writer = AuditWriter::open(&options).unwrap();
@@ -63,7 +63,7 @@ fn writes_survive_multiple_rotations() {
 fn lock_persists_across_rotations() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("audit.jsonl");
-    let mut options = AuditOptions::new(path.clone());
+    let mut options = AuditOptions::new(path.clone(), Seq::FIRST);
     options.rotate_bytes = 300;
     options.rotate_keep = 5;
     let writer = AuditWriter::open(&options).unwrap();
@@ -71,7 +71,7 @@ fn lock_persists_across_rotations() {
         writer.write_record(&record(seq)).unwrap();
     }
 
-    let err = AuditWriter::open(&AuditOptions::new(path.clone())).unwrap_err();
+    let err = AuditWriter::open(&AuditOptions::new(path.clone(), Seq::FIRST)).unwrap_err();
     match err {
         AuditError::Locked { .. } => {}
         other => panic!("expected Locked, got {other:?}"),

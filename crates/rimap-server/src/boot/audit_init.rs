@@ -22,12 +22,11 @@ pub fn init_audit_writer_multi(
     let trailing = rimap_audit::read_trailing_state(audit_path)?;
     let initial_seq = trailing.last_seq.map_or(Seq::FIRST, Seq::next);
 
-    let mut options = AuditOptions::new(audit_path.clone());
+    let mut options = AuditOptions::new(audit_path.clone(), initial_seq);
     options.rotate_bytes = multi.audit.rotate_bytes;
     options.rotate_keep = multi.audit.rotate_keep;
     options.retention_seconds = multi.audit.retention_seconds;
     options.fail_open = multi.audit.fail_open;
-    options.initial_seq = initial_seq;
     let writer = AuditWriter::open(&options)?;
 
     if let Some(parent) = writer.path().parent() {
@@ -332,7 +331,8 @@ allowed_base_dir = "{base}"
 
         // Pre-populate the audit file with some records so trailing state is non-empty.
         {
-            let writer = AuditWriter::open(&AuditOptions::new(audit_path.clone())).unwrap();
+            let writer =
+                AuditWriter::open(&AuditOptions::new(audit_path.clone(), Seq::FIRST)).unwrap();
             let pid = ProcessId::new_now();
             writer
                 .write_record(&AuditRecord::new(

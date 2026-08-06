@@ -35,7 +35,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::Context;
-use rimap_audit::{AuditOptions, AuditWriter};
+use rimap_audit::{AuditOptions, AuditWriter, Seq};
 use rimap_authz::matrix::EffectiveMatrix;
 use rimap_config::loader::load_and_validate;
 use rimap_core::tool::ToolName;
@@ -145,7 +145,7 @@ pub async fn run<W: Write>(path: &Path, out: &mut W) -> anyhow::Result<()> {
     // printing the matrix. Chain-of-history continuation (trailing state) is
     // not useful here; Seq::FIRST — `AuditOptions::new`'s default, left
     // unassigned below — is correct.
-    let mut options = AuditOptions::new(audit_path.clone());
+    let mut options = AuditOptions::new(audit_path.clone(), Seq::FIRST);
     options.rotate_bytes = multi.audit.rotate_bytes;
     options.rotate_keep = multi.audit.rotate_keep;
     options.retention_seconds = multi.audit.retention_seconds;
@@ -265,7 +265,7 @@ allowed_base_dir = "{}"
 
     #[tokio::test]
     async fn second_dry_run_against_same_audit_fails_with_config_error() {
-        use rimap_audit::{AuditOptions, AuditWriter};
+        use rimap_audit::{AuditOptions, AuditWriter, Seq};
 
         let dir = TempDir::new().unwrap();
         let path = write_minimal_config(&dir);
@@ -277,7 +277,7 @@ allowed_base_dir = "{}"
         // Hold the audit file open with a direct writer so the second dry-run
         // collides with us.
         let audit_path = dir.path().join("audit.jsonl");
-        let _held = AuditWriter::open(&AuditOptions::new(audit_path)).unwrap();
+        let _held = AuditWriter::open(&AuditOptions::new(audit_path, Seq::FIRST)).unwrap();
 
         let err = run(&path, &mut Vec::new()).await.unwrap_err();
         let chain: String = err

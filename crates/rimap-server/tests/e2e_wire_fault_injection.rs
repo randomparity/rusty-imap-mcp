@@ -38,7 +38,7 @@ mod wire;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimap_audit::{AuditOptions, AuditWriter};
+use rimap_audit::{AuditOptions, AuditWriter, Seq};
 use rimap_config::credential::{CredentialStore, KeyringCredentialResolver, PASSWORD_ENV_VAR};
 use rimap_config::model::FallbackMode;
 use rimap_imap::{Connection, ConnectionConfig, ImapEncryption};
@@ -392,8 +392,11 @@ async fn wire_fault_connection_lost() {
 /// `e2e_wire.rs::seed_multipart_message`.
 async fn seed_multipart_message(dovecot: &DovecotHarness) {
     let audit_dir = TempDir::new().expect("seed-audit tempdir");
-    let audit = AuditWriter::open(&AuditOptions::new(audit_dir.path().join("seed.jsonl")))
-        .expect("audit open");
+    let audit = AuditWriter::open(&AuditOptions::new(
+        audit_dir.path().join("seed.jsonl"),
+        Seq::FIRST,
+    ))
+    .expect("audit open");
 
     let cfg = ConnectionConfig {
         account: None,

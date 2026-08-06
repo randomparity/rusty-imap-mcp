@@ -30,7 +30,7 @@ fn audit_merge_round_trips_synthetic_log() {
     std::fs::write(&config_path, b"# synthetic config for test").unwrap();
 
     {
-        let writer = AuditWriter::open(&AuditOptions::new(path.clone())).unwrap();
+        let writer = AuditWriter::open(&AuditOptions::new(path.clone(), Seq::FIRST)).unwrap();
         // Seq 1: process_start record, as required by the audit format.
         let trailing = read_trailing_state(&path).unwrap();
         let inode = current_inode(&path).unwrap();
@@ -82,7 +82,7 @@ fn audit_merge_filters_by_kind() {
     let path = dir.path().join("audit.jsonl");
 
     {
-        let writer = AuditWriter::open(&AuditOptions::new(path.clone())).unwrap();
+        let writer = AuditWriter::open(&AuditOptions::new(path.clone(), Seq::FIRST)).unwrap();
         let pid = ProcessId::new_now();
         for seq in 1_u64..=3 {
             writer.write_record(&record(seq, pid)).unwrap();

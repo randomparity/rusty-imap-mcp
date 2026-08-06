@@ -308,10 +308,9 @@ mod tests {
     /// record under test is always seq 1, so the join also holds for a bug
     /// that hardcoded [`Seq::FIRST`] instead of carrying the real seq.
     fn test_writer_from_seq(path: std::path::PathBuf, initial_seq: Seq) -> AuditWriter {
-        let mut options = AuditOptions::new(path);
+        let mut options = AuditOptions::new(path, initial_seq);
         options.rotate_bytes = 10 * 1024 * 1024;
         options.rotate_keep = 5;
-        options.initial_seq = initial_seq;
         AuditWriter::open(&options).unwrap()
     }
 
@@ -343,7 +342,7 @@ mod tests {
     }
 
     fn test_writer_fail_open(path: std::path::PathBuf, fail_open: bool) -> AuditWriter {
-        let mut options = AuditOptions::new(path);
+        let mut options = AuditOptions::new(path, Seq::FIRST);
         options.rotate_bytes = 10 * 1024 * 1024;
         options.rotate_keep = 5;
         options.fail_open = fail_open;
