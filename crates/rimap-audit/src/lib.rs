@@ -15,7 +15,7 @@ pub use cancellation::{
 };
 
 pub use crate::error::AuditError;
-pub use crate::reader::{Filter, open_shared, parse_line, stream_records};
+pub use crate::reader::{Filter, StreamSummary, open_shared, parse_line, stream_records};
 pub use crate::record::ids::{ProcessId, Seq, Timestamp};
 pub use crate::record::{
     AccountSummary, AccountToolMatrix, AuditRecord, AuthEvent, AuthResult, ConfigEvent, Payload,

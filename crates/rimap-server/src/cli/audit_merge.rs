@@ -67,6 +67,13 @@ pub fn parse_filter(args: &RunArgs<'_>) -> anyhow::Result<Filter> {
 
 /// Run the `audit merge` subcommand.
 ///
+/// Records whose `kind` this binary does not recognize are skipped by the
+/// reader rather than aborting the merge (#717). A skip is not silent: the
+/// count goes to stderr on the way out, so an operator piping stdout to `jq`
+/// still learns the merged stream is missing records a newer version wrote.
+/// The note is written directly rather than through `tracing` so it survives
+/// whatever log filter the invocation is running under.
+///
 /// # Errors
 /// - Any `AuditError` from opening / locking / reading the file.
 /// - Parse errors on `--since` / `--until` arguments.
@@ -75,7 +82,7 @@ pub fn run(path: &Path, args: RunArgs<'_>) -> anyhow::Result<()> {
     let filter = parse_filter(&args)?;
 
     let mut stdout = std::io::stdout().lock();
-    stream_records(path, &filter, |record| {
+    let summary = stream_records(path, &filter, |record| {
         let line = serde_json::to_string(record).map_err(rimap_audit::AuditError::Serialize)?;
         writeln!(stdout, "{line}").map_err(|source| rimap_audit::AuditError::Write {
             path: path.to_path_buf(),
@@ -84,13 +91,94 @@ pub fn run(path: &Path, args: RunArgs<'_>) -> anyhow::Result<()> {
         Ok(())
     })
     .context("streaming audit records")?;
-    Ok(())
+
+    report_skipped(&mut std::io::stderr().lock(), path, &summary)
+}
+
+/// Write the unknown-kind note for `summary` to `out`, if there is one.
+///
+/// Split out from [`run`] so the message is testable without a subprocess;
+/// `run` passes the real stderr.
+///
+/// # Errors
+/// I/O error writing to `out`.
+fn report_skipped(
+    out: &mut impl Write,
+    path: &Path,
+    summary: &rimap_audit::StreamSummary,
+) -> anyhow::Result<()> {
+    if summary.skipped_unknown_kind == 0 {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "warning: skipped {} record(s) of an unrecognized kind in {}; \
+         they were written by a newer version than this binary, and are \
+         not in the output above",
+        summary.skipped_unknown_kind,
+        path.display(),
+    )
+    .context("writing the skipped-record warning to stderr")
 }
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::{RunArgs, parse_filter};
+    use std::path::{Path, PathBuf};
+
+    use super::{RunArgs, parse_filter, report_skipped};
+
+    /// Stream `lines` from a throwaway file and hand back the summary.
+    ///
+    /// `StreamSummary` is `#[non_exhaustive]` with no constructor, so this
+    /// crate cannot mint one — which is the intended shape: the only summary
+    /// worth asserting on is one a real pass produced.
+    fn summary_of(dir: &tempfile::TempDir, lines: &[&str]) -> rimap_audit::StreamSummary {
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        rimap_audit::stream_records(&path, &rimap_audit::Filter::default(), |_| Ok(())).unwrap()
+    }
+
+    const GOOD_LINE: &str = r#"{"seq":1,"ts":"2026-04-07T14:22:01.000Z","process_id":"01JXAAAAAAAAAAAAAAAAAAAAAA","kind":"process_end","reason":"eof","total_tool_calls":0}"#;
+    const FUTURE_LINE: &str = r#"{"seq":2,"ts":"2026-04-07T14:22:02.000Z","process_id":"01JXAAAAAAAAAAAAAAAAAAAAAA","kind":"policy","rule":"deny-all"}"#;
+
+    #[test]
+    fn skipped_records_are_reported_with_their_count_and_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let summary = summary_of(&dir, &[GOOD_LINE, FUTURE_LINE, GOOD_LINE]);
+        assert_eq!(summary.skipped_unknown_kind, 1, "fixture must skip one");
+
+        let mut out = Vec::new();
+        report_skipped(&mut out, Path::new("/tmp/audit.jsonl"), &summary).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains('1'),
+            "the count must be in the message: {text}"
+        );
+        assert!(
+            text.contains("/tmp/audit.jsonl"),
+            "the message must name the file: {text}",
+        );
+        assert!(
+            text.contains("unrecognized kind"),
+            "the message must say why: {text}",
+        );
+    }
+
+    #[test]
+    fn a_clean_merge_says_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let summary = summary_of(&dir, &[GOOD_LINE, GOOD_LINE]);
+        assert_eq!(summary.skipped_unknown_kind, 0);
+
+        let mut out = Vec::new();
+        report_skipped(&mut out, &PathBuf::from("/tmp/audit.jsonl"), &summary).unwrap();
+        assert!(
+            out.is_empty(),
+            "a merge that skipped nothing must not print a warning",
+        );
+    }
 
     #[test]
     fn all_none_default_parses_to_empty_filter() {

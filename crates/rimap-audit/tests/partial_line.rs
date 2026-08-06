@@ -26,11 +26,15 @@ fn partial_trailing_line_is_skipped() {
     drop(f);
 
     let mut seen = Vec::new();
-    let n = stream_records(&path, &Filter::default(), |rec| {
+    let summary = stream_records(&path, &Filter::default(), |rec| {
         seen.push(rec.seq.get());
         Ok(())
     })
     .unwrap();
-    assert_eq!(n, 2);
+    assert_eq!(summary.matched, 2);
     assert_eq!(seen, vec![1, 2]);
+    assert_eq!(
+        summary.skipped_unknown_kind, 0,
+        "a torn write is not a record of an unrecognized kind",
+    );
 }
