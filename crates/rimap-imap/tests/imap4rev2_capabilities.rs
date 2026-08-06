@@ -18,8 +18,8 @@
 //! response that does not contain the `IMAP4rev1` atom — so a rev2-only line
 //! fails to parse, and the *pre-login* `CAPABILITY` command fails the connect
 //! with `ImapError::Protocol` long before `read_capabilities` runs. That
-//! remainder of #686 is upstream and is tracked separately; see
-//! `Connection::read_capabilities`.
+//! remainder of #686 is upstream work and #686 stays open for it; see
+//! `Connection::read_capabilities` for the full account.
 //!
 //! `IMAP4rev1 IMAP4rev2` is the shape RFC 9051 Appendix A names for a server
 //! that wants to remain compatible with `IMAP4rev1`, so it is both the reachable
