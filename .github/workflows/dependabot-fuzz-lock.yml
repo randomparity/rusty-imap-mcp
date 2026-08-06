@@ -1,0 +1,218 @@
+name: Dependabot fuzz-lock realign
+
+# Every Dependabot PR that moves the workspace `Cargo.lock` is born red on the
+# required `cargo-deny` check, because the two tracked fuzz lockfiles are gated
+# for parity with it (ADR-0011) and nothing updates them. This workflow runs
+# `just realign-fuzz-locks` on the PR and pushes the result, so the chore stops
+# being manual. See docs/ADR/0016-dependabot-fuzz-lock-auto-realign.md.
+#
+# `pull_request_target` + a write credential + PR-head content is the most
+# exploited GitHub Actions antipattern, so the mitigations are stated where
+# they apply and summarised here:
+#
+#   1. The job runs only for a PR *authored* by Dependabot whose head branch
+#      lives in this repository. Fork PRs cannot reach it at all.
+#   2. `GITHUB_TOKEN` is stripped to `contents: read` — the minimum
+#      `actions/checkout` needs — and is never able to push. The write
+#      credential is a separate PAT that enters the environment only in the
+#      final step, after all PR content has been processed.
+#   3. The PR diff must consist of nothing but cargo manifests and lockfiles
+#      before any tool reads PR content. That excludes `.cargo/config.toml`
+#      (which could redirect `build.rustc`), build scripts, and the `justfile`
+#      and `scripts/` this job then executes — so those are provably identical
+#      to the base branch's.
+#   4. The realign itself is `cargo metadata`, which resolves and downloads but
+#      never compiles. No `build.rs` and no proc-macro from the PR's dependency
+#      graph is executed. Verified empirically, not assumed.
+#
+# The workflow file itself is always read from the base branch on
+# `pull_request_target`, so every inline `run:` block below is trusted code.
+
+on:
+  # zizmor: ignore[dangerous-triggers]
+  # `pull_request` is not usable: the `GITHUB_TOKEN` issued to a run on a
+  # Dependabot-authored PR is read-only, so it cannot push the fix. Pushing
+  # with `GITHUB_TOKEN` would not work either — pushes made with it do not
+  # trigger workflows, so the realigned head would carry no CI runs at all and
+  # the required checks would sit permanently "expected". See the mitigations
+  # above for why the elevated-token-on-untrusted-head hazard does not apply.
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'Cargo.lock'
+
+# Nothing at workflow level. The one job below asks for the read scope
+# `actions/checkout` needs and nothing more.
+permissions: {}
+
+concurrency:
+  group: fuzz-lock-realign-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  realign:
+    name: realign fuzz lockfiles
+    # Three independent conditions. Each one alone excludes an untrusted head.
+    #
+    # `pull_request.user.login` is the PR *author*, fixed when the PR is opened.
+    # Unlike `github.actor` it does not change when a third party pushes to the
+    # branch or re-runs the workflow, so it cannot be moved by anyone else.
+    #
+    # `head.repo.full_name == github.repository` requires the head branch to
+    # live in this repository rather than a fork. That excludes the entire
+    # untrusted-contributor population: pushing a branch here already requires
+    # write access.
+    #
+    # `github.actor` requires that *this particular event* came from Dependabot.
+    # Its job here is to stop the workflow reacting to its own push: that push
+    # is authenticated as the PAT's owner, so the `synchronize` it triggers
+    # carries a human actor and this job does not re-enter.
+    #
+    # zizmor flags `github.actor` as spoofable (`bot-conditions`), and it is
+    # right in general — which is why it carries none of the security weight
+    # here. Spoofing it can only make the job *run*, and running still requires
+    # both conditions above: a PR literally authored by Dependabot whose head
+    # branch is in this repository, which already implies write access. The
+    # ignore is scoped to this one expression. The remedy zizmor recommends,
+    # `github.event.pull_request.user.login`, is the first condition already.
+    if: >-  # zizmor: ignore[bot-conditions]
+      github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.actor == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # First, before anything is checked out. A missing credential is a hard
+      # failure rather than a silent skip: the whole point of the workflow is
+      # that nobody has to notice the chore, and a warning nobody reads would
+      # restore exactly the manual step this removes.
+      - name: Require the realign credential
+        env:
+          REALIGN_TOKEN: ${{ secrets.FUZZ_LOCK_REALIGN_TOKEN }}
+        run: |
+          if [ -z "$REALIGN_TOKEN" ]; then
+            echo "::error::FUZZ_LOCK_REALIGN_TOKEN is not configured. This" \
+                 "workflow needs a credential that can push to branches in" \
+                 "this repository; GITHUB_TOKEN cannot be used because pushes" \
+                 "made with it do not re-trigger CI. Create a fine-grained PAT" \
+                 "scoped to this repository with Contents: read and write, and" \
+                 "store it as the FUZZ_LOCK_REALIGN_TOKEN repository secret." \
+                 "See docs/ADR/0016-dependabot-fuzz-lock-auto-realign.md."
+            exit 1
+          fi
+
+      # The PR head is untrusted content. `persist-credentials: false` keeps
+      # every credential out of `.git/config` while it is on disk; the push
+      # step introduces its own.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      # The gate that makes everything after it safe. Dependabot cargo PRs
+      # change lockfiles and manifests, nothing else — so anything else in the
+      # diff means this is not the situation the workflow was built for, and
+      # the job stops before a single byte of PR content is interpreted.
+      #
+      # Concretely this is what rules out `.cargo/config.toml` (`build.rustc`
+      # and `build.rustc-wrapper` are arbitrary-command settings that
+      # `cargo metadata` honours), any added `build.rs`, and any edit to the
+      # `justfile` or `scripts/` that the next steps run.
+      #
+      # The file list comes from the API rather than from `git diff`, so it
+      # does not depend on the PR branch's history shape.
+      - name: Require a cargo-manifest-only diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" \
+            --jq '.[].filename' > /tmp/pr-files.txt
+          echo "PR touches:"
+          sed 's/^/  /' /tmp/pr-files.txt
+          if grep -vqE '^(.*/)?Cargo\.(toml|lock)$' /tmp/pr-files.txt; then
+            echo "::error::this PR changes files other than cargo manifests" \
+                 "and lockfiles, so it is not an ordinary Dependabot cargo" \
+                 "bump. Refusing to run the realign against it; do it by hand" \
+                 "with 'just realign-fuzz-locks' after reviewing the diff."
+            grep -vE '^(.*/)?Cargo\.(toml|lock)$' /tmp/pr-files.txt
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+        with:
+          toolchain: 1.94.0
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+        with:
+          tool: just
+
+      # `cargo metadata` under the hood: it resolves the fuzz graph against the
+      # seeded workspace lockfile and downloads the `.crate` files it needs to
+      # read their manifests. It does not compile, so nothing in the dependency
+      # graph executes. The script restores the original lockfile if cargo
+      # fails, so a red job never leaves a half-realigned tree behind.
+      - name: Realign the fuzz lockfiles
+        run: just realign-fuzz-locks
+
+      # The realign is only ever allowed to move the tracked fuzz lockfiles. If
+      # it moved anything else, something is wrong with an assumption above and
+      # the right answer is to stop, not to push it.
+      - name: Confirm only fuzz lockfiles moved
+        id: realigned
+        run: |
+          git status --porcelain > /tmp/realign-status.txt
+          if [ ! -s /tmp/realign-status.txt ]; then
+            echo "the fuzz lockfiles are already in parity; nothing to push"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "realign changed:"
+          sed 's/^/  /' /tmp/realign-status.txt
+          if cut -c4- /tmp/realign-status.txt \
+              | grep -vqE '^(.*/)?fuzz/Cargo\.lock$'; then
+            echo "::error::the realign touched paths other than the tracked" \
+                 "fuzz lockfiles. Refusing to push."
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Push nothing that would not pass the gate this exists to satisfy.
+      - name: Re-check parity
+        if: steps.realigned.outputs.changed == 'true'
+        run: just check-fuzz-lock-parity
+
+      # The credential enters the environment here and nowhere else, after all
+      # PR content has been read. The push is a plain fast-forward: if
+      # Dependabot has moved the branch since this run started it fails rather
+      # than clobbering, and the next `synchronize` starts a fresh run.
+      #
+      # Note this push makes Dependabot stop auto-rebasing the PR — it treats a
+      # branch someone else has pushed to as no longer solely its own. Comment
+      # `@dependabot rebase` to hand it back; the force-push that follows fires
+      # `synchronize` and this workflow realigns the new head.
+      - name: Commit and push the realignment
+        if: steps.realigned.outputs.changed == 'true'
+        env:
+          REALIGN_TOKEN: ${{ secrets.FUZZ_LOCK_REALIGN_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          # The same two pathspecs the parity script discovers the tracked set
+          # with (FUZZ_LOCK_GLOBS). Plain pathspecs, not `:(glob)` magic —
+          # git's default wildmatch lets `*` cross `/`, which is what reaches
+          # the nested `crates/rimap-server/fuzz/Cargo.lock`.
+          git add -- 'fuzz/Cargo.lock' '*/fuzz/Cargo.lock'
+          git commit -m 'deps(fuzz): realign the fuzz lockfiles with the bumped workspace lock' \
+                     -m 'Automated by .github/workflows/dependabot-fuzz-lock.yml (issue #698).'
+          git remote set-url origin \
+            "https://x-access-token:${REALIGN_TOKEN}@github.com/${GH_REPO}.git"
+          git push origin "HEAD:refs/heads/${HEAD_REF}"
