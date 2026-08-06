@@ -36,7 +36,8 @@
 //!
 //! The newtypes in [`ids`] are deliberately left exhaustive; see that module.
 //! So are the enums here ([`Payload`], [`ProcessEndReason`], [`ToolStatus`],
-//! [`VerdictSource`], [`FolderSource`], [`PostureEffective`]), matching #665's treatment of
+//! [`VerdictSource`], [`FolderSource`], [`SpecialUseDiscovery`],
+//! [`PostureEffective`]), matching #665's treatment of
 //! `rimap_config::model`. A new variant is a new `kind` or a new value of an
 //! existing one — a reader that does not know it cannot do anything useful
 //! with the record, so forcing downstream matches through a wildcard arm
@@ -225,6 +226,33 @@ pub enum FolderSource {
     Discovered,
 }
 
+/// Whether special-use discovery had run when a matrix was built.
+///
+/// Without this, `protected_folders` cannot distinguish two different
+/// claims that happen to look alike: a server that declared no special-use
+/// folders, and a producer that never asked. The second is the normal case
+/// for `process_start`, which is written before the account registry exists.
+/// An absent field means *unknown*, and the reader is told to substitute
+/// [`Self::NotRun`] — see `docs/audit-log.md` ("Compatibility contract").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecialUseDiscovery {
+    /// Discovery had not run when this matrix was built, so
+    /// `protected_folders` is the configured list and nothing in it can be
+    /// [`FolderSource::Discovered`]. **Not** a statement that the server
+    /// declares no special-use folders.
+    ///
+    /// Also the value a record predating this field reads as, where it is
+    /// vacuous rather than wrong: such a record carries no folder entries at
+    /// all, so there is no list whose completeness could be misjudged.
+    #[default]
+    NotRun,
+    /// Discovery ran, and `protected_folders` is the union the `FolderGuard`
+    /// was built from. An empty list here is the affirmative claim that the
+    /// guard protects nothing.
+    Ran,
+}
+
 /// One entry of a resolved folder list and where it came from.
 ///
 /// A struct expression is rejected outside this crate:
@@ -298,13 +326,19 @@ pub struct AccountToolMatrix {
     pub tools: Vec<ToolVerdict>,
     /// Resolved `protected_folders`, in list order.
     ///
-    /// Whether this includes [`FolderSource::Discovered`] entries depends on
-    /// the producer: special-use discovery needs an IMAP session, and the
-    /// `process_start` record is written before one exists. See
-    /// `rimap_server::boot::tool_matrix::account_tool_matrix`, whose
-    /// `discovered` argument is how a caller states which it has.
+    /// Read this together with [`Self::special_use_discovery`], which says
+    /// whether the list can contain [`FolderSource::Discovered`] entries at
+    /// all. Special-use discovery needs an IMAP session, and the
+    /// `process_start` record is written before one exists.
     #[serde(default)]
     pub protected_folders: Vec<FolderEntry>,
+    /// Whether [`Self::protected_folders`] reflects special-use discovery.
+    ///
+    /// Kept beside the list rather than inferred from it: an empty or
+    /// discovery-free list is otherwise ambiguous between "the server
+    /// declared nothing" and "nobody asked the server".
+    #[serde(default)]
+    pub special_use_discovery: SpecialUseDiscovery,
     /// Resolved `expunge_folders`, in list order. Never carries a
     /// [`FolderSource::Discovered`] entry: discovery only ever widens
     /// protection, never expungeability.
@@ -322,12 +356,17 @@ impl AccountToolMatrix {
     /// claim a caller must make deliberately: no explicit verdicts, nothing
     /// protected, nothing expungeable. The one producer resolves all three
     /// before it can build the matrix at all.
+    ///
+    /// `special_use_discovery` is a parameter for the same reason. A caller
+    /// that let it default would be claiming its `protected_folders` predates
+    /// discovery, which is the one thing the field exists to state.
     #[must_use]
     pub fn new(
         account: String,
         posture: Posture,
         tools: Vec<ToolVerdict>,
         protected_folders: Vec<FolderEntry>,
+        special_use_discovery: SpecialUseDiscovery,
         expunge_folders: Vec<FolderEntry>,
     ) -> Self {
         Self {
@@ -335,6 +374,7 @@ impl AccountToolMatrix {
             posture,
             tools,
             protected_folders,
+            special_use_discovery,
             expunge_folders,
         }
     }
@@ -832,6 +872,7 @@ mod tests {
                 },
             ],
             protected_folders: Vec::new(),
+            special_use_discovery: crate::record::SpecialUseDiscovery::NotRun,
             expunge_folders: Vec::new(),
         }]);
 
@@ -852,7 +893,7 @@ mod tests {
 
     #[test]
     fn process_start_tool_matrix_serializes_folder_lists_with_provenance() {
-        use crate::record::{AccountToolMatrix, FolderEntry, FolderSource};
+        use crate::record::{AccountToolMatrix, FolderEntry, FolderSource, SpecialUseDiscovery};
 
         let rec = sample_start_with(vec![AccountToolMatrix::new(
             "work".to_string(),
@@ -862,6 +903,7 @@ mod tests {
                 FolderEntry::new("INBOX".to_string(), FolderSource::Inherited),
                 FolderEntry::new("[Gmail]/Sent Mail".to_string(), FolderSource::Discovered),
             ],
+            SpecialUseDiscovery::Ran,
             vec![FolderEntry::new(
                 "Trash".to_string(),
                 FolderSource::Inherited,
@@ -878,11 +920,44 @@ mod tests {
             "[Gmail]/Sent Mail"
         );
         assert_eq!(matrix["protected_folders"][1]["source"], "discovered");
+        assert_eq!(matrix["special_use_discovery"], "ran");
         assert_eq!(matrix["expunge_folders"][0]["folder"], "Trash");
         assert_eq!(matrix["expunge_folders"][0]["source"], "inherited");
 
         let back: AuditRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn an_empty_protected_list_is_not_the_same_line_as_an_unprobed_one() {
+        // The distinction the field exists for. Both matrices serialize an
+        // empty `protected_folders`; only `special_use_discovery` says
+        // whether that means "the guard protects nothing" or "nobody asked".
+        use crate::record::{AccountToolMatrix, SpecialUseDiscovery};
+
+        let line_for = |discovery| {
+            serde_json::to_string(&sample_start_with(vec![AccountToolMatrix::new(
+                "work".to_string(),
+                Posture::Readonly,
+                Vec::new(),
+                Vec::new(),
+                discovery,
+                Vec::new(),
+            )]))
+            .unwrap()
+        };
+
+        let probed = line_for(SpecialUseDiscovery::Ran);
+        let unprobed = line_for(SpecialUseDiscovery::NotRun);
+        assert_ne!(
+            probed, unprobed,
+            "an empty union and an un-run discovery must not share a line",
+        );
+
+        let v: Value = serde_json::from_str(&probed).unwrap();
+        assert_eq!(v["tool_matrix"][0]["special_use_discovery"], "ran");
+        let v: Value = serde_json::from_str(&unprobed).unwrap();
+        assert_eq!(v["tool_matrix"][0]["special_use_discovery"], "not_run");
     }
 
     #[test]
@@ -903,6 +978,12 @@ mod tests {
         // `docs/audit-log.md` ("Compatibility contract").
         assert!(entry.protected_folders.is_empty());
         assert!(entry.expunge_folders.is_empty());
+        // And the discovery state reads as `NotRun`, which is vacuous rather
+        // than wrong on a line that carries no folder entries at all.
+        assert_eq!(
+            entry.special_use_discovery,
+            crate::record::SpecialUseDiscovery::NotRun,
+        );
     }
 
     #[test]

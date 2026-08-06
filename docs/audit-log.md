@@ -61,8 +61,9 @@ the file.
 - A field it expects and does not find was added after *that line* was written.
   Every such field has a documented read-as value in the tables below --
   `records_lost` reads as `0`, `undrained_dispatches` as `0`, `tool_matrix`
-  and a matrix entry's `protected_folders` / `expunge_folders` as empty -- so
-  the line parses into the same struct a current writer produces.
+  and a matrix entry's `protected_folders` / `expunge_folders` as empty,
+  `special_use_discovery` as `not_run` -- so the line parses into the same
+  struct a current writer produces.
 
   **That is a parse rule, not a measurement.** For the two counters it means
   *not measured*, not *measured as zero*: a binary predating `records_lost`
@@ -117,7 +118,8 @@ every line it copies.
 2. A `#[serde(default)]` field the line predates is **materialized at its
    default** -- `records_lost` and `undrained_dispatches` as `0`,
    `tool_matrix` and a matrix entry's `protected_folders` / `expunge_folders`
-   as `[]`. The value is the one a reader was already told to substitute, so
+   as `[]`, `special_use_discovery` as `"not_run"`. The value is the one a
+   reader was already told to substitute, so
    nothing is misread as a *record*; what is lost is the ability to tell
    not-measured from measured, which the counters' own note above depends on.
    The folder lists carry the same hazard in a sharper form: a merged line
@@ -171,6 +173,7 @@ One entry per account, in both single- and multi-account mode -- unlike
       {"folder": "INBOX", "source": "inherited"},
       {"folder": "Sent",  "source": "inherited"}
     ],
+    "special_use_discovery": "not_run",
     "expunge_folders": [
       {"folder": "Trash", "source": "inherited"}
     ]
@@ -187,6 +190,7 @@ One entry per account, in both single- and multi-account mode -- unlike
 | `tools[].source` | `account` if the account's own `[accounts.security.tools]` wrote it, `inherited` if it came from `[defaults.security.tools]` |
 | `protected_folders[].folder` | A folder name in the resolved `protected_folders` list |
 | `protected_folders[].source` | `account`, `inherited`, or `discovered` (see below) |
+| `special_use_discovery` | `ran` if `protected_folders` reflects the server's special-use folders, `not_run` if discovery had not happened when the matrix was built |
 | `expunge_folders[].folder` | A folder name in the resolved `expunge_folders` list |
 | `expunge_folders[].source` | `account` or `inherited`; never `discovered` |
 
@@ -195,6 +199,13 @@ everywhere else in this file, **absent means unknown, not empty** -- an empty
 `expunge_folders` on a record that carries the key is the affirmative claim
 "nothing in this account may be expunged", and reading an absent key as the
 same claim is a misread.
+
+`special_use_discovery` reads as `not_run` when absent. On a record predating
+these fields that is vacuous rather than wrong: such a record carries no
+folder entries at all, so there is no list whose completeness it could
+misdescribe. `not_run` is **not** a statement that the server declares no
+special-use folders -- that claim is `"special_use_discovery": "ran"` with no
+`discovered` entry in the list.
 
 `tools` lists **explicit verdicts only**. A tool with no override follows
 `posture` through the posture table, which the record's `version` and
@@ -224,14 +235,23 @@ property of the list, and every entry of one configured list shares it.
 here.** An inherited `expunge_folders` is the one way a folder becomes
 expungeable on an account that never asked for it (#624 / ADR-0013).
 
-**`process_start` never carries a `discovered` entry.** The record is written
-before the account registry is built, so no IMAP `LIST` has run and no
-special-use folder is known yet; `protected_folders` on this record is the
-*configured* list. The union the `FolderGuard` is actually built from -- the
-one that can contain `discovered` entries -- is logged at `info` level, once
-per account and after the guard exists, under the message `effective folder
-policy`. `rusty-imap-mcp --dry-run` opens no IMAP session at all, so it prints
-the configured list too, under a header that says so.
+**`process_start` never carries a `discovered` entry, and says so with
+`"special_use_discovery": "not_run"`.** The record is written before the
+account registry is built, so no IMAP `LIST` has run and no special-use folder
+is known yet; `protected_folders` on this record is the *configured* list.
+
+**The discovery-derived union reaches you in exactly one place: the boot log
+line.** It is emitted at `info` level, once per account, after the
+`FolderGuard` is built, under the message `effective folder policy`, and it
+carries `special_use_discovery=ran`. If you want to see which server folders
+your accounts actually protect, that line is what to grep for -- the audit log
+does not have it, and neither does `--dry-run`, which opens no IMAP session
+and prints the configured list under a header that says so.
+
+Getting the union into `process_start` would mean writing that record after
+IMAP boot, which would leave an account that fails to come up with no
+`process_start` at all. The trade is not worth it; tracked as the remaining
+half of #696.
 
 ### `process_end`
 

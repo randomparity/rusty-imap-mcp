@@ -26,7 +26,7 @@
 //! renderers say which state they are in.
 
 use rimap_audit::record::{
-    AccountToolMatrix, FolderEntry, FolderSource, ToolVerdict, VerdictSource,
+    AccountToolMatrix, FolderEntry, FolderSource, SpecialUseDiscovery, ToolVerdict, VerdictSource,
 };
 use rimap_config::model::Verdict;
 use rimap_config::validate::ValidatedAccountConfig;
@@ -53,8 +53,11 @@ use rimap_core::tool::ToolName;
 ///   construction, not by a second merge that could drift from the first.
 /// - `None` — discovery has not run at this call site. `protected_folders`
 ///   is the configured list alone. This is not the same claim as
-///   `Some(&[])`, which asserts the guard was built with nothing protected,
-///   and callers must not collapse the two.
+///   `Some(&[])`, which asserts the guard was built with nothing protected.
+///
+/// The two do not merely differ in this function's output: they set
+/// [`AccountToolMatrix::special_use_discovery`], so the distinction survives
+/// into the record and a reader never has to know which call site wrote it.
 #[must_use]
 pub fn account_tool_matrix(
     acfg: &ValidatedAccountConfig,
@@ -80,6 +83,11 @@ pub fn account_tool_matrix(
         acfg.security.posture,
         tools,
         protected_entries(acfg, resolved_protected),
+        if resolved_protected.is_some() {
+            SpecialUseDiscovery::Ran
+        } else {
+            SpecialUseDiscovery::NotRun
+        },
         folder_entries(
             &acfg.security.expunge_folders,
             acfg.account_written_expunge_folders,
@@ -215,6 +223,10 @@ pub fn log_account_folder_policy(matrix: &AccountToolMatrix) {
         account = %matrix.account,
         protected_folders = %render_folder_list(&matrix.protected_folders),
         expunge_folders = %render_folder_list(&matrix.expunge_folders),
+        special_use_discovery = match matrix.special_use_discovery {
+            SpecialUseDiscovery::Ran => "ran",
+            SpecialUseDiscovery::NotRun => "not_run",
+        },
         "effective folder policy",
     );
 }
@@ -225,7 +237,7 @@ pub fn log_account_folder_policy(matrix: &AccountToolMatrix) {
 mod tests {
     use std::path::PathBuf;
 
-    use rimap_audit::record::{FolderSource, VerdictSource};
+    use rimap_audit::record::{FolderSource, SpecialUseDiscovery, VerdictSource};
     use rimap_config::loader::load_and_validate;
     use rimap_config::validate::ValidatedAccountConfig;
     use rimap_core::account::AccountId;
@@ -519,6 +531,28 @@ allowed_base_dir = "{base}"
         let matrix = account_tool_matrix(&acfg, Some(&[]));
         assert!(matrix.protected_folders.is_empty());
         assert_eq!(render_folder_list(&matrix.protected_folders), "none");
+    }
+
+    #[test]
+    fn the_discovery_argument_sets_the_recorded_discovery_state() {
+        // `None` and `Some` must stay apart *in the record*, not only in this
+        // function's output — an empty union and an un-run discovery are
+        // different claims and both can produce an empty list.
+        let dir = TempDir::new().unwrap();
+        let acfg = folder_account(&dir, "work");
+        assert_eq!(
+            account_tool_matrix(&acfg, None).special_use_discovery,
+            SpecialUseDiscovery::NotRun,
+        );
+        assert_eq!(
+            account_tool_matrix(&acfg, Some(&[])).special_use_discovery,
+            SpecialUseDiscovery::Ran,
+        );
+        assert_eq!(
+            account_tool_matrix(&acfg, Some(&acfg.security.protected_folders))
+                .special_use_discovery,
+            SpecialUseDiscovery::Ran,
+        );
     }
 
     #[test]

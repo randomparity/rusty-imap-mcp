@@ -24,13 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `discovered`. An `inherited` entry under `expunge_folders` is the #624
   widening that makes a folder expungeable on an account that never asked for
   it, and it now appears in the `tool_matrix` entries of the `process_start`
-  audit record and in two new `--dry-run` sections. `protected_folders` also
-  grows server-declared RFC 6154 special-use names at boot; that union is
-  logged per account under `effective folder policy` once the `FolderGuard`
-  is built. The `process_start` record and `--dry-run` are both written before
-  any such folder is known, so they carry the configured list and say so.
-  Records written before these fields parse unchanged, and an absent list
-  reads as *unknown*, not as an empty one. See #696 and `docs/audit-log.md`.
+  audit record and in two new `--dry-run` sections. Records written before
+  these fields parse unchanged, and an absent list reads as *unknown*, not as
+  an empty one. See #696 and `docs/audit-log.md`.
+- **New boot log line `effective folder policy`, one per account, and it is
+  the only place the *complete* protected-folder list appears.**
+  `protected_folders` gains the server's RFC 6154 special-use folders at boot
+  (`[Gmail]/Sent Mail` and friends), and that union is what the `FolderGuard`
+  is built from. Neither the `process_start` audit record nor `--dry-run` can
+  carry it: both run before any IMAP session exists. This line is emitted at
+  `info` level after the guard is built, tags each entry with its origin, and
+  carries `special_use_discovery=ran` — so `grep 'effective folder policy'` is
+  how an operator sees which folders a running server actually protects. The
+  two pre-discovery renderings say `not_run` rather than presenting a shorter
+  list as complete. #696.
 - crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
   new `publish-crates` release job. Publishes in dependency order with an
   idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by
@@ -90,15 +97,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **API break: `rimap_audit::record::AccountToolMatrix::new` takes two further
-  arguments (#696).** The signature is now
-  `new(account, posture, tools, protected_folders, expunge_folders)`. Adding
-  the fields is additive — `AccountToolMatrix` is `#[non_exhaustive]` (#706)
-  and both are `#[serde(default)]`, so the on-disk format is unchanged for
-  existing records — but neither list defaults, because for each of them an
-  empty value is an affirmative claim ("nothing protected", "nothing
-  expungeable") a caller must make deliberately. New `FolderEntry` (also
-  `#[non_exhaustive]`) and `FolderSource` types come with them.
+- **API break: `rimap_audit::record::AccountToolMatrix::new` takes three
+  further arguments (#696).** The signature is now
+  `new(account, posture, tools, protected_folders, special_use_discovery,
+  expunge_folders)`. Adding the fields is additive — `AccountToolMatrix` is
+  `#[non_exhaustive]` (#706) and all three are `#[serde(default)]`, so the
+  on-disk format is unchanged for existing records — but none of them
+  defaults in the constructor, because each empty or absent value is an
+  affirmative claim ("nothing protected", "nothing expungeable", "this list
+  predates discovery") a caller must make deliberately. New `FolderEntry`
+  (also `#[non_exhaustive]`), `FolderSource`, and `SpecialUseDiscovery` types
+  come with them.
   `rimap_config::validate::ValidatedAccountConfig` gains
   `account_written_protected_folders` / `account_written_expunge_folders`,
   which is additive (that type is `#[non_exhaustive]` since #707). Absorbed by

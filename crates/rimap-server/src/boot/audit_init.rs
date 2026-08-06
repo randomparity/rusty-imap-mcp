@@ -356,6 +356,10 @@ allowed_base_dir = "{base}"
             protected.iter().all(|p| p["source"] != "discovered"),
             "no IMAP session exists when process_start is written:\n{protected:?}",
         );
+        // And the record says so, rather than leaving a reader to infer it
+        // from a code-ordering fact: this list is not the guard's union, and
+        // its lack of discovered entries is not a claim about the server.
+        assert_eq!(work["special_use_discovery"], "not_run");
 
         // The same record distinguishes the account that asked for it.
         let personal = matrix

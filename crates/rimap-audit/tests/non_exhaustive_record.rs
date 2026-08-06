@@ -61,8 +61,8 @@
 
 use rimap_audit::record::{
     AccountToolMatrix, AttachmentProvenance, AuditRecord, FolderEntry, FolderSource, Payload,
-    ProcessEnd, ProcessEndReason, Provenance, ResultSummary, ToolEnd, ToolStatus, ToolVerdict,
-    VerdictSource,
+    ProcessEnd, ProcessEndReason, Provenance, ResultSummary, SpecialUseDiscovery, ToolEnd,
+    ToolStatus, ToolVerdict, VerdictSource,
 };
 use rimap_audit::{ProcessId, Seq, Timestamp};
 use rimap_core::{Posture, tool::ToolName};
@@ -104,11 +104,13 @@ fn record_types_are_built_through_constructors_and_field_assignment() {
             "INBOX".to_string(),
             FolderSource::Inherited,
         )],
+        SpecialUseDiscovery::NotRun,
         vec![FolderEntry::new("Trash".to_string(), FolderSource::Account)],
     );
     assert_eq!(matrix.account, "work");
     assert_eq!(matrix.tools.len(), 1);
     assert_eq!(matrix.protected_folders.len(), 1);
+    assert_eq!(matrix.special_use_discovery, SpecialUseDiscovery::NotRun);
     assert_eq!(matrix.expunge_folders[0].source, FolderSource::Account);
 
     // `ResultSummary` is the one type whose constructor is `Default`: every
@@ -327,9 +329,10 @@ fn auth_line_is_byte_exact() {
 /// including `tool_matrix`, the #632 field whose addition is the reason this
 /// issue exists, and its `protected_folders` / `expunge_folders` (#696).
 ///
-/// This golden moved once, in #696, and only by gaining those two keys on the
-/// `tool_matrix` entry. That is what an additive change looks like on disk:
-/// every byte that was here before is still here, in the same order.
+/// This golden moved once, in #696, and only by gaining `protected_folders`,
+/// `special_use_discovery`, and `expunge_folders` on the `tool_matrix` entry.
+/// That is what an additive change looks like on disk: every byte that was
+/// here before is still here, in the same order.
 #[test]
 fn process_start_multi_account_line_is_byte_exact() {
     let mut inputs = rimap_audit::ProcessStartInputs::new(
@@ -360,6 +363,7 @@ fn process_start_multi_account_line_is_byte_exact() {
             FolderEntry::new("INBOX".to_string(), FolderSource::Inherited),
             FolderEntry::new("[Gmail]/Sent Mail".to_string(), FolderSource::Discovered),
         ],
+        SpecialUseDiscovery::Ran,
         vec![FolderEntry::new(
             "Trash".to_string(),
             FolderSource::Inherited,
@@ -387,7 +391,7 @@ fn process_start_multi_account_line_is_byte_exact() {
     record.process_id = fixed_pid();
     assert_golden(
         &record,
-        r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"abc123","accounts":[{"name":"work","posture":"readonly","imap_host":"imap.example.com"}],"tool_matrix":[{"account":"work","posture":"readonly","tools":[{"tool":"delete_message","allow":true,"source":"inherited"}],"protected_folders":[{"folder":"INBOX","source":"inherited"},{"folder":"[Gmail]/Sent Mail","source":"discovered"}],"expunge_folders":[{"folder":"Trash","source":"inherited"}]}],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
+        r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"abc123","accounts":[{"name":"work","posture":"readonly","imap_host":"imap.example.com"}],"tool_matrix":[{"account":"work","posture":"readonly","tools":[{"tool":"delete_message","allow":true,"source":"inherited"}],"protected_folders":[{"folder":"INBOX","source":"inherited"},{"folder":"[Gmail]/Sent Mail","source":"discovered"}],"special_use_discovery":"ran","expunge_folders":[{"folder":"Trash","source":"inherited"}]}],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
     );
 }
 

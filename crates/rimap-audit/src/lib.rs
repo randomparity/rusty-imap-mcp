@@ -20,7 +20,7 @@ pub use crate::record::ids::{ProcessId, Seq, Timestamp};
 pub use crate::record::{
     AccountSummary, AccountToolMatrix, AuditRecord, AuthEvent, AuthResult, ConfigEvent,
     FolderEntry, FolderSource, Payload, ProcessEnd, ProcessEndReason, ProcessStart, Provenance,
-    ResultSummary, ToolEnd, ToolStart, ToolStatus, ToolVerdict, VerdictSource,
+    ResultSummary, SpecialUseDiscovery, ToolEnd, ToolStart, ToolStatus, ToolVerdict, VerdictSource,
 };
 pub use crate::redact::{
     FieldPolicy, RedactionSalt, RedactionSchema, Redactor, ToolRedactionSchema, VerbatimType,

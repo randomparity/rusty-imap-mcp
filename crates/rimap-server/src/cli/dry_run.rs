@@ -148,11 +148,15 @@ fn write_folder_policy_sections<W: Write>(
     out: &mut W,
     matrix: &rimap_audit::record::AccountToolMatrix,
 ) -> std::io::Result<()> {
-    write_folder_section(
-        out,
-        "Protected folders (configured; server special-use folders are added at boot)",
-        &matrix.protected_folders,
-    )?;
+    // Header derived from the matrix rather than hard-coded, so the caveat
+    // cannot outlive the state it describes.
+    let header = match matrix.special_use_discovery {
+        rimap_audit::record::SpecialUseDiscovery::NotRun => {
+            "Protected folders (configured; server special-use folders are added at boot)"
+        }
+        rimap_audit::record::SpecialUseDiscovery::Ran => "Protected folders",
+    };
+    write_folder_section(out, header, &matrix.protected_folders)?;
     write_folder_section(out, "Expunge folders", &matrix.expunge_folders)
 }
 
