@@ -1217,7 +1217,7 @@ mod tests {
              record must not claim a verdict the attempt never reached",
         );
         assert_eq!(event.account.as_deref(), Some("acct"));
-        assert_eq!(event.username, "alice@example.com");
+        assert_eq!(event.username.0, "alice@example.com");
         assert_eq!(event.port, port);
         assert_eq!(
             event.tls_fingerprint_sha256, None,

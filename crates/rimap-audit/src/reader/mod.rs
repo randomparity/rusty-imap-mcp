@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn account_filter_excludes_record_with_different_account() {
-        use crate::record::{AuthEvent, AuthResult};
+        use crate::record::{AuthEvent, AuthResult, Host, Username};
 
         let dir = TempDir::new().unwrap();
         let pid = ProcessId::new_now();
@@ -812,9 +812,9 @@ mod tests {
             payload: Payload::Auth({
                 let mut event = AuthEvent::new(
                     AuthResult::Success,
-                    "h".to_string(),
+                    Host("h".to_string()),
                     993,
-                    "u".to_string(),
+                    Username("u".to_string()),
                     None,
                     None,
                     None,

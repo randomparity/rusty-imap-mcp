@@ -19,7 +19,7 @@ pub mod uid_selector;
 pub mod version;
 pub mod warning;
 
-pub use crate::auth_event::{AuthEvent, AuthResult};
+pub use crate::auth_event::{AuthEvent, AuthResult, Host, Username};
 pub use crate::auth_sink::{AuthEventSink, AuthSinkError};
 pub use crate::error::{ErrorCode, RimapError};
 pub use crate::folder_name::{FolderName, FolderNameError, is_rejected_display_codepoint};

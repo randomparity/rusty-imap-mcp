@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn log_auth_writes_one_record_with_allocated_seq() {
-        use crate::record::{AuthEvent, AuthResult};
+        use crate::record::{AuthEvent, AuthResult, Host, Username};
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("audit.jsonl");
@@ -731,9 +731,9 @@ mod tests {
         let seq = writer
             .log_auth(AuthEvent::new(
                 AuthResult::Success,
-                "127.0.0.1".to_string(),
+                Host("127.0.0.1".to_string()),
                 993,
-                "alice@example.test".to_string(),
+                Username("alice@example.test".to_string()),
                 Some("ab".repeat(32)),
                 Some(true),
                 None,
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn log_auth_uses_writer_process_id_for_every_record() {
-        use crate::record::{AuthEvent, AuthResult};
+        use crate::record::{AuthEvent, AuthResult, Host, Username};
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("audit.jsonl");
@@ -774,9 +774,9 @@ mod tests {
         let make = || {
             AuthEvent::new(
                 AuthResult::Failure,
-                "h".into(),
+                Host("h".to_string()),
                 1,
-                "u".into(),
+                Username("u".to_string()),
                 None,
                 None,
                 Some(rimap_core::ErrorCode::Tls),
