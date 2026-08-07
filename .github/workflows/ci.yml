@@ -547,11 +547,6 @@ jobs:
           && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
-      # TEMPORARY (#759 acceptance criterion 2): force this job red so the run
-      # shows whether the required `SonarQube` context reports failure or is
-      # skipped green. Reverted in the next commit.
-      - name: TEMPORARY force the coverage job to fail
-        run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
