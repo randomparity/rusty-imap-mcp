@@ -434,7 +434,7 @@ impl ProcessStartInputs {
 #[expect(clippy::unwrap_used, reason = "tests")]
 #[expect(clippy::expect_used, reason = "tests")]
 mod tests {
-    use rimap_core::auth_event::{AuthEvent, AuthResult};
+    use rimap_core::auth_event::{AuthEvent, AuthResult, Host, Username};
     use rimap_core::auth_sink::AuthEventSink;
     use tempfile::TempDir;
 
@@ -487,9 +487,9 @@ mod tests {
 
         let mut event = AuthEvent::new(
             AuthResult::Success,
-            "127.0.0.1".to_string(),
+            Host("127.0.0.1".to_string()),
             993,
-            "alice@example.test".to_string(),
+            Username("alice@example.test".to_string()),
             None,
             None,
             None,

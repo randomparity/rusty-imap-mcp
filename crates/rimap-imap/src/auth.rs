@@ -44,12 +44,20 @@ impl AuthContext<'_> {
     /// available from this crate — functional update included (E0639). The
     /// constructor takes every field a reader of the trail draws a conclusion
     /// from; `account` is the operator label it leaves to assignment.
+    ///
+    /// The two `Host` / `Username` wraps below are the whole process's only
+    /// `String` → newtype boundary for these two values (#748), and the one
+    /// place left where a transposition is expressible. Everything downstream
+    /// of here is type-checked; everything upstream reaches `AuthContext`
+    /// through a named struct literal, where a transposition is not
+    /// expressible either. `context_fields_land_on_the_event_fields_they_name`
+    /// below pins these two lines.
     fn event(&self, result: AuthResult, error_code: Option<rimap_core::ErrorCode>) -> AuthEvent {
         let mut event = AuthEvent::new(
             result,
-            self.host.to_string(),
+            rimap_core::Host(self.host.to_string()),
             self.port,
-            self.username.to_string(),
+            rimap_core::Username(self.username.to_string()),
             self.observed_hex(),
             self.fingerprint_match(),
             error_code,
@@ -82,9 +90,11 @@ mod tests {
 
     /// Every `AuthContext` field has to land on the `AuthEvent` field of the
     /// same name. Since #716 the mapping runs through `AuthEvent::new`'s
-    /// positional parameters, where `host` and `username` are both `String`
-    /// and a transposition compiles — so each value here names its own field.
-    /// `account` is checked separately because it is the one field the
+    /// positional parameters; since #748 those are `Host` and `Username`, so
+    /// a transposed *argument* no longer compiles. What is still expressible
+    /// is a transposed `Host(self.username…)` **wrap**, one line up — so each
+    /// value here names its own field, and this test is what reads those two
+    /// wraps. `account` is checked separately because it is the one field the
     /// constructor does not take and the builder assigns afterwards.
     ///
     /// Both builders are exercised: they share `AuthContext::event`, so a
@@ -107,8 +117,8 @@ mod tests {
             auth_failure(&ctx, rimap_core::ErrorCode::Auth),
         ] {
             assert_eq!(rec.account.as_deref(), Some("ACCOUNT-goes-here"));
-            assert_eq!(rec.host, "HOST-goes-here");
-            assert_eq!(rec.username, "USERNAME-goes-here");
+            assert_eq!(rec.host.0, "HOST-goes-here");
+            assert_eq!(rec.username.0, "USERNAME-goes-here");
             assert_eq!(rec.port, 1993);
             assert_eq!(
                 rec.credential_source,

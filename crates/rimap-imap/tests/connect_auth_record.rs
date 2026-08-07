@@ -117,7 +117,7 @@ async fn a_successful_connect_emits_one_auth_record_naming_the_credential_source
         Some(true),
         "the connection pins the fake's own certificate",
     );
-    assert_eq!(event.username, "user@example.com");
+    assert_eq!(event.username.0, "user@example.com");
 }
 
 /// A completed connect's `auth` record must not depend on tokio's blocking
