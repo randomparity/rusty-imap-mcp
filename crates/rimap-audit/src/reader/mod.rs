@@ -101,7 +101,8 @@ impl Filter {
                 Payload::ProcessStart(_)
                 | Payload::ProcessEnd(_)
                 | Payload::Auth(_)
-                | Payload::Config(_) => None,
+                | Payload::Config(_)
+                | Payload::FolderPolicy(_) => None,
             };
             match got {
                 Some(name) if name == want => {}
@@ -113,6 +114,9 @@ impl Filter {
                 Payload::Auth(a) => a.account.as_deref(),
                 Payload::ToolStart(t) => t.account.as_deref(),
                 Payload::ToolEnd(t) => t.account.as_deref(),
+                // Scoped to exactly one account, so `--account` must narrow to
+                // it rather than pass it through as a record without a scope.
+                Payload::FolderPolicy(p) => Some(p.account.as_str()),
                 Payload::ProcessStart(_) | Payload::ProcessEnd(_) | Payload::Config(_) => None,
             };
             // Records that lack an account field pass through.
@@ -132,6 +136,7 @@ const KIND_AUTH: &str = "auth";
 const KIND_TOOL_START: &str = "tool_start";
 const KIND_TOOL_END: &str = "tool_end";
 const KIND_CONFIG: &str = "config";
+const KIND_FOLDER_POLICY: &str = "folder_policy";
 
 /// Every `kind` discriminator this build recognizes.
 ///
@@ -141,13 +146,14 @@ const KIND_CONFIG: &str = "config";
 /// A new [`Payload`] variant breaks `kind_of`'s exhaustive match, and the arm
 /// it needs has to name a constant — so widening this array is part of adding
 /// a kind rather than a step that can be forgotten separately.
-const KNOWN_KINDS: [&str; 6] = [
+const KNOWN_KINDS: [&str; 7] = [
     KIND_PROCESS_START,
     KIND_PROCESS_END,
     KIND_AUTH,
     KIND_TOOL_START,
     KIND_TOOL_END,
     KIND_CONFIG,
+    KIND_FOLDER_POLICY,
 ];
 
 fn kind_of(payload: &Payload) -> &'static str {
@@ -158,6 +164,7 @@ fn kind_of(payload: &Payload) -> &'static str {
         Payload::ToolStart(_) => KIND_TOOL_START,
         Payload::ToolEnd(_) => KIND_TOOL_END,
         Payload::Config(_) => KIND_CONFIG,
+        Payload::FolderPolicy(_) => KIND_FOLDER_POLICY,
     }
 }
 
@@ -585,6 +592,7 @@ mod tests {
                 Payload::ProcessEnd(_) => "process_end",
                 Payload::Auth(_) => "auth",
                 Payload::Config(_) => "config",
+                Payload::FolderPolicy(_) => "folder_policy",
             });
             Ok(())
         })
@@ -994,7 +1002,7 @@ mod tests {
         );
         assert_eq!(
             super::KNOWN_KINDS.len(),
-            6,
+            7,
             "one entry per `Payload` variant. Adding a variant reddens \
              `kind_of`'s exhaustive match; widen `KNOWN_KINDS` in the same \
              change or the reader will skip records it can in fact parse",
