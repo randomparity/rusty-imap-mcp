@@ -12,7 +12,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use async_imap::imap_proto::{Response, Status};
-use async_imap::types::UnsolicitedResponse;
+use async_imap::types::{Capabilities, Capability, UnsolicitedResponse};
 use rimap_core::auth_event::AuthEvent;
 use secrecy::ExposeSecret;
 use tokio::net::TcpStream;
@@ -204,7 +204,7 @@ impl Connection {
     ///
     /// A listing advertising `IMAP4rev2` and *not* `IMAP4rev1` never reaches
     /// this function. `imap-proto`'s `capability_data` parser (read against
-    /// 0.16.7) runs every parsed `CAPABILITY` response through
+    /// 0.16.6, the pinned version) runs every parsed `CAPABILITY` response through
     /// `ensure_capabilities_contains_imap4rev`, which rejects any that lacks
     /// the `IMAP4rev1` atom — so the line fails to parse and the *pre-login*
     /// `CAPABILITY` command fails the whole connect with
@@ -223,11 +223,11 @@ impl Connection {
     /// produce. That is a property of the fold, not of the parser blocker
     /// above, and it holds however the upstream question is settled.
     ///
-    /// Both probes are also literal-case: `has_str` special-cases `IMAP4rev1`
-    /// case-insensitively but compares every other atom exactly, so a server
-    /// spelling it `IMAP4REV2` reads as absent. That is #735, and it is a
-    /// fail-safe direction — the listing degrades to whatever its other atoms
-    /// say.
+    /// Every extension probe below goes through [`advertises`], not `has_str`,
+    /// because capability atoms are case-insensitive and `has_str` folds case
+    /// only for `IMAP4rev1` and the `AUTH=` prefix, comparing every other atom
+    /// byte-exactly (#735). The `IMAP4rev1` half of the readability gate is
+    /// [`carries_rev1`] instead, for the reason recorded there.
     async fn read_capabilities(session: &mut ImapSession) -> ServerCapabilities {
         let caps = match session.capabilities().await {
             Ok(caps) => caps,
@@ -242,9 +242,9 @@ impl Connection {
             }
         };
 
-        let rev2 = caps.has_str("IMAP4rev2");
+        let rev2 = advertises(&caps, "IMAP4rev2");
 
-        if !caps.has_str("IMAP4rev1") && !rev2 {
+        if !carries_rev1(&caps) && !rev2 {
             tracing::warn!(
                 advertised = caps.len(),
                 "post-login CAPABILITY reply omitted both IMAP4rev1 and \
@@ -259,8 +259,8 @@ impl Connection {
         // RFC 9051 Appendix E folds MOVE and UIDPLUS into the base protocol, so
         // an IMAP4rev2 server advertises both by advertising the revision.
         ServerCapabilities::Known {
-            has_move: caps.has_str("MOVE") || rev2,
-            has_uidplus: caps.has_str("UIDPLUS") || rev2,
+            has_move: advertises(&caps, "MOVE") || rev2,
+            has_uidplus: advertises(&caps, "UIDPLUS") || rev2,
         }
     }
 
@@ -501,4 +501,63 @@ impl Connection {
             );
         }
     }
+}
+
+/// `true` when `caps` advertises the extension atom `probe`, compared
+/// ASCII-case-insensitively. Not for `IMAP4rev1` — [`carries_rev1`] is.
+///
+/// RFC 3501 §9 defines a capability as an `atom` and IMAP protocol keywords are
+/// case-insensitive, so `MOVE`, `Move`, and `move` name one capability.
+/// `Capabilities::has_str` disagrees: read against async-imap 0.11.3 it
+/// special-cases `IMAP4rev1` and the `AUTH=` prefix, then falls through to a
+/// `HashSet` lookup on `Capability::Atom(String)`, whose `Eq` is byte-exact. So
+/// a conformant server spelling `uidplus` in lowercase reads as absent there,
+/// and the resulting `Known { false, false }` is the pair that selects the
+/// folder-wide `EXPUNGE` against a server that in fact supports `UID EXPUNGE` —
+/// #649's data-loss path reached by a spelling (#735).
+///
+/// This is a workaround for an upstream defect, not a preference: every
+/// `async-imap` consumer probing a non-`IMAP4rev1` capability by string
+/// inherits it. #767 tracks reporting it, and is where the exit condition for
+/// this helper lives.
+///
+/// `Capability::Auth` never matches, and that is load-bearing rather than
+/// merely unimplemented: `imap-proto` strips the `AUTH=` prefix with
+/// `tag_no_case`, so an `AUTH=MOVE` mechanism would otherwise answer a `MOVE`
+/// probe. Probing a mechanism would need its own prefix handling, which no
+/// caller wants; pass bare capability atoms.
+///
+/// `handshake::capability_advertised` applies the same case-insensitive rule to
+/// the *pre-login* `LOGINDISABLED` probe, over `imap_proto::Capability` items
+/// pulled off the unsolicited-response channel rather than an owned
+/// `Capabilities` set. They cannot share a body across those two types, and at
+/// two occurrences that is not worth an abstraction — but they should stay in
+/// step. It ignores `Capability::Imap4rev1` for the same reason this does — see
+/// [`carries_rev1`], which is what probes the revision atom.
+fn advertises(caps: &Capabilities, probe: &str) -> bool {
+    caps.iter().any(|cap| match cap {
+        Capability::Atom(atom) => atom.eq_ignore_ascii_case(probe),
+        Capability::Imap4rev1 | Capability::Auth(_) => false,
+    })
+}
+
+/// `true` when the listing carries the RFC 3501 revision atom, keyed on
+/// `Capability::Imap4rev1` rather than on an atom comparison.
+///
+/// The distinction is what keeps [`Connection::read_capabilities`]'s
+/// readability gate honest. `imap-proto`'s RFC 3501 `CAPABILITY` parser matches
+/// the revision with `tag_no_case` and routes every spelling to that variant,
+/// so a real capability listing always produces it whatever its case — this is
+/// no stricter than `has_str`, which resolved the same probe the same way.
+///
+/// Its RFC 5161 `ENABLED` parser does not: it maps every atom, `IMAP4rev1`
+/// included, to `Capability::Atom`, and async-imap's `parse_capabilities` (read
+/// against 0.11.3) folds every `Response::Capabilities` it sees before the
+/// tagged completion into one set. So `* ENABLED IMAP4rev1` would satisfy an
+/// atom-wise rev1 probe — and that reply is precisely what the gate exists to
+/// reject, since it is not a capability listing. Admitting it would return
+/// `Known { false, false }`, the pair that selects the folder-wide `EXPUNGE`,
+/// where the refusal belongs (#649).
+fn carries_rev1(caps: &Capabilities) -> bool {
+    caps.iter().any(|cap| matches!(cap, Capability::Imap4rev1))
 }
