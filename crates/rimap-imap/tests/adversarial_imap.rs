@@ -25,10 +25,44 @@ use rimap_imap::error::{AuthFailure, ImapError};
 use rimap_imap::types::{FetchSpec, Uid};
 use support::tracing_capture::WarnCapture;
 
-/// Smoke/calibration: a real login + LIST through the fake proves the TLS
-/// handshake, pin, greeting, CAPABILITY drain, LOGIN, and post-login
-/// CAPABILITY all work end-to-end. Prints `recorded()` so the exact client
-/// command order can be read off and used to write the other scenarios.
+/// Prints the fake's recorded client-command dialog to stderr **iff** the test
+/// is unwinding, so a miscalibrated script surfaces as a legible divergence
+/// rather than a bare assertion. Mirrors
+/// `rimap_server::e2e_wire_fetch_skipped::DumpOnPanic`.
+///
+/// The `panicking()` gate is load-bearing, not stylistic. `recorded()` captures
+/// raw client command lines, so the dump contains the plaintext `LOGIN` frame;
+/// printing it unconditionally publishes that frame into a public CI log on
+/// every green run, because the coverage CI step passes
+/// `--success-output final` (issue #692 / PR #746) and so retains a *passing*
+/// test's captured output. Issue #750.
+///
+/// Out of scope for `rimap_server::canary_coverage_meta`, and correctly so:
+/// that sweep globs `crates/rimap-server/tests/e2e_wire*.rs` because
+/// `canary::assert_absent` scans artifacts a spawned server child produced
+/// (audit files, transcripts, MCP responses) for a per-run minted canary. The
+/// suites here drive the fake in-process and authenticate with the
+/// `FAKE_PASSWORD` literal from `rimap_fake_imap::fake_imap`, which is public
+/// source text and mints no canary — there is nothing for that sweep to find.
+/// The cost of sitting outside it is that nothing here fails on a
+/// reintroduced unguarded dump, so keep new dialog dumps behind this guard.
+struct DumpOnPanic<'a>(&'a FakeImapServer);
+
+impl Drop for DumpOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            #[expect(clippy::print_stderr, reason = "test diagnostic on failure")]
+            {
+                eprintln!("fake recorded dialog:\n{:#?}", self.0.recorded());
+            }
+        }
+    }
+}
+
+/// Smoke: a real login + LIST through the fake proves the TLS handshake, pin,
+/// greeting, CAPABILITY drain, LOGIN, and post-login CAPABILITY all work
+/// end-to-end. On failure [`DumpOnPanic`] renders the exact client command
+/// order, which is also how the other scenarios in this file were calibrated.
 #[tokio::test]
 async fn login_and_list_succeed_through_fake() {
     let mut steps = login_preamble("IMAP4rev1 UIDPLUS");
@@ -40,18 +74,11 @@ async fn login_and_list_succeed_through_fake() {
         },
     ]);
     let server = FakeImapServer::start(steps).await;
+    let _dump = DumpOnPanic(&server);
 
     let conn = server.connection("user@example.com");
     let folders = conn.list_folders("*").await.expect("list should succeed");
     assert!(folders.iter().any(|f| f.name == "INBOX"));
-
-    // Calibration aid: dump the exact client command order. `print_stderr` is
-    // denied workspace-wide (stdout is the MCP transport); stderr is fine in a
-    // test, so suppress it at the call site.
-    #[expect(clippy::print_stderr, reason = "calibration output for TDD")]
-    {
-        eprintln!("recorded dialog: {:#?}", server.recorded());
-    }
 }
 
 /// Scenario 2: LOGINDISABLED in CAPABILITY yields `CapabilityMissing` with
