@@ -27,25 +27,24 @@ use support::tracing_capture::WarnCapture;
 
 /// Prints the fake's recorded client-command dialog to stderr **iff** the test
 /// is unwinding, so a miscalibrated script surfaces as a legible divergence
-/// rather than a bare assertion. Mirrors
-/// `rimap_server::e2e_wire_fetch_skipped::DumpOnPanic`.
+/// rather than a bare assertion. Mirrors the guard in
+/// `crates/rimap-server/tests/e2e_wire_fetch_skipped.rs`.
 ///
-/// The `panicking()` gate is load-bearing, not stylistic. `recorded()` captures
-/// raw client command lines, so the dump contains the plaintext `LOGIN` frame;
-/// printing it unconditionally publishes that frame into a public CI log on
-/// every green run, because the coverage CI step passes
-/// `--success-output final` (issue #692 / PR #746) and so retains a *passing*
-/// test's captured output. Issue #750.
+/// The gate is load-bearing, not stylistic: `recorded()` captures raw client
+/// command lines, so the dump carries the plaintext `LOGIN` frame. Printing it
+/// unconditionally published that frame to a public CI log on every green run,
+/// once the coverage step took `--success-output final` (issue #692 / PR #746)
+/// and so began retaining a *passing* test's captured output. Issue #750.
 ///
-/// Out of scope for `rimap_server::canary_coverage_meta`, and correctly so:
-/// that sweep globs `crates/rimap-server/tests/e2e_wire*.rs` because
-/// `canary::assert_absent` scans artifacts a spawned server child produced
-/// (audit files, transcripts, MCP responses) for a per-run minted canary. The
-/// suites here drive the fake in-process and authenticate with the
-/// `FAKE_PASSWORD` literal from `rimap_fake_imap::fake_imap`, which is public
-/// source text and mints no canary — there is nothing for that sweep to find.
-/// The cost of sitting outside it is that nothing here fails on a
-/// reintroduced unguarded dump, so keep new dialog dumps behind this guard.
+/// No sweep backstops this file. `crates/rimap-server/tests/canary_coverage_meta.rs`
+/// globs `crates/rimap-server/tests/e2e_wire*.rs` — a scope decision from issue
+/// #528, not a consequence of what the sweeps do — and both sweeps it accepts
+/// need a planted canary to look for: `canary::assert_absent` over the harness
+/// tempdir, `canary::assert_login_frame_only` over `recorded()` itself. This
+/// crate plants none; it drives the fake in-process against the hardcoded
+/// `FAKE_PASSWORD` const in `crates/rimap-fake-imap/src/fake_imap.rs`, a literal
+/// already in public source. So nothing here fails on a reintroduced unguarded
+/// dump — keep new dialog dumps behind this guard.
 struct DumpOnPanic<'a>(&'a FakeImapServer);
 
 impl Drop for DumpOnPanic<'_> {
