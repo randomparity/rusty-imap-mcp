@@ -31,12 +31,15 @@
 # must also still contain the fuzz-only packages that prove it is one.
 #
 # Usage:
-#   check-fuzz-lock-parity.sh [--fix] [WORKSPACE_LOCK FUZZ_LOCK...]
+#   check-fuzz-lock-parity.sh [--fix | --list] [WORKSPACE_LOCK FUZZ_LOCK...]
 #
 # With no lockfile arguments the tracked set is discovered from git, so a fuzz
 # workspace whose lockfile gets committed later is covered without editing this
 # script. Explicit paths exist for the companion test. `--fix` realigns each
-# fuzz lockfile from the workspace lockfile and re-verifies.
+# fuzz lockfile from the workspace lockfile and re-verifies. `--list` reports
+# which lockfiles the selection reached and does not rule on parity, so a
+# caller can check glob coverage without its answer depending on whether the
+# tree currently drifts (issue #736).
 #
 # Wired into `just check-fuzz-lock-parity` (part of `just ci`) and the
 # `publish-checks` CI job. Tested by scripts/check-fuzz-lock-parity.test.sh.
@@ -211,14 +214,39 @@ def realign(workspace_lock, fuzz_lock):
 
 
 args = sys.argv[1:]
-fix = bool(args) and args[0] == "--fix"
-if fix:
-    args = args[1:]
+fix = False
+list_only = False
+while args and args[0].startswith("--"):
+    flag = args.pop(0)
+    if flag == "--fix":
+        fix = True
+    elif flag == "--list":
+        list_only = True
+    else:
+        sys.exit(
+            "::error::unknown option {!r}. Usage: check-fuzz-lock-parity.sh "
+            "[--fix | --list] [WORKSPACE_LOCK FUZZ_LOCK...]".format(flag)
+        )
+
+if fix and list_only:
+    sys.exit(
+        "::error::--fix and --list are mutually exclusive: --list reports "
+        "which lockfiles were selected and changes nothing."
+    )
 
 if args:
     workspace_lock, fuzz_locks = args[0], args[1:]
 else:
     workspace_lock, fuzz_locks = WORKSPACE_LOCK, discover_fuzz_locks()
+
+if list_only:
+    # A coverage report, not a verdict. It exits 0 even when the selection is
+    # empty, so a caller comparing discovery against its own expectation gets
+    # an answer that the parity result cannot confound — that coupling is the
+    # bug in #736. The empty case is still an error for every other mode.
+    for lock in fuzz_locks:
+        print(lock)
+    sys.exit(0)
 
 if not fuzz_locks:
     sys.exit(

@@ -4,10 +4,15 @@
 # touching no cargo, network, or repo state.
 #
 # Two cases are deliberately not hermetic, and neither writes anything:
-#   - the last block runs the script in discovery mode against the real repo
-#     (read-only) to prove discovery is anchored to the repo root;
+#   - the last two blocks run the script in discovery mode against the real
+#     repo (read-only) to prove discovery is anchored to the repo root and that
+#     its globs reach every tracked fuzz workspace;
 #   - the realign-failure case invokes the real `cargo`, in a temp directory
 #     with no Cargo.toml so that it fails immediately without network access.
+#
+# Neither real-repo case may depend on whether the lockfiles are currently *in
+# parity* — that state is not this suite's subject, and coupling to it reports
+# a coverage failure for what is really ordinary drift (issue #736).
 #
 # Run: `bash scripts/check-fuzz-lock-parity.test.sh` (or `just
 # test-fuzz-lock-parity`).
@@ -168,6 +173,27 @@ expect_drift "a [[package]] block the parser cannot read is an error" \
 expect_drift "no fuzz lockfiles to compare is an error" \
     "no fuzz lockfiles to check" "$ws"
 
+# --- --list reports the selection without ruling on parity ------------------
+
+# The property the real-repo coverage case below depends on: --list answers the
+# same way whether or not the lockfiles are in parity, so a coverage assertion
+# built on it cannot be reddened by ordinary drift (issue #736).
+write_lock "$ws" "rmcp@2.2.0"
+write_fuzz_lock "$fz" "rmcp@2.1.0"
+if list_out="$("$script" --list "$ws" "$fz" 2>&1)" && [ "${list_out}" = "${fz}" ]; then
+    echo "ok: --list reports the selection and exits 0 despite drift"
+else
+    echo "FAIL: --list did not report just ${fz}:" >&2
+    echo "${list_out}" >&2
+    failures=$((failures + 1))
+fi
+
+expect_drift "an unknown option is rejected rather than read as a path" \
+    "unknown option '--nope'" --nope "$ws" "$fz"
+
+expect_drift "--fix and --list together are rejected" \
+    "mutually exclusive" --fix --list "$ws" "$fz"
+
 # --- --fix must not destroy the lockfile it fails to rebuild ----------------
 
 # realign() has to copy the workspace lockfile to the fuzz lockfile's real path
@@ -239,10 +265,13 @@ fi
 
 unlocked=""
 manifest_count=0
+expected_locks=""
 while IFS= read -r manifest; do
     [ -n "${manifest}" ] || continue
     manifest_count=$((manifest_count + 1))
     lock="${manifest%Cargo.toml}Cargo.lock"
+    expected_locks="${expected_locks}${lock}
+"
     if ! (cd "${repo_root}" && git ls-files --error-unmatch "${lock}" >/dev/null 2>&1); then
         unlocked="${unlocked} ${lock}"
     fi
@@ -258,17 +287,57 @@ else
     echo "ok: all ${manifest_count} tracked fuzz workspaces commit a lockfile"
 fi
 
-# The count the gate reports must match, so that a lockfile tracked but outside
-# the script's globs (a fuzz workspace moved somewhere the globs miss) is a
-# failure here rather than an untested directory.
-counted_out="$(cd "${repo_root}" && "$script" 2>&1)" || true
-counted="$(printf '%s\n' "${counted_out}" | sed -n 's/^ok: \([0-9][0-9]*\) fuzz lockfile.*/\1/p')"
-if [ "${counted}" = "${manifest_count}" ]; then
-    echo "ok: the gate checks all ${manifest_count} of them"
+# --- the gate's globs reach every one of them -------------------------------
+
+# A lockfile tracked but outside the script's globs — a fuzz workspace moved
+# somewhere they miss — must be a failure here rather than an untested
+# directory. The two glob lists are independent copies (the script's in python,
+# this file's above), so they drift apart exactly when someone edits one.
+#
+# Read that from `--list`, which reports the lockfiles discovery selected and
+# rules on nothing. Scraping the gate's `ok: N ...` line instead couples this
+# case to whether the tree is currently in parity: on ordinary drift the gate
+# prints its failure, the scrape yields nothing, and a *coverage* failure is
+# reported for what is really drift (issue #736).
+
+# The lockfiles $2's discovery reaches, from repo root $1, one per line sorted.
+discovered_fuzz_locks() {
+    (cd "$1" && "$2" --list) | LC_ALL=C sort
+}
+
+expected_sorted="$(printf '%s' "${expected_locks}" | LC_ALL=C sort)"
+discovered="$(discovered_fuzz_locks "${repo_root}" "${script}")"
+if [ "${discovered}" = "${expected_sorted}" ]; then
+    echo "ok: the gate's globs reach all ${manifest_count} of them"
 else
-    echo "FAIL: ${manifest_count} fuzz workspace(s) tracked, gate checked '${counted}':" >&2
-    echo "${counted_out}" >&2
+    echo "FAIL: the gate's discovery globs do not reach every fuzz workspace." >&2
+    echo "      tracked fuzz lockfiles:" >&2
+    printf '%s\n' "${expected_sorted}" | sed 's/^/        /' >&2
+    echo "      reached by the gate's globs:" >&2
+    printf '%s\n' "${discovered}" | sed 's/^/        /' >&2
     failures=$((failures + 1))
+fi
+
+# And that assertion has to bite. Narrow a copy of the gate's globs to the repo
+# root so they no longer reach the nested crates/rimap-server/fuzz workspace,
+# and the comparison above must reject it. If the substitution ever stops
+# matching, the copy is identical to the original and this case fails loudly
+# rather than passing vacuously — which the equality guard below checks first.
+narrowed="${tmp}/narrowed-gate.sh"
+sed 's|^FUZZ_LOCK_GLOBS = .*|FUZZ_LOCK_GLOBS = ["fuzz/Cargo.lock"]|' \
+    "$script" >"${narrowed}"
+chmod +x "${narrowed}"
+
+if cmp -s "${narrowed}" "$script"; then
+    echo "FAIL: narrowing FUZZ_LOCK_GLOBS changed nothing — the substitution" >&2
+    echo "      no longer matches, so the coverage case is untested" >&2
+    failures=$((failures + 1))
+elif [ "$(discovered_fuzz_locks "${repo_root}" "${narrowed}")" = "${expected_sorted}" ]; then
+    echo "FAIL: globs narrowed past a tracked fuzz workspace still compared" >&2
+    echo "      equal — the coverage assertion does not bite" >&2
+    failures=$((failures + 1))
+else
+    echo "ok: the coverage assertion fails when the globs miss a workspace"
 fi
 
 # --- result -----------------------------------------------------------------
