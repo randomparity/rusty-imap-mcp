@@ -1,7 +1,35 @@
 //! AC1 enforcement (issue #528): every `e2e_wire*.rs` suite references the canary
-//! sweep, and per file its `assert_absent` count is >= its `#[tokio::test]`
-//! count so no single test can spawn a harness without sweeping. Source-text
-//! check; host-runnable, no container.
+//! sweep, and every `#[tokio::test]` region within one calls a sweep of its own,
+//! so no single test can spawn a harness without sweeping. Source-text check;
+//! host-runnable, no container.
+//!
+//! # Why the glob stops at `crates/rimap-server/tests/e2e_wire*.rs`
+//!
+//! A scope choice from #528 — and, for the one escape found outside it, these
+//! sweeps would not have helped anyway. That escape was issue #750:
+//! `crates/rimap-imap/tests/adversarial_imap.rs` printed the fake's recorded
+//! dialog, plaintext `LOGIN` frame and all, on its *passing* path.
+//!
+//! Neither sweep reads the channel it escaped through. `canary::assert_absent`
+//! walks files under the roots it is handed plus explicit `extra` strings;
+//! `canary::assert_login_frame_only` walks the fake's `recorded()` vector. The
+//! #750 dump went to the test process's **stderr** via `eprintln!`, which
+//! `--success-output final` (PR #746) then retained in the CI log. A canary
+//! planted in that very test would have sailed through both.
+//!
+//! So do not read this glob as a promise that files outside it are unreachable
+//! — `crates/rimap-imap/tests/` is not canary-free (it holds the source of
+//! truth for `canary::DOVECOT_CANARY_PASSWORD`, and its `integration/` targets
+//! spawn containers), and `FakeImapServer::connection_with` takes an arbitrary
+//! resolver, so a fake-backed suite there *could* plant one. Widening would be
+//! cross-crate — `tests_dir()` is this crate's `CARGO_MANIFEST_DIR` — and would
+//! still miss a stderr dump.
+//!
+//! What catches a dump of that shape is a `DumpOnPanic` guard: gate the print
+//! on `std::thread::panicking()` so it renders only when the test is already
+//! failing. The fake-backed suites under this glob use one, and
+//! `adversarial_imap.rs` now does too. Any new dialog dump needs that guard,
+//! inside this glob or outside it — these sweeps will not catch it for you.
 // Only `unwrap_used` is expected — this file uses `.unwrap()` and `assert!`
 // (which is not clippy::panic). A `panic` expectation here would be unfulfilled.
 #![expect(clippy::unwrap_used, reason = "test")]
