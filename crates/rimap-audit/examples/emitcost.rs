@@ -13,7 +13,9 @@
 //! cheap on local storage, which is a claim about a filesystem, not about this
 //! code.
 //!
-//! **Give it an empty scratch directory, never a configured `audit.path`.**
+//! **Give it an empty scratch directory, never one that holds a live audit
+//! log.** (The argument is a directory; `audit.path` names the log *file*
+//! inside one.)
 //! This writes `WARMUP + n` real-shaped `auth` records for a fabricated
 //! account, and it opens at [`Seq::FIRST`] every time. Against a file that
 //! already holds records that restarts the sequence, putting duplicate `seq`

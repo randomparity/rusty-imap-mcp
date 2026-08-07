@@ -174,8 +174,8 @@ exposure, not a new one, since the guard's write had the same property from
 
 Committed at
 [`crates/rimap-audit/examples/emitcost.rs`](../../crates/rimap-audit/examples/emitcost.rs).
-Build `--release` and pass an **empty scratch directory** — never a configured
-`audit.path`, for the reason its module doc gives:
+Build `--release` and pass an **empty scratch directory** — never one holding a
+live audit log, for the reason its module doc gives:
 
 ```text
 cargo run -p rimap-audit --release --example emitcost -- <dir> [n]
@@ -336,8 +336,8 @@ test-doc` is `cargo test --workspace --doc`, which reaches rustdoc comments and
 no markdown file.
 
 The section is now a link to `crates/rimap-audit/examples/emitcost.rs`, which
-`just lint`'s `--all-targets` clippy — and CI's `clippy`, `check`, and
-`test (MSRV)` jobs — build on every run. The literals became
+`just lint`'s `--all-targets` clippy — and CI's required `clippy`,
+`check (macOS)`, and `test (MSRV 1.88.0)` checks — build on every run. The literals became
 `AuditOptions::new(path, Seq::FIRST)` and `AuthEvent::new(..)` with `account`
 assigned afterwards; both constructors produce exactly the values the literals
 named, so the harness measures what it measured. The committed version reports

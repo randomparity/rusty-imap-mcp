@@ -76,12 +76,13 @@ dependency — the same position as the reader's scratch crate, so
 `#[non_exhaustive]` is in force on both offending types. It is built by
 `just lint` — `cargo clippy --workspace --all-targets --all-features --locked
 -- -D warnings`, which `just ci` runs — and by `just test-msrv`'s
-`--all-targets` check. In CI it is built three more times: the `clippy` job
-runs the same command, and the `check` and `test (MSRV)` jobs both pass
-`--all-targets`. (`just check` also builds it, but is not one of `just ci`'s
-prerequisites.) No new recipe, no new CI job: the next `#[non_exhaustive]`,
-renamed field, or changed constructor signature that touches this harness
-reddens the required lint check on the PR that introduces it.
+`--all-targets` check. In CI it is built by the required `clippy`,
+`check (macOS)`, and `test (MSRV 1.88.0)` checks, and incidentally by any job
+running `cargo nextest`, which builds example targets too. (`just check` also
+builds it, but is not one of `just ci`'s prerequisites.) No new recipe, no new
+CI job: the next `#[non_exhaustive]`, renamed field, or changed constructor
+signature that touches this harness reddens the required `clippy` check on the
+PR that introduces it.
 
 An example rather than a doctest because a doctest cannot be handed a directory
 and run; the harness's whole purpose is to be executed against real storage, and
