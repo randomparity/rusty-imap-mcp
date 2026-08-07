@@ -45,13 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforced union reached only the `effective folder policy` log line and left
   no trace in the audit trail; `process_start` structurally could not carry it,
   being written before any IMAP session exists. The new record is written per
-  account once that account's guard is constructed, so an account that fails to
-  boot leaves none — while `process_start` still carries every configured
-  account's matrix, unchanged in timing and content (#632 is untouched).
-  `--dry-run` is unchanged: it has no IMAP session and so nothing to add. Older
-  readers skip the new kind and count it rather than treating the file as
-  corrupt, but note that `audit merge` run by an older binary omits these
-  records from its output. See #761, ADR-0021, and `docs/audit-log.md`.
+  account once that account's guard is constructed, so an account that fails
+  *before its guard is built* leaves none — while `process_start` still carries
+  every configured account's matrix, unchanged in timing and content (#632 is
+  untouched). `--dry-run` is unchanged: it has no IMAP session and so nothing to
+  add. Readers carrying the unknown-kind skip (also new in this release) tolerate
+  the new kind, though `audit merge` run by such a binary omits these records
+  from its output; `v0.1.0`, which predates that skip, aborts on them instead.
+  See #761, ADR-0021, and `docs/audit-log.md`.
 - crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
   new `publish-crates` release job. Publishes in dependency order with an
   idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by

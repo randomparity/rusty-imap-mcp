@@ -666,9 +666,13 @@ async fn build_registry(
         // account that fails before this point keeps its `process_start`
         // matrix (#632) and leaves no `folder_policy`, which is how a reader
         // tells which account did not boot.
+        // The rest pattern is required, not stylistic: this binary is its own
+        // crate, so `ResolvedFolderPolicy`'s `#[non_exhaustive]` is in force
+        // here exactly as it is for any downstream consumer (rustc E0638).
         let rimap_server::boot::discovery::ResolvedFolderPolicy {
             special_use,
             folder_guard,
+            ..
         } = rimap_server::boot::discovery::resolve_folder_policy(acfg, &imap, audit).await?;
 
         let smtp = build_smtp_client(acfg, credentials)?;

@@ -58,7 +58,8 @@ pub struct Filter {
     pub until: Option<OffsetDateTime>,
     /// If set, only `tool_start` / `tool_end` records whose `tool` field
     /// exactly matches are returned. All other payload kinds
-    /// (`process_start`, `process_end`, `auth`, `config`) are excluded.
+    /// (`process_start`, `process_end`, `auth`, `config`, `folder_policy`)
+    /// are excluded.
     pub tool: Option<String>,
     /// Required `kind` field (exact match).
     pub kind: Option<String>,

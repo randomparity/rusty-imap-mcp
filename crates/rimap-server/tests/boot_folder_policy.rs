@@ -171,12 +171,16 @@ async fn the_guard_returned_enforces_every_folder_the_record_lists() {
     let listed = record["protected_folders"]
         .as_array()
         .expect("protected_folders is an array");
-    assert!(
-        !listed.is_empty(),
-        "a vacuous pass would prove nothing about the guard",
-    );
+
+    // `check_protected` refuses `INBOX` unconditionally, whatever the guard
+    // was built from, so iterating the list alone would pass on a guard built
+    // from nothing. Require at least one entry that is not INBOX.
+    let mut discriminating = 0_usize;
     for entry in listed {
         let folder = entry["folder"].as_str().expect("folder is a string");
+        if !folder.eq_ignore_ascii_case("INBOX") {
+            discriminating += 1;
+        }
         assert!(
             outcome
                 .folder_guard
@@ -187,10 +191,116 @@ async fn the_guard_returned_enforces_every_folder_the_record_lists() {
         );
     }
     assert!(
+        discriminating > 0,
+        "every listed folder was INBOX, which the guard refuses regardless of \
+         how it was built -- this pass would have been vacuous",
+    );
+
+    // The control: a guard that refused everything would satisfy the loop
+    // above. A folder on neither list must still be allowed.
+    assert!(
+        outcome
+            .folder_guard
+            .check_protected("Archive", "delete_folder")
+            .is_ok(),
+        "`Archive` is on no list, so a guard built from the recorded policy \
+         must permit it -- otherwise the loop above proves only that the \
+         guard refuses everything",
+    );
+
+    assert!(
         outcome
             .special_use
             .sent()
             .is_some_and(|name| name == DISCOVERED_SENT),
         "the returned map is the one discovery produced",
+    );
+}
+
+/// A `LIST` reply with no special-use attribute anywhere -- the ordinary case
+/// on a plain IMAP server.
+fn list_without_special_use() -> Vec<Step> {
+    let mut steps = login_preamble("IMAP4rev1");
+    steps.extend([
+        Step::Expect { verb: "LIST" },
+        Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
+        Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"Archive\"\r\n".to_vec()),
+        Step::Reply {
+            text: "OK LIST completed",
+        },
+    ]);
+    steps
+}
+
+/// A server that declares nothing special-use still gets `ran`, and the list
+/// is the configured one with no `discovered` entry.
+///
+/// This is the case where a `Some(&protected)`-vs-`None` miswiring is hardest
+/// to see: the folder list looks identical either way, and only
+/// `special_use_discovery` distinguishes them. It is also the common
+/// production shape, so leaving it untested would mean the acceptance test
+/// covers only the exotic path.
+#[tokio::test]
+async fn a_server_declaring_no_special_use_folders_still_records_ran() {
+    let dir = TempDir::new().expect("tempdir");
+    let audit_path = dir.path().join("audit.jsonl");
+    let fake = FakeImapServer::start(list_without_special_use()).await;
+    let acfg = account_config(&dir);
+
+    {
+        let audit = writer_at(&audit_path);
+        let imap = fake.connection("alice@work.test");
+        resolve_folder_policy(&acfg, &imap, &audit)
+            .await
+            .expect("folder policy resolves");
+    }
+
+    let record = folder_policy_line(&audit_path);
+    assert_eq!(
+        record["special_use_discovery"], "ran",
+        "discovery ran and found nothing; `not_run` would be the claim that \
+         nobody asked, which is a different and false statement",
+    );
+    assert_eq!(
+        record["protected_folders"],
+        serde_json::json!([{"folder": "INBOX", "source": "account"}]),
+        "nothing was discovered, so the list is the configured one",
+    );
+}
+
+/// One record per account, which is what makes an account's *absence* from the
+/// log readable as "it did not boot" (`docs/audit-log.md`).
+#[tokio::test]
+async fn each_account_gets_its_own_record() {
+    let dir = TempDir::new().expect("tempdir");
+    let audit_path = dir.path().join("audit.jsonl");
+    let fake = FakeImapServer::start(list_with_special_use_sent()).await;
+    let acfg = account_config(&dir);
+
+    {
+        let audit = writer_at(&audit_path);
+        // Two accounts differing only in name: the same config re-labelled, so
+        // any difference in the two records can only come from the emitter.
+        for name in ["work", "personal"] {
+            let mut acfg = acfg.clone();
+            acfg.id = AccountId::new(name).expect("account id");
+            let imap = fake.connection("alice@work.test");
+            resolve_folder_policy(&acfg, &imap, &audit)
+                .await
+                .expect("folder policy resolves");
+        }
+    }
+
+    let contents = std::fs::read_to_string(&audit_path).expect("audit file readable");
+    let accounts: Vec<String> = contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|rec| rec.get("kind").and_then(Value::as_str) == Some("folder_policy"))
+        .filter_map(|rec| rec["account"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        accounts,
+        vec!["work".to_string(), "personal".to_string()],
+        "one record per account, in boot order, each naming its own account",
     );
 }
