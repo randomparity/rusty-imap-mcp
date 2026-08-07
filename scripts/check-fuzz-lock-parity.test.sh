@@ -3,10 +3,11 @@
 # script against synthetic lockfiles in a temp dir via its explicit-path form,
 # touching no cargo, network, or repo state.
 #
-# Two cases are deliberately not hermetic, and neither writes anything:
-#   - the last two blocks run the script in discovery mode against the real
-#     repo (read-only) to prove discovery is anchored to the repo root and that
-#     its globs reach every tracked fuzz workspace;
+# Some cases are deliberately not hermetic, and none of them writes anything:
+#   - the real-repo blocks below run the script in discovery mode against this
+#     repository (read-only) to prove discovery is anchored to the repo root,
+#     that every tracked fuzz workspace commits a lockfile, and that the
+#     script's globs reach all of them;
 #   - the realign-failure case invokes the real `cargo`, in a temp directory
 #     with no Cargo.toml so that it fails immediately without network access.
 #
@@ -306,8 +307,15 @@ discovered_fuzz_locks() {
 }
 
 expected_sorted="$(printf '%s' "${expected_locks}" | LC_ALL=C sort)"
-discovered="$(discovered_fuzz_locks "${repo_root}" "${script}")"
-if [ "${discovered}" = "${expected_sorted}" ]; then
+if ! discovered="$(discovered_fuzz_locks "${repo_root}" "${script}")"; then
+    # Without this the bare assignment would trip errexit, killing the suite
+    # before it prints either a diagnosis or its failure summary. Re-run for
+    # the diagnosis: the pipeline's stdout was consumed by `sort` and the
+    # explanation went to stderr.
+    echo "FAIL: the gate's --list mode did not run:" >&2
+    (cd "${repo_root}" && "$script" --list) >&2 2>&1 || true
+    failures=$((failures + 1))
+elif [ -n "${expected_sorted}" ] && [ "${discovered}" = "${expected_sorted}" ]; then
     echo "ok: the gate's globs reach all ${manifest_count} of them"
 else
     echo "FAIL: the gate's discovery globs do not reach every fuzz workspace." >&2
@@ -320,9 +328,14 @@ fi
 
 # And that assertion has to bite. Narrow a copy of the gate's globs to the repo
 # root so they no longer reach the nested crates/rimap-server/fuzz workspace,
-# and the comparison above must reject it. If the substitution ever stops
-# matching, the copy is identical to the original and this case fails loudly
-# rather than passing vacuously — which the equality guard below checks first.
+# and the comparison above must reject it.
+#
+# Two ways that copy could stop being a valid probe, both of which would let
+# this case pass while testing nothing, so both are guarded: the substitution
+# stops matching (the copy is then identical to the original — `cmp`), or it
+# matches but leaves a copy that does not run, e.g. because FUZZ_LOCK_GLOBS grew
+# onto continuation lines the pattern orphans (the copy then reports no
+# lockfiles, which differs from expected for the wrong reason — the exit status).
 narrowed="${tmp}/narrowed-gate.sh"
 sed 's|^FUZZ_LOCK_GLOBS = .*|FUZZ_LOCK_GLOBS = ["fuzz/Cargo.lock"]|' \
     "$script" >"${narrowed}"
@@ -332,7 +345,12 @@ if cmp -s "${narrowed}" "$script"; then
     echo "FAIL: narrowing FUZZ_LOCK_GLOBS changed nothing — the substitution" >&2
     echo "      no longer matches, so the coverage case is untested" >&2
     failures=$((failures + 1))
-elif [ "$(discovered_fuzz_locks "${repo_root}" "${narrowed}")" = "${expected_sorted}" ]; then
+elif ! narrowed_locks="$(discovered_fuzz_locks "${repo_root}" "${narrowed}")"; then
+    echo "FAIL: the glob-narrowed gate copy does not run, so the coverage" >&2
+    echo "      case is untested:" >&2
+    (cd "${repo_root}" && "${narrowed}" --list) >&2 2>&1 || true
+    failures=$((failures + 1))
+elif [ "${narrowed_locks}" = "${expected_sorted}" ]; then
     echo "FAIL: globs narrowed past a tracked fuzz workspace still compared" >&2
     echo "      equal — the coverage assertion does not bite" >&2
     failures=$((failures + 1))
