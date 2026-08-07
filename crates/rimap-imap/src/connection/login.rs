@@ -12,7 +12,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use async_imap::imap_proto::{Response, Status};
-use async_imap::types::UnsolicitedResponse;
+use async_imap::types::{Capabilities, Capability, UnsolicitedResponse};
 use rimap_core::auth_event::AuthEvent;
 use secrecy::ExposeSecret;
 use tokio::net::TcpStream;
@@ -223,11 +223,9 @@ impl Connection {
     /// produce. That is a property of the fold, not of the parser blocker
     /// above, and it holds however the upstream question is settled.
     ///
-    /// Both probes are also literal-case: `has_str` special-cases `IMAP4rev1`
-    /// case-insensitively but compares every other atom exactly, so a server
-    /// spelling it `IMAP4REV2` reads as absent. That is #735, and it is a
-    /// fail-safe direction — the listing degrades to whatever its other atoms
-    /// say.
+    /// Every probe below goes through [`advertises`], not `has_str`, because
+    /// capability atoms are case-insensitive and `has_str` compares all but
+    /// `IMAP4rev1` byte-exactly (#735).
     async fn read_capabilities(session: &mut ImapSession) -> ServerCapabilities {
         let caps = match session.capabilities().await {
             Ok(caps) => caps,
@@ -242,9 +240,9 @@ impl Connection {
             }
         };
 
-        let rev2 = caps.has_str("IMAP4rev2");
+        let rev2 = advertises(&caps, "IMAP4rev2");
 
-        if !caps.has_str("IMAP4rev1") && !rev2 {
+        if !advertises(&caps, "IMAP4rev1") && !rev2 {
             tracing::warn!(
                 advertised = caps.len(),
                 "post-login CAPABILITY reply omitted both IMAP4rev1 and \
@@ -259,8 +257,8 @@ impl Connection {
         // RFC 9051 Appendix E folds MOVE and UIDPLUS into the base protocol, so
         // an IMAP4rev2 server advertises both by advertising the revision.
         ServerCapabilities::Known {
-            has_move: caps.has_str("MOVE") || rev2,
-            has_uidplus: caps.has_str("UIDPLUS") || rev2,
+            has_move: advertises(&caps, "MOVE") || rev2,
+            has_uidplus: advertises(&caps, "UIDPLUS") || rev2,
         }
     }
 
@@ -501,4 +499,29 @@ impl Connection {
             );
         }
     }
+}
+
+/// `true` when `caps` advertises `probe`, compared ASCII-case-insensitively.
+///
+/// RFC 3501 §9 defines a capability as an `atom` and IMAP protocol keywords are
+/// case-insensitive, so `MOVE`, `Move`, and `move` name one capability.
+/// `Capabilities::has_str` disagrees: read against async-imap 0.11.3 it
+/// special-cases `IMAP4rev1` and the `AUTH=` prefix, then falls through to a
+/// `HashSet` lookup on `Capability::Atom(String)`, whose `Eq` is byte-exact. So
+/// a conformant server spelling `uidplus` in lowercase reads as absent there,
+/// and the resulting `Known { false, false }` is the pair that selects the
+/// folder-wide `EXPUNGE` against a server that in fact supports `UID EXPUNGE` —
+/// #649's data-loss path reached by a spelling (#735).
+///
+/// `Capability::Auth` never matches. async-imap models `AUTH=` mechanisms as
+/// their own variant, so probing one would need prefix handling that no caller
+/// wants; pass bare capability atoms.
+fn advertises(caps: &Capabilities, probe: &str) -> bool {
+    caps.iter().any(|cap| match cap {
+        // imap-proto parses this atom with `tag_no_case` into its own variant,
+        // so the server's spelling is already gone by the time we see it.
+        Capability::Imap4rev1 => probe.eq_ignore_ascii_case("IMAP4rev1"),
+        Capability::Atom(atom) => atom.eq_ignore_ascii_case(probe),
+        Capability::Auth(_) => false,
+    })
 }
