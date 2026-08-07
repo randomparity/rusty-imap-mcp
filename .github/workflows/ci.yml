@@ -476,17 +476,31 @@ jobs:
           tool: zizmor
       - run: zizmor .github/workflows/
 
-  sonarqube:
-    name: SonarQube
+  # The coverage half of the SonarQube analysis. This job compiles and executes
+  # every build script and proc macro in the dependency graph plus the
+  # workspace's test binaries, so it must never hold a credential: a build
+  # script can append to $GITHUB_ENV / $GITHUB_PATH and reach a later step in
+  # the same job. It therefore names no `environment:` and reads no `secrets.*`
+  # — the scan half below holds SONAR_TOKEN and compiles nothing, and the two
+  # halves exchange `lcov.info` through a run-scoped artifact (#759).
+  #
+  # Adding a secret to this job, or a compile to the scan job, undoes the split.
+  coverage:
+    name: coverage (llvm-cov)
     # Run on `push` to main; on a PR, run only for a non-Dependabot PR whose
-    # head branch lives in this repository. Fork PRs and Dependabot's PRs must
-    # not reach SONAR_TOKEN: this job runs `cargo llvm-cov nextest
-    # --all-features`, which compiles and executes every build script and proc
-    # macro in the dependency graph plus the workspace's test binaries, and
-    # then hands the token to the scan step in the same job. On a Dependabot PR
-    # that graph is the freshly bumped one. Splitting the compile from the scan
-    # so the token is never in the compiling job is #759; this gate narrows who
-    # reaches that job, it does not isolate it.
+    # head branch lives in this repository. This is the same gate as the
+    # `sonarqube` job below and the two must stay in step. It is duplicated
+    # rather than shared because GitHub Actions has no job-level anchor or
+    # reusable `if:`; the duplication fails loud rather than silent in the
+    # direction that matters, because a scan job that runs where this one did
+    # not reddens on its `needs.coverage.result` guard rather than scanning a
+    # stale or absent report.
+    #
+    # The gate is no longer what keeps SONAR_TOKEN away from a freshly bumped
+    # dependency graph — the split is (#759). It survives as a cost and blast-
+    # radius control: it keeps a full instrumented build off every Dependabot
+    # and fork PR, and it keeps fork head code from running on a job whose
+    # cache the `push`-to-`main` run restores.
     #
     # Read from the PR itself, never from `github.actor`. The actor is whoever
     # triggered the *current* event, so clicking "Update branch" on a
@@ -510,8 +524,9 @@ jobs:
     # the same today, since this workflow triggers on exactly `push` and
     # `pull_request`. But a trigger added later (`merge_group`, or the
     # `pull_request_target` this repo already uses elsewhere) would satisfy a
-    # denylist and open the fork guard completely, running the token-bearing
-    # job on fork head code. Under the allowlist it skips instead: the scan is
+    # denylist and open the fork guard completely, running both halves —
+    # including the token-bearing scan — on fork head code. Under the
+    # allowlist they skip instead: the scan is
     # silently lost until someone extends this line, which is the safe way to
     # be wrong. Naming `push` also keeps the condition free of any reliance on
     # how GitHub coerces the null `github.event.pull_request` — on `push` the
@@ -522,12 +537,6 @@ jobs:
     # is `null` against a string and therefore false. Main-branch analysis
     # would stop silently and greenly, since nothing gates on a push run.
     #
-    # Every PR into `main` still reaches this job and reports a conclusion, so
-    # the required check is never simply absent — a skipped required check
-    # satisfies branch protection, a missing one wedges it. (A PR based on any
-    # other branch does not start this workflow at all, and protection covers
-    # only `main`.)
-    #
     # Consequence worth knowing: a maintainer who takes over a Dependabot PR
     # and pushes hand-written code to that branch gets no scan, permanently and
     # greenly, because the author never changes. Push that work under a new
@@ -537,32 +546,10 @@ jobs:
       || (github.event.pull_request.user.login != 'dependabot[bot]'
           && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
-    # Naming an environment puts each use of the token in the deployment log
-    # and gives a place to attach policy later. It does NOT currently scope the
-    # secret: `SONAR_TOKEN` is a repository-level secret, and the `sonarcloud`
-    # environment holds none, so any job in any workflow here can read it by
-    # naming it. Moving the secret onto this environment would scope it to the
-    # jobs that name the environment; the branch dimension stays open either
-    # way, for the reason below. Tracked in #755 — do not read this line as if
-    # it had already happened.
-    #
-    # Do NOT add required reviewers or a deployment-branch policy here, which
-    # an earlier version of this comment invited. SonarQube is a required
-    # status check on `main`: a branch policy matches branch and tag names, so
-    # it matches no `refs/pull/N/merge` ref and fails the job on every PR, and
-    # required reviewers park it in `waiting` until a human approves, pending
-    # the check on every PR. #755 proposes branch policies across all four
-    # environments; its comment thread carves this one out for that reason.
-    # dependabot-fuzz-lock.yml warns against required reviewers too, for a
-    # different reason — that job is not a required check; a human gate would
-    # simply reinstate the manual step it exists to remove.
-    environment: sonarcloud
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-          # Shallow clones disable blame information needed by SonarCloud.
-          fetch-depth: 0
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
@@ -644,6 +631,105 @@ jobs:
               printf "lcov.info: %d/%d lines covered (%.2f%%)\n", hit, found, 100 * hit / found
             }
           ' lcov.info
+      # Intra-run hand-off to the scan job. Same run, same trust level, so no
+      # `workflow_run` cross-trust handling is involved; the retention is one
+      # day because nothing outside this run consumes it.
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: lcov-coverage
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 1
+
+  # The scan half. Holds SONAR_TOKEN and the `sonarcloud` environment, and
+  # deliberately compiles nothing: no toolchain, no cargo, no dependency build
+  # script runs in this job (#759). `lcov.info` arrives from `coverage` as an
+  # artifact and is treated as data — read by the scanner, never interpreted as
+  # a command here.
+  sonarqube:
+    name: SonarQube
+    needs: coverage
+    # `SonarQube` is a required status check on `main`, and this name is the
+    # context string branch protection matches. Do not rename this job, and do
+    # not move the name onto `coverage`: a required context that never reports
+    # hangs pending forever rather than failing, and with `strict: true` there
+    # is no self-service recovery — every PR in the repo becomes unmergeable
+    # until someone edits protection.
+    #
+    # `!cancelled()` is what keeps the split from converting a required gate
+    # into a decorative one. A `needs:`-dependent job is SKIPPED by default
+    # when its dependency fails, and a skipped required check SATISFIES branch
+    # protection — so without this the `SonarQube` context would go green while
+    # the real failure sat on `coverage`, which protection does not require.
+    # With it, a failed or skipped `coverage` reaches the guard step below and
+    # this job reports RED. (`!cancelled()` rather than `always()`: a run
+    # cancelled by `concurrency` should not manufacture a red check on a run
+    # nobody is waiting for.) The alternative remedy — adding `coverage` to the
+    # required contexts — was not taken, because it needs a branch-protection
+    # edit and so cannot ship with the workflow change that requires it.
+    #
+    # The second half of the condition is the #754 gate, identical to the one
+    # on `coverage`; see that job for why each term is shaped as it is. Both
+    # jobs must carry it: with only this one, `coverage` would run on fork PRs.
+    #
+    # Every PR into `main` still reaches this job and reports a conclusion, so
+    # the required check is never simply absent — a skipped required check
+    # satisfies branch protection, a missing one wedges it. (A PR based on any
+    # other branch does not start this workflow at all, and protection covers
+    # only `main`.)
+    if: >-
+      !cancelled()
+      && (github.event_name == 'push'
+          || (github.event.pull_request.user.login != 'dependabot[bot]'
+              && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    # Naming an environment puts each use of the token in the deployment log
+    # and gives a place to attach policy later. It does NOT currently scope the
+    # secret: `SONAR_TOKEN` is a repository-level secret, and the `sonarcloud`
+    # environment holds none, so any job in any workflow here can read it by
+    # naming it. Moving the secret onto this environment would scope it to the
+    # jobs that name the environment; the branch dimension stays open either
+    # way, for the reason below. Tracked in #755 — do not read this line as if
+    # it had already happened.
+    #
+    # Do NOT add required reviewers or a deployment-branch policy here, which
+    # an earlier version of this comment invited. SonarQube is a required
+    # status check on `main`: a branch policy matches branch and tag names, so
+    # it matches no `refs/pull/N/merge` ref and fails the job on every PR, and
+    # required reviewers park it in `waiting` until a human approves, pending
+    # the check on every PR. #755 proposes branch policies across all four
+    # environments; its comment thread carves this one out for that reason.
+    # dependabot-fuzz-lock.yml warns against required reviewers too, for a
+    # different reason — that job is not a required check; a human gate would
+    # simply reinstate the manual step it exists to remove.
+    environment: sonarcloud
+    steps:
+      # Runs first and reddens the required check when `coverage` did not
+      # succeed. `download-artifact` would fail too, but on a 404 that reads
+      # like an infrastructure fault; this says which job concluded what.
+      - name: Require a successful coverage build
+        if: ${{ needs.coverage.result != 'success' }}
+        env:
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+        run: |
+          echo "::error::coverage job concluded '${COVERAGE_RESULT}' — there is no lcov.info to scan"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # Shallow clones disable blame information needed by SonarCloud.
+          fetch-depth: 0
+      - name: Download coverage report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: lcov-coverage
+      # `sonar.rust.lcov.reportPaths=lcov.info` is resolved relative to the
+      # workspace, and the scanner exits 0 on a report it cannot read. The
+      # producing job already validated the contents; this only confirms the
+      # transfer landed something.
+      - name: Verify the downloaded lcov.info is present and non-empty
+        run: test -s lcov.info
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f  # v8.2.1
         env:

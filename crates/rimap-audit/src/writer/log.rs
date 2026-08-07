@@ -151,6 +151,25 @@ impl AuditWriter {
         self.emit(crate::record::Payload::ProcessEnd(payload))
     }
 
+    /// Build a `folder_policy` record from `payload`, allocate a seq, and
+    /// write it. One per account, emitted once that account's `FolderGuard`
+    /// exists (#761, ADR-0021).
+    ///
+    /// The record struct directly, not a `*Inputs` shim: every field is
+    /// carried verbatim and nothing is derived here.
+    ///
+    /// `folder_policy` **is** fsynced; see the private `needs_fsync` helper in
+    /// `writer/emit.rs` for why it sits with the lifecycle kinds.
+    ///
+    /// # Errors
+    /// Propagates any error from `allocate_seq` or `write_record`.
+    pub fn log_folder_policy(
+        &self,
+        payload: crate::record::FolderPolicy,
+    ) -> Result<crate::record::ids::Seq, AuditError> {
+        self.emit(crate::record::Payload::FolderPolicy(payload))
+    }
+
     /// Build a `process_start` record from `inputs` and the writer's own
     /// `process_id`, allocate a seq, and write it. Computes the
     /// `audit_file_inode_changed` tamper signal from

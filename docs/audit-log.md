@@ -105,6 +105,27 @@ spelling, reordering fields, removing a field, or repurposing an existing
 versioned file, not a field edit, because the files it invalidates are already
 written and are append-only by design.
 
+**Adding a whole new `kind` is a third case, and it rests on a different
+mechanism.** A new *field* is tolerated by `#[serde(default)]`, which lets an
+old reader parse a line carrying something it does not know. That does nothing
+for a new kind: an old reader meeting an unfamiliar `kind` has no payload type
+to deserialize into at all. What covers it is the unknown-`kind` skip above --
+the line is dropped, counted, and reported on stderr, never treated as
+corruption. Both are "additive", and they are not interchangeable: **a new kind
+survives an old reader by being skipped, a new field by being parsed.** The
+practical difference is that a merge run by an older binary *keeps* the data in
+the field case and *loses the whole record* in the kind case. Reserve a new kind
+for what genuinely cannot be a field. `folder_policy` (#761) is the first kind
+added under this tolerance; ADR-0021 argues why it could not be a field.
+
+**The unknown-`kind` tolerance itself is unreleased.** It arrived in #717, and
+`v0.1.0` -- the only tag -- predates it: that binary's reader has no
+unknown-`kind` path and **aborts** on a `folder_policy` line rather than
+skipping it. Both #717 and `folder_policy` land in the same unreleased `0.2.0`
+cycle, so no released reader will ever meet a kind it cannot skip. Until that
+release exists, a `v0.1.0` binary pointed at a file written by a current build
+is the one case this contract does not cover.
+
 `crates/rimap-audit/tests/non_exhaustive_record.rs` holds this contract as
 byte-exact golden lines. A diff there means the format moved.
 
@@ -241,18 +262,97 @@ expungeable on an account that never asked for it (#624 / ADR-0013).
 account registry is built, so no IMAP `LIST` has run and no special-use folder
 is known yet; `protected_folders` on this record is the *configured* list.
 
-**The discovery-derived union reaches you in exactly one place: the boot log
-line.** It is emitted at `info` level, once per account, after the
-`FolderGuard` is built, under the message `effective folder policy`, and it
-carries `special_use_discovery=ran`. If you want to see which server folders
-your accounts actually protect, that line is what to grep for -- the audit log
-does not have it, and neither does `--dry-run`, which opens no IMAP session
-and prints the configured list under a header that says so.
+**For the enforced union, read the [`folder_policy`](#folder_policy) record**
+(#761). It is written per account once that account's `FolderGuard` exists, and
+it is the record whose folder lists can carry `discovered` entries. The same
+union is also emitted at `info` level under the message
+`effective folder policy` -- the live operator's view of what the durable
+record says.
 
-Getting the union into `process_start` would mean writing that record after
-IMAP boot, which would leave an account that fails to come up with no
-`process_start` at all. The trade is not worth it; tracked as the remaining
-half of #696.
+Getting the union into `process_start` itself would mean writing that record
+after IMAP boot, which would leave an account that fails to come up with no
+`process_start` at all. That trade is not worth one field, which is why
+`folder_policy` is a separate kind rather than a change to this one; ADR-0021
+records the reasoning. `--dry-run` still shows the configured list only, under
+headings that say so: it opens no IMAP session and cannot know the union.
+
+### `folder_policy`
+
+One record per account, written once that account's `FolderGuard` has been
+built. **This is the record that says what is actually enforced** (#761,
+ADR-0021): its `protected_folders` is the post-discovery union the guard was
+handed, so unlike `process_start` it can and does carry `discovered` entries.
+
+```json
+{
+  "seq": 4,
+  "ts": "2026-05-05T12:00:00.234Z",
+  "process_id": "01HM0000000000000000000000",
+  "kind": "folder_policy",
+  "account": "work",
+  "protected_folders": [
+    {"folder": "INBOX", "source": "inherited"},
+    {"folder": "[Gmail]/Sent Mail", "source": "discovered"}
+  ],
+  "special_use_discovery": "ran",
+  "expunge_folders": [
+    {"folder": "Trash", "source": "inherited"}
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `account` | Account name from config (`default` for a flat config) |
+| `protected_folders[].folder` | A folder name in the enforced `protected_folders` list |
+| `protected_folders[].source` | `account`, `inherited`, or `discovered` -- see [Folder-list provenance](#folder-list-provenance) |
+| `special_use_discovery` | Always `ran` on this kind; see below |
+| `expunge_folders[].folder` | A folder name in the enforced `expunge_folders` list |
+| `expunge_folders[].source` | `account` or `inherited`; never `discovered` |
+
+The four fields are this kind's birth fields: **every `folder_policy` line ever
+written carries all four**, none of them is `#[serde(default)]`, and a line
+missing one does not parse. That is deliberate -- defaulting them would let a
+torn write parse as a record asserting nothing was protected, which is a false
+claim about an authorization decision rather than an absent one.
+
+**`special_use_discovery` is `"ran"` on every correctly-written record of this
+kind, and is carried anyway.** It is not redundant: it is what makes a
+miswired producer visible. The lists are derived from the same call that
+distinguishes "discovery ran, this is the guard's list" from "this is the
+configured list", so a producer that got that wrong would otherwise emit the
+configured list looking exactly like the enforced union. A `folder_policy`
+record reading `"special_use_discovery": "not_run"` is a defect, not a state.
+
+**Which accounts appear, and what their absence means.** `folder_policy` is
+written per account at the moment its guard is constructed, so an account whose
+boot fails before that point -- a refused `LOGIN`, an unreachable host, a failed
+`LIST` -- has **no** `folder_policy` record, and neither does any account after
+it in the boot order. This is the deliberate complement of `process_start`,
+which carries a `tool_matrix` entry for *every* configured account precisely so
+a failed one still leaves its effective policy behind (#632).
+
+Reading the two together: an account in `process_start`'s `tool_matrix` with no
+`folder_policy` of the same `process_id` did not finish booting. **Two caveats
+on the converse, and both matter before this is used as an alerting rule.**
+
+- **A `folder_policy` record does not mean the account came up.** Only that its
+  guard was built. SMTP client construction happens after, so an account whose
+  SMTP credential cannot be resolved has a `folder_policy` record and still
+  fails the boot.
+- **With `audit.fail_open = true` an absent record proves nothing at all.** A
+  suppressed write returns success to the boot path and drops the record, so a
+  perfectly healthy account can be missing one. The suppression is counted --
+  see `records_lost` on `process_end` -- but the two are only correlatable in
+  aggregate.
+
+**Compared with the `process_start` `tool_matrix` entry** for the same account,
+this record repeats the folder half verbatim in the same field order and drops
+`posture` / `tools`, which do not change between the two points. Diffing the
+two is how you see what special-use discovery added.
+
+`rimap audit merge --account <name>` includes these records; `--kind
+folder_policy` selects them.
 
 ### `process_end`
 
@@ -437,9 +537,9 @@ Config-related event. Declared for future use.
   with `ERR_CONFIG`. The lock is held for the full process lifetime
   and released on exit.
 - **Write discipline:** each record is one `write_all` + buffer flush.
-  `fsync` is called after `process_start`, `process_end`, `auth`, and
-  `config` records. `tool_start` and `tool_end` are flushed but not
-  fsync'd (a crash may lose a few trailing entries).
+  `fsync` is called after `process_start`, `process_end`, `auth`,
+  `config`, and `folder_policy` records. `tool_start` and `tool_end` are
+  flushed but not fsync'd (a crash may lose a few trailing entries).
 - **Write failure:** fails the tool call with `ERR_INTERNAL` by
   default. Set `audit.fail_open = true` to suppress write failures
   and continue (not recommended -- audit records will be lost).
@@ -637,6 +737,7 @@ piped to `jq`.
 | `--until <RFC3339>` | Only records at or before this timestamp |
 | `--tool <name>` | Only `tool_start`/`tool_end` records for this tool |
 | `--kind <kind>` | Only records of this kind (e.g. `auth`, `tool_end`) |
+| `--account <name>` | Only records scoped to this account (`auth`, `tool_start`, `tool_end`, `folder_policy`). Records with no account scope -- `process_start`, `process_end`, `config` -- pass through unfiltered |
 | `--process <ulid>` | Only records from this process ID |
 
 Trailing malformed lines (from a mid-record crash) produce a stderr
