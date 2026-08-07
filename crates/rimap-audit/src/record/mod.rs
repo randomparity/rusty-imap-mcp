@@ -375,6 +375,125 @@ impl AccountToolMatrix {
     }
 }
 
+/// Payload of the `folder_policy` kind: the folder lists one account's
+/// `FolderGuard` was actually built from (#761, ADR-0021).
+///
+/// # Why this is not a field on `process_start`
+///
+/// `protected_folders` gains the server's RFC 6154 special-use names at boot,
+/// and that union — not the configured list — is what `check_protected`
+/// enforces. `process_start` is written before any IMAP session exists, so it
+/// can only ever carry the configured list, and says so with
+/// [`SpecialUseDiscovery::NotRun`]. Moving it later would leave an account
+/// that fails to connect with no `process_start` at all, losing the property
+/// #632 exists to guarantee. So the enforced policy gets its own kind,
+/// emitted per account once the guard is built, and `process_start` is
+/// untouched in both timing and content.
+///
+/// The two are complementary rather than redundant: `process_start` covers
+/// every configured account whether or not it came up, this covers exactly
+/// the accounts something is being enforced for. A `process_start` naming
+/// three accounts beside two `folder_policy` records says which account
+/// failed to boot.
+///
+/// The fields mirror the folder half of an [`AccountToolMatrix`] entry, in
+/// the same order, so the configured and enforced policies are directly
+/// diffable. `posture` and `tools` are not repeated: they do not change
+/// between the two emission points and `process_start` already carries them.
+///
+/// A struct expression is rejected outside this crate:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::record::FolderPolicy {
+///     account: "work".to_owned(),
+///     protected_folders: Vec::new(),
+///     special_use_discovery: rimap_audit::record::SpecialUseDiscovery::Ran,
+///     expunge_folders: Vec::new(),
+/// };
+/// ```
+///
+/// And so is functional-update syntax spreading a value this crate did hand
+/// out — `..` is still a struct expression (E0639). Spreading from the
+/// type's own constructor rather than from `Default` is deliberate: this type
+/// has no `Default`, so `..Default::default()` would fail with E0277 and the
+/// `compile_fail` would pass while testing nothing (#715).
+///
+/// ```compile_fail,E0639
+/// let base = rimap_audit::record::FolderPolicy::new(
+///     "work".to_owned(),
+///     Vec::new(),
+///     rimap_audit::record::SpecialUseDiscovery::Ran,
+///     Vec::new(),
+/// );
+/// let _ = rimap_audit::record::FolderPolicy { account: "personal".to_owned(), ..base };
+/// ```
+///
+/// The supported form is [`FolderPolicy::new`]:
+///
+/// ```
+/// use rimap_audit::record::{FolderEntry, FolderSource, FolderPolicy, SpecialUseDiscovery};
+/// let policy = FolderPolicy::new(
+///     "work".to_owned(),
+///     vec![FolderEntry::new("[Gmail]/Sent Mail".to_owned(), FolderSource::Discovered)],
+///     SpecialUseDiscovery::Ran,
+///     vec![],
+/// );
+/// assert_eq!(policy.protected_folders[0].source, FolderSource::Discovered);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FolderPolicy {
+    /// Account name from config.
+    pub account: String,
+    /// The resolved `protected_folders` the guard was handed, in the order it
+    /// was handed them. Unlike the `process_start` rendering, this one can
+    /// carry [`FolderSource::Discovered`] entries — carrying them is the
+    /// reason the kind exists.
+    pub protected_folders: Vec<FolderEntry>,
+    /// Always [`SpecialUseDiscovery::Ran`] on a correctly-wired record, and
+    /// carried anyway.
+    ///
+    /// Not redundancy: it is a constant of correct *wiring*, not of the type.
+    /// The lists come from `account_tool_matrix`, whose `Option` argument is
+    /// what separates "discovery ran, this is the guard's list" from "this is
+    /// the configured list". A producer that passed `None` would emit the
+    /// configured list looking exactly like the enforced union — with this
+    /// field it instead emits `not_run` on a `folder_policy` line, which is
+    /// visibly wrong and assertable. See ADR-0021.
+    pub special_use_discovery: SpecialUseDiscovery,
+    /// The resolved `expunge_folders` the guard was handed. Never carries a
+    /// [`FolderSource::Discovered`] entry: discovery only widens protection,
+    /// never expungeability.
+    pub expunge_folders: Vec<FolderEntry>,
+}
+
+impl FolderPolicy {
+    /// Construct a policy record. Every field is a parameter, including the
+    /// two lists whose empty value is an affirmative claim — nothing
+    /// protected, nothing expungeable — and `special_use_discovery`, whose
+    /// whole purpose is to be passed through from the matrix rather than
+    /// assumed.
+    ///
+    /// No `#[serde(default)]` on any field, and so none of them defaults
+    /// here: these are the kind's birth fields, present on every line it has
+    /// ever written. Defaulting them would let a truncated line parse as a
+    /// policy record claiming nothing was protected.
+    #[must_use]
+    pub fn new(
+        account: String,
+        protected_folders: Vec<FolderEntry>,
+        special_use_discovery: SpecialUseDiscovery,
+        expunge_folders: Vec<FolderEntry>,
+    ) -> Self {
+        Self {
+            account,
+            protected_folders,
+            special_use_discovery,
+            expunge_folders,
+        }
+    }
+}
+
 /// Payload of the `process_start` kind. Fields chosen to chain history across
 /// restarts (see spec §10 startup self-check).
 ///
@@ -776,6 +895,9 @@ pub enum Payload {
     ToolEnd(ToolEnd),
     /// Config-related event (declared for Sprint 5; not emitted in Sprint 2).
     Config(ConfigEvent),
+    /// One account's enforced folder policy, written once its `FolderGuard`
+    /// exists (#761).
+    FolderPolicy(FolderPolicy),
 }
 
 #[cfg(test)]
