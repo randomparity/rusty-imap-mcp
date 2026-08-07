@@ -172,60 +172,17 @@ exposure, not a new one, since the guard's write had the same property from
 
 ### The measurement harness
 
-Not committed to the tree, so it is reproduced here in full. Drop it into a
-scratch crate depending on `rimap-audit` and `rimap-core` by path, build
-`--release`, and pass a directory:
+Committed at
+[`crates/rimap-audit/examples/emitcost.rs`](../../crates/rimap-audit/examples/emitcost.rs).
+Build `--release` and pass an **empty scratch directory** — never one holding a
+live audit log, for the reason its module doc gives:
 
-```rust
-use std::time::Instant;
-use rimap_audit::writer::{AuditOptions, AuditWriter};
-use rimap_core::auth_event::{AuthEvent, AuthResult};
-use rimap_core::auth_sink::AuthEventSink;
-
-fn event() -> AuthEvent {
-    AuthEvent {
-        account: Some("alice".to_string()),
-        result: AuthResult::Success,
-        host: "imap.example.test".to_string(),
-        port: 993,
-        username: "alice@example.test".to_string(),
-        tls_fingerprint_sha256: Some("ab".repeat(32)),
-        fingerprint_match: Some(true),
-        error_code: None,
-        credential_source: None,
-    }
-}
-
-fn main() {
-    let dir = std::env::args().nth(1).expect("usage: emitcost <dir> [n]");
-    let n: usize = std::env::args().nth(2).map_or(2000, |s| s.parse().unwrap());
-    let writer = AuditWriter::open(&AuditOptions {
-        path: std::path::Path::new(&dir).join("audit.jsonl"),
-        rotate_bytes: 0,          // steady state, not the rotation outlier
-        rotate_keep: 0,
-        retention_seconds: None,
-        fail_open: false,
-        initial_seq: rimap_audit::record::ids::Seq::FIRST,
-    })
-    .expect("open audit writer");
-
-    for _ in 0..50 {
-        AuthEventSink::emit_auth(&writer, event()).expect("warmup");
-    }
-    let mut samples = Vec::with_capacity(n);
-    for _ in 0..n {
-        let ev = event();
-        let start = Instant::now();
-        AuthEventSink::emit_auth(&writer, ev).expect("emit");
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
-    }
-    samples.sort_by(f64::total_cmp);
-    let pct = |p: f64| samples[((samples.len() as f64 - 1.0) * p) as usize];
-    println!("mean {:.3}", samples.iter().sum::<f64>() / samples.len() as f64);
-    println!("p50 {:.3}  p95 {:.3}  p99 {:.3}  max {:.3}",
-             pct(0.50), pct(0.95), pct(0.99), pct(1.0));
-}
+```text
+cargo run -p rimap-audit --release --example emitcost -- <dir> [n]
 ```
+
+It was reproduced inline here when this ADR was accepted. See the Errata below
+for why it is a link.
 
 ## Alternatives considered
 
@@ -353,3 +310,45 @@ fn main() {
   async code in this workspace. This ADR is about the `auth` emitters
   specifically, and the reason is specific to them: they must survive the
   runtime that would otherwise defer them.
+
+## Errata
+
+Append-only, per
+[ADR-0018](0018-runnable-artifacts-live-in-the-tree.md). Nothing here revises
+the decision above; entries record facts about this document.
+
+### 2026-08-06 — the measurement harness moved into the tree
+
+Issue [#743](https://github.com/randomparity/rusty-imap-mcp/issues/743).
+
+The harness reproduced inline under "The measurement harness" no longer
+compiled. Both of its struct literals acquired `#[non_exhaustive]` after this
+ADR was accepted — `AuditOptions` by
+[#715](https://github.com/randomparity/rusty-imap-mcp/issues/715),
+`AuthEvent` by
+[#716](https://github.com/randomparity/rusty-imap-mcp/issues/716) — and this
+section told the reader to build it in a scratch crate depending on
+`rimap-audit` and `rimap-core` by path, which is exactly where the attribute is
+in force. E0639 on both, at the reader's first `cargo build`.
+
+Nothing in `just ci` compiled the snippet and nothing would have: `just
+test-doc` is `cargo test --workspace --doc`, which reaches rustdoc comments and
+no markdown file.
+
+The section is now a link to `crates/rimap-audit/examples/emitcost.rs`, which
+`just lint`'s `--all-targets` clippy — and CI's required `clippy`,
+`check (macOS)`, and `test (MSRV 1.88.0)` checks — build on every run. The literals became
+`AuditOptions::new(path, Seq::FIRST)` and `AuthEvent::new(..)` with `account`
+assigned afterwards; both constructors produce exactly the values the literals
+named, so the harness measures what it measured. The committed version reports
+errors instead of panicking and writes through a locked stdout handle, because
+the workspace denies `unwrap_used` and `print_stdout` and warns `expect_used`;
+and it refuses to run unless its directory is empty or absent, since it opens
+at `Seq::FIRST` and would otherwise append fabricated `auth` records to a real
+log. The pre-edit text is in this file's git history.
+
+The table under "What the change costs" was **not** re-measured and is
+unchanged. A 300-sample spot check of the relocated harness on the same host
+class (Apple M5 Max, macOS, APFS on the internal NVMe) returned p50 4.05 ms
+against the 4.09 ms recorded there — consistent, and reported as a spot check
+rather than a replacement for the 2000-sample run.
