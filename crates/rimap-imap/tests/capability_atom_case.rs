@@ -13,11 +13,13 @@
 //! the atoms case-sensitively desynchronizes and fails rather than quietly
 //! proving nothing.
 //!
-//! `IMAP4rev1` itself is spelled conventionally throughout: `imap-proto`
-//! already parses it with `tag_no_case` into its own `Capability::Imap4rev1`
-//! variant, so its case is not what is under test here — the extension atoms
-//! and `IMAP4rev2`, which land in `Capability::Atom` with the server's own
-//! spelling, are.
+//! `IMAP4rev1` itself is spelled conventionally throughout, because its case is
+//! not what is under test: the RFC 3501 `CAPABILITY` parser matches it with
+//! `tag_no_case` into its own `Capability::Imap4rev1` variant, and the
+//! readability gate probes that variant. The extension atoms and `IMAP4rev2`
+//! land in `Capability::Atom` carrying the server's own spelling, and they are
+//! what this file exercises — plus, at the end, the one reply that spells the
+//! revision as an atom and must *not* be read as a listing.
 //!
 //! Fake, no container runtime — runs on every PR.
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
@@ -27,6 +29,7 @@ use std::time::Duration;
 
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
 use rimap_imap::ServerCapabilities;
+use rimap_imap::error::ImapError;
 use rimap_imap::types::Uid;
 
 /// Generous command timeout so the loopback dialog cannot race a `Timeout`
@@ -112,6 +115,20 @@ async fn assert_move_and_uidplus_advertised(caps: &str) {
     );
 }
 
+/// Case-insensitivity must not become substring-tolerance. `XMOVE`, `UIDPLUS2`,
+/// and an `auth=move` mechanism all *contain* a probe atom without being one,
+/// and each is a real capability some server advertises.
+///
+/// Nothing today would match them — `str::eq_ignore_ascii_case` length-checks
+/// first — but a later refactor to a `starts_with`/`contains` form would turn
+/// this listing into `Known { true, true }` and issue `UID MOVE` to a server
+/// that never advertised MOVE. The scripted folder-wide fallback is what
+/// catches that.
+#[tokio::test]
+async fn atoms_that_merely_contain_a_probe_are_not_that_probe() {
+    assert_neither_extension_advertised("IMAP4rev1 XMOVE UIDPLUS2 auth=move").await;
+}
+
 /// The `AUTH=` arm is not a gap, it is the point: `imap-proto` strips the
 /// prefix with `tag_no_case` into `Capability::Auth`, so a server offering the
 /// SASL mechanisms `AUTH=MOVE` and `AUTH=UIDPLUS` advertises no extension at
@@ -121,7 +138,17 @@ async fn assert_move_and_uidplus_advertised(caps: &str) {
 /// the probes from the mechanism names stays on `UID MOVE` and desynchronizes.
 #[tokio::test]
 async fn auth_mechanisms_are_not_capability_atoms() {
-    let mut steps = login_preamble("IMAP4rev1 AUTH=MOVE AUTH=UIDPLUS");
+    assert_neither_extension_advertised("IMAP4rev1 AUTH=MOVE AUTH=UIDPLUS").await;
+}
+
+/// Drive `delete_message` against a server whose listing names neither
+/// extension, asserting the affirmative `Known { false, false }` and the
+/// COPY + folder-wide `EXPUNGE` fallback it selects.
+///
+/// A probe that matched anything in `caps` would take `UID MOVE` instead and
+/// desynchronize against the scripted `UID COPY`.
+async fn assert_neither_extension_advertised(caps: &str) {
+    let mut steps = login_preamble(caps);
     steps.extend([
         Step::Expect { verb: "SELECT" },
         Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
@@ -158,7 +185,7 @@ async fn auth_mechanisms_are_not_capability_atoms() {
             has_move: false,
             has_uidplus: false,
         },
-        "`AUTH=MOVE` names a SASL mechanism, not the MOVE extension",
+        "nothing in `{caps}` is a MOVE or UIDPLUS capability atom",
     );
     assert!(result.used_fallback);
     assert!(result.folder_wide_expunge);
@@ -166,8 +193,98 @@ async fn auth_mechanisms_are_not_capability_atoms() {
     let dialog = server.recorded().join("\n").to_ascii_uppercase();
     assert!(
         !dialog.contains("UID MOVE"),
-        "UID MOVE must never be issued to a server that only named it after \
-         `AUTH=`: {dialog}",
+        "UID MOVE must never be issued to a server that did not advertise it: \
+         {dialog}",
+    );
+}
+
+/// The readability gate must key on `Capability::Imap4rev1`, not on an atom
+/// spelled `IMAP4rev1`, because those are not the same thing.
+///
+/// `imap-proto`'s RFC 5161 parser maps every atom in an `* ENABLED` response to
+/// `Capability::Atom` — including the revision — and async-imap's
+/// `parse_capabilities` folds every `Response::Capabilities` before the tagged
+/// completion into one set. So an `* ENABLED IMAP4rev1` reply to `CAPABILITY`
+/// carries `Atom("IMAP4rev1")` and no revision variant. It is not a capability
+/// listing, and admitting it would return `Known { false, false }` — the pair
+/// that expunges the whole folder — exactly where #649 put a refusal.
+///
+/// The pre-login line advertises `MOVE UIDPLUS` deliberately: it is not a
+/// source of truth for the session, and a client falling back to it would issue
+/// `UID MOVE` here rather than refuse. The destructive dialog is scripted and
+/// must never be reached, so losing the refusal makes the command *succeed*
+/// rather than desync — a desync raises `ConnectionLost`, which an `expect_err`
+/// would happily accept.
+#[tokio::test]
+async fn an_enabled_response_is_not_a_capability_listing() {
+    let server = FakeImapServer::start(vec![
+        Step::Send(b"* OK fake ready\r\n".to_vec()),
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(b"* CAPABILITY IMAP4rev1 MOVE UIDPLUS\r\n".to_vec()),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+        Step::Expect { verb: "LOGIN" },
+        Step::Reply {
+            text: "OK LOGIN completed",
+        },
+        Step::Expect { verb: "CAPABILITY" },
+        Step::Send(b"* ENABLED IMAP4rev1\r\n".to_vec()),
+        Step::Reply {
+            text: "OK CAPABILITY completed",
+        },
+        Step::Expect { verb: "SELECT" },
+        Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
+        Step::Reply {
+            text: "OK [READ-WRITE] SELECT completed",
+        },
+        Step::Expect { verb: "UID STORE" },
+        Step::Send(b"* 1 FETCH (UID 5 FLAGS (\\Deleted))\r\n".to_vec()),
+        Step::Reply {
+            text: "OK STORE completed",
+        },
+        Step::Expect { verb: "UID COPY" },
+        Step::Reply {
+            text: "OK COPY completed",
+        },
+        Step::Expect { verb: "EXPUNGE" },
+        Step::Send(b"* 1 EXPUNGE\r\n".to_vec()),
+        Step::Reply {
+            text: "OK EXPUNGE completed",
+        },
+    ])
+    .await;
+    let conn = server.connection_timeout("user@example.com", BACKSTOP);
+
+    let err = conn
+        .delete_message("INBOX", uid(5), "Trash", None)
+        .await
+        .expect_err("an ENABLED reply establishes no capabilities, so refuse");
+
+    assert!(
+        matches!(
+            err,
+            ImapError::CapabilitiesUnknown {
+                op: "delete_message"
+            }
+        ),
+        "expected ImapError::CapabilitiesUnknown, got {err:?}",
+    );
+    assert_eq!(
+        conn.capabilities().await,
+        ServerCapabilities::Unknown,
+        "an ENABLED response is not a capability listing, so nothing may be \
+         recorded as this session's advertisement",
+    );
+
+    let dialog = server.recorded().join("\n").to_ascii_uppercase();
+    assert!(
+        !dialog.contains("EXPUNGE"),
+        "no EXPUNGE of any form may follow an unreadable probe: {dialog}",
+    );
+    assert!(
+        !dialog.contains("UID STORE"),
+        "the refusal must land before the \\Deleted flag is set: {dialog}",
     );
 }
 
