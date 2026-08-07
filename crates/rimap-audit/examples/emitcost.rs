@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use rimap_audit::{AuditOptions, AuditWriter, Seq};
-use rimap_core::auth_event::{AuthEvent, AuthResult};
+use rimap_core::auth_event::{AuthEvent, AuthResult, Host, Username};
 use rimap_core::auth_sink::AuthEventSink;
 
 /// Emits discarded before sampling starts, to page in the file and warm the
@@ -63,9 +63,9 @@ const DEFAULT_SAMPLES: usize = 2000;
 fn event() -> AuthEvent {
     let mut ev = AuthEvent::new(
         AuthResult::Success,
-        "imap.example.test".to_string(),
+        Host("imap.example.test".to_string()),
         993,
-        "alice@example.test".to_string(),
+        Username("alice@example.test".to_string()),
         Some("ab".repeat(32)),
         Some(true),
         None, // error_code

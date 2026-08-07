@@ -112,6 +112,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: `AuthEvent::host` and `AuthEvent::username` are now
+  `rimap_core::Host` and `rimap_core::Username` rather than bare `String`
+  (#748).** Both are `pub` single-field newtypes, re-exported from
+  `rimap_core` and `rimap_audit::record`. `AuthEvent::new` takes them in the
+  same positions, so a transposed `host` / `username` call no longer compiles
+  (rustc E0308) — passed bare they were two `String`s separated only by a
+  `u16`, and a transposition type-checked and wrote a login identity into the
+  `host` field of a record that is never rewritten. A `compile_fail,E0308`
+  doctest on `AuthEvent::new` holds it. The wrappers also give the "`username`
+  must never carry credential material" rule a single greppable construction
+  site instead of a positional argument at every call site.
+
+  Downstream impact: wrap at the call (`Host(host)`, `Username(username)`) and
+  read through `.0`. No `From`/`Into` conversions are provided on purpose — an
+  inferred `.into()` in argument position would restore exactly the
+  transposition the newtypes exist to reject. `rimap_config::model::ImapConfig`
+  is unchanged: it is a deserialization boundary with named TOML keys, where
+  the transposition is not expressible.
+
+  **No on-disk change.** Both are `#[serde(transparent)]`, so an `auth` line is
+  the same bytes and the byte-exact goldens in
+  `crates/rimap-audit/tests/non_exhaustive_record.rs` are unchanged. That test
+  file's round-trip case gains the two `auth` goldens it lacked, which is the
+  read direction: a line already on disk still parses.
 - **API break: `rimap_audit::record::AccountToolMatrix::new` takes three
   further arguments (#696).** The signature is now
   `new(account, posture, tools, protected_folders, special_use_discovery,
