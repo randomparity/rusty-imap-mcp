@@ -5,6 +5,36 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # Every one of the 14 required status checks on `main` is a job in this
+    # workflow, so whether this trigger fires decides whether a PR can merge
+    # at all. The default type set is `opened, synchronize, reopened`, which
+    # omits `edited` — and retargeting a PR's base branch fires `edited`, not
+    # `synchronize`. A PR opened against some other base and then moved onto
+    # `main` therefore started no run, and its required contexts were not red
+    # and not skipped but *absent*, which branch protection reads as forever
+    # `expected`. With `strict: true` there is no self-service recovery: the
+    # author has to push an empty commit or close and reopen (#760).
+    #
+    # `edited` also fires on title and body edits, so a typo fix in the
+    # description now costs a full CI round. That is the price of the shape
+    # below, and it was chosen over the two cheaper-looking alternatives
+    # because both trade a real verdict for one that only looks like a
+    # verdict:
+    #
+    #   - A cheap gate job that every other job `needs:` — a `needs:`
+    #     dependent is SKIPPED when its dependency is skipped, and a skipped
+    #     required check SATISFIES branch protection. That hands out merges
+    #     on 14 contexts that never ran. Same trap as the `sonarqube` job's
+    #     `!cancelled()` guard below; see the reasoning there.
+    #   - A per-job `if:` that skips unless `changes.base` is set — correct
+    #     for the retarget case, but on a title-only edit it *replaces* the
+    #     genuine green check runs already sitting on that SHA with `skipped`
+    #     ones, converting real signal into protection-satisfying noise.
+    #
+    # The extra runs stay bounded: `concurrency` below cancels the in-flight
+    # run for the same PR, so an edit during CI collapses into one round
+    # rather than adding one.
+    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
