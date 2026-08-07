@@ -155,14 +155,29 @@ review, not by a check.
   is a real cost of committing it, and it is the right one: the snippet was
   exempt from those lints only because nothing compiled it.
 
-- It also gained a refusal the snippet did not have: it will not start when
-  `<dir>/audit.jsonl` already exists. A scratch snippet that opens at
+- It also gained a refusal the snippet did not have: it will not start unless
+  its directory is empty or absent. A scratch snippet that opens at
   `Seq::FIRST` and appends fabricated `auth` records is harmless; a committed,
-  published example that a reader may point at a configured `audit.path` is
-  not — it would write invented `auth`/`success` records into a real
-  security log and restart the `seq` chain, putting duplicate sequence numbers
-  into an append-only, tamper-evident file. Committing an artifact means owning
-  the ways it can be misused, and this is the first of them.
+  published example a reader may point at a configured `audit.path` is not.
+  Two outcomes, and the second is the one that shaped the check: against a file
+  that already holds records it restarts the `seq` chain, which is at least
+  loud; against a real audit directory whose active file is absent — a fresh
+  install, or one whose active file was rotated away — a filename-only guard
+  would pass, `Seq::FIRST` would collide with nothing, and `rimap-server`'s
+  boot path would resume from `last_seq` and adopt the fabricated block as
+  chain history with no anomaly left to find. Emptiness is the property that
+  excludes both.
+
+  What it does not do: it is a guard against an operator's slip, not a security
+  control. `AuditWriter::open` is public API, so a local attacker gains nothing
+  from this binary that twenty lines of their own would not give them, and the
+  check is not atomic against a directory that gains an entry immediately after
+  it. The writer's own `O_NOFOLLOW` and exclusive `flock` are what defend the
+  symlink and racing-server cases, and they predate this change.
+
+  This is the standing cost of the decision above. Committing an artifact means
+  owning the ways it can be misused; the version in the ADR body was exempt only
+  because nobody could run it.
 
 - An ADR author who wants to show a reader how to reproduce something now has
   more work to do: commit the artifact first, then link it. This is intended.

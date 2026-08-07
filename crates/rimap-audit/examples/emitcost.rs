@@ -15,12 +15,18 @@
 //!
 //! **Give it an empty scratch directory, never a configured `audit.path`.**
 //! This writes `WARMUP + n` real-shaped `auth` records for a fabricated
-//! account, and it opens at [`Seq::FIRST`] every time, which on a file that
-//! already holds records restarts the sequence and puts duplicate `seq` values
-//! into an append-only, tamper-evident log. It therefore refuses to start when
-//! `<dir>/audit.jsonl` already exists — a refusal, rather than a
-//! read-and-continue, because continuing a real log means writing fabricated
-//! `auth` records into it, which is the outcome the check exists to prevent.
+//! account, and it opens at [`Seq::FIRST`] every time. Against a file that
+//! already holds records that restarts the sequence, putting duplicate `seq`
+//! values into an append-only, tamper-evident log; against a real audit
+//! directory whose active file happens to be absent it is quieter and worse,
+//! because `rimap-server` resumes from `last_seq` on the next boot and the
+//! fabricated block becomes chain history with nothing anomalous to find.
+//!
+//! It therefore refuses to start unless the directory is empty or absent, and
+//! refuses rather than continuing an existing chain — continuing means writing
+//! fabricated `auth` records into a real log, which is the outcome being
+//! prevented. See [`require_empty_or_absent`] for what that check does and
+//! does not defend.
 //!
 //! Rotation is off and `fail_open` is false, so every sample is a steady-state
 //! append: no rotation outlier, and a write failure fails the run rather than
@@ -74,6 +80,42 @@ fn percentile(sorted: &[f64], numerator: usize, denominator: usize) -> f64 {
     sorted.get(idx).copied().unwrap_or(f64::NAN)
 }
 
+/// Refuses any `dir` that exists and holds anything at all. An absent `dir` is
+/// fine — `AuditWriter::open` creates it.
+///
+/// Emptiness rather than "no `audit.jsonl`", because the quieter hazard is a
+/// real audit directory whose active file is currently absent — a fresh
+/// install, or one whose active file has been rotated away. There, a
+/// filename-only check passes, `Seq::FIRST` collides with nothing, and
+/// `rimap-server`'s boot path resumes from `last_seq` and adopts the
+/// fabricated block as chain history with no anomaly to notice later. An
+/// empty directory cannot be that.
+///
+/// This is a guard against an operator's slip, not against a local attacker:
+/// `AuditWriter::open` is public API, so anyone with a shell can write these
+/// records without this binary. It is also not atomic — the directory can
+/// gain an entry between this check and the open — which does not matter for
+/// what it defends. The writer's own `O_NOFOLLOW` and exclusive `flock` are
+/// what stop a symlinked path or a racing live server.
+fn require_empty_or_absent(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => {
+            if entries.next().is_some() {
+                return Err(format!(
+                    "{} is not empty — emitcost writes fabricated auth records and \
+                     opens at Seq::FIRST, so it must never share a directory with a \
+                     real audit log. Point it at an empty or absent directory.",
+                    dir.display()
+                )
+                .into());
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("reading {}: {e}", dir.display()).into()),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let Some(dir) = args.next() else {
@@ -89,17 +131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("sample count must be at least 1".into());
     }
 
-    let path = PathBuf::from(dir).join("audit.jsonl");
-    if path.exists() {
-        return Err(format!(
-            "{} already exists — emitcost writes fabricated auth records and \
-             restarts the seq chain at Seq::FIRST. Point it at an empty \
-             directory.",
-            path.display()
-        )
-        .into());
-    }
-    let writer = AuditWriter::open(&AuditOptions::new(path, Seq::FIRST))?;
+    let dir = PathBuf::from(dir);
+    require_empty_or_absent(&dir)?;
+    let writer = AuditWriter::open(&AuditOptions::new(dir.join("audit.jsonl"), Seq::FIRST))?;
 
     for _ in 0..WARMUP {
         AuthEventSink::emit_auth(&writer, event())?;

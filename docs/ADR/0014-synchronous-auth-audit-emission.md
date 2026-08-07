@@ -343,9 +343,9 @@ assigned afterwards; both constructors produce exactly the values the literals
 named, so the harness measures what it measured. The committed version reports
 errors instead of panicking and writes through a locked stdout handle, because
 the workspace denies `unwrap_used` and `print_stdout` and warns `expect_used`;
-and it refuses to run against a directory that already holds an `audit.jsonl`,
-since it opens at `Seq::FIRST` and would otherwise append fabricated `auth`
-records to a real log. The pre-edit text is in this file's git history.
+and it refuses to run unless its directory is empty or absent, since it opens
+at `Seq::FIRST` and would otherwise append fabricated `auth` records to a real
+log. The pre-edit text is in this file's git history.
 
 The table under "What the change costs" was **not** re-measured and is
 unchanged. A 300-sample spot check of the relocated harness on the same host
