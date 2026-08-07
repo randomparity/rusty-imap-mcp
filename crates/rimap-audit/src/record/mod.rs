@@ -5,22 +5,17 @@
 //!
 //! # Adding a field
 //!
-//! Every payload struct *defined* here is `#[non_exhaustive]`, so adding a
-//! field is additive at the Rust API level: no downstream crate can name the
-//! full set of fields in a struct expression, and none has to be recompiled
-//! against a wider one. It is additive on disk too, because readers tolerate
-//! an absent field via `#[serde(default)]`. Both halves are required — see
-//! `docs/audit-log.md` ("Compatibility contract"), which is the normative
-//! statement of what a reader may assume.
+//! Every payload struct is `#[non_exhaustive]`, so adding a field is additive
+//! at the Rust API level: no downstream crate can name the full set of fields
+//! in a struct expression, and none has to be recompiled against a wider one.
+//! It is additive on disk too, because readers tolerate an absent field via
+//! `#[serde(default)]`. Both halves are required — see `docs/audit-log.md`
+//! ("Compatibility contract"), which is the normative statement of what a
+//! reader may assume.
 //!
-//! **One payload is not covered.** [`AuthEvent`] backs the `auth` kind but is
-//! defined in `rimap_core::auth_event` and only re-exported here, because
-//! `rimap-imap` constructs it without depending on this crate. It is still
-//! exhaustive, so adding a field to it *is* a breaking change and the
-//! paragraph above does not apply to `auth` records. It has already grown one
-//! field this way (`credential_source`, #78). Tracked in #716; until that
-//! lands, treat `AuthEvent` as the pre-#706 hazard this module otherwise
-//! removes.
+//! That covers every kind, including `auth`: [`AuthEvent`] is *defined* in
+//! `rimap_core::auth_event` and only re-exported here, but it carries the
+//! attribute too (#716) and is built through `AuthEvent::new`.
 //!
 //! `#[non_exhaustive]` is a Rust-visibility construct only. It does not touch
 //! serde, so an unchanged record serializes to byte-identical JSONL. The
@@ -36,7 +31,8 @@
 //!
 //! The newtypes in [`ids`] are deliberately left exhaustive; see that module.
 //! So are the enums here ([`Payload`], [`ProcessEndReason`], [`ToolStatus`],
-//! [`VerdictSource`], [`PostureEffective`]), matching #665's treatment of
+//! [`VerdictSource`], [`FolderSource`], [`SpecialUseDiscovery`],
+//! [`PostureEffective`]), matching #665's treatment of
 //! `rimap_config::model`. A new variant is a new `kind` or a new value of an
 //! existing one — a reader that does not know it cannot do anything useful
 //! with the record, so forcing downstream matches through a wildcard arm
@@ -195,8 +191,121 @@ impl ToolVerdict {
     }
 }
 
-/// One account's effective posture and its explicit per-tool verdicts, as
-/// resolved at boot.
+/// Where one entry of a resolved folder list came from.
+///
+/// Unlike `[security.tools]`, the folder lists merge *whole-list*: an
+/// account's `[accounts.security] expunge_folders` replaces the inherited
+/// list outright rather than unioning with it (`AccountSecurityOverrides::
+/// merge_onto`). So the layer is a property of the list, and every entry of
+/// one configured list shares it.
+///
+/// [`Self::Discovered`] is the exception, and it is not a config layer at
+/// all: `protected_folders` gains server-declared RFC 6154 special-use names
+/// at boot, after the config merge, from
+/// `rimap_server::boot::discovery::merge_protected_folders`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderSource {
+    /// The account's own `[accounts.security]` block wrote this list — or
+    /// the config is flat (single-account), where there is no `[defaults]`
+    /// layer the list could have been inherited *from*.
+    Account,
+    /// The account's own block did **not** write this list: it arrived from
+    /// `[defaults.security]`, or — when neither layer names it — from the
+    /// built-in default. Both are "the operator did not ask for this on this
+    /// account", which is the distinction worth recording (#624 / ADR-0013).
+    Inherited,
+    /// Appended at boot from a special-use folder the IMAP server declared,
+    /// not present in any config layer. Only `protected_folders` grows this
+    /// way, and only on a code path that has an IMAP session.
+    Discovered,
+}
+
+/// Whether special-use discovery had run when a matrix was built.
+///
+/// Without this, `protected_folders` cannot distinguish two different
+/// claims that happen to look alike: a server that declared no special-use
+/// folders, and a producer that never asked. The second is the normal case
+/// for `process_start`, which is written before the account registry exists.
+/// An absent field means *unknown*, and the reader is told to substitute
+/// [`Self::NotRun`] — see `docs/audit-log.md` ("Compatibility contract").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecialUseDiscovery {
+    /// Discovery had not run when this matrix was built, so
+    /// `protected_folders` is the configured list and nothing in it can be
+    /// [`FolderSource::Discovered`]. **Not** a statement that the server
+    /// declares no special-use folders.
+    ///
+    /// Also the value a record predating this field reads as, where it is
+    /// vacuous rather than wrong: such a record carries no folder entries at
+    /// all, so there is no list whose completeness could be misjudged.
+    #[default]
+    NotRun,
+    /// Discovery ran, and `protected_folders` is the union the `FolderGuard`
+    /// was built from. An empty list here is the affirmative claim that the
+    /// guard protects nothing.
+    Ran,
+}
+
+/// One entry of a resolved folder list and where it came from.
+///
+/// A struct expression is rejected outside this crate:
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_audit::record::FolderEntry {
+///     folder: "INBOX".to_owned(),
+///     source: rimap_audit::record::FolderSource::Account,
+/// };
+/// ```
+///
+/// And so is functional-update syntax, spreading a value this crate did hand
+/// out — `..` is still a struct expression (E0639):
+///
+/// ```compile_fail,E0639
+/// let base = rimap_audit::record::FolderEntry::new(
+///     "INBOX".to_owned(),
+///     rimap_audit::record::FolderSource::Account,
+/// );
+/// let _ = rimap_audit::record::FolderEntry { folder: "Sent".to_owned(), ..base };
+/// ```
+///
+/// The supported form is [`FolderEntry::new`]:
+///
+/// ```
+/// let entry = rimap_audit::record::FolderEntry::new(
+///     "INBOX".to_owned(),
+///     rimap_audit::record::FolderSource::Inherited,
+/// );
+/// assert_eq!(entry.folder, "INBOX");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FolderEntry {
+    /// The folder name exactly as the guard was built with it — a config
+    /// literal, or a server-native name such as `[Gmail]/Sent Mail`.
+    pub folder: String,
+    /// Which layer put this entry in the list.
+    pub source: FolderSource,
+}
+
+impl FolderEntry {
+    /// Construct an entry. Both fields are load-bearing, so both are
+    /// parameters.
+    #[must_use]
+    pub fn new(folder: String, source: FolderSource) -> Self {
+        Self { folder, source }
+    }
+}
+
+/// One account's resolved dispatch policy as of boot: effective posture, the
+/// explicit per-tool verdicts, and the two folder lists the `FolderGuard` is
+/// built from.
+///
+/// The name predates the folder lists (#632 added the type for verdicts
+/// alone, #696 the lists); it is kept because `tool_matrix` is the on-disk
+/// field name on [`ProcessStart`], and renaming a type to chase a field it
+/// does not own would buy nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AccountToolMatrix {
@@ -210,19 +319,58 @@ pub struct AccountToolMatrix {
     /// listing them per boot would be redundant bulk.
     #[serde(default)]
     pub tools: Vec<ToolVerdict>,
+    /// Resolved `protected_folders`, in list order.
+    ///
+    /// Read this together with [`Self::special_use_discovery`], which says
+    /// whether the list can contain [`FolderSource::Discovered`] entries at
+    /// all. Special-use discovery needs an IMAP session, and the
+    /// `process_start` record is written before one exists.
+    #[serde(default)]
+    pub protected_folders: Vec<FolderEntry>,
+    /// Whether [`Self::protected_folders`] reflects special-use discovery.
+    ///
+    /// Kept beside the list rather than inferred from it: an empty or
+    /// discovery-free list is otherwise ambiguous between "the server
+    /// declared nothing" and "nobody asked the server".
+    #[serde(default)]
+    pub special_use_discovery: SpecialUseDiscovery,
+    /// Resolved `expunge_folders`, in list order. Never carries a
+    /// [`FolderSource::Discovered`] entry: discovery only ever widens
+    /// protection, never expungeability.
+    ///
+    /// An `inherited` entry here is the widening worth looking for — it is
+    /// the one way a folder becomes expungeable that it was not before
+    /// (#624).
+    #[serde(default)]
+    pub expunge_folders: Vec<FolderEntry>,
 }
 
 impl AccountToolMatrix {
-    /// Construct a matrix. `tools` is a parameter rather than a defaulted
-    /// empty list because the one caller resolves it before it can build the
-    /// matrix at all; an account that overrides nothing passes `Vec::new()`
-    /// and says so.
+    /// Construct a matrix. Every list is a parameter rather than a defaulted
+    /// empty one, because for each of them the empty value is an affirmative
+    /// claim a caller must make deliberately: no explicit verdicts, nothing
+    /// protected, nothing expungeable. The one producer resolves all three
+    /// before it can build the matrix at all.
+    ///
+    /// `special_use_discovery` is a parameter for the same reason. A caller
+    /// that let it default would be claiming its `protected_folders` predates
+    /// discovery, which is the one thing the field exists to state.
     #[must_use]
-    pub fn new(account: String, posture: Posture, tools: Vec<ToolVerdict>) -> Self {
+    pub fn new(
+        account: String,
+        posture: Posture,
+        tools: Vec<ToolVerdict>,
+        protected_folders: Vec<FolderEntry>,
+        special_use_discovery: SpecialUseDiscovery,
+        expunge_folders: Vec<FolderEntry>,
+    ) -> Self {
         Self {
             account,
             posture,
             tools,
+            protected_folders,
+            special_use_discovery,
+            expunge_folders,
         }
     }
 }
@@ -427,11 +575,11 @@ impl AuditRecord {
 // Re-exported here under their canonical names for ergonomic access
 // from within `rimap-audit` (writer, reader, on-disk format tests).
 //
-// NOTE: `AuthEvent` is the one payload in this module that is NOT
-// `#[non_exhaustive]` — it is defined in another crate, so #706 could not
-// mark it without a constructor there and a sweep of `rimap-imap`'s
-// construction sites. Adding a field to it is still a breaking change.
-// See the module docs and #716.
+// `AuthEvent` is `#[non_exhaustive]` like the payloads defined here (#716),
+// so the "Adding a field" note in the module docs covers it; its constructor
+// is `AuthEvent::new`. Being defined in another crate, the attribute is in
+// force on it *inside* `rimap-audit` too, unlike the local payloads.
+// `AuthResult` is an enum and stays exhaustive, matching #665 and #706.
 pub use rimap_core::auth_event::{AuthEvent, AuthResult};
 
 /// Payload of the `tool_start` kind. Recorded before dispatch begins so a
@@ -718,6 +866,9 @@ mod tests {
                     source: VerdictSource::Account,
                 },
             ],
+            protected_folders: Vec::new(),
+            special_use_discovery: crate::record::SpecialUseDiscovery::NotRun,
+            expunge_folders: Vec::new(),
         }]);
 
         let json = serde_json::to_string(&rec).unwrap();
@@ -733,6 +884,101 @@ mod tests {
 
         let back: AuditRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn process_start_tool_matrix_serializes_folder_lists_with_provenance() {
+        use crate::record::{AccountToolMatrix, FolderEntry, FolderSource, SpecialUseDiscovery};
+
+        let rec = sample_start_with(vec![AccountToolMatrix::new(
+            "work".to_string(),
+            Posture::Readonly,
+            Vec::new(),
+            vec![
+                FolderEntry::new("INBOX".to_string(), FolderSource::Inherited),
+                FolderEntry::new("[Gmail]/Sent Mail".to_string(), FolderSource::Discovered),
+            ],
+            SpecialUseDiscovery::Ran,
+            vec![FolderEntry::new(
+                "Trash".to_string(),
+                FolderSource::Inherited,
+            )],
+        )]);
+
+        let json = serde_json::to_string(&rec).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        let matrix = &v["tool_matrix"][0];
+        assert_eq!(matrix["protected_folders"][0]["folder"], "INBOX");
+        assert_eq!(matrix["protected_folders"][0]["source"], "inherited");
+        assert_eq!(
+            matrix["protected_folders"][1]["folder"],
+            "[Gmail]/Sent Mail"
+        );
+        assert_eq!(matrix["protected_folders"][1]["source"], "discovered");
+        assert_eq!(matrix["special_use_discovery"], "ran");
+        assert_eq!(matrix["expunge_folders"][0]["folder"], "Trash");
+        assert_eq!(matrix["expunge_folders"][0]["source"], "inherited");
+
+        let back: AuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn an_empty_protected_list_is_not_the_same_line_as_an_unprobed_one() {
+        // The distinction the field exists for. Both matrices serialize an
+        // empty `protected_folders`; only `special_use_discovery` says
+        // whether that means "the guard protects nothing" or "nobody asked".
+        use crate::record::{AccountToolMatrix, SpecialUseDiscovery};
+
+        let line_for = |discovery| {
+            serde_json::to_string(&sample_start_with(vec![AccountToolMatrix::new(
+                "work".to_string(),
+                Posture::Readonly,
+                Vec::new(),
+                Vec::new(),
+                discovery,
+                Vec::new(),
+            )]))
+            .unwrap()
+        };
+
+        let probed = line_for(SpecialUseDiscovery::Ran);
+        let unprobed = line_for(SpecialUseDiscovery::NotRun);
+        assert_ne!(
+            probed, unprobed,
+            "an empty union and an un-run discovery must not share a line",
+        );
+
+        let v: Value = serde_json::from_str(&probed).unwrap();
+        assert_eq!(v["tool_matrix"][0]["special_use_discovery"], "ran");
+        let v: Value = serde_json::from_str(&unprobed).unwrap();
+        assert_eq!(v["tool_matrix"][0]["special_use_discovery"], "not_run");
+    }
+
+    #[test]
+    fn tool_matrix_entry_without_folder_lists_parses_as_empty() {
+        // A `process_start` written between #632 and #696 carries a
+        // `tool_matrix` whose entries have no folder keys. Raw JSONL rather
+        // than a re-serialized struct, because `#[serde(default)]` is exactly
+        // what a round-trip would hide.
+        let line = r#"{"seq":1,"ts":"2026-05-05T12:00:00.000Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.1.0","git_commit":"","posture":"readonly","tool_matrix":[{"account":"work","posture":"readonly","tools":[]}],"config_path":"/tmp/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#;
+        assert!(
+            !line.contains("protected_folders") && !line.contains("expunge_folders"),
+            "fixture must be the pre-#696 shape",
+        );
+        let rec: AuditRecord = serde_json::from_str(line).unwrap();
+        let start = process_start_of(&rec).expect("fixture is a process_start");
+        let entry = start.tool_matrix.first().expect("one matrix entry");
+        // Empty here means *unknown*, not "nothing was protected" — see
+        // `docs/audit-log.md` ("Compatibility contract").
+        assert!(entry.protected_folders.is_empty());
+        assert!(entry.expunge_folders.is_empty());
+        // And the discovery state reads as `NotRun`, which is vacuous rather
+        // than wrong on a line that carries no folder entries at all.
+        assert_eq!(
+            entry.special_use_discovery,
+            crate::record::SpecialUseDiscovery::NotRun,
+        );
     }
 
     #[test]
@@ -785,17 +1031,16 @@ mod tests {
             seq: Seq(2),
             ts: Timestamp::now(),
             process_id: ProcessId::new_now(),
-            payload: Payload::Auth(crate::record::AuthEvent {
-                account: None,
-                result: crate::record::AuthResult::Success,
-                host: "127.0.0.1".to_string(),
-                port: 1143,
-                username: "alice@example.test".to_string(),
-                tls_fingerprint_sha256: Some("ab".repeat(32)),
-                fingerprint_match: Some(true),
-                error_code: None,
-                credential_source: None,
-            }),
+            payload: Payload::Auth(crate::record::AuthEvent::new(
+                crate::record::AuthResult::Success,
+                "127.0.0.1".to_string(),
+                1143,
+                "alice@example.test".to_string(),
+                Some("ab".repeat(32)),
+                Some(true),
+                None,
+                None,
+            )),
         };
         let json = serde_json::to_string(&rec).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();

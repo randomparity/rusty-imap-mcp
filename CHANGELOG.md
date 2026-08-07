@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rusty-imap-mcp --dry-run`. All three render the same rows from one producer.
   `process_start` records written before this field parse unchanged. See #632
   and `docs/audit-log.md`.
+- Boot now also reports each account's resolved `protected_folders` and
+  `expunge_folders`, marking every entry `account`, `inherited`, or
+  `discovered`. An `inherited` entry under `expunge_folders` is the #624
+  widening that makes a folder expungeable on an account that never asked for
+  it, and it now appears in the `tool_matrix` entries of the `process_start`
+  audit record and in two new `--dry-run` sections. Records written before
+  these fields parse unchanged, and an absent list reads as *unknown*, not as
+  an empty one. See #696 and `docs/audit-log.md`.
+- **New boot log line `effective folder policy`, one per account, and it is
+  the only place the *complete* protected-folder list appears.**
+  `protected_folders` gains the server's RFC 6154 special-use folders at boot
+  (`[Gmail]/Sent Mail` and friends), and that union is what the `FolderGuard`
+  is built from. Neither the `process_start` audit record nor `--dry-run` can
+  carry it: both run before any IMAP session exists. This line is emitted at
+  `info` level after the guard is built, tags each entry with its origin, and
+  carries `special_use_discovery=ran` — so `grep 'effective folder policy'` is
+  how an operator sees which folders a running server actually protects. The
+  two pre-discovery renderings say `not_run` rather than presenting a shorter
+  list as complete. #696.
 - crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
   new `publish-crates` release job. Publishes in dependency order with an
   idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by
@@ -78,6 +97,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API break: `rimap_audit::record::AccountToolMatrix::new` takes three
+  further arguments (#696).** The signature is now
+  `new(account, posture, tools, protected_folders, special_use_discovery,
+  expunge_folders)`. Adding the fields is additive — `AccountToolMatrix` is
+  `#[non_exhaustive]` (#706) and all three are `#[serde(default)]`, so the
+  on-disk format is unchanged for existing records — but none of them
+  defaults in the constructor, because each empty or absent value is an
+  affirmative claim ("nothing protected", "nothing expungeable", "this list
+  predates discovery") a caller must make deliberately. New `FolderEntry`
+  (also `#[non_exhaustive]`), `FolderSource`, and `SpecialUseDiscovery` types
+  come with them.
+  `rimap_config::validate::ValidatedAccountConfig` gains
+  `account_written_protected_folders` / `account_written_expunge_folders`,
+  which is additive (that type is `#[non_exhaustive]` since #707). Absorbed by
+  the planned `0.2.0`; no version bump.
 - **API break: `rimap_audit::stream_records` returns `StreamSummary` instead of
   `usize` (#717).** The new type carries `matched` — the old return value — plus
   `skipped_unknown_kind`, the count of lines skipped because their `kind` is not
@@ -158,19 +192,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breaking changes that `cargo semver-checks` reported as clean, because it
   baselines on `v0.1.0` and a declared `0.2.0-dev` major bump permits any break
   (`0 checks: 0 pass, 253 skip`). Third of the `#[non_exhaustive]` siblings,
-  after #665 and #707; #716 (`AuthEvent`) carries the remainder, before
-  `v0.2.0` is tagged.
+  after #665 and #707.
 
-  **Two record-adjacent types are deliberately not covered.** `AuthEvent`
-  backs the `auth` kind but is defined in `rimap_core::auth_event` and only
-  re-exported from `rimap_audit::record`, because `rimap-imap` constructs it
-  without depending on `rimap-audit`; marking it needs a constructor in
-  `rimap-core` and a sweep of `rimap-imap`, so it is #716. Adding a field to
-  `AuthEvent` therefore remains a breaking change, and it has already grown
-  one that way (`credential_source`, #78). `AuditOptions`, `Filter`, and
-  `TrailingState` were #715, which has since landed — see the entry below.
-  Until #716 lands, `auth` records keep the hazard this entry describes
-  removing everywhere else.
+  **Two record-adjacent types were out of this change's scope**, and both have
+  since been covered by their own entries below. `AuthEvent` backs the `auth`
+  kind but is defined in `rimap_core::auth_event` and only re-exported from
+  `rimap_audit::record`, because `rimap-imap` constructs it without depending
+  on `rimap-audit`; marking it needed a constructor in `rimap-core` and a
+  sweep of `rimap-imap`, which is #716. `AuditOptions`, `Filter`, and
+  `TrailingState` were #715.
 
   Downstream impact: the struct literal is no longer available outside the
   crate, and **that includes functional-update syntax** — `..Default::default()`
@@ -216,7 +246,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `retention_seconds`, `fail_open`, `initial_seq`) and it grows whenever a
   rotation or retention knob is added, so every such addition was a breaking
   change the semver gate could not report. Fourth of the `#[non_exhaustive]`
-  siblings, after #665, #707, and #706; #716 (`AuthEvent`) is the remainder.
+  siblings, after #665, #707, and #706.
 
   Downstream impact: the struct literal is no longer available outside the
   crate, and **that includes functional-update syntax** — `..Default::default()`
@@ -254,6 +284,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test compiles just as well without the attribute. That file's header now
   states the convention for the crate: every new `pub` struct is born
   `#[non_exhaustive]` rather than retrofitted.
+- **API break: `rimap_core::AuthEvent` is now `#[non_exhaustive]` and gains
+  `AuthEvent::new` (#716).** This is the `auth` audit record's payload — the
+  last of the five `#[non_exhaustive]` siblings, after #665, #707, #706, and
+  #715, and the one payload the others could not reach: it is defined in
+  `rimap-core` (so `rimap-imap` can build one without depending on
+  `rimap-audit`) and only re-exported from `rimap_audit::record`. Adding a
+  field to it was a breaking change the semver gate could not report, and it
+  had already grown one that way (`credential_source`, #78). `AuthResult` is
+  an enum and stays exhaustive, matching #665 and #706.
+
+  Downstream impact: the struct literal is no longer available outside
+  `rimap-core`, and **that includes functional-update syntax** —
+  `..AuthEvent::new(…)` is still a struct expression, so rustc rejects it too
+  (E0639). Pattern matches need a trailing `..`.
+
+  The constructor is
+  `AuthEvent::new(result, host, port, username, tls_fingerprint_sha256,
+  fingerprint_match, error_code, credential_source)`, and `account` is reached
+  by assignment: `let mut e = AuthEvent::new(…); e.account = …;`. The split
+  follows the rule `ProcessEnd::new` and `AuditOptions::new` established — a
+  default that asserts something is a parameter — and each of the four
+  `Option`s has a load-bearing `None`: *no fingerprint was observed*, *the
+  config pinned nothing*, *no error code*, *the attempt ended before
+  credential resolution ran*. `credential_source` is a parameter even though
+  `skip_serializing_if` omits it when absent, because an omitted key is not a
+  neutral silence: `docs/audit-log.md` binds a reader to treat an absent field
+  as *unknown* rather than benign, so a forgotten assignment would be
+  indistinguishable on disk from the genuine pre-resolution failure the field
+  documents. `account` stays assignment-reached because it is an operator
+  label rather than a security fact — `None` is the ordinary shape of a
+  single-account deployment.
+
+  **No on-disk change.** `#[non_exhaustive]` is a Rust-visibility construct
+  that serde never sees, and neither is a constructor, so an `auth` line
+  already written still reads and re-writes byte-identically.
+  `crates/rimap-audit/tests/non_exhaustive_record.rs` keeps the pre-existing
+  success golden unchanged through the new construction path and adds a
+  failure-shape one pinning `error_code` and `credential_source`, plus a
+  section-4 construction contract and an argument-mapping test — `host` and
+  `username` are both `String` in the signature, and a transposition would
+  write a login identity into the host field of a forensic record. The type
+  carries `compile_fail,E0639` doctests as the enforcing half; both were
+  confirmed to fail with `Test compiled successfully, but it's marked
+  compile_fail` when the attribute is removed. The module docs and re-export
+  comment in `rimap_audit::record` no longer carve `auth` out, and
+  `docs/audit-log.md` now names `auth` as covered.
 - **Behaviour break for multi-account configs (#624).** Because the fix above
   makes accounts inherit keys they previously reverted, an account carrying a
   partial `[accounts.security]` block can come out *more* permissive after
@@ -276,15 +352,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlap an account's own `expunge_folders`.
 
   Run `rusty-imap-mcp --dry-run` before and after upgrading and diff the
-  per-account effective matrix it prints. **That covers the tool-verdict
-  widening only.** `--dry-run` prints posture, per-tool verdicts,
-  infrastructure tools, IMAP capabilities, and the TLS fingerprint — it does
-  **not** print `protected_folders`, `expunge_folders`, or any `[limits]`
-  field, so the folder-list widenings above are invisible in its output.
-  Review those two lists by hand against your `[defaults.security]` for every
-  account carrying a partial `[accounts.security]` block. #632 added a
-  boot-time record of the resolved *tool verdicts* with their provenance; the
-  resolved folder lists are still recorded nowhere.
+  per-account output. It prints posture, per-tool verdicts, infrastructure
+  tools, both folder lists, IMAP capabilities, and the TLS fingerprint, each
+  verdict and folder marked `account` or `inherited` — so all three widenings
+  above are visible without reading your config. Look for
+  `Trash(inherited)`-style entries under `Expunge folders:`: that is a folder
+  made expungeable by `[defaults.security]` on an account that never asked
+  for it. No `[limits]` field is printed, so limit changes still need a
+  by-hand diff. See #632 and #696.
 - `rimap-config`: `RawAccountConfig::{security, limits, credentials}` change
   type to the new `AccountSecurityOverrides` / `AccountLimitsOverrides` /
   `AccountCredentialsOverrides` mirror structs. Breaking for direct consumers
