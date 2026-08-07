@@ -6,12 +6,21 @@
 //! cargo run -p rimap-audit --release --example emitcost -- <dir> [n]
 //! ```
 //!
-//! `<dir>` must exist and is written to (`<dir>/audit.jsonl`); `n` defaults to
-//! 2000 samples after a 50-emit warmup. Build `--release`: ADR-0014's numbers
-//! are release numbers, and a debug build measures the wrong thing. Run it on
-//! the storage you actually care about — the finding the ADR rests on is that
-//! an fsync per record is cheap on local storage, which is a claim about a
-//! filesystem, not about this code.
+//! `<dir>` is created if missing; `n` defaults to 2000 samples after a 50-emit
+//! warmup. Build `--release`: ADR-0014's numbers are release numbers, and a
+//! debug build measures the wrong thing. Point it at storage of the class you
+//! care about — the finding the ADR rests on is that an fsync per record is
+//! cheap on local storage, which is a claim about a filesystem, not about this
+//! code.
+//!
+//! **Give it an empty scratch directory, never a configured `audit.path`.**
+//! This writes `WARMUP + n` real-shaped `auth` records for a fabricated
+//! account, and it opens at [`Seq::FIRST`] every time, which on a file that
+//! already holds records restarts the sequence and puts duplicate `seq` values
+//! into an append-only, tamper-evident log. It therefore refuses to start when
+//! `<dir>/audit.jsonl` already exists — a refusal, rather than a
+//! read-and-continue, because continuing a real log means writing fabricated
+//! `auth` records into it, which is the outcome the check exists to prevent.
 //!
 //! Rotation is off and `fail_open` is false, so every sample is a steady-state
 //! append: no rotation outlier, and a write failure fails the run rather than
@@ -21,9 +30,9 @@
 //!
 //! An example compiles as its own crate, so `#[non_exhaustive]` on
 //! `AuditOptions` (#715) and `AuthEvent` (#716) is in force here exactly as it
-//! is in a reader's scratch crate — and `just lint` / `just check` build it via
-//! `--all-targets`, so it cannot rot unnoticed the way the ADR-embedded version
-//! did (#743). See ADR-0018.
+//! is in a reader's scratch crate — and `just lint`'s `--all-targets` clippy
+//! builds it, so it cannot rot unnoticed the way the ADR-embedded version did
+//! (#743). See ADR-0018.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -71,17 +80,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: emitcost <dir> [n]".into());
     };
     let samples_wanted = match args.next() {
-        Some(raw) => raw.parse::<usize>()?,
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|e| format!("sample count {raw:?}: {e} — pass a positive integer"))?,
         None => DEFAULT_SAMPLES,
     };
     if samples_wanted == 0 {
         return Err("sample count must be at least 1".into());
     }
 
-    let writer = AuditWriter::open(&AuditOptions::new(
-        PathBuf::from(dir).join("audit.jsonl"),
-        Seq::FIRST,
-    ))?;
+    let path = PathBuf::from(dir).join("audit.jsonl");
+    if path.exists() {
+        return Err(format!(
+            "{} already exists — emitcost writes fabricated auth records and \
+             restarts the seq chain at Seq::FIRST. Point it at an empty \
+             directory.",
+            path.display()
+        )
+        .into());
+    }
+    let writer = AuditWriter::open(&AuditOptions::new(path, Seq::FIRST))?;
 
     for _ in 0..WARMUP {
         AuthEventSink::emit_auth(&writer, event())?;

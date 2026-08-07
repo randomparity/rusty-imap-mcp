@@ -12,13 +12,13 @@ supersedes the old one (update both `Status` fields and the `Supersedes` /
 `Superseded-by` links) rather than editing history.
 
 [ADR-0018](0018-runnable-artifacts-live-in-the-tree.md) bounds what that
-covers. Immutability binds the decision — Context, Decision, Alternatives
-considered, Consequences. Exactly two edits to an accepted ADR are permitted:
-replacing an embedded **runnable artifact** with a pointer to its committed
-location in the tree, and appending a dated entry to an `## Errata` section at
-the end of the file, which every such replacement must record. ADRs do not
-embed runnable artifacts in the first place — a harness a reader is told to
-execute is committed where the workspace's build gates compile it.
+covers. Immutability binds the whole accepted document, with exactly two
+permitted edits: replacing an embedded **runnable artifact** with a pointer to
+its committed location in the tree, and appending a dated entry to an
+`## Errata` section at the end of the file, which every such replacement must
+record. ADRs do not embed runnable artifacts in the first place — a harness a
+reader is told to execute is committed where the workspace's build gates
+compile it.
 
 ## Index
 
