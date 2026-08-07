@@ -315,9 +315,9 @@ fn tool_start_infrastructure_line_is_byte_exact() {
 fn auth_line_is_byte_exact() {
     let mut event = rimap_audit::record::AuthEvent::new(
         rimap_audit::record::AuthResult::Success,
-        "imap.example.com".to_string(),
+        rimap_audit::record::Host("imap.example.com".to_string()),
         993,
-        "alice@example.com".to_string(),
+        rimap_audit::record::Username("alice@example.com".to_string()),
         Some("ab".repeat(32)),
         Some(true),
         None,
@@ -346,9 +346,9 @@ fn auth_line_is_byte_exact() {
 fn auth_failure_line_is_byte_exact() {
     let event = rimap_audit::record::AuthEvent::new(
         rimap_audit::record::AuthResult::Failure,
-        "imap.example.com".to_string(),
+        rimap_audit::record::Host("imap.example.com".to_string()),
         993,
-        "alice@example.com".to_string(),
+        rimap_audit::record::Username("alice@example.com".to_string()),
         None,
         None,
         Some(rimap_core::ErrorCode::Auth),
@@ -555,12 +555,22 @@ fn whole_second_timestamps_lose_their_zero_millis_on_rewrite() {
 /// Serialization and deserialization have to agree about the format, not just
 /// each be self-consistent -- a round-trip through the struct is exactly what
 /// `audit merge` does to every line it copies.
+///
+/// The two `auth` lines are the read direction of the byte-exact goldens
+/// above, and they are here because #748 changed the Rust *type* of `host`
+/// and `username` (bare `String` to `Host` / `Username`). `assert_golden`
+/// proves only that a freshly built record still *writes* those bytes; no
+/// test read an `auth` line back, so nothing covered whether a line already
+/// on the disk of a running deployment still parses. That is the half that
+/// matters for an append-only log, and it is what these two add.
 #[test]
 fn a_line_read_off_disk_reserializes_unchanged() {
     let goldens = [
         r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"","posture":"readonly","tool_matrix":[],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
         r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"signal_int","total_tool_calls":0,"records_lost":0,"undrained_dispatches":0}"#,
         r#"{"seq":3,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"config","path":"/etc/rimap/config.toml","hash_sha256":"00"}"#,
+        r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"auth","account":"work","result":"success","host":"imap.example.com","port":993,"username":"alice@example.com","tls_fingerprint_sha256":"abababababababababababababababababababababababababababababababab","fingerprint_match":true,"error_code":null}"#,
+        r#"{"seq":3,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"auth","result":"failure","host":"imap.example.com","port":993,"username":"alice@example.com","tls_fingerprint_sha256":null,"fingerprint_match":null,"error_code":"ERR_AUTH","credential_source":"keyring"}"#,
     ];
 
     for golden in goldens {
@@ -792,14 +802,14 @@ fn trailing_state_is_read_and_destructured_with_a_rest_pattern() {
 /// would be indistinguishable from.
 #[test]
 fn auth_event_is_built_through_its_constructor_and_field_assignment() {
-    use rimap_audit::record::{AuthEvent, AuthResult};
+    use rimap_audit::record::{AuthEvent, AuthResult, Host, Username};
     use rimap_core::CredentialSource;
 
     let mut event = AuthEvent::new(
         AuthResult::Failure,
-        "imap.example.com".to_string(),
+        Host("imap.example.com".to_string()),
         993,
-        "alice@example.com".to_string(),
+        Username("alice@example.com".to_string()),
         Some("cd".repeat(32)),
         Some(false),
         Some(rimap_core::ErrorCode::Tls),
@@ -838,21 +848,21 @@ fn auth_event_is_built_through_its_constructor_and_field_assignment() {
 /// `Option`s a reader acts on. This is the mapping the compiler cannot check.
 #[test]
 fn auth_event_new_maps_each_argument_onto_the_field_it_names() {
-    use rimap_audit::record::{AuthEvent, AuthResult};
+    use rimap_audit::record::{AuthEvent, AuthResult, Host, Username};
 
     let event = AuthEvent::new(
         AuthResult::Success,
-        "HOST-goes-here".to_string(),
+        Host("HOST-goes-here".to_string()),
         1993,
-        "USERNAME-goes-here".to_string(),
+        Username("USERNAME-goes-here".to_string()),
         Some("FINGERPRINT-goes-here".to_string()),
         Some(true),
         Some(rimap_core::ErrorCode::Auth),
         Some(rimap_core::CredentialSource::LegacyKeyring),
     );
 
-    assert_eq!(event.host, "HOST-goes-here");
-    assert_eq!(event.username, "USERNAME-goes-here");
+    assert_eq!(event.host.0, "HOST-goes-here");
+    assert_eq!(event.username.0, "USERNAME-goes-here");
     assert_eq!(event.port, 1993);
     assert_eq!(
         event.tls_fingerprint_sha256.as_deref(),

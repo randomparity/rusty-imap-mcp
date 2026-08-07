@@ -222,16 +222,16 @@ fn needs_fsync(payload: &crate::record::Payload) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use rimap_core::auth_event::{AuthEvent, AuthResult};
+    use rimap_core::auth_event::{AuthEvent, AuthResult, Host, Username};
 
     use crate::record::{Payload, ProcessEnd, ProcessEndReason, ProcessStart, ToolEnd, ToolStart};
 
     fn auth_payload() -> Payload {
         Payload::Auth(AuthEvent::new(
             AuthResult::Success,
-            "h".to_string(),
+            Host("h".to_string()),
             1,
-            "u".to_string(),
+            Username("u".to_string()),
             None,
             None,
             None,

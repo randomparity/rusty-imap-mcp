@@ -448,9 +448,9 @@ mod tests {
     fn any_auth_event() -> AuthEvent {
         AuthEvent::new(
             rimap_core::auth_event::AuthResult::Failure,
-            "127.0.0.1".to_string(),
+            rimap_core::Host("127.0.0.1".to_string()),
             143,
-            "unused".to_string(),
+            rimap_core::Username("unused".to_string()),
             None,
             None,
             Some(rimap_core::ErrorCode::Internal),

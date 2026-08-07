@@ -580,7 +580,10 @@ impl AuditRecord {
 // is `AuthEvent::new`. Being defined in another crate, the attribute is in
 // force on it *inside* `rimap-audit` too, unlike the local payloads.
 // `AuthResult` is an enum and stays exhaustive, matching #665 and #706.
-pub use rimap_core::auth_event::{AuthEvent, AuthResult};
+//
+// `Host` and `Username` are `AuthEvent`'s two `#[serde(transparent)]` field
+// wrappers (#748) — needed to call the constructor at all, so they come along.
+pub use rimap_core::auth_event::{AuthEvent, AuthResult, Host, Username};
 
 /// Payload of the `tool_start` kind. Recorded before dispatch begins so a
 /// crash mid-call still leaves a breadcrumb.
@@ -1033,9 +1036,9 @@ mod tests {
             process_id: ProcessId::new_now(),
             payload: Payload::Auth(crate::record::AuthEvent::new(
                 crate::record::AuthResult::Success,
-                "127.0.0.1".to_string(),
+                crate::record::Host("127.0.0.1".to_string()),
                 1143,
-                "alice@example.test".to_string(),
+                crate::record::Username("alice@example.test".to_string()),
                 Some("ab".repeat(32)),
                 Some(true),
                 None,
