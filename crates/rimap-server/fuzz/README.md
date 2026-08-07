@@ -55,13 +55,15 @@ Dependabot entry here would reintroduce the same drift in the other direction.
 On a Dependabot PR the realign is automatic:
 `.github/workflows/dependabot-fuzz-lock.yml` runs the command above and pushes
 the result, so the gate clears without anyone cloning the branch. Two things
-follow from that. It needs a `FUZZ_LOCK_REALIGN_TOKEN` secret on the
-`fuzz-lock-realign` environment and fails loudly without one, and once it has
-pushed, Dependabot stops
+follow from that. It needs `REALIGN_APP_ID` and `REALIGN_APP_KEY` secrets on the
+`fuzz-lock-realign` environment — the credentials of a GitHub App installed on
+this repository with `Contents: read and write` — and fails loudly without them,
+and once it has pushed, Dependabot stops
 auto-rebasing that PR — comment `@dependabot rebase` to hand the branch back.
 The workflow declines any PR whose diff reaches past cargo manifests and
 lockfiles; those still get the manual command. See
-[ADR-0016](../../../docs/ADR/0016-dependabot-fuzz-lock-auto-realign.md).
+[ADR-0016](../../../docs/ADR/0016-dependabot-fuzz-lock-auto-realign.md) and
+[ADR-0017](../../../docs/ADR/0017-realign-push-uses-a-github-app-token.md).
 
 ## Findings
 
