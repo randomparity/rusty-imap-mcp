@@ -2,6 +2,15 @@
 
 **Status:** Accepted · 2026-08-06 · issue [#698](https://github.com/randomparity/rusty-imap-mcp/issues/698)
 
+- **Superseded-by (in part):** [ADR-0017](0017-realign-push-uses-a-github-app-token.md)
+  replaces the credential decision below — the "Pushing uses a PAT
+  (`FUZZ_LOCK_REALIGN_TOKEN`), not `GITHUB_TOKEN`" paragraph and the
+  `FUZZ_LOCK_REALIGN_TOKEN` deployment prerequisite. The realign now pushes
+  with a GitHub App installation token. Everything else here — the
+  `pull_request_target` trigger, the no-head-file-is-executed invariant, the
+  overlay and its symlink defences, the actor/author gate — is unchanged and
+  still governs.
+
 **Relates to:** [ADR-0011](0011-fuzz-lockfile-workspace-parity.md) — this
 records how the cost ADR-0011 accepted is paid. ADR-0011's decision is
 unchanged and is not superseded.
