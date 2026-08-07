@@ -124,15 +124,42 @@ reader parse a line carrying a field it does not know. That does nothing here �
 an old reader meeting `"kind":"folder_policy"` has no variant to deserialize
 into. What saves it is #717's skip: `stream_records` drops a line whose `kind`
 is absent from `KNOWN_KINDS`, warns on stderr, and counts it in
-`StreamSummary::skipped_unknown_kind`. So a binary predating this change reads
-a file containing `folder_policy` records without calling it corrupt.
+`StreamSummary::skipped_unknown_kind`.
 
-The cost is the one `docs/audit-log.md` already documents for that path:
-**`rimap audit merge` run by an older binary silently omits these records from
-its output**, and the count on stderr is the only trace. That is worse than the
-field case, where the data survives the merge. It is the price of a new kind
-and it is why a new kind is reserved for things that genuinely cannot be a
-field.
+**That tolerance has not shipped yet, and the distinction is load-bearing.**
+#717 is unreleased — `v0.1.0` is the only tag, and its
+`crates/rimap-audit/src/reader/mod.rs` has no `unknown_kind`, no
+`KNOWN_KINDS`, and no `skipped_unknown_kind`. So a `v0.1.0` binary reading a
+file this change wrote **aborts with a parse error naming the line**, which is
+exactly the corruption behavior the tolerance exists to avoid. The guarantee
+is therefore: readers at or after the release carrying #717 skip these records;
+`v0.1.0` does not. Both #717 and this change land in the same unreleased
+`0.2.0` cycle, so no released reader ever has to skip a kind it does not know —
+but a mixed deployment against a `v0.1.0` binary is a real and unhandled case
+until that release exists.
+
+The cost, once the tolerance has shipped, is the one `docs/audit-log.md`
+documents for that path: **`rimap audit merge` run by an older binary silently
+omits these records from its output**, and the count on stderr is the only
+trace. That is worse than the field case, where the data survives the merge. It
+is the price of a new kind and it is why a new kind is reserved for things that
+genuinely cannot be a field.
+
+**The audit write here is a blocking, fsynced write issued from an `async fn`,
+which is a third exception to the rule in
+`docs/architecture/audit-locking.md`.** That document says async callers reach
+the writer through `DispatchDrain::spawn_blocking_tracked` and names exactly
+two exceptions (`Connection::emit_auth` under ADR-0014, and the cancellation
+drainer). This is the third, and it is justified by *when* it runs rather than
+by what it does: `resolve_folder_policy` is awaited from `build_registry`,
+which completes before `spawn_drainer` and before `rmcp::serve_server`, so the
+drain it would register with does not exist yet and a bare `spawn_blocking`
+is what that document itself calls a bug. Boot is single-task at this point, so
+the write stalls nothing. **This justification is about boot's serial
+structure, not about the write being cheap** — a change that parallelizes
+account boot (`join_all` over accounts is the obvious one) invalidates it and
+must revisit this call site. The exception list in `audit-locking.md` carries
+the same note.
 
 **Nothing about `process_start` changes** — not its timing, not its fields, not
 its `special_use_discovery: not_run`. An account that fails to connect still
@@ -178,3 +205,16 @@ contract, and not what `rimap audit merge` reads.
 post-session. Rejected: `auth` is emitted per *connect*, including reconnects,
 so the policy would be repeated on every reconnection while being a property of
 boot; and it would couple an authentication record to an authorization concern.
+
+**Put them on `process_end`** — the only *existing* kind written after the
+guards are built, and therefore the only option that would have been
+field-additive rather than kind-additive. That matters, because the consequence
+above sets a bar this decision has to clear: a field parses on an old reader
+and survives a merge, a new kind does neither. Rejected anyway, and decisively:
+`process_end` is best-effort. A hard crash leaves none, which means the runs
+that most need an enforcement record are exactly the runs that would have no
+enforcement record. Hanging a durable authorization statement off a
+best-effort one inverts its reliability. It would also arrive at shutdown,
+hours after the policy took effect, and would have to carry an array over
+accounts — reintroducing the "which account failed to boot" ambiguity that
+per-account emission resolves for free.

@@ -33,6 +33,12 @@ use rimap_imap::{Connection, SpecialUseMap, types::Folder};
 /// that enforces the policy and the map the session keeps. Splitting them
 /// across two calls would reintroduce the possibility of a caller pairing a
 /// guard with a map from a different `LIST`.
+///
+/// `#[non_exhaustive]` because `rimap-server` is a published crate (ADR-0004)
+/// and its `pub` structs are born with the attribute — a third field here
+/// would otherwise be a breaking change. The only construction and the only
+/// destructure are both in-crate, where the attribute is a no-op.
+#[non_exhaustive]
 pub struct ResolvedFolderPolicy {
     /// The special-use classification of the account's folder list.
     pub special_use: SpecialUseMap,
@@ -52,6 +58,18 @@ pub struct ResolvedFolderPolicy {
 /// Emits the `folder_policy` audit record and the `effective folder policy`
 /// log line, in that order — the record first, because it is the durable one
 /// and the log line is best-effort by nature.
+///
+/// # Blocking
+///
+/// The audit write is synchronous and fsynced, and this is an `async fn`, so
+/// it is a third exception to `docs/architecture/audit-locking.md`'s rule that
+/// async callers reach the writer through
+/// `DispatchDrain::spawn_blocking_tracked`. It is justified by *when* it runs,
+/// not by what it costs: `build_registry` completes before `spawn_drainer` and
+/// before `rmcp::serve_server`, so the drain to register with does not exist
+/// yet and boot has no other task to stall. **A change that boots accounts
+/// concurrently invalidates that and must revisit this call site** — see
+/// ADR-0021 and the exception list in `audit-locking.md`.
 ///
 /// # Errors
 /// Propagates a `LIST` failure (the account cannot be booted without one) and

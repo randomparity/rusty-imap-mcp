@@ -118,6 +118,14 @@ the field case and *loses the whole record* in the kind case. Reserve a new kind
 for what genuinely cannot be a field. `folder_policy` (#761) is the first kind
 added under this tolerance; ADR-0021 argues why it could not be a field.
 
+**The unknown-`kind` tolerance itself is unreleased.** It arrived in #717, and
+`v0.1.0` -- the only tag -- predates it: that binary's reader has no
+unknown-`kind` path and **aborts** on a `folder_policy` line rather than
+skipping it. Both #717 and `folder_policy` land in the same unreleased `0.2.0`
+cycle, so no released reader will ever meet a kind it cannot skip. Until that
+release exists, a `v0.1.0` binary pointed at a file written by a current build
+is the one case this contract does not cover.
+
 `crates/rimap-audit/tests/non_exhaustive_record.rs` holds this contract as
 byte-exact golden lines. A diff there means the format moved.
 
@@ -322,9 +330,21 @@ boot fails before that point -- a refused `LOGIN`, an unreachable host, a failed
 `LIST` -- has **no** `folder_policy` record, and neither does any account after
 it in the boot order. This is the deliberate complement of `process_start`,
 which carries a `tool_matrix` entry for *every* configured account precisely so
-a failed one still leaves its effective policy behind (#632). Reading the two
-together: an account in `process_start`'s `tool_matrix` with no `folder_policy`
-of the same `process_id` is an account that never came up.
+a failed one still leaves its effective policy behind (#632).
+
+Reading the two together: an account in `process_start`'s `tool_matrix` with no
+`folder_policy` of the same `process_id` did not finish booting. **Two caveats
+on the converse, and both matter before this is used as an alerting rule.**
+
+- **A `folder_policy` record does not mean the account came up.** Only that its
+  guard was built. SMTP client construction happens after, so an account whose
+  SMTP credential cannot be resolved has a `folder_policy` record and still
+  fails the boot.
+- **With `audit.fail_open = true` an absent record proves nothing at all.** A
+  suppressed write returns success to the boot path and drops the record, so a
+  perfectly healthy account can be missing one. The suppression is counted --
+  see `records_lost` on `process_end` -- but the two are only correlatable in
+  aggregate.
 
 **Compared with the `process_start` `tool_matrix` entry** for the same account,
 this record repeats the folder half verbatim in the same field order and drops
@@ -717,6 +737,7 @@ piped to `jq`.
 | `--until <RFC3339>` | Only records at or before this timestamp |
 | `--tool <name>` | Only `tool_start`/`tool_end` records for this tool |
 | `--kind <kind>` | Only records of this kind (e.g. `auth`, `tool_end`) |
+| `--account <name>` | Only records scoped to this account (`auth`, `tool_start`, `tool_end`, `folder_policy`). Records with no account scope -- `process_start`, `process_end`, `config` -- pass through unfiltered |
 | `--process <ulid>` | Only records from this process ID |
 
 Trailing malformed lines (from a mid-record crash) produce a stderr
