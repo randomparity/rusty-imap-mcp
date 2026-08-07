@@ -84,22 +84,115 @@ jobs:
     # requires write access. A deleted fork yields `head.repo: null`, which
     # compares false.
     #
-    # `github.actor` carries none of that weight. Its job is to stop the
-    # workflow reacting to its own push: that push is authenticated as the
-    # realign App's installation, so the `synchronize` it triggers has that
-    # App's bot login as its actor — never `dependabot[bot]`, which is a
-    # different account — and this job does not re-enter. The App push *does*
-    # start workflow runs, unlike a `GITHUB_TOKEN` push, so this gate is what
-    # bounds the loop rather than the platform's own recursion suppression.
-    # The realign is idempotent besides. zizmor flags it as spoofable
-    # (`bot-conditions`)
-    # and is right in general; here spoofing it can only cause the job to
-    # *run*, which still requires both conditions above. The ignore is scoped
-    # to this one expression, and zizmor's recommended replacement,
+    # The actor terms carry none of that weight. Their only job is to stop the
+    # workflow reacting to its own push, so they name exactly the one identity
+    # that push arrives under: the realign App's installation. Run
+    # 31138102525 is that push observed — actor `rusty-imap-realign[bot]`,
+    # account id `314027065`, conclusion `skipped` — so both literals below
+    # are read off a real run rather than assumed from the App slug. The App
+    # push *does* start workflow runs, unlike a `GITHUB_TOKEN` push, so this
+    # gate is what bounds the loop rather than the platform's own recursion
+    # suppression. The realign is idempotent besides, which ADR-0016 records
+    # as the independent backstop: a second run finds parity restored and
+    # pushes nothing, so no further `synchronize` follows.
+    #
+    # Login *and* account id, both required — the second lock on the same
+    # door, the way `core.symlinks=false` sits behind the file-mode check
+    # further down.
+    # An exclusion fails *open* where the old equality failed closed: if the
+    # literal stops matching, the App's own push re-enters instead of simply
+    # not running. The two ways it can stop matching have opposite blind
+    # spots. Renaming the App changes the login and keeps the id; deleting and
+    # re-registering it can keep the login and changes the id. Either term
+    # alone would miss one of those; together they catch both, because the job
+    # runs only when the actor differs from the App on *both* axes.
+    #
+    # It has to be `github.actor`/`github.actor_id` and not
+    # `github.triggering_actor`. GitHub documents `github.actor` as "the
+    # username of the user that triggered the initial workflow run" and
+    # `github.actor_id` as "the account ID of the person or app that triggered
+    # the initial workflow run", both unchanged by a re-run, while
+    # `triggering_actor` is "the user that initiated the workflow run" and
+    # does move (Actions contexts reference, `github` context). Run
+    # 31136687519 is that divergence live: `run_attempt: 3`, actor
+    # `dependabot[bot]`, triggering_actor `randomparity`. Gating on
+    # `triggering_actor` would let a human re-run of the App's own push slip
+    # past the exclusion and re-enter the job on the head the App just wrote.
+    # The `initial workflow run` pair keeps answering "who caused the event
+    # this run is reacting to" in both the fresh-event and the re-run case.
+    #
+    # This clause used to require `github.actor == 'dependabot[bot]'`, which
+    # also skipped a human clicking "Update branch" — the push `strict` branch
+    # protection requires before every merge, and the one that most often
+    # re-drifts the fuzz lockfiles, because it brings a newer workspace
+    # `Cargo.lock` onto the branch. Run 31136216134 is that defect: actor
+    # `randomparity`, conclusion `skipped`, on a PR that then needed the
+    # manual `just realign-fuzz-locks` commit this workflow exists to remove
+    # (#763).
+    #
+    # Event matrix, in the style #754/#758 established for the SonarQube gate.
+    # All four conditions are joined by `&&`, so every row below already has a
+    # `dependabot[bot]`-authored PR whose head branch lives in this
+    # repository; the actor is what varies.
+    #   * Dependabot opens the PR, or force-pushes a rebase or recreate
+    #     (`dependabot[bot]`) — runs, as before.
+    #   * A human clicks "Update branch", or any collaborator pushes to the
+    #     branch, or reopens the PR (`randomparity`, …) — now runs; skipped
+    #     before. That is the #763 fix.
+    #   * This workflow's own realign push (`rusty-imap-realign[bot]`,
+    #     `314027065`) — skips, which is what bounds the loop.
+    #   * A re-run of any row above — evaluates as the row it re-runs, because
+    #     both actor terms stay the initial run's actor.
+    #   * A fork PR, whatever the actor — skips on `head.repo.full_name`.
+    #   * A non-Dependabot PR, whatever the actor — skips on the author.
+    #
+    # Excluding one identity admits every identity nobody thought of, so what
+    # that widening admits is worth stating plainly. Pushing to a branch in
+    # this repository requires write access and reopening a PR requires write
+    # access or authorship, so the newly admitted population is this
+    # repository's collaborators plus any App installed here with contents
+    # write — the same population the `head.repo.full_name` clause already
+    # trusts, and the population that can already land any commit on `main`
+    # through a pull request. (Not the population that can push to `main`
+    # directly: protection there is `strict` with force-pushes disabled, so
+    # only an admin bypasses it.) No other *workflow* here pushes to a
+    # Dependabot-authored PR branch — release.yml pushes only to its own
+    # `chore/post-release-bump-v*` branch and to the tap repository — so
+    # there is no second automated pusher for this job to ping-pong with.
+    # Dependabot is the one other App that pushes to these branches, and the
+    # note on the push step at the bottom of this file covers that
+    # interaction: the realign push makes Dependabot stop auto-rebasing until
+    # it is asked to.
+    #
+    # One consequence to know, because it is new. Under the old equality only
+    # Dependabot's own events reached the manifest-only diff gate below, and
+    # Dependabot never emits a wider diff, so that gate's `exit 1` was
+    # effectively unreachable. Now a collaborator push or "Update branch" on a
+    # Dependabot PR that carries a hand-edit — #600 added `deny.toml`, #605
+    # added a source file — reaches it and fails it. That is a red
+    # `realign fuzz lockfiles` check on the PRs a maintainer is already
+    # hand-holding. It does not block merge (this job is not a required
+    # context), and it is the true signal rather than noise: the workflow
+    # cannot auto-realign such a PR, so the fuzz lockfiles may be drifted and
+    # somebody has to run `just realign-fuzz-locks`. Under the old gate that
+    # fact was silently absent, which is the class of defect #698 and #763
+    # exist to remove. Whether it should instead be a soft skip is #773.
+    #
+    # This expression used to carry a `# zizmor: ignore[bot-conditions]`.
+    # zizmor's `bot-conditions` audit matches an *equality* against a bot
+    # login and does not fire on the exclusions below, so the ignore became a
+    # no-op and is gone; restoring an `==` here would surface the finding
+    # again, which is the right way round. The audit's underlying point still
+    # holds — the actor terms are spoofable — and is still answered: spoofing
+    # them in the direction that matters, making the job *run*, leaves both
+    # weight-bearing conditions to satisfy, and spoofing them the other way
+    # only suppresses the realign, which reinstates a manual chore rather than
+    # granting anything. zizmor's recommended replacement,
     # `github.event.pull_request.user.login`, is already the first condition.
-    if: >-  # zizmor: ignore[bot-conditions]
+    if: >-
       github.event.pull_request.user.login == 'dependabot[bot]'
-      && github.actor == 'dependabot[bot]'
+      && github.actor != 'rusty-imap-realign[bot]'
+      && github.actor_id != '314027065'
       && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     # Scopes the App credentials to this job rather than to every workflow in
@@ -181,6 +274,18 @@ jobs:
       # two-dot `git diff BASE HEAD` also reports every commit that landed on
       # main after the PR branched, so it rejects any PR that is merely behind
       # — which, with `strict` branch protection on this repo, is most of them.
+      #
+      # The other direction — a head that has just *absorbed* main via "Update
+      # branch" — is a live path since #763, so it is worth recording that it
+      # works and why. `pull_request.base.sha` in the payload is refreshed by
+      # the `synchronize`, so it is the main commit the update merged in, not
+      # the PR's original branch point. Checked against PR #746: head
+      # `34b5101d` is `Merge branch 'main' into …` with main-side parent
+      # `e4535342`, and that PR's `base.sha` is `e4535342`. The merge base of
+      # the two is therefore `e4535342` itself and the diff is the PR's own
+      # three files, with none of main's. Were `base.sha` to lag instead, the
+      # merge base would fall back to the older commit and this gate would
+      # reject every updated PR.
       - name: Require a cargo-manifest-only diff
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
