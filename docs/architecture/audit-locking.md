@@ -194,8 +194,8 @@ Future contributors who add new audit emission paths from async code:
 follow the `spawn_blocking_tracked` pattern above. A bare
 `tokio::task::spawn_blocking` is the shape that reintroduces #672.
 
-There are exactly two exceptions, and both are argued in full where they
-are introduced above rather than repeated here:
+There are exactly three exceptions, and each is argued in full where it is
+introduced rather than repeated here:
 
 - The `auth` pair in `crates/rimap-imap/src/connection/login.rs` —
   `Connection::emit_auth` and `Connection::emit_auth_blocking`, which
@@ -210,6 +210,16 @@ are introduced above rather than repeated here:
   direction of the crate graph — see "The cancellation drainer is a
   second exception" above for why, and for the join-budget-and-`abort`
   mechanism that bounds it instead.
+- `boot::discovery::resolve_folder_policy` in `rimap-server`, which writes
+  the `folder_policy` record (#761,
+  [ADR-0021](../ADR/0021-folder-policy-record-after-registry-build.md)).
+  Unlike the two above it is not justified by what it writes but by *when*:
+  it is awaited from `build_registry`, which completes before
+  `spawn_drainer` and before `rmcp::serve_server`, so no drain exists to
+  register with and no other task is running to stall. **That argument is
+  about boot being serial, and a change that boots accounts concurrently
+  breaks it** — such a change must move this write onto the drain or
+  re-argue the exception, not inherit it.
 
 A bare `spawn_blocking` writing an audit record anywhere else is a bug:
 file an issue rather than living with the gap or inventing a third

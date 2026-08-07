@@ -1,0 +1,1 @@
+{"seq":4,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"folder_policy","account":"work","protected_folders":[{"folder":"INBOX","source":"inherited"},{"folder":"[Gmail]/Sent Mail","source":"discovered"}],"special_use_discovery":"ran","expunge_folders":[{"folder":"Trash","source":"inherited"}]}

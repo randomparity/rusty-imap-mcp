@@ -55,7 +55,20 @@
 //! #696's `FolderEntry` is the second, and it is a *record* component rather
 //! than a helper, so its construction case belongs with the record types in
 //! section 1 and its bytes are pinned by the golden in section 2 — section 3
-//! is only for `pub` structs with no on-disk component.
+//! is only for `pub` structs with no on-disk component. #761's `FolderPolicy`
+//! is the third and is treated the same way, being the payload of a whole
+//! `kind`.
+//!
+//! **The `EXXXX` half of `compile_fail,E0639` is not enforced by rustdoc on
+//! stable** (verified on 1.94.0: annotating one of these doctests `E0277`
+//! leaves it passing). So the doctests prove *does not compile*, not *fails
+//! with E0639*, and the difference is the #715 trap: a type without `Default`
+//! makes `..Default::default()` fail with `E0277` and the doctest still
+//! passes while testing nothing. Two habits close the gap, and every new case
+//! must follow both: spread from the type's **own constructor** rather than
+//! from `Default`, so a missing `Default` cannot be the reason it failed; and
+//! confirm the code out-of-band once by compiling the same expression as an
+//! ordinary downstream item. Tracked as a gate in #777.
 //!
 //! The rule reaches `AuthEvent` too even though `rimap-core` defines it: it is
 //! a `pub` type this crate re-exports as part of its own record surface, so a
@@ -67,8 +80,8 @@
 #![expect(clippy::expect_used, reason = "integration test")]
 
 use rimap_audit::record::{
-    AccountToolMatrix, AttachmentProvenance, AuditRecord, FolderEntry, FolderSource, Payload,
-    ProcessEnd, ProcessEndReason, Provenance, ResultSummary, SpecialUseDiscovery, ToolEnd,
+    AccountToolMatrix, AttachmentProvenance, AuditRecord, FolderEntry, FolderPolicy, FolderSource,
+    Payload, ProcessEnd, ProcessEndReason, Provenance, ResultSummary, SpecialUseDiscovery, ToolEnd,
     ToolStatus, ToolVerdict, VerdictSource,
 };
 use rimap_audit::{ProcessId, Seq, Timestamp};
@@ -119,6 +132,22 @@ fn record_types_are_built_through_constructors_and_field_assignment() {
     assert_eq!(matrix.protected_folders.len(), 1);
     assert_eq!(matrix.special_use_discovery, SpecialUseDiscovery::NotRun);
     assert_eq!(matrix.expunge_folders[0].source, FolderSource::Account);
+
+    // `FolderPolicy` (#761) is a record type, so its case belongs here rather
+    // than in section 3, and its bytes are pinned by the golden in section 2.
+    let policy = FolderPolicy::new(
+        "work".to_string(),
+        vec![FolderEntry::new(
+            "[Gmail]/Sent Mail".to_string(),
+            FolderSource::Discovered,
+        )],
+        SpecialUseDiscovery::Ran,
+        Vec::new(),
+    );
+    assert_eq!(policy.account, "work");
+    assert_eq!(policy.protected_folders[0].source, FolderSource::Discovered);
+    assert_eq!(policy.special_use_discovery, SpecialUseDiscovery::Ran);
+    assert!(policy.expunge_folders.is_empty());
 
     // `ResultSummary` is the one type whose constructor is `Default`: every
     // field is `#[serde(default)]`, so there is nothing a `new` would have to
@@ -432,6 +461,88 @@ fn process_start_multi_account_line_is_byte_exact() {
         &record,
         r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"abc123","accounts":[{"name":"work","posture":"readonly","imap_host":"imap.example.com"}],"tool_matrix":[{"account":"work","posture":"readonly","tools":[{"tool":"delete_message","allow":true,"source":"inherited"}],"protected_folders":[{"folder":"INBOX","source":"inherited"},{"folder":"[Gmail]/Sent Mail","source":"discovered"}],"special_use_discovery":"ran","expunge_folders":[{"folder":"Trash","source":"inherited"}]}],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
     );
+}
+
+/// The `folder_policy` kind (#761, ADR-0021): the enforced folder policy of
+/// one account, written once its `FolderGuard` exists.
+///
+/// **This golden has no pre-change provenance and cannot have one** — unlike
+/// every other line in this section, which was reproduced against a worktree
+/// at the merge-base to prove the format did not move. A new `kind` has no
+/// prior bytes to preserve, so this pins the shape from birth instead. From
+/// here on it carries the same weight as its siblings: files written by the
+/// version that introduced it are already on disk.
+///
+/// The field order deliberately mirrors the folder half of a `process_start`
+/// `tool_matrix` entry, which the golden above pins -- `protected_folders`,
+/// `special_use_discovery`, `expunge_folders`. A reader diffing the
+/// configured policy against the enforced one walks the same keys in the same
+/// order, and a reordering here would quietly break that.
+///
+/// `special_use_discovery` is `"ran"` and, on a correctly-wired producer,
+/// always will be. It is pinned rather than dropped because it is the on-disk
+/// detector for the one miswiring this kind exists to prevent; see ADR-0021.
+#[test]
+fn folder_policy_line_is_byte_exact() {
+    let record = AuditRecord::new(
+        Seq(4),
+        fixed_ts(),
+        fixed_pid(),
+        Payload::FolderPolicy(FolderPolicy::new(
+            "work".to_string(),
+            vec![
+                FolderEntry::new("INBOX".to_string(), FolderSource::Inherited),
+                FolderEntry::new("[Gmail]/Sent Mail".to_string(), FolderSource::Discovered),
+            ],
+            SpecialUseDiscovery::Ran,
+            vec![FolderEntry::new(
+                "Trash".to_string(),
+                FolderSource::Inherited,
+            )],
+        )),
+    );
+    assert_golden(
+        &record,
+        r#"{"seq":4,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"folder_policy","account":"work","protected_folders":[{"folder":"INBOX","source":"inherited"},{"folder":"[Gmail]/Sent Mail","source":"discovered"}],"special_use_discovery":"ran","expunge_folders":[{"folder":"Trash","source":"inherited"}]}"#,
+    );
+}
+
+/// `folder_policy` carries no `#[serde(default)]` field, so a line missing one
+/// of its four keys must fail to parse rather than materialize a default.
+///
+/// This is the inverse of the tolerance the compatibility contract grants
+/// *added* fields. These are the kind's birth fields: every `folder_policy`
+/// line ever written has all four, so an absent one is corruption, not age.
+/// Defaulting them would let a torn write parse as a policy record asserting
+/// that nothing was protected -- a false claim about an authorization
+/// decision, which is the worst shape of misread this file guards against.
+#[test]
+fn folder_policy_birth_fields_do_not_default() {
+    for absent in [
+        "account",
+        "protected_folders",
+        "special_use_discovery",
+        "expunge_folders",
+    ] {
+        let mut line = serde_json::json!({
+            "seq": 4,
+            "ts": "2026-05-05T12:00:00.234Z",
+            "process_id": "01HM0000000000000000000000",
+            "kind": "folder_policy",
+            "account": "work",
+            "protected_folders": [],
+            "special_use_discovery": "ran",
+            "expunge_folders": [],
+        });
+        line.as_object_mut()
+            .expect("object")
+            .remove(absent)
+            .expect("field present before removal");
+        assert!(
+            serde_json::from_value::<AuditRecord>(line).is_err(),
+            "a folder_policy line missing `{absent}` must not parse",
+        );
+    }
 }
 
 /// The fields `#[serde(skip_serializing_if)]` omits stay omitted. This is the

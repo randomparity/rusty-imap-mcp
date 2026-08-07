@@ -4,9 +4,10 @@
 //! and where each of those came from (#696).
 //!
 //! Consumers report the same thing — the boot `tracing::info!` lines, the
-//! `process_start` audit record, and `--dry-run` — so all of them derive
-//! their rows from [`account_tool_matrix`] here. Adding provenance to one
-//! renderer and not the others is what this module exists to prevent.
+//! `process_start` and `folder_policy` audit records, and `--dry-run` — so all
+//! of them derive their rows from [`account_tool_matrix`] here. Adding
+//! provenance to one renderer and not the others is what this module exists to
+//! prevent.
 //!
 //! # One producer, two states of knowledge
 //!
@@ -23,7 +24,11 @@
 //! guard is actually built from. Rather than let the two pre-discovery
 //! callers silently render a shorter list that looks complete,
 //! [`account_tool_matrix`] takes the discovered names as an `Option` and the
-//! renderers say which state they are in.
+//! renderers say which state they are in. The third consumer,
+//! [`crate::boot::discovery::resolve_folder_policy`], is on the registry path
+//! and so is the one that can pass `Some` — which is why the enforced policy
+//! reaches the audit trail as its own `folder_policy` kind rather than as a
+//! field on `process_start` (#761, ADR-0021).
 
 use rimap_audit::record::{
     AccountToolMatrix, FolderEntry, FolderSource, SpecialUseDiscovery, ToolVerdict, VerdictSource,
@@ -214,6 +219,14 @@ fn render_folder_list(entries: &[FolderEntry]) -> String {
 /// still leaves it behind (#632), while this line is worth logging only once
 /// special-use discovery has contributed to `protected_folders` — which is
 /// after the `FolderGuard` exists.
+///
+/// **This line is no longer the only place the enforced union appears.** It
+/// was, until #761 added the `folder_policy` audit record, which
+/// [`crate::boot::discovery::resolve_folder_policy`] writes from this same
+/// matrix immediately before calling this. The line stays because the two
+/// serve different readers: this one is what an operator greps on a running
+/// server, the record is what survives the process. They cannot disagree —
+/// both render one [`AccountToolMatrix`].
 ///
 /// `expunge_folders` entries marked `inherited` are the ones to look for: a
 /// folder is expungeable that the operator did not ask to make expungeable on

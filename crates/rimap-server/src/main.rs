@@ -659,28 +659,23 @@ async fn build_registry(
             ));
         let imap = Connection::new(conn_cfg, auth_sink.clone(), resolver);
 
-        let folders = imap
-            .list_folders("*")
-            .await
-            .with_context(|| format!("listing folders for account {}", id.as_str()))?;
-        let special_use = rimap_server::boot::discovery::resolve_special_use(&folders);
-        let protected = rimap_server::boot::discovery::merge_protected_folders(
-            &acfg.security.protected_folders,
-            special_use.all_discovered(),
-        );
+        // Discovery, the guard, the `folder_policy` audit record and the
+        // `effective folder policy` log line all land in here, after the
+        // account's session exists — which is what `process_start`, written
+        // before the runtime, structurally cannot do (#696 / #761). An
+        // account that fails before this point keeps its `process_start`
+        // matrix (#632) and leaves no `folder_policy`, which is how a reader
+        // tells which account did not boot.
+        // The rest pattern is required, not stylistic: this binary is its own
+        // crate, so `ResolvedFolderPolicy`'s `#[non_exhaustive]` is in force
+        // here exactly as it is for any downstream consumer (rustc E0638).
+        let rimap_server::boot::discovery::ResolvedFolderPolicy {
+            special_use,
+            folder_guard,
+            ..
+        } = rimap_server::boot::discovery::resolve_folder_policy(acfg, &imap, audit).await?;
 
         let smtp = build_smtp_client(acfg, credentials)?;
-
-        let folder_guard =
-            rimap_authz::FolderGuard::new(&protected, &acfg.security.expunge_folders);
-
-        // Logged here rather than beside the tool matrix above because this
-        // is the first point at which `protected` is the discovery-derived
-        // union, which is the list the guard on the line above was built
-        // from (#696).
-        rimap_server::boot::tool_matrix::log_account_folder_policy(
-            &rimap_server::boot::tool_matrix::account_tool_matrix(acfg, Some(&protected)),
-        );
 
         let state = registry::AccountState {
             id: id.clone(),

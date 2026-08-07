@@ -212,10 +212,15 @@ fn write_under_lock(guard: &mut Inner, bytes: &[u8], path: &Path) -> Result<(), 
 fn needs_fsync(payload: &crate::record::Payload) -> bool {
     use crate::record::Payload;
     match payload {
+        // `folder_policy` sits with the lifecycle kinds rather than the
+        // per-call ones: it is written once per account at boot, so the fsync
+        // cost is bounded by account count, and it is a record you want
+        // durable before the process it describes can fail.
         Payload::ProcessStart(_)
         | Payload::ProcessEnd(_)
         | Payload::Auth(_)
-        | Payload::Config(_) => true,
+        | Payload::Config(_)
+        | Payload::FolderPolicy(_) => true,
         Payload::ToolStart(_) | Payload::ToolEnd(_) => false,
     }
 }
