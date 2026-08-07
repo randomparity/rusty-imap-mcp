@@ -1,0 +1,41 @@
+# Code owners for rusty-imap-mcp.
+#
+# Reference: https://docs.github.com/articles/about-code-owners
+#
+# STATUS: ADVISORY. These entries do not block a merge today.
+#
+# `main`'s branch protection carries no `required_pull_request_reviews` block,
+# so GitHub's "Require review from Code Owners" is not settable and nothing
+# here gates a merge. What the entries do provide is automatic reviewer
+# assignment on any pull request touching an owned path, and attribution of
+# the owner in the PR's Files view.
+#
+# The advisory posture is deliberate, not an oversight. This repository is
+# maintained by one person who merges their own pull requests, and GitHub does
+# not let a pull request author satisfy a review requirement on their own
+# pull request. Making code-owner review binding would therefore block every
+# self-authored change to an owned path, with no second reviewer available to
+# unblock it.
+#
+# To make these entries binding, an admin enables
+# `required_pull_request_reviews` on `main` with `require_code_owner_reviews:
+# true`. That configuration needs either a second account with write access or
+# a documented admin bypass before it is workable here, so it is an operator
+# decision made outside this file.
+#
+# Under a binding configuration, Dependabot pull requests from the
+# `github-actions` ecosystem touch `.github/workflows/` and would need an
+# approval; `cargo` bumps touch `Cargo.toml` / `Cargo.lock` only and would not.
+
+# CI/CD configuration. Holds the workflow `permissions:` blocks, the
+# `pull_request_target` fuzz-lock realign job and its GitHub App credential
+# mint, the release and publish path, and this file itself.
+/.github/ @randomparity
+
+# Shell and Python scripts invoked by CI, including the fuzz-lock parity
+# checker that the realign job runs from the base branch's copy.
+/scripts/ @randomparity
+
+# Supply-chain policy: RUSTSEC advisory bans, license allowlist, and the
+# duplicate-version deny list.
+/deny.toml @randomparity
