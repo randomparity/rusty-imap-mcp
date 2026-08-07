@@ -1,19 +1,105 @@
 //! One-shot special-use discovery at account boot.
 //!
-//! Classifies a folder list into a `SpecialUseMap`. Called from the
-//! per-account boot path before `FolderGuard` is constructed so the
-//! guard's protected list can include discovered server-native folder
-//! names (e.g. `[Gmail]/Sent Mail`) in addition to the config-supplied
-//! literals.
+//! Classifies a folder list into a `SpecialUseMap` so the `FolderGuard`'s
+//! protected list can include discovered server-native folder names (e.g.
+//! `[Gmail]/Sent Mail`) in addition to the config-supplied literals.
 //!
-//! The `LIST "" "*"` fetch lives at the caller so this function stays
-//! a pure mapping step exercisable by unit tests with synthetic
-//! `Folder` values — no live IMAP server required.
+//! Two layers, and the split is deliberate. [`resolve_special_use`] and
+//! [`merge_protected_folders`] are pure mappings over values, unit-tested
+//! with synthetic `Folder`s and no live server. [`resolve_folder_policy`]
+//! sits above them and owns the parts that need a session: the
+//! `LIST "" "*"` itself, `FolderGuard::new`, and the `folder_policy` audit
+//! record.
+//!
+//! That orchestration lives here rather than in `main.rs` because `main.rs`
+//! is a binary target no integration test can link against, and #761's whole
+//! point is that the recorded list must be provably the one the guard was
+//! built from. A test can only prove that by driving this function.
 //!
 //! Classification logic is unit-tested in `rimap_imap::special_use`;
-//! the live LIST path is covered by the Dovecot integration harness.
+//! the live LIST path is covered by `tests/boot_folder_policy.rs` against the
+//! in-process fake and by the Dovecot integration harness.
 
-use rimap_imap::{SpecialUseMap, types::Folder};
+use anyhow::Context;
+use rimap_audit::AuditWriter;
+use rimap_audit::record::FolderPolicy;
+use rimap_authz::FolderGuard;
+use rimap_config::validate::ValidatedAccountConfig;
+use rimap_imap::{Connection, SpecialUseMap, types::Folder};
+
+/// What one account's boot-time folder resolution produced.
+///
+/// Returned together because they are one decision rendered twice: the guard
+/// that enforces the policy and the map the session keeps. Splitting them
+/// across two calls would reintroduce the possibility of a caller pairing a
+/// guard with a map from a different `LIST`.
+pub struct ResolvedFolderPolicy {
+    /// The special-use classification of the account's folder list.
+    pub special_use: SpecialUseMap,
+    /// The guard built from the merged protected list.
+    pub folder_guard: FolderGuard,
+}
+
+/// Run special-use discovery for one account, build its `FolderGuard`, and
+/// record the policy the guard was built from.
+///
+/// The order is load-bearing and is the acceptance criterion of #761: the
+/// merged list produced here is passed to `FolderGuard::new` and to
+/// [`crate::boot::tool_matrix::account_tool_matrix`] as the *same* slice, so
+/// the record cannot describe a policy other than the enforced one. Deriving
+/// the record by re-merging instead would let the two drift.
+///
+/// Emits the `folder_policy` audit record and the `effective folder policy`
+/// log line, in that order — the record first, because it is the durable one
+/// and the log line is best-effort by nature.
+///
+/// # Errors
+/// Propagates a `LIST` failure (the account cannot be booted without one) and
+/// an audit-write failure, which is fatal here for the same reason it is at
+/// every other boot-record site: a boot that is not recorded is not one an
+/// operator can later reconstruct.
+pub async fn resolve_folder_policy(
+    acfg: &ValidatedAccountConfig,
+    imap: &Connection,
+    audit: &AuditWriter,
+) -> anyhow::Result<ResolvedFolderPolicy> {
+    let folders = imap
+        .list_folders("*")
+        .await
+        .with_context(|| format!("listing folders for account {}", acfg.id.as_str()))?;
+    let special_use = resolve_special_use(&folders);
+    let protected = merge_protected_folders(
+        &acfg.security.protected_folders,
+        special_use.all_discovered(),
+    );
+
+    let folder_guard = FolderGuard::new(&protected, &acfg.security.expunge_folders);
+
+    // One producer for both renderings: the matrix classifies `protected`
+    // entry by entry against the config, which is what makes the record's
+    // `discovered` tags and the guard's contents the same list by
+    // construction.
+    let matrix = crate::boot::tool_matrix::account_tool_matrix(acfg, Some(&protected));
+    audit
+        .log_folder_policy(FolderPolicy::new(
+            matrix.account.clone(),
+            matrix.protected_folders.clone(),
+            matrix.special_use_discovery,
+            matrix.expunge_folders.clone(),
+        ))
+        .with_context(|| {
+            format!(
+                "writing folder_policy audit record for account {}",
+                acfg.id.as_str(),
+            )
+        })?;
+    crate::boot::tool_matrix::log_account_folder_policy(&matrix);
+
+    Ok(ResolvedFolderPolicy {
+        special_use,
+        folder_guard,
+    })
+}
 
 /// Classify a folder list into a `SpecialUseMap`.
 ///
