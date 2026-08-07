@@ -13,7 +13,7 @@
 //!
 //! Because a listing carrying only `IMAP4rev2` cannot be delivered to this
 //! client at all. `imap-proto`'s `capability_data` parser (read against
-//! 0.16.7, the current release) runs its result through
+//! 0.16.6, the pinned version) runs its result through
 //! `ensure_capabilities_contains_imap4rev`, which rejects any `CAPABILITY`
 //! response that does not contain the `IMAP4rev1` atom — so a rev2-only line
 //! fails to parse, and the *pre-login* `CAPABILITY` command fails the connect
