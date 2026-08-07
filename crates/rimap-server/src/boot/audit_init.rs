@@ -70,9 +70,15 @@ pub fn init_audit_writer_multi(
     // answer here: this record is written before the account registry is
     // built, so no IMAP `LIST` has run and no special-use folder is known
     // yet. The recorded `protected_folders` is therefore the configured
-    // list; the union the `FolderGuard` is built from reaches the operator
-    // through the `effective folder policy` boot log line, once discovery
-    // has actually happened (#696).
+    // list.
+    //
+    // The union the `FolderGuard` is built from is carried by the
+    // `folder_policy` record, written per account once that account's guard
+    // exists, and by the `effective folder policy` boot log line beside it
+    // (#696, #761 / ADR-0021). Neither can be produced from here, and that
+    // is the asymmetry ADR-0021 exists to hold: this record must stay ahead
+    // of IMAP boot so an account that never connects still leaves its
+    // matrix behind (#632).
     let tool_matrix = multi
         .accounts
         .values()
