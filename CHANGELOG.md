@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit record and in two new `--dry-run` sections. Records written before
   these fields parse unchanged, and an absent list reads as *unknown*, not as
   an empty one. See #696 and `docs/audit-log.md`.
-- **New boot log line `effective folder policy`, one per account, and it is
-  the only place the *complete* protected-folder list appears.**
+- **New boot log line `effective folder policy`, one per account, carrying the
+  *complete* protected-folder list.** (It was the only place that list
+  appeared, until the `folder_policy` audit record below.)
   `protected_folders` gains the server's RFC 6154 special-use folders at boot
   (`[Gmail]/Sent Mail` and friends), and that union is what the `FolderGuard`
   is built from. Neither the `process_start` audit record nor `--dry-run` can
@@ -38,6 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how an operator sees which folders a running server actually protects. The
   two pre-discovery renderings say `not_run` rather than presenting a shorter
   list as complete. #696.
+- **New audit record kind `folder_policy`, one per account, carrying the
+  folder lists the `FolderGuard` was actually built from** — including the
+  server's RFC 6154 special-use folders, tagged `discovered`. Until now the
+  enforced union reached only the `effective folder policy` log line and left
+  no trace in the audit trail; `process_start` structurally could not carry it,
+  being written before any IMAP session exists. The new record is written per
+  account once that account's guard is constructed, so an account that fails to
+  boot leaves none — while `process_start` still carries every configured
+  account's matrix, unchanged in timing and content (#632 is untouched).
+  `--dry-run` is unchanged: it has no IMAP session and so nothing to add. Older
+  readers skip the new kind and count it rather than treating the file as
+  corrupt, but note that `audit merge` run by an older binary omits these
+  records from its output. See #761, ADR-0021, and `docs/audit-log.md`.
 - crates.io publishing of all 8 workspace crates on stable `v*` tags, via a
   new `publish-crates` release job. Publishes in dependency order with an
   idempotent, rate-limit-aware `scripts/publish-crates.sh`, gated by
