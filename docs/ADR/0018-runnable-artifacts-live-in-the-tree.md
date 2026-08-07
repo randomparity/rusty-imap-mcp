@@ -21,10 +21,10 @@ now E0639 at the reader's first `cargo build`.
 Nothing caught it, and nothing in the workspace would have. `just test-doc` is
 `cargo test --workspace --doc`, which compiles fenced Rust in *rustdoc comments*
 and reaches no markdown file. The repo already leans on that mechanism to keep
-`#[non_exhaustive]` honest — the `compile_fail,E0639` doctests for
-`rimap_config::model::ImapConfig` (#665) and `rimap_audit::record::ProcessEnd`
-(#706) exist precisely because a doctest compiles as its own crate — but the ADR
-body was never inside it.
+`#[non_exhaustive]` honest — the `compile_fail` doctest for
+`rimap_config::model::ImapConfig` (#665) and the `compile_fail,E0639` one for
+`rimap_audit::record::ProcessEnd` (#706) exist precisely because a doctest
+compiles as its own crate — but the ADR body was never inside it.
 
 The repair was not made in #715 because `docs/ADR/README.md` says each ADR is
 immutable once accepted, and ADR-0014 is Accepted. So the question this ADR
@@ -46,15 +46,19 @@ links to a committed location that the workspace's existing build gates already
 compile. Illustrative fragments — a signature, a single expression quoted to
 make a sentence concrete — are not runnable artifacts and stay inline.
 
-**Immutability binds the decision.** An accepted ADR's Context, Decision,
-Alternatives considered, and Consequences are not edited. Revising a decision
-still requires a superseding ADR with both `Status` fields and the
-`Supersedes` / `Superseded-by` links updated.
+**Immutability binds the whole accepted document**, not a list of section
+names — an ADR's sections vary, and ADR-0014's own measurement table lives
+under a heading (`What the change costs`) that no such list would have caught.
+Revising a decision still requires a superseding ADR with both `Status` fields
+and the `Supersedes` / `Superseded-by` links updated.
 
 **Exactly two edits to an accepted ADR are permitted, and no others:**
 
 1. Replacing an embedded runnable artifact with a pointer to its committed
-   location, changing nothing else in the surrounding prose.
+   location. This may rewrite the prose that says how to obtain and run the
+   artifact, because that prose describes an arrangement that no longer holds;
+   it may not touch the surrounding argument, and it may not change any claim
+   the decision rests on.
 2. Appending a dated entry to an `## Errata` section at the end of the file.
 
 Every exercise of (1) is recorded by an entry under (2), naming what was
@@ -70,11 +74,14 @@ ADR-0014's harness section links to it.
 An example target compiles as its own crate against `rimap-audit` as a
 dependency — the same position as the reader's scratch crate, so
 `#[non_exhaustive]` is in force on both offending types. It is built by
-`cargo clippy --workspace --all-targets --all-features` (`just lint`) and
-`cargo check --workspace --all-targets` (`just check`), both already in
-`just ci`. No new recipe, no new CI job: the next `#[non_exhaustive]`, renamed
-field, or changed constructor signature that touches this harness reddens the
-lint arm on the PR that introduces it.
+`just lint` — `cargo clippy --workspace --all-targets --all-features --locked
+-- -D warnings`, which `just ci` runs — and by `just test-msrv`'s
+`--all-targets` check. In CI it is built three more times: the `clippy` job
+runs the same command, and the `check` and `test (MSRV)` jobs both pass
+`--all-targets`. (`just check` also builds it, but is not one of `just ci`'s
+prerequisites.) No new recipe, no new CI job: the next `#[non_exhaustive]`,
+renamed field, or changed constructor signature that touches this harness
+reddens the required lint check on the PR that introduces it.
 
 An example rather than a doctest because a doctest cannot be handed a directory
 and run; the harness's whole purpose is to be executed against real storage, and
@@ -139,13 +146,23 @@ review, not by a check.
   `rimap-core`, which is already a normal dependency, so nothing is added to the
   dependency graph.
 
-- The harness is now maintained code subject to the workspace lint set. Its
-  behaviour is unchanged from the version in ADR-0014 — same 50-emit warmup,
-  same 2000-sample default, rotation off, `fail_open` false — but it reports
-  errors rather than panicking and writes through a locked stdout handle,
-  because `unwrap_used`, `expect_used`, and `print_stdout` are denied workspace
-  wide. That is a real cost of committing it, and it is the right one: the
-  snippet was exempt from those lints only because nothing compiled it.
+- The harness is now maintained code subject to the workspace lint set. What it
+  measures is unchanged from the version in ADR-0014 — same 50-emit warmup,
+  same 2000-sample default, rotation off, `fail_open` false, same percentiles —
+  but it reports errors rather than panicking and writes through a locked
+  stdout handle, because the workspace denies `unwrap_used` and `print_stdout`
+  and warns `expect_used`, which the `-D warnings` lint arms make fatal. That
+  is a real cost of committing it, and it is the right one: the snippet was
+  exempt from those lints only because nothing compiled it.
+
+- It also gained a refusal the snippet did not have: it will not start when
+  `<dir>/audit.jsonl` already exists. A scratch snippet that opens at
+  `Seq::FIRST` and appends fabricated `auth` records is harmless; a committed,
+  published example that a reader may point at a configured `audit.path` is
+  not — it would write invented `auth`/`success` records into a real
+  security log and restart the `seq` chain, putting duplicate sequence numbers
+  into an append-only, tamper-evident file. Committing an artifact means owning
+  the ways it can be misused, and this is the first of them.
 
 - An ADR author who wants to show a reader how to reproduce something now has
   more work to do: commit the artifact first, then link it. This is intended.

@@ -174,7 +174,8 @@ exposure, not a new one, since the guard's write had the same property from
 
 Committed at
 [`crates/rimap-audit/examples/emitcost.rs`](../../crates/rimap-audit/examples/emitcost.rs).
-Build `--release` and pass a directory:
+Build `--release` and pass an **empty scratch directory** — never a configured
+`audit.path`, for the reason its module doc gives:
 
 ```text
 cargo run -p rimap-audit --release --example emitcost -- <dir> [n]
@@ -335,13 +336,16 @@ test-doc` is `cargo test --workspace --doc`, which reaches rustdoc comments and
 no markdown file.
 
 The section is now a link to `crates/rimap-audit/examples/emitcost.rs`, which
-the `--all-targets` arms of `just lint` and `just check` build on every run. The
-literals became `AuditOptions::new(path, Seq::FIRST)` and `AuthEvent::new(..)`
-with `account` assigned afterwards; both constructors produce exactly the values
-the literals named, so the harness measures what it measured. The committed
-version reports errors instead of panicking and writes through a locked stdout
-handle, because the workspace denies `unwrap_used`, `expect_used`, and
-`print_stdout`. The pre-edit text is in this file's git history.
+`just lint`'s `--all-targets` clippy — and CI's `clippy`, `check`, and
+`test (MSRV)` jobs — build on every run. The literals became
+`AuditOptions::new(path, Seq::FIRST)` and `AuthEvent::new(..)` with `account`
+assigned afterwards; both constructors produce exactly the values the literals
+named, so the harness measures what it measured. The committed version reports
+errors instead of panicking and writes through a locked stdout handle, because
+the workspace denies `unwrap_used` and `print_stdout` and warns `expect_used`;
+and it refuses to run against a directory that already holds an `audit.jsonl`,
+since it opens at `Seq::FIRST` and would otherwise append fabricated `auth`
+records to a real log. The pre-edit text is in this file's git history.
 
 The table under "What the change costs" was **not** re-measured and is
 unchanged. A 300-sample spot check of the relocated harness on the same host
