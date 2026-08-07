@@ -36,15 +36,11 @@ use support::tracing_capture::WarnCapture;
 /// once the coverage step took `--success-output final` (issue #692 / PR #746)
 /// and so began retaining a *passing* test's captured output. Issue #750.
 ///
-/// No sweep backstops this file. `crates/rimap-server/tests/canary_coverage_meta.rs`
-/// globs `crates/rimap-server/tests/e2e_wire*.rs` — a scope decision from issue
-/// #528, not a consequence of what the sweeps do — and both sweeps it accepts
-/// need a planted canary to look for: `canary::assert_absent` over the harness
-/// tempdir, `canary::assert_login_frame_only` over `recorded()` itself. This
-/// crate plants none; it drives the fake in-process against the hardcoded
-/// `FAKE_PASSWORD` const in `crates/rimap-fake-imap/src/fake_imap.rs`, a literal
-/// already in public source. So nothing here fails on a reintroduced unguarded
-/// dump — keep new dialog dumps behind this guard.
+/// No sweep backstops a dump like this one — the canary sweeps read files and
+/// `recorded()`, not stderr;
+/// `crates/rimap-server/tests/canary_coverage_meta.rs` records the detail. So
+/// nothing fails on a reintroduced unguarded dump — keep new dialog dumps
+/// behind this guard.
 struct DumpOnPanic<'a>(&'a FakeImapServer);
 
 impl Drop for DumpOnPanic<'_> {
