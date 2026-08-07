@@ -64,8 +64,10 @@ fn delete_via_uid_move() -> Vec<Step> {
 /// atomic `UID MOVE` ran and no `EXPUNGE` of any form reached the wire.
 ///
 /// The script carries no fallback dialog on purpose: the fallback's first
-/// command is `UID COPY`, which desynchronizes against it and fails the
-/// `expect` below rather than quietly proving nothing.
+/// *divergent* command is `UID COPY` (the `UID STORE` before it is shared),
+/// which desynchronizes against it and fails the `expect` below rather than
+/// quietly proving nothing. That desync is what carries the test — the wire
+/// assertions afterwards only see lines the script had a step for.
 async fn assert_move_and_uidplus_advertised(caps: &str) {
     let mut steps = login_preamble(caps);
     steps.extend(delete_via_uid_move());
@@ -107,6 +109,65 @@ async fn assert_move_and_uidplus_advertised(caps: &str) {
         "no EXPUNGE of any form may follow a MOVE advertisement — the atomic \
          move needs none, and the folder-wide form is the data-loss path #649 \
          closed: {dialog}",
+    );
+}
+
+/// The `AUTH=` arm is not a gap, it is the point: `imap-proto` strips the
+/// prefix with `tag_no_case` into `Capability::Auth`, so a server offering the
+/// SASL mechanisms `AUTH=MOVE` and `AUTH=UIDPLUS` advertises no extension at
+/// all. Matching those would read capabilities out of an authentication list.
+///
+/// The scripted dialog is the folder-wide fallback, so a client that answered
+/// the probes from the mechanism names stays on `UID MOVE` and desynchronizes.
+#[tokio::test]
+async fn auth_mechanisms_are_not_capability_atoms() {
+    let mut steps = login_preamble("IMAP4rev1 AUTH=MOVE AUTH=UIDPLUS");
+    steps.extend([
+        Step::Expect { verb: "SELECT" },
+        Step::Send(b"* 3 EXISTS\r\n* OK [UIDVALIDITY 1] .\r\n".to_vec()),
+        Step::Reply {
+            text: "OK [READ-WRITE] SELECT completed",
+        },
+        Step::Expect { verb: "UID STORE" },
+        Step::Send(b"* 1 FETCH (UID 5 FLAGS (\\Deleted))\r\n".to_vec()),
+        Step::Reply {
+            text: "OK STORE completed",
+        },
+        Step::Expect { verb: "UID COPY" },
+        Step::Reply {
+            text: "OK COPY completed",
+        },
+        Step::Expect { verb: "EXPUNGE" },
+        Step::Send(b"* 1 EXPUNGE\r\n".to_vec()),
+        Step::Reply {
+            text: "OK EXPUNGE completed",
+        },
+    ]);
+
+    let server = FakeImapServer::start(steps).await;
+    let conn = server.connection_timeout("user@example.com", BACKSTOP);
+
+    let (result, _uidvalidity) = conn
+        .delete_message("INBOX", uid(5), "Trash", None)
+        .await
+        .expect("an IMAP4rev1 listing is a known state, not an unknown one");
+
+    assert_eq!(
+        conn.capabilities().await,
+        ServerCapabilities::Known {
+            has_move: false,
+            has_uidplus: false,
+        },
+        "`AUTH=MOVE` names a SASL mechanism, not the MOVE extension",
+    );
+    assert!(result.used_fallback);
+    assert!(result.folder_wide_expunge);
+
+    let dialog = server.recorded().join("\n").to_ascii_uppercase();
+    assert!(
+        !dialog.contains("UID MOVE"),
+        "UID MOVE must never be issued to a server that only named it after \
+         `AUTH=`: {dialog}",
     );
 }
 
