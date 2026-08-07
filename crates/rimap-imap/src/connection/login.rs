@@ -224,8 +224,9 @@ impl Connection {
     /// above, and it holds however the upstream question is settled.
     ///
     /// Every probe below goes through [`advertises`], not `has_str`, because
-    /// capability atoms are case-insensitive and `has_str` compares all but
-    /// `IMAP4rev1` byte-exactly (#735).
+    /// capability atoms are case-insensitive and `has_str` folds case only for
+    /// `IMAP4rev1` and the `AUTH=` prefix, comparing every other atom
+    /// byte-exactly (#735).
     async fn read_capabilities(session: &mut ImapSession) -> ServerCapabilities {
         let caps = match session.capabilities().await {
             Ok(caps) => caps,
@@ -513,13 +514,26 @@ impl Connection {
 /// folder-wide `EXPUNGE` against a server that in fact supports `UID EXPUNGE` —
 /// #649's data-loss path reached by a spelling (#735).
 ///
-/// `Capability::Auth` never matches. async-imap models `AUTH=` mechanisms as
-/// their own variant, so probing one would need prefix handling that no caller
-/// wants; pass bare capability atoms.
+/// `Capability::Auth` never matches, and that is load-bearing rather than
+/// merely unimplemented: `imap-proto` strips the `AUTH=` prefix with
+/// `tag_no_case`, so an `AUTH=MOVE` mechanism would otherwise answer a `MOVE`
+/// probe. Probing a mechanism would need its own prefix handling, which no
+/// caller wants; pass bare capability atoms.
+///
+/// `handshake::capability_advertised` applies the same case-insensitive rule to
+/// the *pre-login* `LOGINDISABLED` probe, over `imap_proto::Capability` items
+/// pulled off the unsolicited-response channel rather than an owned
+/// `Capabilities` set. They cannot share a body across those two types, and at
+/// two occurrences that is not worth an abstraction — but they should stay in
+/// step. They differ deliberately in one place: that one ignores
+/// `Imap4rev1` entirely, because no pre-login probe asks for a revision atom.
 fn advertises(caps: &Capabilities, probe: &str) -> bool {
     caps.iter().any(|cap| match cap {
-        // imap-proto parses this atom with `tag_no_case` into its own variant,
-        // so the server's spelling is already gone by the time we see it.
+        // The RFC 3501 `CAPABILITY` parser matches this atom with `tag_no_case`
+        // and routes every spelling here, so the server's is already gone. The
+        // RFC 5161 `ENABLED` parser does not — it maps every atom, `IMAP4rev1`
+        // included, to `Atom` — and async-imap folds both response shapes into
+        // one set, so the arm below is what covers that spelling.
         Capability::Imap4rev1 => probe.eq_ignore_ascii_case("IMAP4rev1"),
         Capability::Atom(atom) => atom.eq_ignore_ascii_case(probe),
         Capability::Auth(_) => false,
