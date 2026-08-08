@@ -216,6 +216,10 @@ One entry per account, in both single- and multi-account mode -- unlike
 | `expunge_folders[].folder` | A folder name in the resolved `expunge_folders` list |
 | `expunge_folders[].source` | `account` or `inherited`; never `discovered` |
 
+A `folder` value longer than 512 bytes is truncated and suffixed with
+`…[abridged]` (#781) — see the [folder_policy](#folder_policy) section for
+the full description of abridgement.
+
 Both folder arrays are absent on records written before they existed. As
 everywhere else in this file, **absent means unknown, not empty** -- an empty
 `expunge_folders` on a record that carries the key is the affirmative claim
@@ -309,6 +313,14 @@ handed, so unlike `process_start` it can and does carry `discovered` entries.
 | `special_use_discovery` | Always `ran` on this kind; see below |
 | `expunge_folders[].folder` | A folder name in the enforced `expunge_folders` list |
 | `expunge_folders[].source` | `account` or `inherited`; never `discovered` |
+
+**Folder name abridgement.** A `folder` value longer than 512 bytes is
+truncated at the nearest UTF-8 character boundary and suffixed with
+`…[abridged]`, so audit lines remain bounded even when a malicious or
+compromised server behind the pinned TLS session sends an arbitrarily long
+mailbox name (#781). An abridged entry is unambiguously recognisable by its
+suffix. The `FolderGuard` always receives the full name; abridgement is
+rendering-only and does not change what the guard protects.
 
 The four fields are this kind's birth fields: **every `folder_policy` line ever
 written carries all four**, none of them is `#[serde(default)]`, and a line
