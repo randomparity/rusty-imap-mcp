@@ -3,6 +3,24 @@ name: Fuzz
 on:
   pull_request:
     branches: [main]
+    # The default type set is `opened, synchronize, reopened`, which omits
+    # `edited`. Retargeting a PR's base branch fires `edited` (with
+    # `changes.base` populated), not `synchronize`. A PR opened against some
+    # other base and then moved onto `main` therefore starts no fuzz run — the
+    # same defect #760 fixed in `ci.yml` (commit 3ac3756c).
+    #
+    # The cost calculus differs from `ci.yml`: because of the `paths:` filter
+    # below, an `edited` event on a PR that touches none of the listed paths
+    # still starts no run. The extra-CI-round cost that `ci.yml` accepted for
+    # title/body edits is therefore much smaller here — only PRs whose head
+    # commit already matches a fuzz path pay for the retarget fix.
+    #
+    # Do not replace this with a gate job that other jobs `needs:` — a
+    # `needs:`-dependent job is SKIPPED when its dependency is skipped, and a
+    # skipped required check SATISFIES branch protection. That trap does not
+    # bite today (no fuzz job is required), but it would the moment one became
+    # required. See the reasoning in `ci.yml`'s trigger block.
+    types: [opened, synchronize, reopened, edited]
     paths:
       - 'crates/rimap-content/**'
       - 'crates/rimap-audit/**'
