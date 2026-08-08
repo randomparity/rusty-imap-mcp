@@ -218,7 +218,7 @@ One entry per account, in both single- and multi-account mode -- unlike
 
 A `folder` value longer than 512 bytes is truncated and suffixed with
 `…[abridged]` (#781) — see the [folder_policy](#folder_policy) section for
-the full description of abridgement.
+the full description of abridgement, including the caveat on recognisability.
 
 Both folder arrays are absent on records written before they existed. As
 everywhere else in this file, **absent means unknown, not empty** -- an empty
@@ -318,9 +318,11 @@ handed, so unlike `process_start` it can and does carry `discovered` entries.
 truncated at the nearest UTF-8 character boundary and suffixed with
 `…[abridged]`, so audit lines remain bounded even when a malicious or
 compromised server behind the pinned TLS session sends an arbitrarily long
-mailbox name (#781). An abridged entry is unambiguously recognisable by its
-suffix. The `FolderGuard` always receives the full name; abridgement is
-rendering-only and does not change what the guard protects.
+mailbox name (#781). A name that was abridged always ends with that suffix;
+a legitimate name shorter than 512 bytes that ends with the same suffix is not
+abridged but is indistinguishable from one that was. The `FolderGuard` always
+receives the full name; abridgement is rendering-only and does not change what
+the guard protects.
 
 The four fields are this kind's birth fields: **every `folder_policy` line ever
 written carries all four**, none of them is `#[serde(default)]`, and a line

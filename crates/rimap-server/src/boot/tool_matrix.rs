@@ -37,14 +37,17 @@ use rimap_config::model::Verdict;
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::tool::ToolName;
 
-/// Maximum byte length of a folder name in an audit record (`folder_policy` /
-/// `process_start`). A server-supplied name longer than this is truncated at
-/// the nearest UTF-8 character boundary and suffixed with [`FOLDER_AUDIT_ABRIDGED`]
-/// before being written. The `FolderGuard` always receives the full name.
+/// Truncation threshold for folder names in audit records (`folder_policy` /
+/// `process_start`): a name longer than this many bytes is truncated at the
+/// nearest UTF-8 character boundary at or below this point and suffixed with
+/// [`FOLDER_AUDIT_ABRIDGED`] before being written. The `FolderGuard` always
+/// receives the full name.
 ///
-/// 512 bytes accommodates any realistic IMAP mailbox hierarchy depth while
-/// bounding the per-line cost of a malicious server that advertises
-/// multi-megabyte folder names (#781).
+/// The **output bound** for an abridged entry is
+/// `FOLDER_NAME_AUDIT_CAP + FOLDER_AUDIT_ABRIDGED.len()` bytes (currently
+/// 525 bytes), not 512. 512 bytes accommodates any realistic IMAP mailbox
+/// hierarchy depth while bounding the per-line cost of a malicious server
+/// that advertises multi-megabyte folder names (#781).
 pub const FOLDER_NAME_AUDIT_CAP: usize = 512;
 
 /// Suffix appended to a folder name that was abridged for audit recording.

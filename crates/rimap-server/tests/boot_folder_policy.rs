@@ -376,6 +376,15 @@ async fn overlong_folder_name_is_abridged_in_record_and_guard_sees_full_name() {
             .is_err(),
         "guard must refuse the full over-long discovered name",
     );
+    // Negative control: a folder on no list must still be allowed, so the
+    // previous assertion cannot pass vacuously on a guard that refuses everything.
+    assert!(
+        outcome
+            .folder_guard
+            .check_protected("Archive", "delete")
+            .is_ok(),
+        "a folder not in any list must still be allowed — guard must not refuse everything",
+    );
 
     // The audit record must be bounded and marked.
     let record = folder_policy_line(&audit_path);
