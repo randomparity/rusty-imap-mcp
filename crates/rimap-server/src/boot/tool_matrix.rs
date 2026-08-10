@@ -37,6 +37,42 @@ use rimap_config::model::Verdict;
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::tool::ToolName;
 
+/// Truncation threshold for folder names in audit records (`folder_policy` /
+/// `process_start`): a name longer than this many bytes is truncated at the
+/// nearest UTF-8 character boundary at or below this point and suffixed with
+/// [`FOLDER_AUDIT_ABRIDGED`] before being written. The `FolderGuard` always
+/// receives the full name.
+///
+/// The **output bound** for an abridged entry is
+/// `FOLDER_NAME_AUDIT_CAP + FOLDER_AUDIT_ABRIDGED.len()` bytes (currently
+/// 525 bytes), not 512. 512 bytes accommodates any realistic IMAP mailbox
+/// hierarchy depth while bounding the per-line cost of a malicious server
+/// that advertises multi-megabyte folder names (#781).
+pub const FOLDER_NAME_AUDIT_CAP: usize = 512;
+
+/// Suffix appended to a folder name that was abridged for audit recording.
+const FOLDER_AUDIT_ABRIDGED: &str = "\u{2026}[abridged]";
+
+/// Cap a folder name for inclusion in an audit record.
+///
+/// If `name` fits within [`FOLDER_NAME_AUDIT_CAP`] bytes it is returned as-is.
+/// Otherwise it is truncated at the last UTF-8 character boundary at or below
+/// the cap and [`FOLDER_AUDIT_ABRIDGED`] is appended, so the resulting string
+/// is unambiguously marked as incomplete.
+fn cap_folder_name_for_audit(name: &str) -> String {
+    if name.len() <= FOLDER_NAME_AUDIT_CAP {
+        return name.to_string();
+    }
+    // Truncate at the last valid char boundary at or below the cap.
+    let boundary = (0..=FOLDER_NAME_AUDIT_CAP)
+        .rev()
+        .find(|&i| name.is_char_boundary(i))
+        .unwrap_or(0);
+    let mut out = name[..boundary].to_string();
+    out.push_str(FOLDER_AUDIT_ABRIDGED);
+    out
+}
+
 /// Collect one account's resolved dispatch policy: effective posture, its
 /// explicit per-tool verdicts in [`ToolName`] declaration order, and its two
 /// folder lists.
@@ -113,7 +149,7 @@ fn folder_entries(folders: &[String], account_written: bool) -> Vec<FolderEntry>
     };
     folders
         .iter()
-        .map(|folder| FolderEntry::new(folder.clone(), source))
+        .map(|folder| FolderEntry::new(cap_folder_name_for_audit(folder), source))
         .collect()
 }
 
@@ -147,7 +183,7 @@ fn protected_entries(
             } else {
                 FolderSource::Discovered
             };
-            FolderEntry::new(folder.clone(), source)
+            FolderEntry::new(cap_folder_name_for_audit(folder), source)
         })
         .collect()
 }
@@ -258,7 +294,10 @@ mod tests {
     use rimap_core::tool::ToolName;
     use tempfile::TempDir;
 
-    use super::{account_tool_matrix, render_folder_list, render_verdict};
+    use super::{
+        FOLDER_AUDIT_ABRIDGED, FOLDER_NAME_AUDIT_CAP, account_tool_matrix,
+        cap_folder_name_for_audit, render_folder_list, render_verdict,
+    };
 
     /// Write a two-layer config whose `[defaults.security.tools]` allows
     /// `delete_message` and whose `work` account tightens posture to
@@ -626,5 +665,67 @@ allowed_base_dir = "{base}"
             "{:?}",
             matrix.protected_folders,
         );
+    }
+
+    // ---- cap_folder_name_for_audit unit tests ----------------------------
+
+    #[test]
+    fn short_name_passes_through_unchanged() {
+        let name = "INBOX";
+        assert_eq!(cap_folder_name_for_audit(name), name);
+    }
+
+    #[test]
+    fn exactly_cap_bytes_passes_through_unchanged() {
+        let name: String = "A".repeat(FOLDER_NAME_AUDIT_CAP);
+        let out = cap_folder_name_for_audit(&name);
+        assert_eq!(out, name);
+        assert!(!out.ends_with(FOLDER_AUDIT_ABRIDGED));
+    }
+
+    #[test]
+    fn one_over_cap_is_abridged_with_marker() {
+        let name: String = "A".repeat(FOLDER_NAME_AUDIT_CAP + 1);
+        let out = cap_folder_name_for_audit(&name);
+        assert!(
+            out.ends_with(FOLDER_AUDIT_ABRIDGED),
+            "marker missing: {out:?}",
+        );
+        assert!(
+            out.len() <= FOLDER_NAME_AUDIT_CAP + FOLDER_AUDIT_ABRIDGED.len(),
+            "out too long: {} bytes",
+            out.len(),
+        );
+    }
+
+    #[test]
+    fn large_name_is_bounded_and_marked() {
+        let name: String = "B".repeat(64 * 1024);
+        let out = cap_folder_name_for_audit(&name);
+        assert!(out.ends_with(FOLDER_AUDIT_ABRIDGED));
+        assert!(
+            out.len() <= FOLDER_NAME_AUDIT_CAP + FOLDER_AUDIT_ABRIDGED.len(),
+            "out too long: {} bytes",
+            out.len(),
+        );
+    }
+
+    #[test]
+    fn multibyte_boundary_is_respected() {
+        // Build a name that is just over FOLDER_NAME_AUDIT_CAP bytes where
+        // the cap falls mid-codepoint (two-byte UTF-8 sequence straddles the
+        // boundary). The cap must retreat to the prior char boundary rather
+        // than splitting the codepoint.
+        let two_byte_char = '\u{00e9}'; // 'é', 2 UTF-8 bytes
+        // Fill up to one byte before the cap with single-byte 'A', then
+        // push enough two-byte chars to exceed the cap.
+        let base: String = "A".repeat(FOLDER_NAME_AUDIT_CAP - 1);
+        let name = format!("{base}{}", two_byte_char.to_string().repeat(4));
+        assert!(name.len() > FOLDER_NAME_AUDIT_CAP);
+        let out = cap_folder_name_for_audit(&name);
+        assert!(out.ends_with(FOLDER_AUDIT_ABRIDGED));
+        assert!(out.is_ascii() || out.chars().all(|c| c.len_utf8() <= 4));
+        // The output must be valid UTF-8 (no panic, no split codepoint).
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }

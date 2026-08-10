@@ -20,6 +20,11 @@
 //! [`discovered_special_use_folder_reaches_the_folder_policy_record`] fails —
 //! on the `discovered` entry in the first case, on the guard/record agreement
 //! in the second.
+//!
+//! `#781` adds an audit-record cap: a server-declared folder name longer than
+//! [`rimap_server::boot::tool_matrix::FOLDER_NAME_AUDIT_CAP`] bytes is
+//! abridged in the record (with `…[abridged]` appended) so the audit line is
+//! bounded. The guard still receives the full name.
 
 #![expect(clippy::expect_used, reason = "integration test")]
 
@@ -302,5 +307,109 @@ async fn each_account_gets_its_own_record() {
         accounts,
         vec!["work".to_string(), "personal".to_string()],
         "one record per account, in boot order, each naming its own account",
+    );
+}
+
+/// Build a LIST reply where the `\Sent` folder name is `len` bytes of 'A'.
+/// The name is sent as an IMAP untagged literal so the parser receives an
+/// arbitrary-length string with no embedded control characters.
+fn list_with_overlong_sent(len: usize) -> Vec<Step> {
+    let name: Vec<u8> = b"A".repeat(len);
+    // IMAP untagged literal: `{<len>}\r\n<name_bytes>` is how a server sends
+    // a mailbox name that would require quoting but is too long for a quoted
+    // string or contains characters that forbid quoting.
+    let literal_header = format!("* LIST (\\HasNoChildren \\Sent) \"/\" {{{len}}}\r\n");
+    let mut send: Vec<u8> = literal_header.into_bytes();
+    send.extend_from_slice(&name);
+    send.extend_from_slice(b"\r\n");
+    let mut steps = login_preamble("IMAP4rev1");
+    steps.extend([
+        Step::Expect { verb: "LIST" },
+        Step::Send(b"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n".to_vec()),
+        Step::Send(send),
+        Step::Reply {
+            text: "OK LIST completed",
+        },
+    ]);
+    steps
+}
+
+/// An over-long server-supplied folder name produces a bounded audit record
+/// that is unambiguously marked as abridged. The `FolderGuard` still receives
+/// the full name and refuses that folder.
+///
+/// Acceptance criteria from #781:
+/// - The audit `folder` entry is no longer than
+///   `FOLDER_NAME_AUDIT_CAP + len("…[abridged]")` bytes.
+/// - The entry's `folder` field ends with the abridgement marker.
+/// - The guard returned by the same call refuses the full name.
+#[tokio::test]
+async fn overlong_folder_name_is_abridged_in_record_and_guard_sees_full_name() {
+    use rimap_server::boot::tool_matrix::FOLDER_NAME_AUDIT_CAP;
+
+    // Suffix appended to an abridged name — must match FOLDER_AUDIT_ABRIDGED
+    // in tool_matrix.rs.
+    const ABRIDGED_MARKER: &str = "\u{2026}[abridged]";
+
+    // 64 KiB — well above any realistic folder name, and the value the
+    // issue body uses in its acceptance criterion.
+    let name_len = 64 * 1024;
+    let dir = TempDir::new().expect("tempdir");
+    let audit_path = dir.path().join("audit.jsonl");
+    let fake = FakeImapServer::start(list_with_overlong_sent(name_len)).await;
+    let acfg = account_config(&dir);
+
+    let outcome = {
+        let audit = writer_at(&audit_path);
+        let imap = fake.connection("alice@work.test");
+        resolve_folder_policy(&acfg, &imap, &audit)
+            .await
+            .expect("folder policy resolves against a healthy server")
+    };
+
+    // The guard must refuse the full name — it was handed the real name.
+    let full_name: String = "A".repeat(name_len);
+    assert!(
+        outcome
+            .folder_guard
+            .check_protected(&full_name, "delete")
+            .is_err(),
+        "guard must refuse the full over-long discovered name",
+    );
+    // Negative control: a folder on no list must still be allowed, so the
+    // previous assertion cannot pass vacuously on a guard that refuses everything.
+    assert!(
+        outcome
+            .folder_guard
+            .check_protected("Archive", "delete")
+            .is_ok(),
+        "a folder not in any list must still be allowed — guard must not refuse everything",
+    );
+
+    // The audit record must be bounded and marked.
+    let record = folder_policy_line(&audit_path);
+    let protected = record["protected_folders"]
+        .as_array()
+        .expect("protected_folders is an array");
+    // The over-long name is discovered, not configured; find it.
+    let discovered = protected
+        .iter()
+        .find(|e| e["source"] == "discovered")
+        .expect("a discovered entry must be present");
+    let recorded_name = discovered["folder"]
+        .as_str()
+        .expect("folder entry is a string");
+
+    // Bounded: no more than the cap + the abridgement marker.
+    assert!(
+        recorded_name.len() <= FOLDER_NAME_AUDIT_CAP + ABRIDGED_MARKER.len(),
+        "recorded name must be bounded: got {} bytes (cap={FOLDER_NAME_AUDIT_CAP})",
+        recorded_name.len(),
+    );
+
+    // Unambiguous: the abridged entry carries the marker.
+    assert!(
+        recorded_name.ends_with(ABRIDGED_MARKER),
+        "abridged entry must end with `{ABRIDGED_MARKER}`, got: {recorded_name:?}",
     );
 }
