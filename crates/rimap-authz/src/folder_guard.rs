@@ -14,7 +14,12 @@ pub struct FolderGuard {
 /// case-insensitive comparison. If decoding fails, fall back to
 /// ASCII-lowercased input — we compare against that so a malformed
 /// encoding cannot silently bypass the guard.
-fn normalize(folder: &str) -> String {
+///
+/// Exposed for callers that must compare folder names through the same
+/// normalization the guard uses — e.g. `merge_protected_folders` and
+/// `protected_entries` in `rimap-server` — so the two cannot drift.
+#[must_use]
+pub fn normalize_folder_name(folder: &str) -> String {
     let decoded = utf7_imap::decode_utf7_imap(folder.to_string());
     decoded.to_lowercase()
 }
@@ -25,7 +30,7 @@ fn normalize(folder: &str) -> String {
 /// before it is ever compared against the protected/expunge lists.
 fn validate_and_normalize(folder: &str) -> Result<String, AuthzError> {
     FolderName::new(folder)?;
-    Ok(normalize(folder))
+    Ok(normalize_folder_name(folder))
 }
 
 impl FolderGuard {
@@ -35,8 +40,14 @@ impl FolderGuard {
     #[must_use]
     pub fn new(protected_folders: &[String], expunge_folders: &[String]) -> Self {
         Self {
-            protected: protected_folders.iter().map(|f| normalize(f)).collect(),
-            expunge_allowed: expunge_folders.iter().map(|f| normalize(f)).collect(),
+            protected: protected_folders
+                .iter()
+                .map(|f| normalize_folder_name(f))
+                .collect(),
+            expunge_allowed: expunge_folders
+                .iter()
+                .map(|f| normalize_folder_name(f))
+                .collect(),
         }
     }
 

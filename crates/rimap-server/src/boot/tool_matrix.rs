@@ -33,6 +33,7 @@
 use rimap_audit::record::{
     AccountToolMatrix, FolderEntry, FolderSource, SpecialUseDiscovery, ToolVerdict, VerdictSource,
 };
+use rimap_authz::normalize_folder_name;
 use rimap_config::model::Verdict;
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_core::tool::ToolName;
@@ -158,10 +159,10 @@ fn folder_entries(folders: &[String], account_written: bool) -> Vec<FolderEntry>
 /// With `resolved_protected` absent this is just the configured list tagged
 /// with its layer. With it present the resolved list drives the iteration and
 /// the configured list is only a lookup table: a name it does not hold —
-/// compared case-insensitively, as
-/// [`crate::boot::discovery::merge_protected_folders`] dedups — came from
-/// special-use discovery. Classifying rather than re-merging is what keeps
-/// this from being able to disagree with the guard.
+/// compared through the same normalization `FolderGuard` uses (mUTF-7 decode,
+/// then Unicode lowercase), as [`crate::boot::discovery::merge_protected_folders`]
+/// dedups — came from special-use discovery. Classifying rather than
+/// re-merging is what keeps this from being able to disagree with the guard.
 fn protected_entries(
     acfg: &ValidatedAccountConfig,
     resolved_protected: Option<&[String]>,
@@ -178,7 +179,8 @@ fn protected_entries(
     resolved
         .iter()
         .map(|folder| {
-            let source = if configured.iter().any(|c| c.eq_ignore_ascii_case(folder)) {
+            let norm = normalize_folder_name(folder);
+            let source = if configured.iter().any(|c| normalize_folder_name(c) == norm) {
                 configured_source
             } else {
                 FolderSource::Discovered
@@ -548,6 +550,123 @@ allowed_base_dir = "{base}"
                 .all(|e| e.source == FolderSource::Inherited),
             "{:?}",
             matrix.protected_folders,
+        );
+    }
+
+    #[test]
+    fn mutf7_discovered_name_not_tagged_discovered_when_config_has_decoded_form() {
+        // Config has "Gelöscht" (decoded). Server reports "Gel&APY-scht"
+        // (mUTF-7 wire form). After merge the list has one entry; that entry
+        // must be tagged Inherited (config-supplied), not Discovered.
+        //
+        // Without the fix, protected_entries used eq_ignore_ascii_case so the
+        // decoded "Gelöscht" never matched the wire "Gel&APY-scht", causing
+        // the single merged entry to be tagged Discovered — a false provenance
+        // claim in the audit record.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let body = format!(
+            r#"
+[defaults.security]
+posture = "draft-safe"
+protected_folders = ["Gelöscht"]
+expunge_folders = []
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        );
+        std::fs::write(&config_path, body).unwrap();
+        let multi = rimap_config::loader::load_and_validate(&config_path).unwrap();
+        let acfg = multi.accounts[&AccountId::new("work").unwrap()].clone();
+
+        // Simulate server returning the mUTF-7 wire form for the same mailbox.
+        let resolved = crate::boot::discovery::merge_protected_folders(
+            &acfg.security.protected_folders,
+            vec!["Gel&APY-scht".to_string()],
+        );
+        // After a correct merge, only one entry: the configured decoded form.
+        assert_eq!(
+            resolved.len(),
+            1,
+            "mUTF-7 form must be deduplicated: {resolved:?}",
+        );
+        let matrix = account_tool_matrix(&acfg, Some(&resolved));
+        assert_eq!(
+            matrix.protected_folders.len(),
+            1,
+            "{:?}",
+            matrix.protected_folders,
+        );
+        // The sole entry comes from config, not from the server.
+        assert_eq!(
+            matrix.protected_folders[0].source,
+            FolderSource::Inherited,
+            "config-supplied folder must not be tagged Discovered: {:?}",
+            matrix.protected_folders[0],
+        );
+    }
+
+    #[test]
+    fn non_ascii_case_difference_not_tagged_discovered() {
+        // Config has "Gelöscht". Server reports "GELÖSCHT" (non-ASCII caps).
+        // Unicode lowercase treats Ö == ö, so this is still one entry and
+        // it must be tagged Inherited.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let body = format!(
+            r#"
+[defaults.security]
+posture = "draft-safe"
+protected_folders = ["Gelöscht"]
+expunge_folders = []
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        );
+        std::fs::write(&config_path, body).unwrap();
+        let multi = rimap_config::loader::load_and_validate(&config_path).unwrap();
+        let acfg = multi.accounts[&AccountId::new("work").unwrap()].clone();
+
+        let resolved = crate::boot::discovery::merge_protected_folders(
+            &acfg.security.protected_folders,
+            vec!["GELÖSCHT".to_string()],
+        );
+        assert_eq!(
+            resolved.len(),
+            1,
+            "non-ASCII case must be deduplicated: {resolved:?}"
+        );
+        let matrix = account_tool_matrix(&acfg, Some(&resolved));
+        assert_eq!(matrix.protected_folders.len(), 1);
+        assert_eq!(
+            matrix.protected_folders[0].source,
+            FolderSource::Inherited,
+            "non-ASCII case variant must be tagged Inherited: {:?}",
+            matrix.protected_folders[0],
         );
     }
 

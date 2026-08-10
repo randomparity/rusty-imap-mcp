@@ -23,7 +23,7 @@
 use anyhow::Context;
 use rimap_audit::AuditWriter;
 use rimap_audit::record::FolderPolicy;
-use rimap_authz::FolderGuard;
+use rimap_authz::{FolderGuard, normalize_folder_name};
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_imap::{Connection, SpecialUseMap, types::Folder};
 
@@ -134,16 +134,21 @@ pub fn resolve_special_use(folders: &[Folder]) -> SpecialUseMap {
 /// `[Gmail]/Sent Mail`), preserving the configured order and appending
 /// only names not already present.
 ///
-/// The dedup is case-insensitive so a user-configured literal (`"Sent"`)
-/// is not duplicated when the server also reports `"Sent"` for the same
-/// mailbox. Kept pure — `discovered` is the output of
-/// [`rimap_imap::SpecialUseMap::all_discovered`] — so the security-relevant
-/// merge is unit-testable without a live IMAP connection.
+/// The dedup is normalization-aware so a user-configured literal (`"Gelöscht"`)
+/// is not duplicated when the server reports the mUTF-7 wire form
+/// (`"Gel&APY-scht"`) or a non-ASCII case variant (`"GELÖSCHT"`). Normalization
+/// uses the same mUTF-7-decode-then-Unicode-lowercase path `FolderGuard` uses,
+/// so the two cannot produce different answers for the same mailbox. Kept pure —
+/// `discovered` is the output of [`rimap_imap::SpecialUseMap::all_discovered`] —
+/// so the security-relevant merge is unit-testable without a live IMAP connection.
 #[must_use]
 pub fn merge_protected_folders(configured: &[String], discovered: Vec<String>) -> Vec<String> {
     let mut protected = configured.to_vec();
     for name in discovered {
-        if !protected.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+        if !protected
+            .iter()
+            .any(|p| normalize_folder_name(p) == normalize_folder_name(&name))
+        {
             protected.push(name);
         }
     }
@@ -190,6 +195,34 @@ mod tests {
         // other: the second is dropped because the first was appended.
         let merged = merge_protected_folders(&[], owned(&["Archive", "archive"]));
         assert_eq!(merged, owned(&["Archive"]));
+    }
+
+    #[test]
+    fn merge_dedup_mutf7_and_unicode_form_treated_as_same() {
+        // "Gelöscht" and its mUTF-7 wire form "Gel&APY-scht" are the same
+        // mailbox. merge_protected_folders must recognise them as identical
+        // and not add the server-reported form as a second entry.
+        //
+        // "APY" is the base64 encoding of U+00F6 ('ö'), the standard mUTF-7
+        // shift sequence for that codepoint.
+        let merged = merge_protected_folders(&owned(&["Gelöscht"]), owned(&["Gel&APY-scht"]));
+        assert_eq!(
+            merged,
+            owned(&["Gelöscht"]),
+            "mUTF-7 form must not be added when decoded form is already configured"
+        );
+    }
+
+    #[test]
+    fn merge_dedup_non_ascii_case_difference_is_single_entry() {
+        // A non-ASCII case difference (GELÖSCHT vs Gelöscht) must not
+        // produce a second entry: Unicode lowercasing treats Ö == ö.
+        let merged = merge_protected_folders(&owned(&["Gelöscht"]), owned(&["GELÖSCHT"]));
+        assert_eq!(
+            merged,
+            owned(&["Gelöscht"]),
+            "non-ASCII case difference must not add a duplicate entry"
+        );
     }
 
     fn folder(name: &str, special: Option<SpecialUse>) -> Folder {
