@@ -394,6 +394,24 @@ are the ones that trip people up or aren't obvious from the lint set.
 - **Never force-push to `main`.** Never amend commits that have been pushed.
   Never skip hooks.
 
+## Issue and label tracking
+
+`status:` labels track *active* work only. The terminal state for a closed
+issue is the **absence** of a `status:` label — there is no `status:done`.
+
+Convention (recorded in [docs/github-tracking-conventions.md](docs/github-tracking-conventions.md)):
+
+- When closing or merging an issue, **strip all `status:*` labels** from it.
+  `gh issue edit <N> --remove-label "status:<x>"`
+- **Closed-state is authoritative.** Tooling (`/campaign`, `/recover-orphans`)
+  must treat closed issues as done regardless of any lingering `status:` label.
+  Always filter stale-label queries with `--state open`.
+- A `status:blocked` or `status:awaiting-merge` on a closed issue is residue,
+  not a real signal — strip it as you close.
+
+See [`docs/github-tracking-conventions.md`](docs/github-tracking-conventions.md)
+for the full label taxonomy and workflow.
+
 ## Security-sensitive work
 
 Some changes deserve extra scrutiny. When touching:
