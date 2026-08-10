@@ -24,17 +24,13 @@ pub fn normalize_folder_name(folder: &str) -> String {
     decoded.to_lowercase()
 }
 
-fn normalize(folder: &str) -> String {
-    normalize_folder_name(folder)
-}
-
 /// Validate `folder`'s structure, then return its normalized comparison
 /// key. The validate-then-normalize ordering is load-bearing security
 /// code: a name that fails [`FolderName`] validation must be rejected
 /// before it is ever compared against the protected/expunge lists.
 fn validate_and_normalize(folder: &str) -> Result<String, AuthzError> {
     FolderName::new(folder)?;
-    Ok(normalize(folder))
+    Ok(normalize_folder_name(folder))
 }
 
 impl FolderGuard {
@@ -44,8 +40,14 @@ impl FolderGuard {
     #[must_use]
     pub fn new(protected_folders: &[String], expunge_folders: &[String]) -> Self {
         Self {
-            protected: protected_folders.iter().map(|f| normalize(f)).collect(),
-            expunge_allowed: expunge_folders.iter().map(|f| normalize(f)).collect(),
+            protected: protected_folders
+                .iter()
+                .map(|f| normalize_folder_name(f))
+                .collect(),
+            expunge_allowed: expunge_folders
+                .iter()
+                .map(|f| normalize_folder_name(f))
+                .collect(),
         }
     }
 
