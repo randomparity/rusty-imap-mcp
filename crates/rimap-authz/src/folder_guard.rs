@@ -14,9 +14,18 @@ pub struct FolderGuard {
 /// case-insensitive comparison. If decoding fails, fall back to
 /// ASCII-lowercased input — we compare against that so a malformed
 /// encoding cannot silently bypass the guard.
-fn normalize(folder: &str) -> String {
+///
+/// Exposed for callers that must compare folder names through the same
+/// normalization the guard uses — e.g. `merge_protected_folders` and
+/// `protected_entries` in `rimap-server` — so the two cannot drift.
+#[must_use]
+pub fn normalize_folder_name(folder: &str) -> String {
     let decoded = utf7_imap::decode_utf7_imap(folder.to_string());
     decoded.to_lowercase()
+}
+
+fn normalize(folder: &str) -> String {
+    normalize_folder_name(folder)
 }
 
 /// Validate `folder`'s structure, then return its normalized comparison

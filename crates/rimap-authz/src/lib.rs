@@ -14,7 +14,7 @@ pub use crate::breaker::{
     BreakerConfig, CircuitBreaker, Clock, FailureReason, ManualClock, State, SystemClock,
 };
 pub use crate::error::AuthzError;
-pub use crate::folder_guard::FolderGuard;
+pub use crate::folder_guard::{FolderGuard, normalize_folder_name};
 pub use crate::guard::DispatchGuard;
 pub use crate::matrix::EffectiveMatrix;
 pub use crate::rate_limit::Governor;
