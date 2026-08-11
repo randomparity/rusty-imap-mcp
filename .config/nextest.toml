@@ -82,6 +82,31 @@ test-group = 'chaos-backed'
 # the markers were actually observed.
 [profile.default]
 leak-timeout = "5s"
+# A test that hangs silently consumes a full GitHub job slot until the 360-minute
+# default kills it with no test name in the output — the only diagnostic is
+# "exceeded the maximum execution time" (#728). `slow-timeout` bounds that:
+# nextest reports the still-running test by name at every `period` boundary and
+# kills it after `terminate-after` periods. At 60 s × 3 the kill fires at 3 min.
+#
+# Container-backed tests (Dovecot + Mailpit, `container-backed` group above) take
+# ~10–60 s per warm boot on a developer host per AGENTS.md. Each *test* sees its
+# own compose project and readiness probe, so the relevant unit is per-test wall
+# time, not total suite time. A 60 s slow-period warns the first time a test
+# approaches the warm-boot ceiling without killing it; the 180 s terminate fires
+# only at 3× that ceiling, which is comfortably beyond even a cold first pull.
+# No per-binary override is needed.
+#
+# `e2e_wire_chaos` runs serially (`chaos-backed`, max-threads = 1) with tight
+# timeout budgets *inside* each test (e.g. a 30 s connect-timeout assertion). The
+# slow period at 60 s will warn when a chaos scenario takes longer than expected,
+# but the test's own `tokio::time::timeout` fires first; the nextest 180 s kill is
+# a backstop that has no meaningful interaction with those in-process budgets.
+#
+# Declared on `[profile.default]` so it applies everywhere — CI (via [profile.ci]
+# inheritance), `just test`, `just test-fast`, and local ad-hoc runs. The
+# alternative — `[profile.ci]`-only — would leave a developer with a hung test
+# and no attribution, which is the problem this fixes.
+slow-timeout = { period = "60s", terminate-after = 3 }
 
 # nextest's built-in default is fail-fast = true: the first failure cancels
 # the run and every test still in flight is reported as "not run" rather than
