@@ -43,3 +43,4 @@ compile it.
 | [0017](0017-realign-push-uses-a-github-app-token.md) | The fuzz-lock realign pushes with a GitHub App installation token, not a PAT | Accepted |
 | [0018](0018-runnable-artifacts-live-in-the-tree.md) | Runnable artifacts live in the tree; ADR immutability binds the decision, not the artifact | Accepted |
 | [0021](0021-folder-policy-record-after-registry-build.md) | The enforced folder policy is its own record kind, written after the registry is built | Accepted |
+| [0022](0022-write-deadline-watchdog-for-slow-audit-path.md) | Write-deadline watchdog is the primary control for a slow or non-local `audit.path` | Accepted |

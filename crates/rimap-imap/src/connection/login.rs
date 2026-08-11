@@ -325,9 +325,9 @@ impl Connection {
     ///   MCP wire stops being served. The same stall on the blocking pool lands
     ///   against its 512-thread cap instead and cannot starve the scheduler, so
     ///   this makes `audit.path` a local-storage requirement rather than a
-    ///   preference — and one nothing currently enforces: `docs/audit-log.md`
-    ///   states it for the operator, but detecting a non-local `audit.path`
-    ///   at startup is #668.
+    ///   preference. ADR-0022 (`docs/ADR/0022-write-deadline-watchdog-for-slow-audit-path.md`)
+    ///   picks the write-deadline watchdog (Option A) as the primary control; the
+    ///   implementation is tracked in #668.
     ///
     /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
     /// file I/O, nothing inside its critical section calls back into this
