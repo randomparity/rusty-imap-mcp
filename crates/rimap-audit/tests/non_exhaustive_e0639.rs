@@ -26,7 +26,6 @@
 //! hand-assembled.
 
 #![expect(clippy::expect_used, reason = "integration test")]
-#![expect(clippy::unwrap_used, reason = "integration test")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,9 +47,7 @@ fn core_crate_root() -> PathBuf {
 
 /// The `cargo` binary to use — cargo sets `CARGO` when running tests.
 fn cargo_bin() -> PathBuf {
-    std::env::var("CARGO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("cargo"))
+    std::env::var("CARGO").map_or_else(|_| PathBuf::from("cargo"), PathBuf::from)
 }
 
 /// Create a minimal two-file temp workspace (`Cargo.toml` + `src/main.rs`)
@@ -106,7 +103,7 @@ fn main() {
 
 /// Functional-update spread on `ProcessEnd` — the `..` form that E0639 should
 /// reject (mirrors the second doctest shape in `record/mod.rs`).
-const PROBE_PROCESS_END_FUNCTIONAL_UPDATE: &str = r#"
+const PROBE_PROCESS_END_FUNCTIONAL_UPDATE: &str = r"
 fn main() {
     let base = rimap_audit::record::ProcessEnd::new(
         rimap_audit::record::ProcessEndReason::Eof,
@@ -117,7 +114,7 @@ fn main() {
         ..base
     };
 }
-"#;
+";
 
 /// Wrong field name on a plain (exhaustive) local struct — this breaks with
 /// E0560 ("unknown field"), not E0639. Used to confirm the gate checks the
@@ -128,7 +125,7 @@ fn main() {
 /// a wrong field name may produce both E0639 *and* E0560, making the check
 /// ambiguous. A plain local struct produces only E0560, which is the
 /// unambiguous "not E0639" case the test needs.
-const PROBE_UNRELATED_FAILURE: &str = r#"
+const PROBE_UNRELATED_FAILURE: &str = r"
 struct Plain {
     x: i32,
 }
@@ -138,7 +135,7 @@ fn main() {
         no_such_field: 42,
     };
 }
-"#;
+";
 
 // ---------------------------------------------------------------------------
 // Tests
