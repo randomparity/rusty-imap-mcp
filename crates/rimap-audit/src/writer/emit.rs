@@ -266,6 +266,7 @@ mod tests {
             total_tool_calls: 0,
             records_lost: 0,
             undrained_dispatches: 0,
+            drainer_aborted_records: 0,
         })
     }
 

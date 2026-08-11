@@ -107,7 +107,7 @@ const PROBE_PROCESS_END_FUNCTIONAL_UPDATE: &str = r"
 fn main() {
     let base = rimap_audit::record::ProcessEnd::new(
         rimap_audit::record::ProcessEndReason::Eof,
-        0, 0, 0,
+        0, 0, 0, 0,
     );
     let _ = rimap_audit::record::ProcessEnd {
         total_tool_calls: 1,
