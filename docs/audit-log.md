@@ -457,23 +457,31 @@ Read the exception before building on the rule.
   it is not a sighting of a record following `process_end`. Alert on it anyway:
   an unverified integrity claim is the thing worth looking at.
 
-  Two things the field does not cover, so a zero is narrower than "this run was
+  One thing the field does not cover, so a zero is narrower than "this run was
   clean":
 
   - A run that never reaches `process_end` at all -- a hard crash, a `SIGKILL`
     -- reports nothing, neither a count nor a zero. A non-zero count is
     evidence that terminality is unverified; a missing `process_end` is not
     evidence that it held.
-  - **The cancellation drainer's own join budget is a second, still
-    stderr-only hole.** The residue is measured before that join, and a cut
-    dispatch releases its registration as soon as it hands its `tool_end` to
-    the drainer's queue -- so the drain honestly reports zero while records sit
-    unwritten. If the join then expires, the server aborts the drainer: those
-    queued records are lost, and a write already handed to the blocking pool
-    lands after `process_end`. `records_lost` does not see it either, because
-    nothing was ever written to fail. The warning
-    `cancellation drainer did not finish within the join budget` on stderr is
-    the only signal. Tracked in #725.
+
+- **A cancellation drainer aborted on its join budget.** After the dispatch
+  drain, the server awaits the cancellation drainer task within a second
+  join budget. If that budget expires it aborts the task; any `ToolEndInputs`
+  queued at that moment are dropped. This is **announced in the file**, as
+  `process_end.drainer_aborted_records`: `1` means the abort path was taken
+  and at least the queued records were lost; `0` is the affirmative claim that
+  the drainer exited cleanly. Alert on a non-zero value.
+
+  Specifically, this field counts the abort as a unit (`0` or `1`), not the
+  number of records that were queued. A `ToolEndInputs` already handed to
+  `spawn_blocking` by the drainer *before* the abort is not counted here --
+  it completes in the thread pool and may land after `process_end` (sequenced
+  after, not silently lost); `undrained_dispatches` already covers the
+  audit-ordering concern for that write.
+
+  The same caveat as `undrained_dispatches` applies: a run that never reaches
+  `process_end` at all reports nothing, neither a count nor a zero.
 
 Separately, and not an exception to *ordering*: a record may be missing
 entirely. Loss on shutdown is expected and documented (best-effort). Terminality

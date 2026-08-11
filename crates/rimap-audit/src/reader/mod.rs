@@ -430,6 +430,7 @@ mod tests {
                 total_tool_calls: seq,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             }),
         }
     }
@@ -713,6 +714,7 @@ mod tests {
                 total_tool_calls: 0,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             }),
         };
         let path = write_lines(&dir, "a.jsonl", &[serde_json::to_string(&rec).unwrap()]);
@@ -745,6 +747,7 @@ mod tests {
                 total_tool_calls: 0,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             }),
         };
         let path = write_lines(&dir, "a.jsonl", &[serde_json::to_string(&rec).unwrap()]);

@@ -487,6 +487,7 @@ mod tests {
                 total_tool_calls: 0,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             }),
         };
         writer.write_record(&rec).unwrap();
@@ -527,6 +528,7 @@ mod tests {
                     total_tool_calls: seq,
                     records_lost: 0,
                     undrained_dispatches: 0,
+                    drainer_aborted_records: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -564,6 +566,7 @@ mod tests {
                     total_tool_calls: seq,
                     records_lost: 0,
                     undrained_dispatches: 0,
+                    drainer_aborted_records: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -636,6 +639,7 @@ mod tests {
                     total_tool_calls: seq,
                     records_lost: 0,
                     undrained_dispatches: 0,
+                    drainer_aborted_records: 0,
                 }),
             };
             writer.write_record(&rec).unwrap();
@@ -867,6 +871,7 @@ mod tests {
                 total_tool_calls: 42,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             })
             .unwrap();
         assert_eq!(seq, crate::record::ids::Seq::FIRST);
@@ -914,6 +919,7 @@ mod tests {
                 total_tool_calls: writer.total_tool_calls(),
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             })
             .unwrap();
         assert_eq!(writer.total_tool_calls(), 2);
@@ -945,6 +951,7 @@ mod tests {
                 total_tool_calls: 7,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             })
             .unwrap();
         drop(writer);
@@ -1043,6 +1050,7 @@ mod tests {
                 total_tool_calls: 0,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             }),
         };
 
@@ -1089,6 +1097,7 @@ mod tests {
                 total_tool_calls: 0,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             }),
         };
 

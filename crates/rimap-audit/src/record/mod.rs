@@ -560,6 +560,7 @@ pub struct ProcessStart {
 ///     total_tool_calls: 0,
 ///     records_lost: 0,
 ///     undrained_dispatches: 0,
+///     drainer_aborted_records: 0,
 /// };
 /// ```
 ///
@@ -578,7 +579,7 @@ pub struct ProcessStart {
 ///
 /// ```
 /// use rimap_audit::record::{ProcessEnd, ProcessEndReason};
-/// let end = ProcessEnd::new(ProcessEndReason::Eof, 12, 0, 0);
+/// let end = ProcessEnd::new(ProcessEndReason::Eof, 12, 0, 0, 0);
 /// assert_eq!(end.total_tool_calls, 12);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -621,38 +622,62 @@ pub struct ProcessEnd {
     /// carry no such field, and must keep deserializing as zero.
     #[serde(default)]
     pub undrained_dispatches: u64,
+    /// Records dropped when the cancellation drainer task was aborted due to
+    /// join-budget expiry. The drainer is aborted as a unit — the server cannot
+    /// inspect how many `ToolEndInputs` it held at abort time — so this field
+    /// is `0` when the drainer finished within budget and `1` when it was
+    /// aborted, regardless of the number of records that were queued.
+    ///
+    /// Specifically: a `ToolEndInputs` handed to `spawn_blocking` by the
+    /// drainer *before* the abort is not counted here. It completes in the
+    /// thread pool and may land after `process_end` (sequenced after, not lost);
+    /// `undrained_dispatches` already covers the audit-ordering concern for
+    /// that write path.
+    ///
+    /// A non-zero value means the abort path was taken and at least the queued
+    /// records were lost. Alert on it. A zero is the affirmative claim that the
+    /// drainer exited cleanly within its join budget.
+    ///
+    /// `#[serde(default)]` because `process_end` records written before #725
+    /// carry no such field, and must keep deserializing as zero.
+    #[serde(default)]
+    pub drainer_aborted_records: u64,
 }
 
 impl ProcessEnd {
     /// Construct a `process_end` payload.
     ///
-    /// `records_lost` and `undrained_dispatches` are parameters rather than
-    /// defaulted fields, departing from #665's rule that a constructor takes
-    /// exactly the fields serde treats as required. A zero in either is not an
-    /// absent value: it is an affirmative, durable claim — that this process's
-    /// record stream has no hole in it, and that no dispatch outlived the
-    /// shutdown drain. A caller that never assigned the field would publish
-    /// that claim without measuring it.
+    /// `records_lost`, `undrained_dispatches`, and `drainer_aborted_records`
+    /// are parameters rather than defaulted fields, departing from #665's rule
+    /// that a constructor takes exactly the fields serde treats as required. A
+    /// zero in any of them is not an absent value: it is an affirmative, durable
+    /// claim — that this process's record stream has no hole in it, that no
+    /// dispatch outlived the shutdown drain, and that the cancellation drainer
+    /// was not aborted. A caller that never assigned a field would publish that
+    /// claim without measuring it.
     ///
     /// [`ToolStartInputs::new`](crate::ToolStartInputs::new) departs for the
     /// same reason, and its doc states the rule the three share.
     /// Production reads `records_lost` from
     /// [`AuditWriter::suppressed_failures`](crate::AuditWriter::suppressed_failures)
-    /// (#647) and `undrained_dispatches` from the return of the server's
-    /// dispatch drain (#680); a synthetic record passes the counts it means to
-    /// assert.
+    /// (#647), `undrained_dispatches` from the return of the server's dispatch
+    /// drain (#680), and `drainer_aborted_records` from the return of the
+    /// server's drainer join (#725); a synthetic record passes the counts it
+    /// means to assert.
     #[must_use]
     pub fn new(
         reason: ProcessEndReason,
         total_tool_calls: u64,
         records_lost: u64,
         undrained_dispatches: u64,
+        drainer_aborted_records: u64,
     ) -> Self {
         Self {
             reason,
             total_tool_calls,
             records_lost,
             undrained_dispatches,
+            drainer_aborted_records,
         }
     }
 }
@@ -1133,6 +1158,7 @@ mod tests {
                 total_tool_calls: 42,
                 records_lost: 0,
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             }),
         };
         let json = serde_json::to_string(&rec).unwrap();

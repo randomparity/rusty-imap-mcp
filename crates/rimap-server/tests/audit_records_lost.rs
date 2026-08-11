@@ -60,6 +60,7 @@ fn emit_process_end(writer: &AuditWriter) {
         writer.total_tool_calls(),
         writer.suppressed_failures(),
         0,
+        0,
     );
     writer.log_process_end(end).unwrap();
 }

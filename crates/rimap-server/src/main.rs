@@ -116,6 +116,12 @@ struct ServeOutcome {
     /// expired. Zero on every clean shutdown, and measured rather than assumed
     /// on every exit path — see [`drain_dispatches`].
     undrained_dispatches: u64,
+    /// Whether the cancellation drainer was aborted due to join-budget expiry.
+    /// `1` when aborted (records were dropped), `0` when the drainer finished
+    /// cleanly. Threaded out of [`join_drainer`] for the same reason
+    /// `undrained_dispatches` is threaded out of `drain_dispatches`: the value
+    /// is not the audit writer's to know (#725).
+    drainer_aborted_records: u64,
 }
 
 /// How long `serve_mcp` waits for in-flight tool dispatches to unwind after
@@ -253,9 +259,15 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
     let ServeOutcome {
         result: mcp_result,
         undrained_dispatches,
+        drainer_aborted_records,
     } = rt.block_on(serve_mcp(&multi, &audit, &credentials, &download_dir));
 
-    emit_process_end(&audit, &mcp_result, undrained_dispatches);
+    emit_process_end(
+        &audit,
+        &mcp_result,
+        undrained_dispatches,
+        drainer_aborted_records,
+    );
 
     // Shut down the runtime without waiting for blocking tasks. The
     // validator's `validate_inbound` bridge owns a `tokio::io::stdin()`
@@ -301,6 +313,7 @@ async fn serve_mcp(
             return ServeOutcome {
                 result: Err(e),
                 undrained_dispatches: 0,
+                drainer_aborted_records: 0,
             };
         }
     };
@@ -353,6 +366,7 @@ async fn serve_mcp(
             return ServeOutcome {
                 result: Err(primary),
                 undrained_dispatches,
+                drainer_aborted_records: 0,
             };
         }
         Err(InitOutcome::Rmcp(boxed)) => {
@@ -361,6 +375,7 @@ async fn serve_mcp(
             return ServeOutcome {
                 result,
                 undrained_dispatches,
+                drainer_aborted_records: 0,
             };
         }
     };
@@ -422,10 +437,11 @@ async fn serve_mcp(
         (Ok(()), Ok(())) => Ok(()),
     };
 
-    join_drainer(drainer_handle, undrained).await;
+    let drainer_aborted_records = join_drainer(drainer_handle, undrained).await;
     ServeOutcome {
         result: mcp_result,
         undrained_dispatches: undrained,
+        drainer_aborted_records,
     }
 }
 
@@ -441,13 +457,16 @@ async fn serve_mcp(
 /// `tool_end` records — after `process_end`, which is the ordering this whole
 /// path exists to establish.
 ///
-/// The records an abort drops reach no counter on `process_end`; `undrained` is
-/// already latched by now and the drainer's own write is untracked. That hole is
-/// stderr-only and tracked in #725 — see `docs/audit-log.md`.
-async fn join_drainer(mut drainer_handle: tokio::task::JoinHandle<()>, undrained: u64) {
+/// Returns `1` if the drainer was aborted (records were dropped), `0` if it
+/// finished within budget. The caller threads this into [`ServeOutcome`] and
+/// ultimately into `process_end.drainer_aborted_records` (#725).
+async fn join_drainer(mut drainer_handle: tokio::task::JoinHandle<()>, undrained: u64) -> u64 {
     match tokio::time::timeout(DRAINER_JOIN_BUDGET, &mut drainer_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::error!(error = %e, "cancellation drainer join error"),
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "cancellation drainer join error");
+            0
+        }
         Err(_) => {
             drainer_handle.abort();
             tracing::warn!(
@@ -456,6 +475,7 @@ async fn join_drainer(mut drainer_handle: tokio::task::JoinHandle<()>, undrained
                  queued cancellation records are lost, and any write already \
                  handed to the blocking pool is sequenced after process_end",
             );
+            1
         }
     }
 }
@@ -465,26 +485,29 @@ async fn join_drainer(mut drainer_handle: tokio::task::JoinHandle<()>, undrained
 /// or with an error (`Error`). Failures to write are logged but do
 /// not propagate.
 ///
-/// `undrained_dispatches` is [`ServeOutcome::undrained_dispatches`], threaded
-/// out of `serve_mcp` rather than read off the writer: unlike the other two
-/// counters it is not the audit writer's to know (#680).
+/// `undrained_dispatches` is [`ServeOutcome::undrained_dispatches`] and
+/// `drainer_aborted_records` is [`ServeOutcome::drainer_aborted_records`],
+/// both threaded out of `serve_mcp` rather than read off the writer: unlike
+/// `records_lost` they are not the audit writer's to know (#680, #725).
 fn emit_process_end(
     audit: &rimap_audit::AuditWriter,
     mcp_result: &anyhow::Result<()>,
     undrained_dispatches: u64,
+    drainer_aborted_records: u64,
 ) {
     let reason = match mcp_result {
         Ok(()) => rimap_audit::ProcessEndReason::Eof,
         Err(_) => rimap_audit::ProcessEndReason::Error,
     };
     // Last chance to state that this file has a hole in it, or that it is not
-    // terminal for this process: both counters live only in memory, and the
-    // process is about to exit (#647, #680).
+    // terminal for this process: all three counters live only in memory, and
+    // the process is about to exit (#647, #680, #725).
     let process_end = rimap_audit::ProcessEnd::new(
         reason,
         audit.total_tool_calls(),
         audit.suppressed_failures(),
         undrained_dispatches,
+        drainer_aborted_records,
     );
     match audit.log_process_end(process_end) {
         Ok(seq) => tracing::info!(seq = %seq, "process_end audit record written"),
@@ -921,31 +944,70 @@ mod process_end_tests {
 
     use super::emit_process_end;
 
+    fn open_writer(path: &std::path::Path) -> AuditWriter {
+        let mut options = AuditOptions::new(path.to_owned(), Seq::FIRST);
+        options.rotate_bytes = 10 * 1024 * 1024;
+        options.rotate_keep = 5;
+        AuditWriter::open(&options).expect("audit writer opens")
+    }
+
     /// The undrained count `serve_mcp` measured must land on the record
     /// verbatim. `emit_process_end` is the last hop and the only production
     /// `ProcessEnd::new` call site, so an argument dropped here is a durable
     /// zero claiming a clean drain that was never observed (#680).
     ///
-    /// A distinctive value, not `1`: the constructor takes three adjacent
+    /// A distinctive value, not `1`: the constructor takes four adjacent
     /// `u64`s and this is the pin that the fourth reaches the fourth field.
     #[test]
     fn the_undrained_count_reaches_the_record_verbatim() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let mut options = AuditOptions::new(path.clone(), Seq::FIRST);
-        options.rotate_bytes = 10 * 1024 * 1024;
-        options.rotate_keep = 5;
-        let writer = AuditWriter::open(&options).expect("audit writer opens");
+        let writer = open_writer(&path);
 
-        emit_process_end(&writer, &Ok(()), 7);
+        emit_process_end(&writer, &Ok(()), 7, 0);
 
         let line = std::fs::read_to_string(&path).expect("audit file readable");
         assert!(
             line.contains(r#""undrained_dispatches":7"#),
             "the count passed in must be the count on disk; got: {line}",
         );
-        // Pinned together so a transposition of the two counters fails here
+        // Pinned together so a transposition of the counters fails here
         // rather than silently swapping which one an operator alerts on.
+        assert!(
+            line.contains(r#""records_lost":0"#),
+            "records_lost must stay its own field; got: {line}",
+        );
+        assert!(
+            line.contains(r#""drainer_aborted_records":0"#),
+            "drainer_aborted_records must be its own field; got: {line}",
+        );
+    }
+
+    /// A non-zero `drainer_aborted_records` must land on the record verbatim
+    /// (#725). `emit_process_end` is the sole production call site; an argument
+    /// dropped here silently claims the drainer finished cleanly.
+    ///
+    /// Distinctive value `1` (the only value `join_drainer` actually returns
+    /// on the abort path) pinned next to `undrained_dispatches:0` so a
+    /// transposition between the two adjacent `u64`s is detectable.
+    #[test]
+    fn the_drainer_aborted_count_reaches_the_record_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let writer = open_writer(&path);
+
+        emit_process_end(&writer, &Ok(()), 0, 1);
+
+        let line = std::fs::read_to_string(&path).expect("audit file readable");
+        assert!(
+            line.contains(r#""drainer_aborted_records":1"#),
+            "the abort flag passed in must be the count on disk; got: {line}",
+        );
+        // Pinned so a transposition with undrained_dispatches is detectable.
+        assert!(
+            line.contains(r#""undrained_dispatches":0"#),
+            "undrained_dispatches must stay its own field; got: {line}",
+        );
         assert!(
             line.contains(r#""records_lost":0"#),
             "records_lost must stay its own field; got: {line}",

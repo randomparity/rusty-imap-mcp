@@ -2126,6 +2126,7 @@ mod dispatch_drain_tests {
             1,
             writer.suppressed_failures(),
             u64::try_from(undrained).expect("count fits u64"),
+            0,
         );
         writer.log_process_end(end).expect("process_end write");
 
@@ -2379,6 +2380,7 @@ mod dispatch_drain_tests {
             1,
             writer.suppressed_failures(),
             u64::try_from(undrained).unwrap_or(u64::MAX),
+            0,
         );
         writer
             .log_process_end(end)
