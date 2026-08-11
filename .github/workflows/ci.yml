@@ -107,6 +107,14 @@ jobs:
   test:
     name: test (stable)
     runs-on: ubuntu-24.04
+    # Bound the job so a test that somehow escapes slow-timeout's per-test kill
+    # (e.g. the runner OOMs and nextest's signal never lands) still surfaces
+    # within a reasonable window rather than burning the 360-minute default (#728).
+    # nextest's slow-timeout terminates individual hung tests at 180 s; the
+    # container-backed e2e suite can boot ~20 containers at max-threads = 4, so
+    # a full cold-pull run with 20 Dovecot boots is the practical ceiling.
+    # 60 min covers that with room for the stable + doctest + e2e canary steps.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -176,6 +184,10 @@ jobs:
   msrv:
     name: test (MSRV 1.88.0)
     runs-on: ubuntu-24.04
+    # Same reasoning as the `test` job above (#728): bound the job as a backstop
+    # for the case where nextest's per-test kill does not land. The MSRV job
+    # runs no e2e binaries (no RIMAP_REQUIRE_DOCKER step), so 45 min is enough.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
