@@ -381,6 +381,18 @@ recently flushed.
 | `records_lost` | Number of records this process failed to persist and told no caller about (absent on records written before this field existed, where it means *not measured* rather than zero) |
 | `undrained_dispatches` | Tool dispatches -- or audit writes one of them offloaded -- still registered when the shutdown drain's budget expired (absent on records written before this field existed, where it means *not measured* rather than zero) |
 
+
+> **Known coverage gap** (#730): the threading from `drain_dispatches() → ServeOutcome
+> → emit_process_end` in `main.rs` is exercised only for the zero (clean-drain) case by
+> the end-to-end shutdown tests. A non-zero residue cannot be driven deterministically
+> from the binary's test module: `spawn_blocking_tracked` — the only mechanism that can
+> park a registration — is `pub(crate)` on the library crate and not visible to binary tests.
+> Widening that visibility would add production surface with no purpose other than testing,
+> violating the project's no-speculative-surface rule. The value passes through
+> `emit_process_end` with no transformation; the existing
+> `the_undrained_count_reaches_the_record_verbatim` test covers that final hop.
+
+
 **A non-zero `records_lost` means this file has a hole in it.** Some event
 happened and left no record — most often a disk that filled mid-run. The count
 merges its two sources on purpose, because no operator decision turns on which
