@@ -62,13 +62,16 @@
 //! **The `EXXXX` half of `compile_fail,E0639` is not enforced by rustdoc on
 //! stable** (verified on 1.94.0: annotating one of these doctests `E0277`
 //! leaves it passing). So the doctests prove *does not compile*, not *fails
-//! with E0639*, and the difference is the #715 trap: a type without `Default`
-//! makes `..Default::default()` fail with `E0277` and the doctest still
-//! passes while testing nothing. Two habits close the gap, and every new case
-//! must follow both: spread from the type's **own constructor** rather than
-//! from `Default`, so a missing `Default` cannot be the reason it failed; and
-//! confirm the code out-of-band once by compiling the same expression as an
-//! ordinary downstream item. Tracked as a gate in #777.
+//! with E0639*. The actual E0639 gate is in
+//! `crates/rimap-audit/tests/non_exhaustive_e0639.rs` (#777): it shells out
+//! to `cargo check` on probe snippets that import the real crate and asserts
+//! `error[E0639]` in the output, not merely a non-zero exit. Two habits
+//! still apply to every new `compile_fail,E0639` doctest: spread from the
+//! type's **own constructor** rather than from `Default` (so a missing
+//! `Default` cannot be the reason it failed); and confirm the code out-of-band
+//! once by compiling the same expression as an ordinary downstream item. The
+//! E0639 gate in `non_exhaustive_e0639.rs` covers `FolderPolicy` and
+//! `ProcessEnd`; extend it when adding a new record type.
 //!
 //! The rule reaches `AuthEvent` too even though `rimap-core` defines it: it is
 //! a `pub` type this crate re-exports as part of its own record surface, so a
