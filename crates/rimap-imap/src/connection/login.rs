@@ -518,8 +518,12 @@ impl Connection {
 ///
 /// This is a workaround for an upstream defect, not a preference: every
 /// `async-imap` consumer probing a non-`IMAP4rev1` capability by string
-/// inherits it. #767 tracks reporting it, and is where the exit condition for
-/// this helper lives.
+/// inherits it. Reported upstream at [chatmail/async-imap#140]; #767 is where
+/// the exit condition for this helper lives (if upstream fixes it, `has_str`
+/// becomes usable again and this helper can be removed; if upstream declines,
+/// #767 records that too).
+///
+/// [chatmail/async-imap#140]: https://github.com/chatmail/async-imap/issues/140
 ///
 /// `Capability::Auth` never matches, and that is load-bearing rather than
 /// merely unimplemented: `imap-proto` strips the `AUTH=` prefix with
