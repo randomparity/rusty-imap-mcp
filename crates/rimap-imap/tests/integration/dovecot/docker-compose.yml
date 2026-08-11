@@ -4,7 +4,9 @@ services:
     # rootless on non-privileged ports; the `-root` variant preserves the
     # rootful contract this fixture's entrypoint relies on: writes to
     # /etc/dovecot, /var/mail, /var/run/dovecot and binds 143/993).
-    image: docker.io/dovecot/dovecot:2.4.4-root
+    # tag@digest — Dependabot tracks the version line; the digest guards
+    # against a re-pushed tag silently changing the pulled image.
+    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:34c8425a6811a80df614353dd2b0bad779b64c76c88b6a5ab3fa2e3d99b981fb
     container_name: ${COMPOSE_PROJECT_NAME:-rimap-it}-dovecot
     ports:
       # Loopback-only. The host port is pre-allocated by the Rust harness
