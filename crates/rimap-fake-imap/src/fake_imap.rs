@@ -197,6 +197,23 @@ impl FakeImapServer {
         self.recorded.lock().unwrap().clone()
     }
 
+    /// Like [`FakeImapServer::recorded`] but rewrites `LOGIN` frames so the
+    /// password argument is replaced with `<REDACTED>`. Safe to pass to
+    /// `DumpOnPanic` and similar diagnostic helpers when the resolver may carry
+    /// a real credential. `assert_login_frame_only` in
+    /// `crates/rimap-server/tests/support/canary.rs` intentionally uses
+    /// [`FakeImapServer::recorded`] — not this accessor — because it asserts
+    /// *on* the credential value inside the LOGIN frame.
+    #[must_use]
+    pub fn recorded_redacted(&self) -> Vec<String> {
+        self.recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|frame| redact_login_frame(frame))
+            .collect()
+    }
+
     /// Fully-wired `Connection` (static-password resolver, ~1s timeout).
     #[must_use]
     pub fn connection(&self, username: &str) -> Connection {
@@ -291,10 +308,14 @@ async fn serve(
                 recorded.lock().unwrap().push(line.clone());
                 let (tag, rest) = line.split_once(' ').unwrap_or((line.trim(), ""));
                 last_tag = tag.to_string();
+                let tag_verb: String = line
+                    .split_whitespace()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 assert!(
                     rest.trim_start().to_ascii_uppercase().starts_with(verb),
-                    "fake: expected command `{verb}`, got `{}`",
-                    line.trim(),
+                    "fake: expected command `{verb}`, got `{tag_verb}`",
                 );
                 pending_literal = parse_sync_literal(&line);
             }
@@ -339,6 +360,34 @@ fn parse_sync_literal(line: &str) -> Option<usize> {
         return None; // non-synchronizing literal — no continuation, no drain
     }
     digits.parse().ok()
+}
+
+/// Rewrite a single recorded client command frame to mask the LOGIN password.
+/// A `LOGIN` frame has the form `<tag> LOGIN <user> <pass>\r\n`; this replaces
+/// `<pass>` with `<REDACTED>` while leaving every other frame untouched.
+fn redact_login_frame(frame: &str) -> String {
+    // Fast path: skip the allocation when the frame is not a LOGIN command.
+    let upper = frame.to_ascii_uppercase();
+    let mut words = upper.split_whitespace();
+    words.next(); // tag
+    if words.next() != Some("LOGIN") {
+        return frame.to_string();
+    }
+    // Reconstruct from the first three whitespace-separated tokens (tag, verb,
+    // user) and replace whatever follows with <REDACTED> + the original line
+    // ending.
+    let ending = if frame.ends_with("\r\n") {
+        "\r\n"
+    } else if frame.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    let mut parts = frame.split_whitespace();
+    let tag = parts.next().unwrap_or("");
+    let login = parts.next().unwrap_or("");
+    let user = parts.next().unwrap_or("");
+    format!("{tag} {login} {user} <REDACTED>{ending}")
 }
 
 /// Resolver returning the password [`FakeImapServer`]'s scripts expect. The
@@ -398,7 +447,7 @@ impl AuthEventSink for NoopAudit {
 
 #[cfg(test)]
 mod tests {
-    use super::{FakeImapServer, Step, login_preamble, parse_sync_literal};
+    use super::{FakeImapServer, Step, login_preamble, parse_sync_literal, redact_login_frame};
 
     #[test]
     fn parse_sync_literal_reads_trailing_brace_count() {
@@ -524,6 +573,103 @@ mod tests {
         assert_eq!(
             logins, 3,
             "each of the three connections must issue its own LOGIN",
+        );
+    }
+
+    /// Unit-level coverage for `redact_login_frame`: LOGIN frames lose the
+    /// password field; all other frames are returned unchanged.
+    #[test]
+    fn redact_login_frame_masks_password_and_passes_through_other_frames() {
+        // LOGIN frame: password replaced with <REDACTED>
+        assert_eq!(
+            redact_login_frame("A3 LOGIN user@example.com s3cr3t\r\n"),
+            "A3 LOGIN user@example.com <REDACTED>\r\n",
+        );
+        // Case-insensitive LOGIN detection
+        assert_eq!(
+            redact_login_frame("A3 login user@example.com s3cr3t\r\n"),
+            "A3 login user@example.com <REDACTED>\r\n",
+        );
+        // Non-LOGIN frames are passed through verbatim
+        assert_eq!(redact_login_frame("A1 CAPABILITY\r\n"), "A1 CAPABILITY\r\n",);
+        assert_eq!(
+            redact_login_frame("A2 LIST \"\" \"*\"\r\n"),
+            "A2 LIST \"\" \"*\"\r\n",
+        );
+        // Line ending variants
+        assert_eq!(
+            redact_login_frame("A3 LOGIN user pass\n"),
+            "A3 LOGIN user <REDACTED>\n",
+        );
+        assert_eq!(
+            redact_login_frame("A3 LOGIN user pass"),
+            "A3 LOGIN user <REDACTED>",
+        );
+    }
+
+    /// `recorded_redacted()` returns frames with LOGIN passwords masked while
+    /// `recorded()` retains the plaintext credential — proving the two
+    /// accessors are independent. Also guards that non-LOGIN frames are
+    /// identical between the two views.
+    #[tokio::test]
+    async fn recorded_redacted_masks_login_password_recorded_retains_it() {
+        let server = FakeImapServer::start(login_preamble("IMAP4rev1")).await;
+        let conn = server.connection("user@example.com");
+        // list_folders triggers the full login preamble and then returns an
+        // error because the script has no LIST step — that is fine; we only
+        // need the preamble frames to be recorded.
+        let _ = conn.list_folders("*").await;
+
+        let plain = server.recorded();
+        let redacted = server.recorded_redacted();
+        assert_eq!(
+            plain.len(),
+            redacted.len(),
+            "redacted view must have the same frame count as the plain view",
+        );
+
+        let login_plain: Vec<_> = plain
+            .iter()
+            .filter(|f| f.to_ascii_uppercase().contains("LOGIN"))
+            .collect();
+        assert!(
+            !login_plain.is_empty(),
+            "at least one LOGIN frame must be recorded",
+        );
+        for frame in &login_plain {
+            assert!(
+                frame.contains("fake-password"),
+                "recorded() must retain the plaintext password in LOGIN frames",
+            );
+        }
+
+        let login_redacted: Vec<_> = redacted
+            .iter()
+            .filter(|f| f.to_ascii_uppercase().contains("LOGIN"))
+            .collect();
+        for frame in &login_redacted {
+            assert!(
+                !frame.contains("fake-password"),
+                "recorded_redacted() must not contain the plaintext password",
+            );
+            assert!(
+                frame.contains("<REDACTED>"),
+                "recorded_redacted() LOGIN frame must contain <REDACTED>",
+            );
+        }
+
+        // Non-LOGIN frames must be identical between the two views.
+        let non_login_plain: Vec<_> = plain
+            .iter()
+            .filter(|f| !f.to_ascii_uppercase().contains("LOGIN"))
+            .collect();
+        let non_login_redacted: Vec<_> = redacted
+            .iter()
+            .filter(|f| !f.to_ascii_uppercase().contains("LOGIN"))
+            .collect();
+        assert_eq!(
+            non_login_plain, non_login_redacted,
+            "non-LOGIN frames must be identical between recorded() and recorded_redacted()",
         );
     }
 }
