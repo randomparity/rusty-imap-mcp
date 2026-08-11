@@ -4,7 +4,7 @@ services:
     # Toxiproxy reaches dovecot:993 / dovecot:143 over the compose network, so
     # all client traffic must traverse the proxy (the point of the chaos layer).
     # tag@digest — same pin policy as docker-compose.yml; see that file.
-    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:34c8425a6811a80df614353dd2b0bad779b64c76c88b6a5ab3fa2e3d99b981fb
+    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80db2e656a9250583712a82397e2752b35ad7e4e2e71c85fdc0d510137d
     container_name: ${COMPOSE_PROJECT_NAME:-rimap-chaos}-dovecot
     volumes:
       # `,z` asks podman to SELinux-relabel these host paths; Docker treats the
