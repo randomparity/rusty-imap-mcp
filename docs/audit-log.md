@@ -595,8 +595,13 @@ Config-related event. Declared for future use.
   no deadline fires anywhere in the process -- including the per-tool-call
   ceiling -- and the server stops answering its MCP client at all.
 
-  Nothing checks the path's locality at startup; it is an operator
-  requirement. Local disk has no such failure mode.
+  Nothing checks the path's locality at startup; it remains an operator
+  requirement for now. ADR-0022
+  (`docs/ADR/0022-write-deadline-watchdog-for-slow-audit-path.md`) picks
+  the write-deadline watchdog as the primary runtime control — it detects
+  the actual symptom (an audit write that never returns) rather than
+  inferring locality from filesystem type. Implementation is tracked in
+  #668. Local disk has no such failure mode.
 
 ## Running multiple MCP clients
 
