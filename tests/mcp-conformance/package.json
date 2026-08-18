@@ -15,9 +15,9 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
-    "@types/node": "26.1.2",
-    "oxfmt": "0.61.0",
-    "oxlint": "1.76.0",
+    "@types/node": "26.2.0",
+    "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
     "zod": "4.4.3"
