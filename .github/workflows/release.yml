@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -208,7 +208,7 @@ jobs:
       # Packages are built host-side (x86_64 runner) via --target; cargo-deb maps
       # the triple to the arm64 Debian/RPM Architecture. No emulated install-test
       # for arm64 (structural + content assertion only — ADR-0006).
-      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -411,7 +411,7 @@ jobs:
           find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' \
             | sort | xargs -d '\n' sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
-      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: |
             artifacts/rusty-imap-mcp-*.tar.gz
@@ -486,7 +486,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
           tool: just,cargo-semver-checks@0.48.0
       # Last gate before an irreversible action: a crates.io version cannot be
@@ -623,7 +623,7 @@ jobs:
       # floating HEAD (this job holds contents: write). macOS runners ship brew.
       - name: Set up Homebrew (Linux)
         if: runner.os == 'Linux'
-        uses: Homebrew/actions/setup-homebrew@9af03b7ae3f9e2ae5c174f659d5c3909f7e7dbac  # master 2026-06
+        uses: Homebrew/actions/setup-homebrew@b35a29a0f83ee8b8ca07b219fc8db3d7bb88ab49  # master 2026-06
         with:
           stable: true
       - name: Build, bottle, and upload
@@ -733,7 +733,7 @@ jobs:
           toolchain: stable
       # `just` drives the fuzz-lockfile realign and the parity gate the bump
       # would otherwise leave red (ADR-0011); cargo-edit provides set-version.
-      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e  # v2.85.4
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
           tool: just@1.58.0
       - name: Install cargo-edit
