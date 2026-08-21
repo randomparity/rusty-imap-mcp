@@ -20,10 +20,11 @@ use rimap_core::tool::ToolName;
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ErrorCode as McpCode, ErrorData, Implementation,
-    InitializeRequestParams, InitializeResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
-    Resource, ResourceContents, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode as McpCode, ErrorData,
+    Implementation, InitializeRequestParams, InitializeResult, ListResourcesResult,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use tokio::sync::watch;
@@ -183,7 +184,7 @@ impl DispatchDrain {
     /// outlives the future that awaited it — so they take a registration of
     /// their own via [`DispatchDrain::spawn_blocking_tracked`] (#672).
     /// `auth` writes are synchronous (ADR-0014) and need nothing extra.
-    async fn track<F>(&self, body: F) -> Result<CallToolResult, ErrorData>
+    async fn track<F>(&self, body: F) -> Result<CallToolResponse, ErrorData>
     where
         F: Future<Output = Result<CallToolResult, ErrorData>>,
     {
@@ -203,7 +204,7 @@ impl DispatchDrain {
             }
         };
         drop(registration);
-        outcome
+        outcome.map(CallToolResponse::Complete)
     }
 
     /// Run `f` on the blocking pool, registered with this drain for the
@@ -770,6 +771,9 @@ impl ServerHandler for ImapMcpServer {
             meta: None,
             next_cursor: next.map(|n| n.to_string()),
             tools: page,
+            cache_scope: None,
+            result_type: None,
+            ttl_ms: None,
         })
     }
 
@@ -797,13 +801,15 @@ impl ServerHandler for ImapMcpServer {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
+    ) -> Result<ReadResourceResponse, ErrorData> {
         let uri = &request.uri;
 
         if let Some(doc) = static_doc_content(uri) {
             let contents =
                 ResourceContents::text(doc, uri.as_str()).with_mime_type("text/markdown");
-            return Ok(ReadResourceResult::new(vec![contents]));
+            return Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+                vec![contents],
+            )));
         }
 
         let account_name = uri.strip_prefix("rimap://accounts/").ok_or_else(|| {
@@ -837,19 +843,18 @@ impl ServerHandler for ImapMcpServer {
         let contents =
             ResourceContents::text(text, uri.as_str()).with_mime_type("application/json");
 
-        Ok(ReadResourceResult::new(vec![contents]))
+        Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+            vec![contents],
+        )))
     }
 
     /// Registers the dispatch with the server's [`DispatchDrain`] and defers to
     /// [`ImapMcpServer::dispatch_call_tool`]. rmcp runs this in a detached
-    /// task, so the registration is what lets `serve_mcp` account for the call
-    /// at shutdown instead of leaving it to `Runtime::shutdown_background`
-    /// (#645).
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         self.drain
             .clone()
             .track(self.dispatch_call_tool(request, context))
