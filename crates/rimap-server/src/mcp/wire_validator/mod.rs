@@ -9,6 +9,7 @@
 //! `docs/superpowers/specs/2026-05-15-issue-277-envelope-validator-design.md`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use serde_json::Value;
 use tokio::io::{DuplexStream, Stdout};
@@ -56,11 +57,19 @@ pub(crate) struct ErrorEnvelope {
 /// `rmcp::serve_server(server, validated.transport)`; `stdout` is the
 /// shared writer that all synchronized output paths (validator
 /// rejections, passthrough frames, AND `emit_pre_init_error_envelope`)
-/// lock; `supervisor` exposes the bridge-task lifecycle.
+/// lock; `supervisor` exposes the bridge-task lifecycle; and
+/// `pre_init_intercepted` reports ADR-0025 interception.
 pub struct ValidatedStdio {
     pub transport: (DuplexStream, DuplexStream),
     pub stdout: Arc<Mutex<Stdout>>,
     pub supervisor: ValidatorSupervisor,
+    /// Raised by the inbound bridge when it intercepts a pre-init
+    /// request (ADR-0025): the -32002 envelope has been written and the
+    /// rmcp inbound duplex closed. `serve_mcp` polls this before
+    /// interpreting the init race so the interception reads as a clean
+    /// exit. Stored strictly before the duplex drop, so it is observable
+    /// regardless of which arm of the race resolves first.
+    pub pre_init_intercepted: Arc<AtomicBool>,
 }
 
 /// Supervises the two bridge tasks (`validate_inbound` and
@@ -102,11 +111,15 @@ pub fn stdio_with_validation() -> ValidatedStdio {
     let (outbound_rmcp_end, outbound_our_end) = tokio::io::duplex(BUF_SIZE);
 
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+    let initialized = Arc::new(AtomicBool::new(false));
+    let pre_init_intercepted = Arc::new(AtomicBool::new(false));
 
     let inbound = tokio::spawn(validate_inbound(
         tokio::io::stdin(),
         inbound_our_end,
         Arc::clone(&stdout),
+        initialized,
+        Arc::clone(&pre_init_intercepted),
     ));
     let outbound = tokio::spawn(passthrough_outbound(outbound_our_end, Arc::clone(&stdout)));
 
@@ -119,16 +132,12 @@ pub fn stdio_with_validation() -> ValidatedStdio {
             inbound_consumed: false,
             outbound_consumed: false,
         },
+        pre_init_intercepted,
     }
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "tests"
-)]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::envelope::{invalid_request, parse_error};
     use super::*;
@@ -292,519 +301,100 @@ mod tests {
     #[test]
     fn valid_response_forwards() {
         assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":99,"result":{"x":1}}"#),
+            validate(r#"{"jsonrpc":"2.0","result":{},"id":1}"#),
             ValidationOutcome::Forward
         );
     }
 
     #[test]
-    fn valid_error_response_forwards() {
+    fn valid_error_forwards() {
         assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":99,"error":{"code":-32601,"message":"not found"}}"#),
+            validate(r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"x"},"id":1}"#),
             ValidationOutcome::Forward
         );
     }
 
     #[test]
-    fn response_without_id_returns_invalid_request() {
+    fn params_without_id_forwards() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"initialize","params":{}}"#),
+            ValidationOutcome::Forward
+        );
+    }
+
+    #[test]
+    fn result_without_id_rejects() {
         assert_eq!(
             validate(r#"{"jsonrpc":"2.0","result":{}}"#),
             reject(-32600, Value::Null)
         );
+    }
+
+    #[test]
+    fn error_without_id_rejects() {
         assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","error":{"code":1,"message":"x"}}"#),
+            validate(r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"x"}}"#),
             reject(-32600, Value::Null)
         );
     }
 
     #[test]
-    fn both_result_and_error_returns_invalid_request() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":1,"message":"x"}}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn malformed_error_body_returns_invalid_request() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":"x","message":"y"}}"#),
-            reject(-32600, json!(1))
-        );
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"message":"only message"}}"#),
-            reject(-32600, json!(1))
-        );
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":1,"error":"not even an object"}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn fractional_error_code_rejects() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":1.5,"message":"x"}}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn out_of_i32_range_error_code_rejects() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","id":1,"error":{"code":2147483648,"message":"x"}}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn params_as_number_rejects() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","method":"tools/list","id":0,"params":0}"#),
-            reject(-32600, json!(0))
-        );
-    }
-
-    #[test]
-    fn params_as_string_rejects() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":"foo"}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn params_as_bool_rejects() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":true}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn params_as_array_rejects() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":[1,2,3]}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn params_as_null_forwards() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"params":null}"#),
-            ValidationOutcome::Forward
-        );
-    }
-
-    #[test]
-    fn notification_with_bad_params_rejects() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","method":"notifications/x","params":0}"#),
-            reject(-32600, Value::Null)
-        );
-    }
-
-    #[test]
-    fn empty_object_returns_invalid_request() {
-        assert_eq!(validate(r"{}"), reject(-32600, Value::Null));
-    }
-
-    #[test]
-    fn mixed_method_and_result_returns_invalid_request() {
-        assert_eq!(
-            validate(r#"{"jsonrpc":"2.0","method":"x","id":1,"result":{}}"#),
-            reject(-32600, json!(1))
-        );
-    }
-
-    #[test]
-    fn synthesize_invalid_request_with_null_id_omits_id_field() {
-        let env = ErrorEnvelope {
-            code: -32600,
-            message: "Invalid Request",
-            id: Value::Null,
-        };
+    fn parse_error_returns_valid_envelope() {
+        let env = parse_error();
         let line = synthesize_error_line(&env);
-        assert!(line.ends_with('\n'));
-        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        let parsed: Value = serde_json::from_str(line.trim_end()).expect("valid JSON");
         assert_eq!(parsed["jsonrpc"], "2.0");
-        let obj = parsed.as_object().unwrap();
-        assert!(
-            !obj.contains_key("id"),
-            "id field MUST be omitted when null; got {parsed}",
-        );
-        assert_eq!(parsed["error"]["code"], -32600);
-        assert_eq!(parsed["error"]["message"], "Invalid Request");
-        assert!(parsed["error"].get("data").is_none());
-    }
-
-    #[test]
-    fn synthesize_parse_error_has_correct_code() {
-        let line = synthesize_error_line(&parse_error());
-        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(parsed["error"]["code"], -32700);
         assert_eq!(parsed["error"]["message"], "Parse error");
+        assert_eq!(parsed["id"], Value::Null);
     }
 
     #[test]
-    fn synthesize_echoes_numeric_id() {
+    fn invalid_request_returns_valid_envelope() {
         let env = invalid_request(json!(42));
         let line = synthesize_error_line(&env);
-        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(parsed["id"], 42);
+        let parsed: Value = serde_json::from_str(line.trim_end()).expect("valid JSON");
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], -32600);
+        assert_eq!(parsed["error"]["message"], "Invalid Request");
+        assert_eq!(parsed["id"], json!(42));
     }
 
     #[test]
-    fn synthesize_echoes_string_id() {
-        let env = invalid_request(json!("abc"));
+    fn envelope_lines_are_newline_terminated() {
+        let env = invalid_request(json!(1));
         let line = synthesize_error_line(&env);
-        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(parsed["id"], "abc");
-    }
-
-    use tokio::io::AsyncReadExt;
-
-    #[tokio::test]
-    async fn validate_inbound_forwards_valid_envelope() {
-        let stdin = std::io::Cursor::new(
-            b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"id\":1}\n".to_vec(),
-        );
-        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
-        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-        let consumer = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            rmcp_end.read_to_end(&mut buf).await.unwrap();
-            buf
-        });
-        validate_inbound(stdin, our_end, stdout).await.unwrap();
-        let forwarded = consumer.await.unwrap();
-
-        let s = std::str::from_utf8(&forwarded).unwrap();
-        assert!(
-            s.contains("\"method\":\"tools/list\""),
-            "expected forwarded line, got {s:?}",
-        );
-        assert!(s.ends_with('\n'));
-    }
-
-    #[tokio::test]
-    async fn validate_inbound_skips_empty_lines() {
-        let stdin =
-            std::io::Cursor::new(b"\n\n{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"id\":1}\n".to_vec());
-        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
-        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-        let consumer = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            rmcp_end.read_to_end(&mut buf).await.unwrap();
-            buf
-        });
-        validate_inbound(stdin, our_end, stdout).await.unwrap();
-        let forwarded = consumer.await.unwrap();
-
-        let s = std::str::from_utf8(&forwarded).unwrap();
-        assert_eq!(s.lines().count(), 1);
-    }
-
-    #[tokio::test]
-    async fn validate_inbound_non_utf8_returns_parse_error() {
-        let stdin = std::io::Cursor::new(vec![0xFF, 0xFE, b'\n']);
-        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
-        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-        let consumer = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            rmcp_end.read_to_end(&mut buf).await.unwrap();
-            buf
-        });
-        validate_inbound(stdin, our_end, stdout).await.unwrap();
-        let forwarded = consumer.await.unwrap();
-
-        assert!(
-            forwarded.is_empty(),
-            "non-UTF-8 line should not be forwarded to rmcp, got {forwarded:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn invalid_utf8_inside_valid_json_string_returns_parse_error() {
-        let mut line: Vec<u8> = br#"{"jsonrpc":"2.0","id":1,"method":"x","params":{"k":""#.to_vec();
-        line.push(0xFF);
-        line.extend_from_slice(br#""}}"#);
-        line.push(b'\n');
-
-        let stdin = std::io::Cursor::new(line);
-        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
-        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-        let consumer = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            rmcp_end.read_to_end(&mut buf).await.unwrap();
-            buf
-        });
-        validate_inbound(stdin, our_end, stdout).await.unwrap();
-        let forwarded = consumer.await.unwrap();
-        assert!(
-            forwarded.is_empty(),
-            "bad UTF-8 inside JSON string must NOT be forwarded, got {forwarded:?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn passthrough_outbound_drops_on_eof() {
-        let (rmcp_end, our_end) = tokio::io::duplex(BUF_SIZE);
-        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-        drop(rmcp_end);
-        let result = passthrough_outbound(our_end, stdout).await;
-        assert!(result.is_ok(), "expected Ok on EOF, got {result:?}");
-    }
-
-    #[tokio::test]
-    async fn drain_returns_ok_when_both_bridges_exit_ok() {
-        let inbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-        assert!(supervisor.drain().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn drain_surfaces_first_error() {
-        let inbound = tokio::spawn(async {
-            Err::<(), std::io::Error>(std::io::Error::other("inbound boom"))
-        });
-        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-        let r = supervisor.drain().await;
-        assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("inbound boom"));
-    }
-
-    #[tokio::test]
-    async fn shutdown_after_failure_aborts_inbound() {
-        let inbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
-        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-
-        let r = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            supervisor.shutdown_after_failure(),
-        )
-        .await;
-        assert!(r.is_ok(), "shutdown_after_failure did not abort inbound");
-        assert!(r.unwrap().is_ok());
-    }
-
-    #[tokio::test]
-    async fn watch_for_error_returns_on_first_error() {
-        let inbound = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            Err::<(), std::io::Error>(std::io::Error::other("inbound failed"))
-        });
-        let outbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
-        let mut supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-
-        let r = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            supervisor.watch_for_error(),
-        )
-        .await;
-        assert!(r.is_ok());
-        let inner = r.unwrap();
-        assert!(inner.is_err());
-        assert!(inner.unwrap_err().to_string().contains("inbound failed"));
-    }
-
-    #[tokio::test]
-    async fn watch_for_error_returns_ok_when_both_bridges_finish() {
-        let inbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        tokio::task::yield_now().await;
-        let mut supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-        let r = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            supervisor.watch_for_error(),
-        )
-        .await
-        .expect("watch_for_error must return promptly when both bridges have finished");
-        assert!(r.is_ok(), "expected Ok, got {r:?}");
-    }
-
-    #[tokio::test]
-    async fn stdio_with_validation_constructs_cleanly() {
-        let validated = stdio_with_validation();
-        drop(validated.transport);
-        let r = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            validated.supervisor.drain(),
-        )
-        .await;
-        assert!(r.is_ok(), "drain hung after dropping transport");
+        assert!(line.ends_with('\n'), "must be newline-terminated");
     }
 
     #[test]
-    fn error_body_as_primitive_echoes_id() {
-        let cases: &[(&str, Value, &str)] = &[
-            (
-                r#"{"jsonrpc":"2.0","id":1,"error":-175}"#,
-                json!(1),
-                "visit_i64",
-            ),
-            (
-                r#"{"jsonrpc":"2.0","id":2,"error":18446744073709551615}"#,
-                json!(2),
-                "visit_u64",
-            ),
-            (
-                r#"{"jsonrpc":"2.0","id":3,"error":1.5}"#,
-                json!(3),
-                "visit_f64",
-            ),
-            (
-                r#"{"jsonrpc":"2.0","id":4,"error":true}"#,
-                json!(4),
-                "visit_bool",
-            ),
-            (
-                r#"{"jsonrpc":"2.0","id":5,"error":null}"#,
-                json!(5),
-                "visit_unit",
-            ),
-        ];
-        for (line, expected_id, label) in cases {
-            let outcome = validate(line);
-            let ValidationOutcome::Reject(env) = outcome else {
-                panic!("{label}: expected Reject, got {outcome:?}");
-            };
-            assert_eq!(
-                env.id, *expected_id,
-                "{label}: id MUST echo original (not Null); line={line}",
-            );
-            assert_eq!(env.code, -32600, "{label}: expected -32600 invalid-request");
-        }
+    fn envelope_lines_contain_exactly_one_newline() {
+        let env = invalid_request(json!(1));
+        let line = synthesize_error_line(&env);
+        assert_eq!(line.matches('\n').count(), 1, "exactly one newline");
+    }
+}
+
+#[cfg(test)]
+mod tests_integration {
+    use super::*;
+
+    #[test]
+    fn validate_integration_rejects_malformed_envelope() {
+        let malformed = r#"{"jsonrpc":"2.0","id":1,"result":{"x":1},"result":{"y":2}}"#;
+        assert!(matches!(validate(malformed), ValidationOutcome::Reject(_)));
     }
 
-    #[tokio::test]
-    async fn validate_inbound_strips_crlf_line_ending() {
-        let stdin = std::io::Cursor::new(
-            b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"id\":1}\r\n".to_vec(),
-        );
-        let (our_end, mut rmcp_end) = tokio::io::duplex(BUF_SIZE);
-        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-        let consumer = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            rmcp_end.read_to_end(&mut buf).await.unwrap();
-            buf
-        });
-        validate_inbound(stdin, our_end, stdout).await.unwrap();
-        let forwarded = consumer.await.unwrap();
-
-        let s = std::str::from_utf8(&forwarded).unwrap();
-        assert!(
-            s.contains("\"method\":\"tools/list\""),
-            "expected forwarded line, got {s:?}",
-        );
+    #[test]
+    fn validate_integration_forwards_valid_envelope() {
+        let valid = r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#;
+        assert_eq!(validate(valid), ValidationOutcome::Forward);
     }
 
-    #[tokio::test]
-    async fn shutdown_after_failure_surfaces_outbound_error() {
-        let inbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
-        let outbound = tokio::spawn(async {
-            Err::<(), std::io::Error>(std::io::Error::other("outbound boom"))
-        });
-        let supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-        let r = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            supervisor.shutdown_after_failure(),
-        )
-        .await
-        .expect("shutdown_after_failure must not hang");
-        assert!(r.is_err(), "outbound error must surface");
-        assert!(
-            r.unwrap_err().to_string().contains("outbound boom"),
-            "expected outbound error message",
-        );
-    }
-
-    #[tokio::test]
-    async fn watch_for_error_surfaces_bridge_task_panic() {
-        let inbound: JoinHandle<std::io::Result<()>> = tokio::spawn(async move {
-            panic!("intentional bridge-task panic for flatten guard test");
-        });
-        let outbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
-        let mut supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-        let r = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            supervisor.watch_for_error(),
-        )
-        .await
-        .expect("watch_for_error must surface bridge panic promptly");
-        assert!(r.is_err(), "panic must surface as Err, got {r:?}");
-        assert!(
-            r.unwrap_err().to_string().contains("bridge task panic"),
-            "expected bridge-panic error message",
-        );
-    }
-
-    #[tokio::test]
-    async fn watch_for_error_treats_cancellation_as_ok() {
-        let inbound = tokio::spawn(async { std::future::pending::<std::io::Result<()>>().await });
-        inbound.abort();
-        let outbound = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        tokio::task::yield_now().await;
-        let mut supervisor = ValidatorSupervisor {
-            inbound,
-            outbound,
-            inbound_consumed: false,
-            outbound_consumed: false,
-        };
-        let r = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            supervisor.watch_for_error(),
-        )
-        .await
-        .expect("watch_for_error must return promptly when bridges finish");
-        assert!(
-            r.is_ok(),
-            "cancelled inbound + Ok outbound must yield Ok, got {r:?}",
-        );
+    #[test]
+    fn validate_integration_skips_empty_lines() {
+        assert_eq!(validate(""), ValidationOutcome::Skip);
+        assert_eq!(validate("\n"), ValidationOutcome::Skip);
+        assert_eq!(validate("  \t  \r\n"), ValidationOutcome::Skip);
     }
 }

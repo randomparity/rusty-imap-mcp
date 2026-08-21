@@ -163,6 +163,26 @@ async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
     u64::try_from(undrained).unwrap_or(u64::MAX)
 }
 
+/// ADR-0025 clean exit for a pre-init interception: the -32002 envelope
+/// is already on stdout and rmcp never saw the request, so `process_end`
+/// keeps reason `Eof` and the exit code stays 0. The same drain +
+/// supervisor-shutdown ordering as [`serve_mcp`]'s failure arms applies —
+/// init never completed, but keeping the order uniform means a dispatch
+/// that later becomes reachable before init returns is counted rather
+/// than silently affirmed as zero.
+async fn intercepted_clean_exit(
+    dispatch_drain: &server::DispatchDrain,
+    supervisor: rimap_server::mcp::wire_validator::ValidatorSupervisor,
+) -> ServeOutcome {
+    let undrained_dispatches = drain_dispatches(dispatch_drain).await;
+    let _ = supervisor.shutdown_after_failure().await;
+    ServeOutcome {
+        result: Ok(()),
+        undrained_dispatches,
+        drainer_aborted_records: 0,
+    }
+}
+
 fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Some(result) = dispatch_subcommand(cli) {
         return result;
@@ -330,6 +350,7 @@ async fn serve_mcp(
     let rimap_server::mcp::wire_validator::ValidatedStdio {
         transport,
         stdout,
+        pre_init_intercepted,
         mut supervisor,
     } = rimap_server::mcp::wire_validator::stdio_with_validation();
     let stdout_for_preinit = std::sync::Arc::clone(&stdout);
@@ -344,6 +365,17 @@ async fn serve_mcp(
         },
     };
     drop(init_fut);
+
+    // ADR-0025: a pre-init interception raises `pre_init_intercepted`
+    // BEFORE the inbound bridge closes the rmcp duplex, so it is
+    // observable here no matter which arm of the init race resolved
+    // (the drop can wake this select on another worker while the bridge
+    // task is still mid-poll, so neither arm's outcome is order-safe on
+    // its own). The -32002 envelope is already on stdout and rmcp never
+    // saw the request: treat the run as a CLEAN exit.
+    if pre_init_intercepted.load(std::sync::atomic::Ordering::SeqCst) {
+        return intercepted_clean_exit(&dispatch_drain, supervisor).await;
+    }
 
     let service = match init_result {
         Ok(svc) => svc,
