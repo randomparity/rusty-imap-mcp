@@ -409,7 +409,7 @@ e2e_wire_tool_advertisement
                 continue;
             };
             if HARNESS_TYPES.iter().any(|t| source.contains(t)) {
-                container_backed.push(path.file_stem().expect("file stem").to_string_lossy().into_owned());
+                container_backed.push(binary_name_for(root, path));
             }
         }
         container_backed.sort();
@@ -420,6 +420,45 @@ e2e_wire_tool_advertisement
             container_backed, listed,
             "container-backed test binaries and scripts/container-test-binaries.txt disagree"
         );
+    }
+
+    /// Map a test source file to its binary name. A `[[test]]` block in the
+    /// owning crate's Cargo.toml whose `path` names this file wins with its
+    /// `name`; any other file takes its stem (Cargo's autodiscovery
+    /// convention). Stem-equals-name is NOT assumed: rimap-imap declares
+    /// `name = "dovecot"`, `path = "tests/integration/dovecot.rs"`.
+    fn binary_name_for(root: &std::path::Path, file: &std::path::Path) -> String {
+        let crate_dir = file
+            .ancestors()
+            .find(|a| a.join("Cargo.toml").is_file())
+            .expect("test file lives in a crate");
+        let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml"))
+            .expect("readable manifest");
+        let rel = file.strip_prefix(crate_dir).expect("file inside crate");
+        let mut current_name: Option<String> = None;
+        let mut current_path: Option<String> = None;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed == "[[test]]" {
+                if let (Some(name), Some(p)) = (&current_name, &current_path) {
+                    if std::path::Path::new(p) == rel {
+                        return name.clone();
+                    }
+                }
+                current_name = None;
+                current_path = None;
+            } else if let Some(rest) = trimmed.strip_prefix("name = ") {
+                current_name = Some(rest.trim_matches('"').to_owned());
+            } else if let Some(rest) = trimmed.strip_prefix("path = ") {
+                current_path = Some(rest.trim_matches('"').to_owned());
+            }
+        }
+        if let (Some(name), Some(p)) = (&current_name, &current_path) {
+            if std::path::Path::new(p) == rel {
+                return name.clone();
+            }
+        }
+        file.file_stem().expect("file stem").to_string_lossy().into_owned()
     }
 
     /// Collect every `.rs` file under `dir`, recursively, as workspace-
@@ -510,10 +549,10 @@ on IMAPS handshakes across every container-backed e2e binary (#811). The
 arch gate now names the pin, the image arch, and the host arch instead.
 ```
 
-3. Manual proof on this host (the criterion-1 red/green): in a scratch
-   copy of the workspace (or by temporarily editing
-   `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` and
-   reverting), pin the old amd64-only digest
+3. Manual proof on this host (the criterion-1 red/green): edit the real
+   `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` in
+   place — the only file the harness reads — to pin the old amd64-only
+   digest
    `sha256:34c8425a6811a80df614353dd2b0bad779b64c76c88b6a5ab3fa2e3d99b981fb`,
    run one container test, and observe the named `ArchMismatch` failure —
    not `auth-userdb` garbage. Restore the multi-arch pin

@@ -190,14 +190,21 @@ if let (Some(arch), Some(host)) = (
 - **Drift guard**: a test in `rimap-container-gate` (the shared home; it is
   a dev-dependency of both harness-owning crates and can reach the
   workspace root via `CARGO_MANIFEST_DIR`) scans `crates/*/tests/**/*.rs`
-  (excluding any `support/` path segment), maps file stem → binary name,
-  and asserts **set equality** between the scanned container-backed set and
-  the list: it fails when a test binary references a container harness type
-  but is missing from the list, and equally when a list entry matches no
-  such file (a stale entry pointing at a de-containerized binary fails the
-  same assertion). This runs in every `just test` / CI test job — a gate
-  that runs where the drift would happen, not in a script only `just ci`
-  reaches.
+  (excluding any `support/` path segment) and asserts **set equality**
+  between the scanned container-backed set and the list: it fails when a
+  test binary references a container harness type but is missing from the
+  list, and equally when a list entry matches no such file (a stale entry
+  pointing at a de-containerized binary fails the same assertion). The
+  file → binary-name mapping is derived from each crate's `Cargo.toml`
+  `[[test]]` blocks — a file whose path equals a `[[test]]` `path` takes
+  that block's `name`; any other test file takes its stem (Cargo's
+  autodiscovery convention). Stem-equals-name is NOT assumed: rimap-imap
+  already declares `name = "dovecot"`, `path = "tests/integration/dovecot.rs"`
+  and a future rename must not silently unguard the list. The `[[test]]`
+  parse is the same line-scan approach as the compose parser (repo-owned
+  manifests, stable shape; no `toml` dependency). This runs in every
+  `just test` / CI test job — a gate that runs where the drift would
+  happen, not in a script only `just ci` reaches.
 - The `test-fast` doc comment and the AGENTS.md description stop saying
   "five heaviest binaries" and say "every container-backed binary plus the
   slow HTML-lookalike proptest".
@@ -263,19 +270,18 @@ comparison against a mapped constant.
 - **`image_arch`**: thin wrapper over `Command`; covered indirectly by the
   container-gated integration path and by the drift-guard test's static
   checks. Its failure contract (None on any error) is one match arm.
-- **Drift-guard test**: positive case (the real tree passes), and mutation
-  cases via tempdirs? No — it reads the real tree. Its bite is proven by
-  the TDD red step: adding a fake harness-referencing test file turns it
-  red, removing it turns it green; adding a bogus list entry also turns it
-  red (set equality, both directions).
-- **Harness mapping tests**: each harness's existing pure `gate()`
-  mapping test style extends to `ArchMismatch` (always loud, message
-  carried).
-- **Manual verification on this host**: temporarily pin the old amd64-only
-  digest `sha256:34c8425…` in a scratch copy of the compose file, run one
-  e2e test, observe the named `ArchMismatch` failure (not auth/TLS
-  garbage), restore. Also `docker image inspect` on the current pin
-  reports `arm64` here — the suite stays green.
+- **Drift-guard test**: positive case (the real tree passes), and its bite
+  proven by TDD mutation: a bogus list entry, a removed real entry, and a
+  fake harness-referencing test file each turn it red; restoring turns it
+  green.
+- **Manual verification on this host**: edit the real
+  `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` in place
+  (the only file the harness reads) to pin the old amd64-only digest
+  `sha256:34c8425…`, run one e2e test, observe the named `ArchMismatch`
+  failure (not auth/TLS garbage), then restore the multi-arch pin
+  `sha256:d6b2f80…` and confirm the same test passes. `docker image
+  inspect` on the current pin reports `arm64` here — the suite stays green
+  on the restored pin.
 
 ## Acceptance criteria
 
