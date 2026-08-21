@@ -113,9 +113,20 @@ impl Timestamp {
 
 impl Serialize for Timestamp {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        let s = self
-            .to_rfc3339_millis()
-            .ok_or_else(|| serde::ser::Error::custom("timestamp could not be formatted"))?;
+        // Format as RFC 3339 with exactly three fractional digits (milliseconds).
+        // Manual formatting ensures zero millis are always emitted as `.000`
+        // rather than being elided by the time crate's default formatter.
+        let year = self.0.year();
+        let month = self.0.month() as u8;
+        let day = self.0.day();
+        let hour = self.0.hour();
+        let minute = self.0.minute();
+        let second = self.0.second();
+        let millisecond = self.0.millisecond();
+
+        let s = format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z"
+        );
         ser.serialize_str(&s)
     }
 }
