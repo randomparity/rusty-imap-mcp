@@ -16,8 +16,9 @@ container-backed e2e binary (issue #811). Nothing in the container gate
 at "can a runtime daemon be reached". The per-bump multi-arch verification
 that would have caught the bad pin exists only as prose —
 [ADR-0001](0001-smtp-real-socket-e2e-and-auth-taxonomy.md) prescribes
-re-verifying `amd64+arm64` with `docker manifest inspect` on every bump —
-and nothing enforced it.
+re-verifying `amd64+arm64` with `docker manifest inspect` on every bump and
+records that "the Dovecot fixture has no arch gate" — and nothing enforced
+it.
 
 ## Decision
 
@@ -34,18 +35,25 @@ Dependabot bump cannot leave the check validating a reference nobody runs.
 A reference the parser cannot find in a compose file that compose itself
 accepted is a named loud failure — the parser has drifted from the fixture
 format, and a silent stand-down there would disarm the guard on precisely
-the class it exists to catch. An inspect that fails after a reference *was*
-parsed stands down: that is genuinely indeterminate, and compose up keeps
-owning it. The host arch is the compile-time target arch
+the class it exists to catch. The host arch is the compile-time target arch
 (`std::env::consts::ARCH`, mapped `aarch64 → arm64`, `x86_64 → amd64`); the
-check stands down when that arch is outside the known map. This assumes
+check stands down when that arch is outside the known map. Two stand-down
+paths therefore exist, both silent: a failed inspect after a reference was
+parsed, and an unmapped host arch. The former is genuinely indeterminate —
+a single local call against an image compose just created, so a failure
+there is a daemon-level anomaly, not a plausible pin state. This assumes
 test binaries are never cross-compiled or built under emulation — true of
 every supported developer and CI flow today; a Rosetta-built test binary
 would see its emulation arch as the host arch, a residual accepted as out
 of scope. On mismatch the harness tears the project down and fails loudly
 at every posture — a new `ArchMismatch` error that never maps to the
-silent-skip `DockerUnavailable`. `scripts/prune-containers.sh` is exempt:
-it never pulls or runs the fixture image.
+silent-skip `DockerUnavailable`. The check is deliberately conservative in
+one direction: where emulation happens to work, a pin that would have run —
+broken or not — now fails with a named diagnostic instead. Accepted because
+#811's evidence shows emulation breaking the fixture on the only supported
+platform that emulates, and a named failure beats silent breakage there.
+`scripts/prune-containers.sh` is exempt: it never pulls or runs the fixture
+image.
 
 ## Consequences
 
@@ -59,22 +67,23 @@ it never pulls or runs the fixture image.
   against a bumped pin.
 - The gate gains no network path and no pull logic; the local image after
   compose up is the image that runs, so one inspect is authoritative.
-- Residual stand-down: an inspect that fails after a reference was parsed
-  disarms the check with no signal, and an arch-mismatched image then runs
-  emulated with the auth/TLS-garbage failure mode and no diagnosis —
-  `compose up` does *not* catch this class, since succeeding on a
-  foreign-arch image is the bug itself. Accepted because the inspect is a
-  single local call against an image compose just created, so a failure
-  there is a daemon-level anomaly, not a plausible pin state; the
-  unparseable-reference path, the plausible disarm, is loud by decision.
+- Residual stand-downs, both silent: a failed post-parse inspect, and an
+  unmapped host arch. An arch-mismatched image then runs emulated with the
+  auth/TLS-garbage failure mode and no diagnosis — `compose up` does *not*
+  catch this class, since succeeding on a foreign-arch image is the bug
+  itself. Accepted because neither path corresponds to a plausible pin
+  state: the inspect is local and post-create; the unmapped-arch path
+  requires an unsupported platform. The plausible disarm — a reference the
+  parser cannot read — is loud by decision above.
 - The decision falsifies documented statements, all amended by the same
   change that carries this record (they read as already-done only after
   that change merges): AGENTS.md's gate-contract paragraph gains the
   arch-check sentences; AGENTS.md's "There is no arch gate" (fixture
-  section) and "Multi-arch, no arch gate" (chaos section) bullets; the
-  chaos compose file's "no arch gate" comment; and each harness's
-  `DockerUnavailable` doc comment stops listing "wrong arch" among the
-  silent-skip causes (it moves to the loud `ArchMismatch`).
+  section) and "Multi-arch, no arch gate" (chaos section) bullets;
+  ADR-0001's "no arch gate" bullet; the chaos compose file's "no arch
+  gate" comment; and each harness's `DockerUnavailable` doc comment stops
+  listing "wrong arch" among the silent-skip causes (it moves to the loud
+  `ArchMismatch`).
 
 ## Considered & rejected
 
@@ -88,10 +97,12 @@ it never pulls or runs the fixture image.
   post-merge-avoiding: a CI manifest-list check catches a bad pin before
   merge and protects every downstream local run; the runtime check is still
   needed for local runs of already-merged commits — the exact runs #811's
-  damage occurred on. Pre-merge detection is deliberately traded away: the
-  charter for #811 excludes workflow changes, and adding a gate is its own
-  decision. Residual: a bad pin that slips through costs one named local
-  failure on the first arch-affected developer run instead of a red PR.
+  damage occurred on. Pre-merge detection is deliberately traded away for
+  this change — the charter excludes `.github/workflows/` changes, and a
+  gate outside workflows was not weighed as a mechanism here; adding any
+  pre-merge gate is its own decision. Residual: a bad pin that slips
+  through costs one named local failure on the first arch-affected
+  developer run instead of a red PR.
 - **Resolve the reference with `<tool> compose config` instead of a hand
   parser.** One extra bounded compose invocation per harness start, and the
   gate couples to the config subcommand's output format across both
