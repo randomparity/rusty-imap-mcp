@@ -282,7 +282,7 @@ insta = { version = "1.47", features = ["json"] }
 # `num`, `num-bigint`, `num-cmp`, `num-complex`, `num-integer`,
 # `num-iter`, `num-rational`, `outref`, `referencing`, `uuid-simd`,
 # `vsimd`.
-jsonschema = { version = "0.48", default-features = false }
+jsonschema = { version = "0.49", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

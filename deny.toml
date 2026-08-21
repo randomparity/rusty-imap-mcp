@@ -99,6 +99,15 @@ skip = [
     # this pin; the older base64 is a pure encoder/decoder with no
     # security advisories. Revisit if utf7-imap publishes a 0.4 bump.
     { name = "base64", version = "0.13" },
+    # `jsonschema 0.49` resolves `base64 0.23`, while the workspace graph holds
+    # `base64 0.22.1` (pulled by async-imap, ureq, and other transitive deps).
+    # These are upstream-pinned dependencies we cannot bump without forking.
+    # jsonschema is a dev-dependency only, so the duplicate is confined to the
+    # dev graph and never reaches release binaries. Revisit when jsonschema
+    # publishes a base64 0.22-compatible release or when upstreams bump to 0.23.
+    # See issue #734.
+    { name = "base64", version = "0.22" },
+
 
     # `syn` is mid-migration across the whole derive ecosystem. The 3.x line
     # enters via `thiserror-impl 2.0.19` and `clap_derive 4.6.4`, while 2.x is
