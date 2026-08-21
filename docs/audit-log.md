@@ -573,6 +573,8 @@ Config-related event. Declared for future use.
 - **Write failure:** fails the tool call with `ERR_INTERNAL` by
   default. Set `audit.fail_open = true` to suppress write failures
   and continue (not recommended -- audit records will be lost).
+  A write that exceeded `audit.write_deadline_seconds` (last bullet of
+  this section) counts as a write failure.
 
   Two `auth` paths are exceptions, because they have no caller to fail:
   the record for a connect that was cut (written from a drop guard), and
@@ -581,31 +583,40 @@ Config-related event. Declared for future use.
   failed). Both log the failure and continue. Neither goes unaccounted --
   they increment the same lost-record counter as a `fail_open`
   suppression.
-- **`audit.path` must be on local storage.** This is not limited to the
-  two exceptional paths above. *Every* connect writes its `auth` record
-  synchronously on a runtime worker thread, with the account's session
-  lock held, and nothing bounds that write -- no timeout covers it
-  (ADR-0014). Pointed at a network mount that stops responding (NFS,
-  SMB), the write never returns: the worker stays pinned for the life of
-  the process, the session lock is never released, and any peer queued on
-  that account waits forever rather than spending its
-  `imap.command_timeout_seconds`.
+- **A stalled `audit.path` degrades loudly, and local storage is still the
+  recommendation.** *Every* connect writes its `auth` record synchronously
+  on a runtime worker thread, with the account's session lock held, so a
+  write to a mount that stops responding (NFS, SMB) matters to the whole
+  process, not just to the log: without a bound, the write never returns,
+  the worker stays pinned for the life of the process, the session lock is
+  never released, and any peer queued on that account waits forever rather
+  than spending its
+  `imap.command_timeout_seconds`. With every worker pinned the timer stops
+  advancing, so no deadline fires anywhere in the process — including the
+  per-tool-call ceiling — and the server stops answering its MCP client at
+  all. How many workers one stall can pin is bounded by
+  `min(accounts, worker_threads)`, and the second term can be 1.
 
-  How many workers one stall can pin is bounded by `min(accounts,
-  worker_threads)` -- and the second term can be 1. The runtime sizes its
-  worker pool from `available_parallelism()`, so under a one-vCPU quota
-  (a container CPU limit, a small VM) a *single* account's connect pins
-  the only worker. With every worker pinned the timer stops advancing, so
-  no deadline fires anywhere in the process -- including the per-tool-call
-  ceiling -- and the server stops answering its MCP client at all.
+  The write-deadline watchdog (ADR-0022,
+  `docs/ADR/0022-write-deadline-watchdog-for-slow-audit-path.md`,
+  implemented under #668) bounds that exposure. Audit file I/O runs on the
+  writer's dedicated worker thread and every caller waits for the
+  completion reply for at most `audit.write_deadline_seconds` (default 15;
+  `0` disables the bound). On expiry the caller receives
+  `AuditError::WriteDeadline` and proceeds exactly as for any other write
+  failure — `ERR_INTERNAL` under the default `fail_open = false`,
+  suppressed and counted under `fail_open = true` — so the runtime worker
+  is released, the session lock frees, and the server keeps serving. The
+  wedge itself is not recoverable: the worker stays parked inside the
+  syscall, every later audit write times out too, and records stop
+  reaching disk until restart. What the deadline buys is the difference
+  between a silent total hang and loud, bounded failures.
 
-  Nothing checks the path's locality at startup; it remains an operator
-  requirement for now. ADR-0022
-  (`docs/ADR/0022-write-deadline-watchdog-for-slow-audit-path.md`) picks
-  the write-deadline watchdog as the primary runtime control — it detects
-  the actual symptom (an audit write that never returns) rather than
-  inferring locality from filesystem type. Implementation is tracked in
-  #668. Local disk has no such failure mode.
+  Nothing checks the path's locality at startup; that remains an operator
+  choice. Local disk has none of the failure modes above, and a
+  well-behaved network mount now works — but a mount that stalls still
+  stops audit recording, which is why local storage remains the
+  recommendation.
 
 ## Running multiple MCP clients
 

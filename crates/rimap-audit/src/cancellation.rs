@@ -161,6 +161,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 

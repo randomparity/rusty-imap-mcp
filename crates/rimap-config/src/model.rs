@@ -459,6 +459,13 @@ pub struct AuditConfig {
     /// Provenance ring buffer window in seconds.
     #[serde(default = "default_provenance_window")]
     pub provenance_window_seconds: u32,
+    /// Write deadline in seconds (ADR-0022 write-deadline watchdog). If a write
+    /// exceeds this duration, the write fails with `AuditError::WriteDeadline`
+    /// rather than blocking indefinitely. A default of 15 seconds catches a
+    /// completely hung mount while not triggering on momentarily slow but
+    /// healthy local disks. Set to 0 to disable the deadline.
+    #[serde(default = "default_write_deadline_seconds")]
+    pub write_deadline_seconds: u64,
     /// If true, continue on audit write failure (insecure; default false).
     #[serde(default)]
     pub fail_open: bool,
@@ -486,6 +493,7 @@ impl AuditConfig {
             rotate_keep: default_rotate_keep(),
             retention_seconds: None,
             provenance_window_seconds: default_provenance_window(),
+            write_deadline_seconds: default_write_deadline_seconds(),
             fail_open: false,
             allowed_base_dir: None,
         }
@@ -500,6 +508,10 @@ fn default_rotate_keep() -> u32 {
 }
 fn default_provenance_window() -> u32 {
     60
+}
+
+fn default_write_deadline_seconds() -> u64 {
+    15
 }
 
 /// `[attachments]` block.

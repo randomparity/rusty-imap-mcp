@@ -314,25 +314,29 @@ impl Connection {
     ///   and — with retention configured — a `read_dir` and a `remove_file`
     ///   per pruned file, still under that mutex.
     ///
-    ///   No deadline covers that write, and it is unbounded above. On an
-    ///   `audit.path` that stops responding — a hung NFS or SMB mount — it
-    ///   never returns: the runtime worker is pinned for the life of the
-    ///   process, and `dispatch::attempt` still holds the account's session
-    ///   lock, so a peer queued on that account waits forever rather than
-    ///   merely spending its `command_timeout`. With every worker so pinned the
-    ///   time driver stops advancing too, so no `tokio::time` deadline fires —
-    ///   `command_timeout` and the ADR-0012 ceiling included — and the stdio
-    ///   MCP wire stops being served. The same stall on the blocking pool lands
-    ///   against its 512-thread cap instead and cannot starve the scheduler, so
-    ///   this makes `audit.path` a local-storage requirement rather than a
-    ///   preference. ADR-0022 (`docs/ADR/0022-write-deadline-watchdog-for-slow-audit-path.md`)
-    ///   picks the write-deadline watchdog (Option A) as the primary control; the
-    ///   implementation is tracked in #668.
+    ///   The write itself is bounded by the audit write-deadline watchdog
+    ///   (ADR-0022, implemented under #668): the file I/O runs on the audit
+    ///   writer's dedicated worker thread and this caller waits at most
+    ///   `audit.write_deadline_seconds` (default 15; 0 disables) before
+    ///   failing with `AuditError::WriteDeadline`, which surfaces as
+    ///   `ERR_INTERNAL` unless `audit.fail_open` is set. A hung NFS or SMB
+    ///   mount therefore pins this worker for at most the deadline instead
+    ///   of the life of the process: the session lock is released, queued
+    ///   peers spend their own `command_timeout` normally, and the stdio
+    ///   MCP wire keeps being served. The wedge itself is not recoverable —
+    ///   the worker stays parked inside the syscall and every later audit
+    ///   write times out too, so records stop reaching disk until restart;
+    ///   what the deadline buys is that a silent total hang becomes loud,
+    ///   bounded failures. Local storage remains strongly preferable (the
+    ///   same stall on the blocking pool lands against its 512-thread cap
+    ///   and cannot starve the scheduler), but it is no longer a hard
+    ///   requirement.
     ///
-    /// There is no lock-order hazard: the audit mutex is a leaf. It guards only
-    /// file I/O, nothing inside its critical section calls back into this
-    /// crate, and the advisory file lock is taken once at open rather than per
-    /// write, so it cannot block on another process either.
+    /// There is no lock-order hazard: the writer's submission mutex is a
+    /// leaf. It serializes handoff to the writer's worker thread, nothing in
+    /// the wait calls back into this crate, and the advisory file lock is
+    /// taken once at open rather than per write, so it cannot block on
+    /// another process either.
     ///
     /// ## Why the sink call is wrapped in `catch_unwind` (#646)
     ///
