@@ -81,9 +81,10 @@ image.
   arch-check sentences; AGENTS.md's "There is no arch gate" (fixture
   section) and "Multi-arch, no arch gate" (chaos section) bullets;
   ADR-0001's "no arch gate" bullet; the chaos compose file's "no arch
-  gate" comment; and each harness's `DockerUnavailable` doc comment stops
-  listing "wrong arch" among the silent-skip causes (it moves to the loud
-  `ArchMismatch`).
+  gate" comment; and the one harness doc comment that lists "wrong arch"
+  among silent-skip causes (rimap-server's Dovecot harness) is corrected —
+  arch mismatch moves to the loud `ArchMismatch`; the other three
+  harnesses' `DockerUnavailable` docs make no arch claim and need no edit.
 
 ## Considered & rejected
 

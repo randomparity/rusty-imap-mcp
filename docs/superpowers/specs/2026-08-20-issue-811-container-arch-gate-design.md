@@ -181,9 +181,11 @@ if let (Some(arch), Some(host)) = (
   requires; `ChaosSkip` is untouched, so the three-tier `RIMAP_CHAOS` /
   skip / loud policy is unchanged. The check runs for both services
   (`dovecot`, then `toxiproxy`) right where chaos's compose up succeeds.
-- `DockerUnavailable`'s doc comment in each harness promises "wrong arch"
-  lands in the loud path — this change makes the promise true; the comment
-  is updated to name `ArchMismatch`.
+- `DockerUnavailable`'s doc comment in rimap-server's Dovecot harness
+  promises "wrong arch" lands in the skip class (verified: it is the only
+  harness carrying that claim) — this change makes the promise true; the
+  comment is updated to name `ArchMismatch`. The other three harnesses'
+  `DockerUnavailable` docs make no arch claim and need no edit.
 
 ### 3. `test-fast` filter from a shared source
 
@@ -274,8 +276,9 @@ sentence-level edit:
 5. `crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml` —
    the "no arch gate" comment on the Toxiproxy image is updated
    (comment-only; no pin change).
-6. Each harness's `DockerUnavailable` doc comment — "wrong arch" moves to
-   the loud `ArchMismatch` (§2).
+6. The one harness `DockerUnavailable` doc comment listing "wrong arch"
+   (rimap-server's Dovecot harness) — corrected; the other three harnesses
+   make no arch claim (§2).
 
 ## Threat model note
 

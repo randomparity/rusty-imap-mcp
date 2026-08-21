@@ -386,8 +386,12 @@ Per-harness specifics:
   `docker-compose.chaos.yml`, **two** services — run the check for
   `dovecot` and for `toxiproxy` (loop over `["dovecot", "toxiproxy"]`).
 
-4. Update `DockerUnavailable`'s doc comment where it promises "wrong arch":
+4. Update the `DockerUnavailable` doc comment in
+   `crates/rimap-server/tests/support/dovecot/harness.rs` — the only
+   harness whose doc comment lists "wrong arch" among silent-skip causes:
    arch mismatch now lands in the loud `ArchMismatch` variant, not here.
+   The other three harnesses' `DockerUnavailable` docs make no arch claim
+   and need no edit.
 
 5. Verification: `just lint` alone — clippy `--all-targets` compiles every
    test binary, which is all this task needs (the harness changes are
