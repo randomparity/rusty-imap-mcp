@@ -58,7 +58,7 @@ just check           # fast compile-check (inner loop)
 just fmt             # format the workspace in place
 just fmt-check       # verify formatting without modifying
 just lint            # cargo clippy with -D warnings
-just test-fast       # inner-loop unit tests (~4 s; skips heavy integration/proptest)
+just test-fast       # inner-loop unit tests; skips every container-backed binary + slow proptest
 just test            # full nextest workspace — run before pushing
 just test-msrv       # same as `test` but on the MSRV toolchain (1.88.0)
 just deny            # cargo deny check (advisories, licenses, bans, sources)
@@ -116,11 +116,22 @@ an unpullable image, a readiness timeout, or
 several agents running `just ci` at once actually hit) is a hard failure
 at every posture, never a skip.
 
+The gate also checks fixture-image architecture (ADR-0023): after
+`compose up -d` succeeds, each harness inspects the pinned image's
+architecture against the host's and fails loudly — at every posture, never
+a silent skip — when they differ. The image reference is parsed from the
+compose file at runtime, so a Dependabot digest bump needs no Rust change.
+`scripts/prune-containers.sh` is exempt: it never pulls or runs the fixture
+image.
+
 The fixture image is `docker.io/dovecot/dovecot:2.4.4-root` (rootful
 flavor, multi-arch `linux/amd64` + `linux/arm64`). It listens on
 container ports 143 (IMAP+STARTTLS) and 993 (IMAPS); the Rust harness
-maps host ports dynamically. There is no arch gate — every supported
-developer host can run the suite.
+maps host ports dynamically. The harnesses run an arch gate (ADR-0023):
+they fail loudly when the fixture image's architecture does not match the
+host. What no gate covers is *pre-merge* pin bumps — Dependabot can still
+land a single-arch pin; the arch gate names it on the first arch-affected
+local run. Every supported developer host can run the suite.
 
 `just test`'s `prune-containers` recipe (`scripts/prune-containers.sh`)
 runs before any test binary starts, so it cannot call
@@ -128,6 +139,16 @@ runs before any test binary starts, so it cannot call
 same autodetect order, same "probe, don't just check the binary"
 behavior, same verbatim `RIMAP_CONTAINER_TOOL` override — so the two
 never disagree about which runtime a given host lands on (issue #689).
+
+### Local Test Troubleshooting: Arch-Mismatched Fixture Pin
+
+An amd64-only digest pin on Apple Silicon does not fail with an arch error —
+it manifests as `doveadm … Unexpectedly disconnected from auth service`
+during user lookups and `tls handshake eof` on IMAPS handshakes across every
+container-backed e2e binary (#811). The arch gate (ADR-0023) now names the
+pin, the image arch, and the host arch instead. If you see those symptoms
+without a gate diagnostic, check whether the compose pin resolves to a
+single-architecture manifest.
 
 ### Local Test Troubleshooting: Address Pool Exhaustion
 
@@ -175,8 +196,10 @@ the audit record, and post-fault recovery.
   probe), so the suite silent-skips on PR CI even under `RIMAP_REQUIRE_DOCKER=1`.
 - **Run locally:**
   `RIMAP_CHAOS=1 RIMAP_REQUIRE_DOCKER=1 cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-capture`
-- **Multi-arch, no arch gate.** Toxiproxy `ghcr.io/shopify/toxiproxy:2.12.0` and
-  Dovecot `2.4.4-root` both ship `linux/amd64` + `linux/arm64`.
+- **Multi-arch.** Toxiproxy `ghcr.io/shopify/toxiproxy:2.12.0` and
+  Dovecot `2.4.4-root` both ship `linux/amd64` + `linux/arm64`; the
+  harness-level arch gate (ADR-0023) covers both images on any host that
+  runs the suite.
 - Runs serially (nextest `chaos-backed` group) — two containers per test with
   tight timeout budgets. CI: `.github/workflows/nightly-chaos.yml`. Spec:
   `docs/superpowers/specs/2026-07-09-issue-522-wire-chaos-design.md`.
