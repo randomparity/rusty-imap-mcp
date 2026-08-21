@@ -131,9 +131,10 @@ if let Some(image) = rimap_container_gate::pinned_image(&compose_dir.join(COMPOS
   never silent-skips, not even without `RIMAP_REQUIRE_DOCKER`. An
   arch-mismatched pin is a fixture defect, not an absent host capability;
   the documented contract already makes "an unpullable image" a hard
-  failure at every posture, and this is the same class. (A silent skip
-  could not carry the diagnosis anyway: `print_stderr` is denied in test
-  source.)
+  failure at every posture, and this is the same class. (The harnesses'
+  skip path is deliberately quiet — a test matches
+  `Err(DockerUnavailable) => return` and prints nothing — so a skip could
+  not carry the diagnosis to the operator.)
 - The chaos harness checks both images (dovecot, toxiproxy); the mailpit
   harness checks mailpit; the two Dovecot harnesses check dovecot.
 - `DockerUnavailable`'s doc comment already promises "wrong arch" lands in
