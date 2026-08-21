@@ -425,7 +425,8 @@ e2e_wire_multi_account_advertisement
 e2e_wire_tool_advertisement
 ```
 
-2. Write the failing drift-guard test first (red step), in `mod tests` of
+2. Write the drift-guard test (green on arrival against the list from
+   step 1 — its red proof is the mutation check below), in `mod tests` of
    the gate crate:
 
 ```rust
@@ -647,16 +648,27 @@ arch gate now names the pin, the image arch, and the host arch instead.
      pin `sha256:d6b2f80…` with the old amd64-only
      `sha256:34c8425a6811a80df614353dd2b0bad779b64c76c88b6a5ab3fa2e3d99b981fb`.
      Run exactly
-     `cargo nextest run -p rimap-imap --test dovecot -E 'test(smoke)'`
-     (or the first small case in that binary) and observe the named
-     `ArchMismatch` failure — not `auth-userdb` garbage. Record the
-     observation.
+     `cargo nextest run -p rimap-imap --test dovecot -E 'test(case_01)'`
+     (a real case: `case_01_connect_with_correct_pin_succeeds`) and observe
+     the named `ArchMismatch` failure — not `auth-userdb` garbage. Record
+     the observation.
    - Restore immediately: `git checkout -- crates/rimap-imap/tests/integration/dovecot/docker-compose.yml`,
      then verify with `git diff --stat` that the tree is clean again
      BEFORE any commit.
    - Green: run the same test on the restored pin and observe it pass
      (this host resolves the multi-arch pin to native `arm64`). Record
      the observation.
+   - Loud-path arms for the other call sites (cheap one-line temp edits,
+     each reverted with `git checkout --` and a `git diff --stat` check):
+     (a) in `crates/rimap-server/tests/support/dovecot/harness.rs`,
+     temporarily pass service `"nonexistent"` to `check_image_arch`, run
+     `cargo nextest run -p rimap-server --test e2e_smtp -E 'test(e2e_send_email_and_forward_through_dispatch)'`,
+     and observe the "could not determine the pinned image" `ArchMismatch`
+     — the unparseable-pin loud path on a `HarnessError` harness; (b) in
+     `crates/rimap-server/tests/support/chaos/harness.rs`, temporarily use
+     service `"nonexistent"` and run one chaos scenario with
+     `RIMAP_CHAOS=1 cargo nextest run -p rimap-server --test e2e_wire_chaos -E 'test(chaos_delayed_greeting_times_out)'`
+     — observe the `panic!("chaos: …")` loud path. Revert both.
 
 4. `just fmt && just lint && just test-fast`. Commit:
    `docs: arch-gate contract and troubleshooting note (#811)`.
