@@ -562,6 +562,12 @@ disconnected from auth service` during user lookups and `tls handshake eof`
 on IMAPS handshakes across every container-backed e2e binary (#811). The
 arch gate now names the pin, the image arch, and the host arch instead.
 ```
+   Also (spec §6 item 5): in
+   `crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml`,
+   update the Toxiproxy image's comment "Multi-arch (linux/amd64 +
+   linux/arm64): no arch gate …" to say the arch gate now exists in the
+   harnesses (ADR-0023); comment-only, no pin change. The ADR-0001 Errata
+   append (spec §6 item 4) is already committed on this branch.
 
 3. Manual proof on this host (the criterion-1 red/green): edit the real
    `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` in
