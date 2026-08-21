@@ -270,7 +270,8 @@ mod tests {
             rotate_keep: 5,
             retention_seconds: None,
             provenance_window_seconds: 60,
-            fail_open: false,
+            write_deadline_seconds: 15,
+                fail_open: false,
             allowed_base_dir: base,
         }
     }

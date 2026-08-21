@@ -65,6 +65,14 @@ pub enum AuditError {
         #[source]
         source: std::io::Error,
     },
+    /// Write exceeded the configured deadline (ADR-0022 write-deadline watchdog).
+    #[error("audit write exceeded deadline of {deadline_seconds}s at `{path}`")]
+    WriteDeadline {
+        /// Path of the audit file.
+        path: PathBuf,
+        /// Configured deadline in seconds.
+        deadline_seconds: u64,
+    },
     /// Rotation rename or fresh-file creation failed.
     #[error("failed to rotate audit file `{path}`: {reason}")]
     Rotate {
@@ -105,6 +113,7 @@ impl AuditError {
             Self::Serialize(_)
             | Self::Parse(_)
             | Self::Write { .. }
+            | Self::WriteDeadline { .. }
             | Self::Fsync { .. }
             | Self::Rotate { .. }
             | Self::Read { .. } => ErrorCode::Internal,

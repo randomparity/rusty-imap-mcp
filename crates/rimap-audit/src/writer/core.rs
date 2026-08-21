@@ -76,6 +76,12 @@ pub struct AuditOptions {
     /// accept losing audit records on storage failures opt in via this
     /// flag — see the audit security model docs for the trade-off.
     pub fail_open: bool,
+    /// Write deadline in seconds (ADR-0022 write-deadline watchdog). If a write
+    /// (write_all, flush, fsync) exceeds this duration, the write fails with
+    /// `AuditError::WriteDeadline` rather than blocking indefinitely. A default
+    /// of 15 seconds catches a completely hung mount while not triggering on
+    /// momentarily slow but healthy local disks. Set to 0 to disable the deadline.
+    pub write_deadline_seconds: u64,
     /// First `Seq` value this writer will allocate. Callers compute this from
     /// `read_trailing_state(path)?.last_seq.map_or(Seq::FIRST, Seq::next)`
     /// before calling `open`. Set through [`AuditOptions::new`], which takes
@@ -118,6 +124,7 @@ impl AuditOptions {
             rotate_keep: 0,
             retention_seconds: None,
             fail_open: false,
+            write_deadline_seconds: 15, // Default 15 seconds per ADR-0022
             initial_seq,
         }
     }
@@ -144,6 +151,7 @@ pub struct AuditWriter {
     pub(super) rotate_keep: u32,
     pub(super) retention_seconds: Option<u64>,
     pub(super) fail_open: bool,
+    pub(super) write_deadline_seconds: u64,
     pub(super) process_id: crate::record::ids::ProcessId,
     pub(super) suppressed_failures: Arc<AtomicU64>,
     pub(super) tool_calls: Arc<AtomicU64>,
@@ -220,6 +228,7 @@ impl AuditWriter {
             rotate_keep: opts.rotate_keep,
             retention_seconds: opts.retention_seconds,
             fail_open: opts.fail_open,
+            write_deadline_seconds: opts.write_deadline_seconds,
             process_id: crate::record::ids::ProcessId::new_now(),
             suppressed_failures: Arc::new(AtomicU64::new(0)),
             tool_calls: Arc::new(AtomicU64::new(0)),
@@ -383,7 +392,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         assert_eq!(writer.path(), path);
         assert!(path.exists());
@@ -400,7 +409,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         let err = AuditWriter::open(&AuditOptions {
             path: path.clone(),
@@ -409,7 +418,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap_err();
         match err {
             AuditError::Locked { path: p } => assert_eq!(p, path),
@@ -429,7 +438,7 @@ mod tests {
                 retention_seconds: None,
                 fail_open: false,
                 initial_seq: crate::record::ids::Seq::FIRST,
-            })
+            write_deadline_seconds: 15,})
             .unwrap();
         }
         // After drop, a second open succeeds.
@@ -440,7 +449,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
     }
 
@@ -455,7 +464,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         assert!(path.exists());
         assert!(path.parent().unwrap().is_dir());
@@ -475,7 +484,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let rec = AuditRecord {
@@ -515,7 +524,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         for seq in 1_u64..=5 {
@@ -553,7 +562,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         for seq in 1_u64..=5 {
@@ -626,7 +635,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         for seq in 1_u64..=5 {
@@ -652,7 +661,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap_err();
         match err {
             AuditError::Locked { .. } => {}
@@ -671,7 +680,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         let pid_a = writer.process_id();
         let pid_b = writer.process_id();
@@ -689,7 +698,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         let s1 = writer.allocate_seq().unwrap();
         let s2 = writer.allocate_seq().unwrap();
@@ -710,7 +719,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq(42),
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         assert_eq!(writer.allocate_seq().unwrap(), crate::record::ids::Seq(42));
         assert_eq!(writer.allocate_seq().unwrap(), crate::record::ids::Seq(43));
@@ -729,7 +738,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let seq = writer
@@ -771,7 +780,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         let pid = writer.process_id();
 
@@ -817,7 +826,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let prior_pid = crate::record::ids::ProcessId::new_now();
@@ -862,7 +871,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let seq = writer
@@ -896,7 +905,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         assert_eq!(writer.total_tool_calls(), 0);
@@ -941,7 +950,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         let pid = writer.process_id();
 
@@ -976,7 +985,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let inputs = ProcessStartInputs {
@@ -1015,7 +1024,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
         assert_eq!(writer.rotate_bytes(), 4242);
     }
@@ -1038,7 +1047,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let rec = AuditRecord {
@@ -1085,7 +1094,7 @@ mod tests {
             retention_seconds: None,
             fail_open: true,
             initial_seq: Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let rec = AuditRecord {
@@ -1131,7 +1140,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -1155,7 +1164,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         let mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;

@@ -161,7 +161,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: Seq::FIRST,
-        })
+            write_deadline_seconds: 15,})
         .unwrap();
 
         // Prime an earlier tool_start so the tool_end has a plausible start_seq.
