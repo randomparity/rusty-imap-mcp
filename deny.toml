@@ -193,6 +193,7 @@ skip = [
 # If a future lockfile brings 0.52 into a configured target, cargo-deny will
 # flag it and a `skip` can be added then.
 skip-tree = [
+    { name = "windows-sys", version = "0.52" },
     { name = "windows-sys", version = "0.59" },
 ]
 # psl (via addr) uses a versioning scheme where the patch number
