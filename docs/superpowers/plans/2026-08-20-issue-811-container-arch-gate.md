@@ -253,23 +253,23 @@ pub fn image_arch(tool: &str, image_ref: &str) -> Option<String> {
 **Files:** the four harness files.
 **Interfaces consumed:** `host_arch`, `image_arch`, `arch_mismatch_reason`,
 `pinned_image` from Task 1/2. **Provides:** loud `ArchMismatch` behavior.
-For **each** of the four harnesses:
+For **three** of the four harnesses (`rimap-imap` `container.rs`,
+`rimap-server` `dovecot/harness.rs`, `rimap-server` `mailpit/harness.rs` —
+all of which have a `HarnessError`):
 
 1. Add the variant to that harness's `HarnessError` (always loud — it is
-   constructed only on a determined mismatch and no caller may map it to
-   `DockerUnavailable`):
+   constructed only on a determined mismatch or an unparseable pin, and no
+   caller may map it to `DockerUnavailable`):
 
 ```rust
-    /// The pinned fixture image's architecture does not match this host.
-    /// Always a hard failure at every posture: an arch-mismatched pin is a
-    /// fixture defect, not an absent host capability (ADR-0023).
+    /// The pinned fixture image's architecture does not match this host,
+    /// or the pinned reference could not be parsed. Always a hard failure
+    /// at every posture: an arch-mismatched pin is a fixture defect, not
+    /// an absent host capability (ADR-0023).
     ArchMismatch(String),
 ```
 
    and its `Display` arm: `Self::ArchMismatch(s) => f.write_str(s),`
-
-2. Add a private helper next to the existing `gate()` mapping function
-   (adjust `COMPOSE_FILE` / service names per harness):
 
 ```rust
 /// Verify the pinned fixture image's architecture matches this host.
@@ -303,6 +303,17 @@ fn check_image_arch(project: &str, compose_dir: &Path) -> Result<(), HarnessErro
     Ok(())
 }
 ```
+
+**The chaos harness is the exception** (`crates/rimap-server/tests/support/chaos/harness.rs`):
+`ChaosHarness::try_start` returns `Result<Self, ChaosSkip>`, and
+`ChaosSkip` is documented as a silent-skip enum — do not add an
+`ArchMismatch` variant to it. Instead, in the chaos harness's own
+`check_image_arch` helper (same shape as above, looping over services
+`["dovecot", "toxiproxy"]`), return the failure via the file's established
+loud path: `compose_down` then `panic!("chaos: {reason}")` — the file
+already carries `#![expect(clippy::panic, reason = "control-plane failures
+abort the test loudly")]`. That is loud at every posture, as ADR-0023
+requires; the three-tier `RIMAP_CHAOS`/skip/loud policy is unchanged.
 
 3. Call it in `try_start` where compose up succeeded, before readiness
    polling — e.g. in the server Dovecot harness:
