@@ -129,29 +129,25 @@ is the one case this contract does not cover.
 `crates/rimap-audit/tests/non_exhaustive_record.rs` holds this contract as
 byte-exact golden lines. A diff there means the format moved.
 
-**Two known asymmetries**, both of them rewrites that
+**One known asymmetry**, a rewrite that
 [`audit merge`](#audit-merge-subcommand) performs because it re-serializes
 every line it copies.
 
-1. A record whose `ts` lands exactly on a second boundary is rewritten as
-   `12:00:00Z` rather than `12:00:00.000Z`: the RFC 3339 formatter elides a
-   zero subsecond. Both forms parse to the same instant, and the value is
-   stable under further rewrites.
-2. A `#[serde(default)]` field the line predates is **materialized at its
-   default** -- `records_lost` and `undrained_dispatches` as `0`,
-   `tool_matrix` and a matrix entry's `protected_folders` / `expunge_folders`
-   as `[]`, `special_use_discovery` as `"not_run"`. The value is the one a
-   reader was already told to substitute, so
-   nothing is misread as a *record*; what is lost is the ability to tell
-   not-measured from measured, which the counters' own note above depends on.
-   The folder lists carry the same hazard in a sharper form: a merged line
-   claims `"expunge_folders": []` where the original said nothing at all, and
-   an empty list read as a statement means "nothing was expungeable" rather
-   than "this binary did not record it".
+A `#[serde(default)]` field the line predates is **materialized at its
+default** -- `records_lost` and `undrained_dispatches` as `0`,
+`tool_matrix` and a matrix entry's `protected_folders` / `expunge_folders`
+as `[]`, `special_use_discovery` as `"not_run"`. The value is the one a
+reader was already told to substitute, so
+nothing is misread as a *record*; what is lost is the ability to tell
+not-measured from measured, which the counters' own note above depends on.
+The folder lists carry the same hazard in a sharper form: a merged line
+claims `"expunge_folders": []` where the original said nothing at all, and
+an empty list read as a statement means "nothing was expungeable" rather
+than "this binary did not record it".
 
 No field's existing value is altered by a merge.
 
-Neither of those is a *loss*. The one thing a merge can drop is a whole record
+This is not a *loss*. The one thing a merge can drop is a whole record
 whose `kind` the merging binary does not recognize, which is covered above:
 the count reaches stderr, never stdout, so a merged file read on its own
 cannot reveal that anything is missing.
