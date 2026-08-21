@@ -177,6 +177,37 @@ json.dump(data, open(path, "w"))
 PY
 expect_fail "policy of the wrong ref kind fails" "crates-io"
 
+# The exit-2 contract: an API failure must be distinguishable from drift
+# (exit 1), because a required check that reports outages as policy drift
+# misdirects triage. Both failure shapes get a case so neither can regress
+# back to a traceback-driven exit 1.
+expect_api_failure() {
+    local label="$1"
+    local status=0
+    RIMAP_GH_BIN="${tmp}/gh" RIMAP_RETRY_SLEEP=0 FIXTURE_DIR="$drift_dir" \
+        bash "$script" ownerr/repo >"${tmp}/out.txt" 2>&1 || status=$?
+    if [[ "$status" -ne 2 ]]; then
+        failures=$((failures + 1))
+        printf 'FAIL %s: expected exit 2, got %d\n' "$label" "$status"
+        cat "${tmp}/out.txt"
+    elif ! grep -q "not drift" "${tmp}/out.txt"; then
+        failures=$((failures + 1))
+        printf 'FAIL %s: output does not say it is an API failure\n' "$label"
+        cat "${tmp}/out.txt"
+    fi
+}
+
+drift_dir="${tmp}/api-error"
+cp -r "$fixture_dir" "$drift_dir"
+rm "${drift_dir}/repos_ownerr_repo_environments.json"
+expect_api_failure "unreachable listing endpoint fails as API error, not drift"
+
+drift_dir="${tmp}/non-json-body"
+cp -r "$fixture_dir" "$drift_dir"
+printf '<html>maintenancing</html>\n' \
+    >"${drift_dir}/repos_ownerr_repo_environments.json"
+expect_api_failure "non-JSON HTTP-200 body fails as API error, not drift"
+
 if [[ "$failures" -ne 0 ]]; then
     printf '%d test(s) failed\n' "$failures"
     exit 1
