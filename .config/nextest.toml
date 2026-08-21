@@ -68,20 +68,21 @@ test-group = 'chaos-backed'
 # fired anyway, so overshooting is cheap and undershooting reintroduces the
 # noise.
 #
-# Leaks stay advisory (nextest's default `result = "pass"`): the workspace does
-# have genuinely subprocess-spawning tests (the Dovecot/Proton/chaos harnesses
-# shell out to the container runtime, the wire harness spawns the server binary)
-# and this window has not yet been calibrated against them under real CI load.
-# Making leaks fatal — `leak-timeout = { period = "5s", result = "fail" }` —
-# requires that calibration first: a run of CI at this period with no markers on
-# either required test job or the nightly chaos workflow (#642).
+# Leaks are fatal (`result = "fail"`, #642): a marker now fails the run on
+# every profile that inherits this table, including the required test jobs and
+# nightly chaos. The workspace does have genuinely subprocess-spawning tests
+# (the Dovecot/Proton/chaos harnesses shell out to the container runtime, the
+# wire harness spawns the server binary), so fatality waited on calibration:
+# every nightly-chaos run since the window landed plus a contention-covering
+# sample of required-job runs (2026-08-04..21) produced zero LEAK markers.
+# The table form needs cargo-nextest >= NEXTEST_MIN (see justfile).
 #
 # Declared after the overrides above so both profile tables read together;
 # `[profile.ci]` inherits this, and so does every recipe that passes no profile
 # (`test-fast`, `test-proton`, `test-injection`, nightly-chaos), which is where
 # the markers were actually observed.
 [profile.default]
-leak-timeout = "5s"
+leak-timeout = { period = "5s", result = "fail" }
 # A test that hangs silently consumes a full GitHub job slot until the 360-minute
 # default kills it with no test name in the output — the only diagnostic is
 # "exceeded the maximum execution time" (#728). `slow-timeout` bounds that:

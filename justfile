@@ -10,7 +10,7 @@ MSRV := "1.88.0"
 # cargo-nextest version floor, stated once and enforced by `setup` below.
 # 0.9.95 is the first release supporting the leak-timeout table form
 # (`{ period = "...", result = "fail" }`, nextest changelog 2025-04-30),
-# which #642 will add to .config/nextest.toml; it also covers the
+# which .config/nextest.toml uses; it also covers the
 # profile.ci `fail-fast = { max-fail = N }` table form already in use here
 # (0.9.89+, #625/#637). An older nextest hits a bare config-parse error on
 # either table form with no hint that upgrading nextest is the fix (#639).
