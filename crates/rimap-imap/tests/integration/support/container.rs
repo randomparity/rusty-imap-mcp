@@ -283,7 +283,7 @@ fn check_image_arch(project: &str, compose_dir: &Path, service: &str) -> Result<
     ) else {
         return Ok(());
     };
-    if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, &host) {
+    if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, host) {
         compose_down(project, compose_dir);
         return Err(HarnessError::ArchMismatch(reason));
     }

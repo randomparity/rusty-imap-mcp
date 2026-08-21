@@ -97,7 +97,7 @@ fn check_image_arch(project: &str, compose_dir: &Path) {
             // loop is still judged independently.
             continue;
         };
-        if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, &host) {
+        if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, host) {
             compose_down(project, compose_dir);
             panic!("chaos: {reason}");
         }
