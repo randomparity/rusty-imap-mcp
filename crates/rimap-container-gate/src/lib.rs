@@ -249,7 +249,10 @@ pub fn arch_mismatch_reason(image_ref: &str, image_arch: &str, host_arch: &str) 
 /// line scan — no YAML dependency for a two-field need. The reference is
 /// read at runtime, never duplicated as a constant, so a Dependabot digest
 /// bump cannot leave the arch check validating a ref nobody runs. `None`
-/// when the file, the service, or its `image:` key cannot be found.
+/// when the file, the service, or its `image:` key cannot be found — or
+/// when the value does not read as a plain reference (quotes, comments,
+/// interpolation): the harnesses turn `None` into a loud failure, so a
+/// misread can never silently disarm the gate.
 #[must_use]
 pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> {
     let text = std::fs::read_to_string(compose).ok()?;
@@ -262,6 +265,16 @@ pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> 
             in_service = line.trim() == service_key;
         } else if in_service && let Some(value) = line.trim_start().strip_prefix("image:") {
             let value = value.trim();
+            if value.contains(['"', '#', '$']) {
+                // A quoted, commented, or interpolated value means the
+                // line is not the plain `image: <ref>` shape this parser
+                // reads. Returning `None` (not the garbage) routes to the
+                // harnesses' loud unparseable-pin failure instead of a
+                // misread ref that would silently disarm via inspect
+                // failure — ADR-0023's stated failure mode for this
+                // parser.
+                return None;
+            }
             if !value.is_empty() {
                 return Some(value.to_owned());
             }
@@ -694,6 +707,26 @@ services:
         assert_eq!(pinned_image(&path, "mailpit"), None);
         let dir = path.parent().expect("scratch dir");
         assert_eq!(pinned_image(&dir.join("absent.yml"), "dovecot"), None);
+    }
+
+    #[test]
+    fn pinned_image_rejects_a_value_it_cannot_read_plainly() {
+        // A quoted, commented, or interpolated value must route to the
+        // loud unparseable-pin failure (`None`), never to a misread ref
+        // that silently disarms the gate via inspect failure.
+        for body in [
+            "image: \"docker.io/dovecot/dovecot:2.4.4-root\"",
+            "image: ghcr.io/shopify/toxiproxy:2.12.0 # comment",
+            "image: linux/${RIMAP_HOST_ARCH}",
+        ] {
+            let (path, _guard) = scratch_compose("compose.yml");
+            std::fs::write(&path, format!("services:\n  dovecot:\n    {body}\n")).expect("write");
+            assert_eq!(
+                pinned_image(&path, "dovecot"),
+                None,
+                "a misread-looking value must not pass: {body}"
+            );
+        }
     }
 
     /// The `test-fast` exclusion list must cover exactly the test binaries

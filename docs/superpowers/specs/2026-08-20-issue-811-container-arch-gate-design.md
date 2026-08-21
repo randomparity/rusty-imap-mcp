@@ -306,9 +306,16 @@ comparison against a mapped constant.
   proven by TDD mutation: a bogus list entry, a removed real entry, and a
   fake harness-referencing test file each turn it red; restoring turns it
   green.
-- **Harness mapping tests**: each harness's existing pure `gate()`
-  mapping test style extends to `ArchMismatch` (always loud, message
-  carried).
+- **Harness wiring**: no per-harness unit test of the `ArchMismatch`
+  mapping — the mapping is three lines per harness (unparseable → loud
+  with a message; indeterminate → stand-down; mismatch → loud with the
+  gate's reason), compile-checked by the exhaustive `Display` match, and
+  its pure inputs (`pinned_image` incl. misread rejection,
+  `arch_mismatch_reason`) carry unit tests. The runtime loud paths were
+  instead executed end-to-end in the manual proof: the mismatch red/green
+  pair on the real pin, the unparseable-pin loud failure on a
+  `HarnessError` harness, and the chaos panic path — stronger evidence
+  than a unit test of extracted logic.
 - **Manual verification on this host**: edit the real
   `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` in place
   (the only file the harness reads) to pin the old amd64-only digest
