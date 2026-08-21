@@ -641,9 +641,30 @@ fn process_start_inputs_map_onto_the_fields_they_name() {
     );
 }
 
-/// A whole-second timestamp does **not** survive a read-rewrite byte-for-byte:
-/// `time`'s RFC 3339 formatter elides a zero subsecond, so `12:00:00.000Z`
-/// comes back as `12:00:00Z`. Pinned here as known, pre-existing behaviour
+/// A whole-second timestamp survives a read-rewrite byte-for-byte:
+/// the `Serialize` impl now always emits exactly three fractional digits,
+/// so `12:00:00.000Z` round-trips unchanged. This test replaces the earlier
+/// pinning of the lossy behavior (`whole_second_timestamps_lose_their_zero_millis_on_rewrite`)
+/// which verified that the time crate's default formatter elided zero subseconds.
+#[test]
+fn whole_second_timestamps_round_trip_byte_for_byte() {
+    let on_second = r#"{"seq":1,"ts":"2026-05-05T12:00:00.000Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"eof","total_tool_calls":0,"records_lost":0,"undrained_dispatches":0,"drainer_aborted_records":0}"#;
+
+    let record: AuditRecord = serde_json::from_str(on_second).expect("golden line parses");
+    let once = serde_json::to_string(&record).expect("record serializes");
+    assert_eq!(
+        once, on_second,
+        "whole-second timestamp must round-trip unchanged; got {once}",
+    );
+
+    let reread: AuditRecord = serde_json::from_str(&once).expect("line parses");
+    let twice = serde_json::to_string(&reread).expect("record serializes");
+    assert_eq!(
+        twice, once,
+        "rewrite must reach a fixed point on first pass"
+    );
+}
+
 /// (it predates #706 and is untouched by it) so that the round-trip claim
 /// below is not read as unconditional. Roughly one record in a thousand lands
 /// on a second boundary, and `audit merge` rewrites every line it copies.
@@ -651,42 +672,15 @@ fn process_start_inputs_map_onto_the_fields_they_name() {
 /// The value is stable under repeated rewrites -- the elision happens once,
 /// on the first pass -- so a merged file does not drift further.
 #[test]
-fn whole_second_timestamps_lose_their_zero_millis_on_rewrite() {
-    let on_second = r#"{"seq":1,"ts":"2026-05-05T12:00:00.000Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"eof","total_tool_calls":0,"records_lost":0}"#;
-
-    let record: AuditRecord = serde_json::from_str(on_second).expect("golden line parses");
-    let once = serde_json::to_string(&record).expect("record serializes");
-    assert!(
-        once.contains(r#""ts":"2026-05-05T12:00:00Z""#),
-        "expected the zero subsecond to be elided; got {once}",
-    );
-
-    let reread: AuditRecord = serde_json::from_str(&once).expect("elided line parses");
-    let twice = serde_json::to_string(&reread).expect("record serializes");
-    assert_eq!(
-        twice, once,
-        "rewrite must reach a fixed point after one pass"
-    );
-}
-
-/// A record read off disk and written straight back out is byte-identical,
-/// for every timestamp except the whole-second case pinned above.
-/// Serialization and deserialization have to agree about the format, not just
-/// each be self-consistent -- a round-trip through the struct is exactly what
-/// `audit merge` does to every line it copies.
-///
-/// The two `auth` lines are the read direction of the byte-exact goldens
-/// above, and they are here because #748 changed the Rust *type* of `host`
 /// and `username` (bare `String` to `Host` / `Username`). `assert_golden`
 /// proves only that a freshly built record still *writes* those bytes; no
 /// test read an `auth` line back, so nothing covered whether a line already
 /// on the disk of a running deployment still parses. That is the half that
 /// matters for an append-only log, and it is what these two add.
-#[test]
 fn a_line_read_off_disk_reserializes_unchanged() {
     let goldens = [
         r#"{"seq":1,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_start","version":"0.2.0-dev","git_commit":"","posture":"readonly","tool_matrix":[],"config_path":"/etc/rimap/config.toml","config_hash_sha256":"00","previous_last_seq":null,"previous_process_id":null,"previous_file_inode":7,"audit_file_inode_changed":false}"#,
-        r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"signal_int","total_tool_calls":0,"records_lost":0,"undrained_dispatches":0,"drainer_aborted_records":0}"#,
+        r#"{"seq":2,"ts":"2026-05-05T12:00:00.000Z","process_id":"01HM0000000000000000000000","kind":"process_end","reason":"eof","total_tool_calls":0,"records_lost":0,"undrained_dispatches":0,"drainer_aborted_records":0}"#,
         r#"{"seq":3,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"config","path":"/etc/rimap/config.toml","hash_sha256":"00"}"#,
         r#"{"seq":2,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"auth","account":"work","result":"success","host":"imap.example.com","port":993,"username":"alice@example.com","tls_fingerprint_sha256":"abababababababababababababababababababababababababababababababab","fingerprint_match":true,"error_code":null}"#,
         r#"{"seq":3,"ts":"2026-05-05T12:00:00.234Z","process_id":"01HM0000000000000000000000","kind":"auth","result":"failure","host":"imap.example.com","port":993,"username":"alice@example.com","tls_fingerprint_sha256":null,"fingerprint_match":null,"error_code":"ERR_AUTH","credential_source":"keyring"}"#,
