@@ -5,23 +5,23 @@
 //! Lives separately from the per-kind `log_*` family so the kind-specific
 //! glue can stay narrow.
 
-use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use crate::AuditError;
 
-use super::{AuditWriter, Inner};
+use super::AuditWriter;
+use super::deadline::Request;
 
 impl AuditWriter {
-    /// Allocate the next monotonic `Seq` value. Locks the inner mutex
-    /// briefly; never crosses an `.await`.
+    /// Allocate the next monotonic `Seq` value. An atomic fetch-add; never
+    /// crosses an `.await` and never blocks on file I/O.
     ///
     /// ## Ordering contract
     ///
-    /// `allocate_seq` and `write_record` each acquire the inner lock
-    /// independently. Two concurrent `log_auth` / `log_process_start`
-    /// callers can therefore produce a file where physical line order
-    /// disagrees with `seq` order (allocation races with the write).
+    /// `allocate_seq` and `write_record` are independent: two concurrent
+    /// `log_auth` / `log_process_start` callers can therefore produce a file
+    /// where physical line order disagrees with `seq` order (allocation
+    /// races with the write).
     ///
     /// Readers of the audit log MUST sort by the `seq` field rather than
     /// relying on line order. No outer lock serializes the writers into
@@ -34,24 +34,11 @@ impl AuditWriter {
     /// the blocking pool) can be inside this pair concurrently.
     ///
     /// # Errors
-    /// Returns `AuditError::Write` if the internal mutex is poisoned.
-    #[must_use = "the seq value should be stored in the audit record"]
+    /// Infallible in practice; the `Result` preserves the historical
+    /// signature.
     pub fn allocate_seq(&self) -> Result<crate::record::ids::Seq, AuditError> {
-        let mut guard = self.lock_inner()?;
-        let seq = guard.next_seq;
-        guard.next_seq = seq.next();
-        Ok(seq)
-    }
-
-    /// Acquire the inner mutex, translating poisoning into a typed
-    /// `AuditError::Write`. The poisoned-path message is deliberately
-    /// generic — the mutex guards both the sequence counter and the
-    /// write buffer, so "poisoned" is the only meaningful signal.
-    pub(super) fn lock_inner(&self) -> Result<std::sync::MutexGuard<'_, Inner>, AuditError> {
-        self.inner.lock().map_err(|_| AuditError::Write {
-            path: self.path.clone(),
-            source: std::io::Error::other("audit mutex poisoned"),
-        })
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        Ok(crate::record::ids::Seq(seq))
     }
 
     /// Allocate a seq, build an `AuditRecord` wrapping `payload`, stamp it
@@ -81,16 +68,18 @@ impl AuditWriter {
     /// programmer errors and never suppressed regardless of `fail_open`.
     /// Suppressed failures are counted via [`Self::suppressed_failures`].
     ///
-    /// # Blocking
-    ///
     /// This function performs synchronous filesystem I/O: at minimum a
     /// `write_all` + `flush` + (conditionally) `fsync`, and on rotation
     /// additionally `rename`, `open`, `try_lock`, `read_dir`,
-    /// `symlink_metadata`, and `remove_file`. An async caller should move it
-    /// onto the blocking pool rather than stall a runtime worker on it — in
-    /// this workspace through `DispatchDrain::spawn_blocking_tracked`, which
-    /// also registers the write with the shutdown drain (#672), rather than a
-    /// bare `tokio::task::spawn_blocking`. The `tool_start` / `tool_end`
+    /// `symlink_metadata`, and `remove_file`. The I/O itself runs on the
+    /// writer's dedicated worker thread; the caller waits for the
+    /// completion reply, bounded by `write_deadline_seconds` (unbounded
+    /// when the deadline is 0) — see [`super::deadline`]. An async caller
+    /// should still move it onto the blocking pool rather than stall a
+    /// runtime worker for up to the deadline — in this workspace through
+    /// `DispatchDrain::spawn_blocking_tracked`, which also registers the
+    /// write with the shutdown drain (#672), rather than a bare
+    /// `tokio::task::spawn_blocking`. The `tool_start` / `tool_end`
     /// emitters in `rimap_server::mcp::audit_envelope` are the pattern;
     /// `docs/architecture/audit-locking.md` has the rule and its exceptions.
     ///
@@ -104,8 +93,9 @@ impl AuditWriter {
     ///
     /// # Errors
     /// - [`AuditError::Serialize`] on JSON failure (never suppressed).
-    /// - [`AuditError::Write`] / [`AuditError::Fsync`] / [`AuditError::Rotate`]
-    ///   when `fail_open == false`.
+    /// - [`AuditError::Write`] / [`AuditError::WriteDeadline`] /
+    ///   [`AuditError::Fsync`] / [`AuditError::Rotate`] when
+    ///   `fail_open == false`.
     pub fn write_record(&self, record: &crate::record::AuditRecord) -> Result<(), AuditError> {
         match self.write_record_inner(record) {
             Ok(()) => Ok(()),
@@ -157,84 +147,12 @@ impl AuditWriter {
         let mut bytes = serde_json::to_vec(record).map_err(AuditError::Serialize)?;
         bytes.push(b'\n');
 
-        let mut guard = self.lock_inner()?;
-
-        // Rotation check happens inside the same critical section as the write.
-        // This prevents two clones of AuditWriter from both observing "needs
-        // rotation" and racing on the rename.
-        if self.rotate_bytes > 0 && guard.bytes_written >= self.rotate_bytes {
-            let (new_buf, new_len) =
-                super::rotation::rotate_file(&self.path, self.rotate_keep, self.retention_seconds)?;
-            guard.buf = new_buf;
-            guard.bytes_written = new_len;
-            tracing::info!(path = %self.path.display(), "audit file rotated");
-        }
-
-        write_under_lock(&mut guard, &bytes, &self.path, self.write_deadline_seconds)?;
-
-        if needs_fsync(&record.payload) {
-            // Check deadline before fsync
-            if self.write_deadline_seconds > 0 {
-                let fsync_start = std::time::Instant::now();
-                if fsync_start.elapsed().as_secs() >= self.write_deadline_seconds {
-                    return Err(AuditError::WriteDeadline {
-                        path: self.path.clone(),
-                        deadline_seconds: self.write_deadline_seconds,
-                    });
-                }
-            }
-            
-            guard
-                .buf
-                .get_ref()
-                .sync_data()
-                .map_err(|source| AuditError::Fsync {
-                    path: self.path.clone(),
-                    source,
-                })?;
-        }
-
-        Ok(())
+        self.io.request(|reply| Request::Write {
+            bytes,
+            fsync: needs_fsync(&record.payload),
+            reply,
+        })
     }
-}
-
-/// Write `bytes` to `guard.buf`, flush, and update `bytes_written`.
-/// If `deadline_seconds > 0`, checks elapsed time before I/O operations.
-fn write_under_lock(
-    guard: &mut Inner,
-    bytes: &[u8],
-    path: &Path,
-    deadline_seconds: u64,
-) -> Result<(), AuditError> {
-    use std::io::Write;
-
-    let start = std::time::Instant::now();
-
-    // Check deadline before write_all
-    if deadline_seconds > 0 && start.elapsed().as_secs() >= deadline_seconds {
-        return Err(AuditError::WriteDeadline {
-            path: path.to_path_buf(),
-            deadline_seconds,
-        });
-    }
-
-
-    guard
-        .buf
-        .write_all(bytes)
-        .map_err(|source| AuditError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    guard.buf.flush().map_err(|source| AuditError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    // bytes.len() is usize; on 64-bit targets this always fits in u64.
-    // On hypothetical 128-bit targets, saturate rather than panic.
-    let written = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    guard.bytes_written = guard.bytes_written.saturating_add(written);
-    Ok(())
 }
 
 fn needs_fsync(payload: &crate::record::Payload) -> bool {

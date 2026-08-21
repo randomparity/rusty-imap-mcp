@@ -271,7 +271,7 @@ mod tests {
             retention_seconds: None,
             provenance_window_seconds: 60,
             write_deadline_seconds: 15,
-                fail_open: false,
+            fail_open: false,
             allowed_base_dir: base,
         }
     }

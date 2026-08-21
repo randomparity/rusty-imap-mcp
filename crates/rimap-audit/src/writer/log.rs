@@ -455,7 +455,8 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::Seq::FIRST,
-            write_deadline_seconds: 15,})
+            write_deadline_seconds: 15,
+        })
         .expect("audit open");
 
         assert_eq!(writer.suppressed_failures(), 0);
@@ -482,7 +483,8 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
-            write_deadline_seconds: 15,})
+            write_deadline_seconds: 15,
+        })
         .unwrap();
 
         let mut event = AuthEvent::new(

@@ -152,10 +152,14 @@ Why this is fine:
   These are the only places a blocking audit write happens under the
   session lock, and it must stay that way: it is the `auth` record's
   durability that buys the exception, and nothing else has that claim.
-  The write is unbounded on a non-local `audit.path`; making
-  `docs/audit-log.md`'s local-storage requirement cover every connect
-  rather than only cut ones is tracked in
-  [#667](https://github.com/randomparity/rusty-imap-mcp/issues/667).
+  The wait is bounded by `audit.write_deadline_seconds` (ADR-0022): the
+  file I/O runs on the audit writer's dedicated worker thread and the
+  emitter gives up with `AuditError::WriteDeadline` — surfacing as
+  `ERR_INTERNAL` under the default `fail_open = false` — if the reply
+  does not arrive in time, so a stalled mount releases the session lock
+  after the deadline instead of holding it for the life of the process.
+  The broader local-storage discussion that #667 opened is resolved by
+  that watchdog; see `docs/audit-log.md`'s `[audit]` section.
 
 ### Operator impact: concurrent calls to one account serialize
 
@@ -187,7 +191,7 @@ connection limits).
 
 | Lock | Type | Held across `.await`? | Why |
 |---|---|---|---|
-| Audit writer (`Inner`) | `std::sync::Mutex` | **NO** | Synchronous I/O; clippy enforces |
+| Audit writer submission | `std::sync::Mutex` | **NO** | Synchronous handoff to the writer thread; clippy enforces |
 | Connection session | `tokio::sync::Mutex` | **YES** | async-imap commands are async |
 
 Future contributors who add new audit emission paths from async code:
@@ -203,8 +207,8 @@ introduced rather than repeated here:
   without reading the trade-off argument on `emit_auth` and
   [ADR-0014](../ADR/0014-synchronous-auth-audit-emission.md): it is
   justified only for a record that must survive the runtime that would
-  otherwise defer it, and it makes `audit.path` a local-storage
-  requirement.
+  otherwise defer it. The write-deadline watchdog bounds its worst case;
+  see [ADR-0022](../ADR/0022-write-deadline-watchdog-for-slow-audit-path.md).
 - The cancellation drainer in `crates/rimap-audit/src/cancellation.rs`,
   which cannot reach `spawn_blocking_tracked` at all because of the
   direction of the crate graph — see "The cancellation drainer is a
