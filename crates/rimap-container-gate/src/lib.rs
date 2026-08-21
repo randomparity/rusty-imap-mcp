@@ -278,10 +278,14 @@ pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> 
 /// it. The harnesses call this only after `compose up -d` succeeded, so
 /// the image is local by construction and one inspect is authoritative.
 /// `None` on any inspect failure — the check then stands down and compose
-/// keeps owning the failure, per the gate's documented asymmetry.
+/// keeps owning the failure, per the gate's documented asymmetry. The
+/// child is bounded by [`DAEMON_PROBE_TIMEOUT`] and killed on expiry: a
+/// stalled daemon degrades to the silent stand-down instead of hanging
+/// the suite (`Command::output()` would wait forever, which is exactly
+/// what `run_daemon_probe` exists to escape).
 #[must_use]
 pub fn image_arch(tool: &str, image_ref: &str) -> Option<String> {
-    let output = Command::new(tool)
+    let mut child = Command::new(tool)
         .args([
             "image",
             "inspect",
@@ -289,12 +293,22 @@ pub fn image_arch(tool: &str, image_ref: &str) -> Option<String> {
             "{{.Architecture}}",
             image_ref,
         ])
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+    let status = wait_bounded(&mut child, DAEMON_PROBE_TIMEOUT)?;
+    if !status.success() {
         return None;
     }
-    let arch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        // The child has already exited, so the pipe is at EOF and this
+        // read cannot block (same reasoning as `run_daemon_probe`).
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut stdout);
+    }
+    let arch = stdout.trim().to_owned();
     if arch.is_empty() { None } else { Some(arch) }
 }
 
@@ -627,12 +641,24 @@ services:
     image: ghcr.io/shopify/toxiproxy:2.12.0
 ";
 
-    /// Unique per-process scratch dir under `std::env::temp_dir` — no
-    /// `tempfile` dependency: the gate crate's manifest says "No
-    /// dependencies, by design" and a dev-dep would amend that contract
-    /// for no gain. The pid+counter name cannot collide across parallel
-    /// test threads; tests only ever read files they just wrote.
-    fn scratch_compose(name: &str) -> std::path::PathBuf {
+    /// Best-effort removal of a scratch dir when the guard drops — keeps
+    /// `std::env::temp_dir` clean without a `tempfile` dev-dependency (the
+    /// gate crate's manifest says "No dependencies, by design"). A failed
+    /// removal is ignored: leftover temp state is cosmetic, and an assert
+    /// must not be masked by cleanup.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Unique per-process scratch dir under `std::env::temp_dir`. The
+    /// pid+counter name cannot collide across parallel test threads;
+    /// tests only ever read files they just wrote. Pair the returned file
+    /// with [`ScratchDir::parent`] for cleanup.
+    fn scratch_compose(name: &str) -> (std::path::PathBuf, ScratchDir) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -641,12 +667,13 @@ services:
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
-        dir.join(name)
+        let guard = ScratchDir(dir.clone());
+        (dir.join(name), guard)
     }
 
     #[test]
     fn pinned_image_reads_the_named_service() {
-        let path = scratch_compose("compose.yml");
+        let (path, _guard) = scratch_compose("compose.yml");
         std::fs::write(&path, COMPOSE_ONE_SERVICE).expect("write");
         assert_eq!(
             pinned_image(&path, "dovecot").as_deref(),
@@ -662,7 +689,7 @@ services:
 
     #[test]
     fn pinned_image_is_none_for_a_missing_service_or_file() {
-        let path = scratch_compose("compose.yml");
+        let (path, _guard) = scratch_compose("compose.yml");
         std::fs::write(&path, COMPOSE_TWO_SERVICES).expect("write");
         assert_eq!(pinned_image(&path, "mailpit"), None);
         let dir = path.parent().expect("scratch dir");
@@ -674,12 +701,20 @@ services:
     /// container-backed binaries were missing from the justfile filter and
     /// ran (and failed on fixture breakage) in the ~4 s inner loop.
     ///
-    /// HARNESS_TYPES is the registry of container-harness public types: a
-    /// future container harness MUST add its type here in the same change.
-    /// `proton` (Proton Bridge, env-gated) is deliberately absent from the
-    /// list: without PROTON_BRIDGE_TEST=1 it self-skips instantly.
+    /// `HARNESS_TYPES` is the registry of container-harness public types:
+    /// a future container harness MUST add its type here in the same
+    /// change. `proton` (Proton Bridge, env-gated) is deliberately absent
+    /// from the list: without `PROTON_BRIDGE_TEST=1` it self-skips
+    /// instantly.
     #[test]
     fn container_backed_test_binaries_match_the_shared_list() {
+        const HARNESS_TYPES: [&str; 4] = [
+            "DovecotHarness",
+            "MailpitHarness",
+            "ChaosHarness",
+            "ConnectedHarness",
+        ];
+
         // Two parents: CARGO_MANIFEST_DIR is
         // <root>/crates/rimap-container-gate, so one parent is still
         // <root>/crates.
@@ -694,13 +729,15 @@ services:
             .map(str::to_owned)
             .collect();
         assert!(!list.is_empty(), "the shared list must not be empty");
-
-        const HARNESS_TYPES: [&str; 4] = [
-            "DovecotHarness",
-            "MailpitHarness",
-            "ChaosHarness",
-            "ConnectedHarness",
-        ];
+        // The list is only as good as its consumer: a justfile reverted to
+        // an inline filter would leave list and guard green while
+        // `test-fast` drifts again (#811).
+        let justfile =
+            std::fs::read_to_string(root.join("justfile")).expect("workspace justfile exists");
+        assert!(
+            justfile.contains("scripts/container-test-binaries.txt"),
+            "justfile test-fast must build its filter from the shared list"
+        );
 
         let mut container_backed: Vec<String> = Vec::new();
         // Scan only crates/*/tests — the test binaries. A whole-tree scan
@@ -714,7 +751,7 @@ services:
             if !tests_dir.is_dir() {
                 continue;
             }
-            for file in walkdir_like(tests_dir) {
+            for file in walkdir_like(&tests_dir) {
                 let path = std::path::Path::new(&file);
                 if path.components().any(|c| c.as_os_str() == "support") {
                     continue;
@@ -723,7 +760,7 @@ services:
                     continue;
                 };
                 if HARNESS_TYPES.iter().any(|t| source.contains(t)) {
-                    container_backed.push(binary_name_for(root, path));
+                    container_backed.push(binary_name_for(path));
                 }
             }
         }
@@ -742,8 +779,7 @@ services:
     /// `name`; any other file takes its stem (Cargo's autodiscovery
     /// convention). Stem-equals-name is NOT assumed: rimap-imap declares
     /// `name = "dovecot"`, `path = "tests/integration/dovecot.rs"`.
-    fn binary_name_for(root: &std::path::Path, file: &std::path::Path) -> String {
-        let _ = root;
+    fn binary_name_for(file: &std::path::Path) -> String {
         let crate_dir = file
             .ancestors()
             .find(|a| a.join("Cargo.toml").is_file())
@@ -756,10 +792,10 @@ services:
         for line in manifest.lines() {
             let trimmed = line.trim();
             if trimmed == "[[test]]" {
-                if let (Some(name), Some(p)) = (&current_name, &current_path) {
-                    if std::path::Path::new(p) == rel {
-                        return name.clone();
-                    }
+                if let (Some(name), Some(p)) = (&current_name, &current_path)
+                    && std::path::Path::new(p) == rel
+                {
+                    return name.clone();
                 }
                 current_name = None;
                 current_path = None;
@@ -769,10 +805,10 @@ services:
                 current_path = Some(rest.trim_matches('"').to_owned());
             }
         }
-        if let (Some(name), Some(p)) = (&current_name, &current_path) {
-            if std::path::Path::new(p) == rel {
-                return name.clone();
-            }
+        if let (Some(name), Some(p)) = (&current_name, &current_path)
+            && std::path::Path::new(p) == rel
+        {
+            return name.clone();
         }
         file.file_stem()
             .expect("file stem")
@@ -782,13 +818,13 @@ services:
 
     /// Collect every `.rs` file under `dir`, recursively, as strings, in
     /// read order (the caller sorts the derived names).
-    fn walkdir_like(dir: std::path::PathBuf) -> Vec<String> {
+    fn walkdir_like(dir: &std::path::Path) -> Vec<String> {
         let mut found = Vec::new();
-        let entries = std::fs::read_dir(&dir).expect("readable dir");
+        let entries = std::fs::read_dir(dir).expect("readable dir");
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                found.extend(walkdir_like(path));
+                found.extend(walkdir_like(&path));
             } else if path.extension().is_some_and(|e| e == "rs") {
                 found.push(path.to_string_lossy().into_owned());
             }
