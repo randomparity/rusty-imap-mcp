@@ -1,5 +1,12 @@
 # ADR-0024: Pre-initialize request responses carry rmcp's -32602 alongside our -32002 envelope
 
+- **Superseded-by:** [ADR-0025](0025-pre-init-single-envelope-validator-interception.md)
+  replaces the decision below — the validator (#277 layer) now intercepts
+  pre-init non-ping/non-initialize requests before rmcp sees them, so the wire
+  carries exactly one `-32002` envelope again and the two-envelope pair pinned
+  here no longer occurs. This record remains as the history of the rmcp 3.x
+  pre-init `_meta` behavior that motivated #821.
+
 **Status:** Accepted · 2026-08-21 · issue [#733](https://github.com/randomparity/rusty-imap-mcp/issues/733)
 
 ## Context
