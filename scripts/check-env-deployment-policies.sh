@@ -81,7 +81,11 @@ MATRIX = {
 }
 
 
-def api(path):
+class ApiShapeError(Exception):
+    pass
+
+
+def api(path, required_key):
     # Transient 429/5xx/timeout must not redden a required check: retry the
     # read a few times before failing. The failure itself stays fail-closed.
     # RIMAP_RETRY_SLEEP exists for tests, which stub the API and must not
@@ -104,15 +108,23 @@ def api(path):
         else:
             if proc.returncode == 0:
                 try:
-                    return json.loads(proc.stdout)
+                    data = json.loads(proc.stdout)
+                    # Wrong-shape JSON (a proxy page, an API shape change) is
+                    # the same failure class as non-JSON: consumers index the
+                    # required key, so its absence must stay an API failure
+                    # instead of surfacing as phantom drift or a KeyError.
+                    if not isinstance(data, dict) or required_key not in data:
+                        raise ApiShapeError(
+                            f"body lacks {required_key!r}: {proc.stdout[:200]!r}"
+                        )
+                    return data
                 except json.JSONDecodeError:
-                    # A non-JSON HTTP-200 body is an API failure too: it must
-                    # keep this function's exit-2 contract rather than crash
-                    # with a traceback that exits 1 and reads as drift.
                     last = (
                         f"HTTP success but body is not JSON: "
                         f"{proc.stdout[:200]!r}"
                     )
+                except ApiShapeError as exc:
+                    last = str(exc)
             else:
                 last = proc.stderr.strip()
         time.sleep(retry_sleep * (2**attempt))
@@ -130,7 +142,7 @@ def env_path(name):
 
 drift = []
 
-listing = api(f"repos/{repo}/environments?per_page=100")
+listing = api(f"repos/{repo}/environments?per_page=100", "environments")
 actual_names = [e["name"] for e in listing.get("environments", [])]
 # The matrix is small, but the guard's headline property — every environment
 # outside it fails closed — only holds if the listing was not truncated. A
@@ -158,7 +170,7 @@ for name in actual_names:
     if name not in MATRIX:
         continue
     mode, policies = MATRIX[name]
-    detail = api(env_path(name))
+    detail = api(env_path(name), "protection_rules")
     dbp = detail.get("deployment_branch_policy")
     rules = [
         r for r in (detail.get("protection_rules") or [])
@@ -195,7 +207,10 @@ for name in actual_names:
             f"{dbp.get('protected_branches')}"
         )
         continue
-    listed = api(f"{env_path(name)}/deployment-branch-policies?per_page=100")
+    listed = api(
+        f"{env_path(name)}/deployment-branch-policies?per_page=100",
+        "branch_policies",
+    )
     actual = {
         (p["type"], p["name"]) for p in listed.get("branch_policies", [])
     }

@@ -206,6 +206,7 @@ expect_fail "fuzz-lock-realign flipped off protected-branches-only fails" "fuzz-
 # back to a traceback-driven exit 1.
 expect_api_failure() {
     local label="$1"
+
     local status=0
     RIMAP_GH_BIN="${tmp}/gh" RIMAP_RETRY_SLEEP=0 FIXTURE_DIR="$drift_dir" \
         bash "$script" ownerr/repo >"${tmp}/out.txt" 2>&1 || status=$?
@@ -224,6 +225,11 @@ drift_dir="${tmp}/api-error"
 cp -r "$fixture_dir" "$drift_dir"
 rm "${drift_dir}/repos_ownerr_repo_environments.json"
 expect_api_failure "unreachable listing endpoint fails as API error, not drift"
+
+drift_dir="${tmp}/wrong-shape-json"
+cp -r "$fixture_dir" "$drift_dir"
+printf '{}\n' >"${drift_dir}/repos_ownerr_repo_environments.json"
+expect_api_failure "wrong-shape JSON listing fails as API error, not drift"
 
 drift_dir="${tmp}/non-json-body"
 cp -r "$fixture_dir" "$drift_dir"
