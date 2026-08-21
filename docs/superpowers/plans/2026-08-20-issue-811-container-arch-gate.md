@@ -109,10 +109,26 @@ services:
     image: ghcr.io/shopify/toxiproxy:2.12.0
 ";
 
+    /// Unique per-process scratch dir under std::env::temp_dir — no
+    /// `tempfile` dependency: the gate crate's manifest says "No
+    /// dependencies, by design" and a dev-dep would amend that contract
+    /// for no gain. The pid+counter name cannot collide across parallel
+    /// test threads; tests only ever read files they just wrote.
+    fn scratch_compose(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rimap-gate-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir.join(name)
+    }
+
     #[test]
     fn pinned_image_reads_the_named_service() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("compose.yml");
+        let path = scratch_compose("compose.yml");
         std::fs::write(&path, COMPOSE_ONE_SERVICE).expect("write");
         assert_eq!(
             pinned_image(&path, "dovecot").as_deref(),
@@ -128,17 +144,13 @@ services:
 
     #[test]
     fn pinned_image_is_none_for_a_missing_service_or_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("compose.yml");
+        let path = scratch_compose("compose.yml");
         std::fs::write(&path, COMPOSE_TWO_SERVICES).expect("write");
         assert_eq!(pinned_image(&path, "mailpit"), None);
-        assert_eq!(pinned_image(&dir.path().join("absent.yml"), "dovecot"), None);
+        let dir = path.parent().expect("scratch dir");
+        assert_eq!(pinned_image(&dir.join("absent.yml"), "dovecot"), None);
     }
 ```
-
-   Note: `tempfile` is already a dev-dependency pattern elsewhere in the
-   workspace; if the gate crate's `[dev-dependencies]` lacks it, add
-   `tempfile = { workspace = true }` there (dev-only, no runtime dep).
 
 2. Run `cargo nextest run -p rimap-container-gate` — the new tests must FAIL
    to compile (functions do not exist). That is the red step.
@@ -200,10 +212,16 @@ pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> 
         } else if line.starts_with("  ") && !line.starts_with("   ") {
             in_service = line.trim_end() == service_key;
         } else if in_service {
-            let value = line.trim_start().strip_prefix("image:")?.trim();
-            if !value.is_empty() {
-                return Some(value.to_owned());
+            if let Some(value) = line.trim_start().strip_prefix("image:") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_owned());
+                }
             }
+            // Any other property line inside the service is skipped — a
+            // `?` here would abort the whole scan on the first
+            // non-`image:` key (e.g. `container_name:`) and return `None`
+            // for every real compose file.
         }
     }
     None
@@ -358,10 +376,22 @@ Per-harness specifics:
 4. Update `DockerUnavailable`'s doc comment where it promises "wrong arch":
    arch mismatch now lands in the loud `ArchMismatch` variant, not here.
 
-5. Verification: `just check && just lint && just test-fast` (the harness
-   mapping is compile-checked; the runtime path is container-gated and is
-   exercised by Task 5's manual verification). Commit:
+5. Verification: `just check && just lint` plus
+   `cargo nextest run -p rimap-server -p rimap-imap -E 'not (binary(dovecot) | binary(e2e) | binary(e2e_wire) | binary(e2e_wire_cancellation) | binary(proptest_html_lookalike))'`
+   — the old justfile filter is still in place until Task 4, so do NOT run
+   `just test-fast` here: it would compile and run the eight not-yet-excluded
+   container binaries (compile-checked harness mapping only; the runtime
+   path is container-gated and is exercised by Task 5's manual
+   verification). Commit:
    `feat(tests): fail loudly on arch-mismatched fixture pins (#811)`.
+
+## Task 4 — Shared binary list + `test-fast` recipe + drift guard
+
+**Files:** `scripts/container-test-binaries.txt` (new), `justfile`,
+`crates/rimap-container-gate/src/lib.rs` (drift-guard test).
+**Interfaces consumed:** nothing from Tasks 1–3 (the guard is static
+analysis). **Provides:** the drift-guarded filter; completes criterion 2.
+
 
 1. Create `scripts/container-test-binaries.txt` (one name per line, no
    blanks, no comments — the recipe and the guard both read it raw). The
@@ -399,9 +429,13 @@ e2e_wire_tool_advertisement
     /// list: without PROTON_BRIDGE_TEST=1 it self-skips instantly.
     #[test]
     fn container_backed_test_binaries_match_the_shared_list() {
+        // Two parents: CARGO_MANIFEST_DIR is
+        // <root>/crates/rimap-container-gate, so one parent is still
+        // <root>/crates.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("gate crate has a parent");
+            .and_then(std::path::Path::parent)
+            .expect("gate crate sits at <workspace>/crates/<crate>");
         let list_path = root.join("scripts/container-test-binaries.txt");
         let list: Vec<String> = std::fs::read_to_string(&list_path)
             .expect("shared list exists")
@@ -545,7 +579,19 @@ test-fast:
 ```
 
 2. AGENTS.md, "Container runtime for integration tests" section: after the
-   paragraph on the loud/skip asymmetry, add:
+   paragraph on the loud/skip asymmetry, add the arch-gate paragraph and
+   troubleshooting note (block below). Then amend the two statements the
+   decision falsifies (spec §6 items 2–3):
+
+   - Line ~122 ("There is no arch gate — every supported developer host
+     can run the suite."): rewrite to state the arch gate now exists — the
+     harnesses fail loudly when the fixture image's architecture does not
+     match the host (ADR-0023); what remains true is that no *CI* arch
+     gate blocks a pin bump before merge.
+   - Line ~178 (chaos section bullet "**Multi-arch, no arch gate.**"):
+     rewrite the lead to "**Multi-arch.**" and note the harness-level arch
+     gate (ADR-0023) covers both images on any host that runs the suite.
+
 
 ```markdown
 The gate also checks fixture-image architecture (ADR-0023): after
