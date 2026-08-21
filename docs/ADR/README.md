@@ -45,3 +45,4 @@ compile it.
 | [0021](0021-folder-policy-record-after-registry-build.md) | The enforced folder policy is its own record kind, written after the registry is built | Accepted |
 | [0022](0022-write-deadline-watchdog-for-slow-audit-path.md) | Write-deadline watchdog is the primary control for a slow or non-local `audit.path` | Accepted |
 | [0023](0023-fixture-image-arch-must-match-host.md) | Fixture image architecture must match the host; mismatch is a loud gate failure | Accepted |
+| [0024](0024-pre-init-wire-sequence-under-rmcp-3.md) | Pre-init requests carry rmcp 3.x's -32602 before our -32002 envelope | Accepted |
