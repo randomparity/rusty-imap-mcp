@@ -668,4 +668,131 @@ services:
         let dir = path.parent().expect("scratch dir");
         assert_eq!(pinned_image(&dir.join("absent.yml"), "dovecot"), None);
     }
+
+    /// The `test-fast` exclusion list must cover exactly the test binaries
+    /// that link a container harness — the drift #811 records: eight
+    /// container-backed binaries were missing from the justfile filter and
+    /// ran (and failed on fixture breakage) in the ~4 s inner loop.
+    ///
+    /// HARNESS_TYPES is the registry of container-harness public types: a
+    /// future container harness MUST add its type here in the same change.
+    /// `proton` (Proton Bridge, env-gated) is deliberately absent from the
+    /// list: without PROTON_BRIDGE_TEST=1 it self-skips instantly.
+    #[test]
+    fn container_backed_test_binaries_match_the_shared_list() {
+        // Two parents: CARGO_MANIFEST_DIR is
+        // <root>/crates/rimap-container-gate, so one parent is still
+        // <root>/crates.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("gate crate sits at <workspace>/crates/<crate>");
+        let list_path = root.join("scripts/container-test-binaries.txt");
+        let list: Vec<String> = std::fs::read_to_string(&list_path)
+            .expect("shared list exists")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert!(!list.is_empty(), "the shared list must not be empty");
+
+        const HARNESS_TYPES: [&str; 4] = [
+            "DovecotHarness",
+            "MailpitHarness",
+            "ChaosHarness",
+            "ConnectedHarness",
+        ];
+
+        let mut container_backed: Vec<String> = Vec::new();
+        // Scan only crates/*/tests — the test binaries. A whole-tree scan
+        // would match this crate's own source, whose HARNESS_TYPES literal
+        // names every harness type, and the guard would detect itself.
+        for entry in std::fs::read_dir(root.join("crates"))
+            .expect("crates dir")
+            .flatten()
+        {
+            let tests_dir = entry.path().join("tests");
+            if !tests_dir.is_dir() {
+                continue;
+            }
+            for file in walkdir_like(tests_dir) {
+                let path = std::path::Path::new(&file);
+                if path.components().any(|c| c.as_os_str() == "support") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                if HARNESS_TYPES.iter().any(|t| source.contains(t)) {
+                    container_backed.push(binary_name_for(root, path));
+                }
+            }
+        }
+        container_backed.sort();
+
+        let mut listed = list;
+        listed.sort();
+        assert_eq!(
+            container_backed, listed,
+            "container-backed test binaries and scripts/container-test-binaries.txt disagree"
+        );
+    }
+
+    /// Map a test source file to its binary name. A `[[test]]` block in the
+    /// owning crate's Cargo.toml whose `path` names this file wins with its
+    /// `name`; any other file takes its stem (Cargo's autodiscovery
+    /// convention). Stem-equals-name is NOT assumed: rimap-imap declares
+    /// `name = "dovecot"`, `path = "tests/integration/dovecot.rs"`.
+    fn binary_name_for(root: &std::path::Path, file: &std::path::Path) -> String {
+        let _ = root;
+        let crate_dir = file
+            .ancestors()
+            .find(|a| a.join("Cargo.toml").is_file())
+            .expect("test file lives in a crate");
+        let manifest =
+            std::fs::read_to_string(crate_dir.join("Cargo.toml")).expect("readable manifest");
+        let rel = file.strip_prefix(crate_dir).expect("file inside crate");
+        let mut current_name: Option<String> = None;
+        let mut current_path: Option<String> = None;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed == "[[test]]" {
+                if let (Some(name), Some(p)) = (&current_name, &current_path) {
+                    if std::path::Path::new(p) == rel {
+                        return name.clone();
+                    }
+                }
+                current_name = None;
+                current_path = None;
+            } else if let Some(rest) = trimmed.strip_prefix("name = ") {
+                current_name = Some(rest.trim_matches('"').to_owned());
+            } else if let Some(rest) = trimmed.strip_prefix("path = ") {
+                current_path = Some(rest.trim_matches('"').to_owned());
+            }
+        }
+        if let (Some(name), Some(p)) = (&current_name, &current_path) {
+            if std::path::Path::new(p) == rel {
+                return name.clone();
+            }
+        }
+        file.file_stem()
+            .expect("file stem")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Collect every `.rs` file under `dir`, recursively, as strings, in
+    /// read order (the caller sorts the derived names).
+    fn walkdir_like(dir: std::path::PathBuf) -> Vec<String> {
+        let mut found = Vec::new();
+        let entries = std::fs::read_dir(&dir).expect("readable dir");
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(walkdir_like(path));
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                found.push(path.to_string_lossy().into_owned());
+            }
+        }
+        found
+    }
 }
