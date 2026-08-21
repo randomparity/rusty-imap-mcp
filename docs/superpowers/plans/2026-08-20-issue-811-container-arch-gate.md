@@ -246,6 +246,12 @@ pub fn image_arch(tool: &str, image_ref: &str) -> Option<String> {
 
    (`Command` is already imported at the top of the file.)
 
+   Probe verification boundary (spec §1): the exact probe is verified on
+   Docker 29.7.2 (returns `arm64` for the current pin on this arm64 host).
+   Podman is not installed on this host, so that arm is unverified here;
+   its failure contract is fail-safe — any surprise yields `None` and the
+   accepted silent stand-down, never a false failure.
+
 2. `just check && just lint` — clean. Commit: `feat(gate): local image arch inspection (#811)`.
 
 ## Task 3 — Harness wiring (four call sites)
@@ -358,7 +364,10 @@ Per-harness specifics:
    `feat(tests): fail loudly on arch-mismatched fixture pins (#811)`.
 
 1. Create `scripts/container-test-binaries.txt` (one name per line, no
-   blanks, no comments — the recipe and the guard both read it raw):
+   blanks, no comments — the recipe and the guard both read it raw). The
+   `proton` binary is deliberately absent: it is `PROTON_BRIDGE_TEST=1`-
+   gated and self-skips instantly without the env var, so excluding it
+   adds nothing.
 
 ```
 dovecot
@@ -383,6 +392,11 @@ e2e_wire_tool_advertisement
     /// that link a container harness — the drift #811 records: eight
     /// container-backed binaries were missing from the justfile filter and
     /// ran (and failed on fixture breakage) in the ~4 s inner loop.
+    ///
+    /// HARNESS_TYPES is the registry of container-harness public types: a
+    /// future container harness MUST add its type here in the same change.
+    /// `proton` (Proton Bridge, env-gated) is deliberately absent from the
+    /// list: without PROTON_BRIDGE_TEST=1 it self-skips instantly.
     #[test]
     fn container_backed_test_binaries_match_the_shared_list() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -104,6 +104,17 @@ Decisions inside the API:
   project down and returns the loud error. The cost on the failure path is
   one emulated bring-up (seconds) — acceptable against the alternative of
   giving the gate pull/budget/network semantics.
+- **Probe verification boundary.** The exact probe the code runs —
+  `<tool> image inspect --format '{{.Architecture}}' <repo:tag@sha256:…>`
+  on a digest-pinned multi-arch index — is verified on Docker 29.7.2
+  (returns `arm64` on this arm64 host). Podman is not installed on the
+  design host, so the podman arm is unverified here; podman's `image
+  inspect --format` accepts the same Go-template surface, and the failure
+  contract is deliberately fail-safe in that direction: any surprise
+  (missing flag, odd output) yields `None` → the accepted silent
+  stand-down, never a false failure. The same asymmetry the runtime probe
+  has always had (`run_daemon_probe` is likewise verified only where a
+  runtime exists).
 - **An unparseable reference is loud; a failed inspect stands down.** If
   `pinned_image` returns `None` for a compose file `compose up` itself
   accepted, the parser has drifted from the fixture format — that is a
@@ -177,12 +188,18 @@ if let (Some(arch), Some(host)) = (
 ### 3. `test-fast` filter from a shared source
 
 - New file `scripts/container-test-binaries.txt`: one binary name per line,
-  the complete container-backed set (verified by scanning the tree for
+  no blanks, no comments (both readers read it raw), the complete
+  container-backed set (verified by scanning the tree for
   `DovecotHarness|MailpitHarness|ChaosHarness|ConnectedHarness` in test
   binaries): `dovecot`, `e2e`, `e2e_smtp`, `e2e_smtp_real`, `e2e_wire`,
   `e2e_wire_cancellation`, `e2e_wire_chaos`, `e2e_wire_destructive`,
   `e2e_wire_fault_injection`, `e2e_wire_folder_management`,
   `e2e_wire_multi_account_advertisement`, `e2e_wire_tool_advertisement`.
+  Boundary: the `proton` binary (Proton Bridge, `PROTON_BRIDGE_TEST=1`-
+  gated) is deliberately NOT in the list — without the env var it
+  self-skips in milliseconds, so excluding it adds nothing. Criterion 2's
+  "every container-backed binary" means every binary the inner loop would
+  otherwise compile-and-run against a fixture.
 - The `test-fast` recipe becomes a shebang recipe that builds the `-E`
   filter from the file (`binary(&name)` joined with `|` inside `not (…)`),
   keeping `binary(proptest_html_lookalike)` as an explicit, commented
@@ -199,10 +216,18 @@ if let (Some(arch), Some(host)) = (
   `[[test]]` blocks — a file whose path equals a `[[test]]` `path` takes
   that block's `name`; any other test file takes its stem (Cargo's
   autodiscovery convention). Stem-equals-name is NOT assumed: rimap-imap
-  already declares `name = "dovecot"`, `path = "tests/integration/dovecot.rs"`
-  and a future rename must not silently unguard the list. The `[[test]]`
-  parse is the same line-scan approach as the compose parser (repo-owned
-  manifests, stable shape; no `toml` dependency). This runs in every
+  already declares `name = "dovecot"`,
+  `path = "tests/integration/dovecot.rs"`, and a future rename must not
+  silently unguard the list. The `[[test]]` parse is the same line-scan
+  approach as the compose parser (repo-owned manifests, stable shape; no
+  `toml` dependency). The harness-type list (`DovecotHarness`,
+  `MailpitHarness`, `ChaosHarness`, `ConnectedHarness`) is the registry of
+  container-harness public types: a future container harness MUST add its
+  public type to that constant in the same change that creates it. The
+  enumeration is deliberate — a structural predicate ("references
+  `rimap_container_gate`") does not work, because top-level test binaries
+  reach the harnesses through `support/` module re-exports (excluded from
+  the scan) and never import the gate directly. This runs in every
   `just test` / CI test job — a gate that runs where the drift would
   happen, not in a script only `just ci` reaches.
 - The `test-fast` doc comment and the AGENTS.md description stop saying
@@ -245,7 +270,7 @@ sentence-level edit:
 4. `docs/ADR/0001-smtp-real-socket-e2e-and-auth-taxonomy.md` — its Context
    bullet "The Dovecot fixture has **no arch gate**" is corrected by a
    dated `## Errata` append, the one edit an accepted ADR permits (already
-   drafted in this branch's history; carried in the final diff).
+   committed on this branch; carried in the final diff).
 5. `crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml` —
    the "no arch gate" comment on the Toxiproxy image is updated
    (comment-only; no pin change).
@@ -266,14 +291,21 @@ comparison against a mapped constant.
   shaped like the real files (dovecot single-service, chaos two-service,
   missing service, missing image key, comment lines); `host_arch` mapping
   (aarch64/x86_64 → Some, exotic → None); `arch_mismatch_reason` match /
-  mismatch / message content (names ref, both arches).
+  mismatch / message content — the message must name the pin, both arches,
+  AND the emulation symptom (all four elements of the Goal-1 diagnostic,
+  each asserted).
 - **`image_arch`**: thin wrapper over `Command`; covered indirectly by the
   container-gated integration path and by the drift-guard test's static
   checks. Its failure contract (None on any error) is one match arm.
+  Probe verification status is recorded in §1 (Docker verified; podman
+  unverified, fail-safe direction).
 - **Drift-guard test**: positive case (the real tree passes), and its bite
   proven by TDD mutation: a bogus list entry, a removed real entry, and a
   fake harness-referencing test file each turn it red; restoring turns it
   green.
+- **Harness mapping tests**: each harness's existing pure `gate()`
+  mapping test style extends to `ArchMismatch` (always loud, message
+  carried).
 - **Manual verification on this host**: edit the real
   `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` in place
   (the only file the harness reads) to pin the old amd64-only digest
@@ -288,7 +320,7 @@ comparison against a mapped constant.
 | # | Criterion (source) | Where |
 |---|---|---|
 | 1 | On an emulation-capable host, an arch-mismatched pin fails fast, naming both arches and the pin (issue Expected ¶1) | gate `arch_mismatch_reason` + `ArchMismatch` wiring |
-| 2 | `just test-fast` excludes every container-backed binary (issue Expected ¶2) | shared list + recipe + drift guard |
+| 2 | `just test-fast` excludes every container-backed binary the inner loop would run against a fixture (issue Expected ¶2; `proton` boundary documented in §3) | shared list + recipe + drift guard |
 | 3 | Only genuine can't-run hosts silent-skip (issue Context, AGENTS.md) | `ArchMismatch` never maps to `DockerUnavailable` |
 | 4 | `prune-containers.sh` same treatment or documented exemption (issue Proposed 1) | header comment |
 | 5 | AGENTS.md troubleshooting note (issue Proposed 3) | AGENTS.md |
