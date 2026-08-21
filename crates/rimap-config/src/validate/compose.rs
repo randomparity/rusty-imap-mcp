@@ -437,7 +437,6 @@ mod tests {
                 rotate_keep: 5,
                 retention_seconds: None,
                 provenance_window_seconds: 60,
-                write_deadline_seconds: 15,
                 fail_open: false,
                 allowed_base_dir: Some(audit_dir.to_path_buf()),
             },

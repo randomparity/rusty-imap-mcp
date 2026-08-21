@@ -170,9 +170,20 @@ impl AuditWriter {
             tracing::info!(path = %self.path.display(), "audit file rotated");
         }
 
-        write_under_lock(&mut guard, &bytes, &self.path)?;
+        write_under_lock(&mut guard, &bytes, &self.path, self.write_deadline_seconds)?;
 
         if needs_fsync(&record.payload) {
+            // Check deadline before fsync
+            if self.write_deadline_seconds > 0 {
+                let fsync_start = std::time::Instant::now();
+                if fsync_start.elapsed().as_secs() >= self.write_deadline_seconds {
+                    return Err(AuditError::WriteDeadline {
+                        path: self.path.clone(),
+                        deadline_seconds: self.write_deadline_seconds,
+                    });
+                }
+            }
+            
             guard
                 .buf
                 .get_ref()
@@ -188,8 +199,25 @@ impl AuditWriter {
 }
 
 /// Write `bytes` to `guard.buf`, flush, and update `bytes_written`.
-fn write_under_lock(guard: &mut Inner, bytes: &[u8], path: &Path) -> Result<(), AuditError> {
+/// If `deadline_seconds > 0`, checks elapsed time before I/O operations.
+fn write_under_lock(
+    guard: &mut Inner,
+    bytes: &[u8],
+    path: &Path,
+    deadline_seconds: u64,
+) -> Result<(), AuditError> {
     use std::io::Write;
+
+    let start = std::time::Instant::now();
+
+    // Check deadline before write_all
+    if deadline_seconds > 0 && start.elapsed().as_secs() >= deadline_seconds {
+        return Err(AuditError::WriteDeadline {
+            path: path.to_path_buf(),
+            deadline_seconds,
+        });
+    }
+
 
     guard
         .buf
