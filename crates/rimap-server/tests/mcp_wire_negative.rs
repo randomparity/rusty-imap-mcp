@@ -340,6 +340,16 @@ async fn initialize_after_already_initialized() {
 /// envelope with code -32002 (Server not initialized), echo the
 /// request id verbatim, then close stdin and exit `0`. Fixed by #275.
 ///
+/// Since the rmcp 3.x migration (#733, ADR-0024), rmcp's pre-init
+/// loop validates every non-ping/non-initialize first request against
+/// the 2026-07-28 `_meta` requirements (no negotiated version exists
+/// yet to gate them by) and answers -32602 BEFORE returning
+/// `ExpectedInitializeRequest` to our init-failure handler. The wire
+/// therefore carries TWO error envelopes: rmcp's -32602 first, then
+/// our -32002 #275 envelope as the last word before the clean close.
+/// The -32002 contract itself is unchanged; this test pins the full
+/// sequence so a future shift in either envelope fails loudly.
+///
 /// Audit log MUST record `process_end.reason: Eof` on the success
 /// path — this is the contract the bug report flagged as broken.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -350,7 +360,30 @@ async fn tools_list_before_initialize() {
     // Deliberately skip initialize_handshake.
     let id = harness.send_request_no_wait("tools/list", json!({})).await;
 
-    // Phase 1: error envelope arrives with -32002.
+    // Phase 1a: rmcp's pre-init _meta rejection (-32602) arrives first.
+    let meta_envelope = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => {
+            panic!("expected -32602 pre-init _meta error envelope for tools/list, got {other:?}")
+        }
+    };
+    assert!(
+        meta_envelope["error"].is_object(),
+        "must be an error envelope, got {meta_envelope}",
+    );
+    assert_eq!(
+        meta_envelope["error"]["code"],
+        json!(-32602),
+        "must be code -32602 (rmcp 3.x pre-init _meta enforcement), got {meta_envelope}",
+    );
+    assert_eq!(
+        meta_envelope["id"],
+        json!(id),
+        "id must be echoed verbatim on the -32602 envelope, got {meta_envelope}",
+    );
+    assert_envelope_valid(&meta_envelope);
+
+    // Phase 1b: our #275 -32002 envelope arrives second.
     let envelope = match harness.response_or_close(REQUEST_TIMEOUT).await {
         CloseOrResponse::Response(line) => parse_response_line(&line),
         other => {
@@ -402,6 +435,21 @@ async fn tools_list_before_initialize_str_id() {
     let raw = r#"{"jsonrpc":"2.0","id":"abc-123","method":"tools/list","params":{}}"#;
     harness.send_line(raw).await;
 
+    // Phase 1a: rmcp's pre-init _meta rejection (-32602) arrives first
+    // (see tools_list_before_initialize / ADR-0024).
+    let meta_envelope = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected -32602 pre-init _meta error envelope w/ str id, got {other:?}"),
+    };
+    assert_eq!(meta_envelope["error"]["code"], json!(-32602));
+    assert_eq!(
+        meta_envelope["id"],
+        json!("abc-123"),
+        "string id must survive verbatim through rmcp's -32602 envelope, got {meta_envelope}",
+    );
+    assert_envelope_valid(&meta_envelope);
+
+    // Phase 1b: our #275 -32002 envelope arrives second.
     let envelope = match harness.response_or_close(REQUEST_TIMEOUT).await {
         CloseOrResponse::Response(line) => parse_response_line(&line),
         other => panic!(
