@@ -25,8 +25,8 @@ name: Dependabot fuzz-lock realign
 #   * `GITHUB_TOKEN` is scoped to `contents: read` and cannot push. The write
 #     credential is a separate GitHub App installation token, minted in the
 #     last two steps only and revoked when the job ends.
-#   * A PR whose diff reaches past cargo manifests is refused outright, so the
-#     workflow only ever pushes to the kind of PR it was built for.
+#   * A PR whose diff reaches past cargo manifests is skipped, so the workflow
+#     only ever pushes to the kind of PR it was built for.
 #
 # The workflow file itself is always read from the base branch on
 # `pull_request_target`, so every inline `run:` block below is trusted code.
@@ -172,11 +172,13 @@ jobs:
     # added a source file — reaches it and fails it. That is a red
     # `realign fuzz lockfiles` check on the PRs a maintainer is already
     # hand-holding. It does not block merge (this job is not a required
-    # context), and it is the true signal rather than noise: the workflow
-    # cannot auto-realign such a PR, so the fuzz lockfiles may be drifted and
-    # somebody has to run `just realign-fuzz-locks`. Under the old gate that
-    # fact was silently absent, which is the class of defect #698 and #763
-    # exist to remove. Whether it should instead be a soft skip is #773.
+    # context), but it is noisy: the same signal could be delivered without the
+    # failure. Decision: the scope miss (non-manifest files) is a soft skip
+    # (issue #773), while the empty-diff and symlink/submodule cases stay hard
+    # failures because they indicate integrity problems. ADR-0016's framing of
+    # the gate as "a scope guard, not the security control" is the basis; the
+    # security properties (no head file is executed, no App token runs when
+    # in_scope is false) are unchanged.
     #
     # This expression used to carry a `# zizmor: ignore[bot-conditions]`.
     # zizmor's `bot-conditions` audit matches an *equality* against a bot
@@ -286,7 +288,12 @@ jobs:
       # three files, with none of main's. Were `base.sha` to lag instead, the
       # merge base would fall back to the older commit and this gate would
       # reject every updated PR.
+      #
+      # Decision: the scope miss is a soft skip (issue #773), while the
+      # empty-diff and symlink/submodule cases stay hard failures because they
+      # indicate integrity problems. See the comment in the `if:` block above.
       - name: Require a cargo-manifest-only diff
+        id: scope
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -305,13 +312,13 @@ jobs:
           fi
           if grep -vqE '^(.*/)?Cargo\.(toml|lock)$' "$RUNNER_TEMP/pr-files.txt"
           then
-            echo "::error::this PR changes files other than cargo manifests" \
+            echo "::notice::this PR changes files other than cargo manifests" \
                  "and lockfiles, so it is not an ordinary Dependabot cargo" \
-                 "bump. Refusing to push an automated commit to it; realign" \
-                 "by hand with 'just realign-fuzz-locks' after reviewing the" \
-                 "diff."
+                 "bump. Skipping automated realignment; run 'just" \
+                 "realign-fuzz-locks' by hand after reviewing the diff."
             grep -vE '^(.*/)?Cargo\.(toml|lock)$' "$RUNNER_TEMP/pr-files.txt"
-            exit 1
+            echo "in_scope=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           # A path regex cannot see a file's *mode*, and the overlay below
           # materializes whatever the head has. A manifest committed as a
@@ -337,6 +344,7 @@ jobs:
               "$RUNNER_TEMP/head-tree.txt"
             exit 1
           fi
+          echo "in_scope=true" >> "$GITHUB_OUTPUT"
 
       # The only bytes from the PR head that reach the working tree. Two
       # pathspecs per filename rather than `*Cargo.toml`, which would also
@@ -357,6 +365,7 @@ jobs:
       # repo tracks no symlinks at all, so it changes nothing in the normal
       # case.
       - name: Overlay the PR's cargo manifests
+        if: steps.scope.outputs.in_scope == 'true'
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -365,9 +374,11 @@ jobs:
           git reset --quiet
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+        if: steps.scope.outputs.in_scope == 'true'
         with:
           toolchain: 1.94.0
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+        if: steps.scope.outputs.in_scope == 'true'
         with:
           tool: just
 
@@ -378,12 +389,14 @@ jobs:
       # graph executes. The script restores the original lockfile if cargo
       # fails, so a red job never leaves a half-realigned tree.
       - name: Realign the fuzz lockfiles
+        if: steps.scope.outputs.in_scope == 'true'
         run: just realign-fuzz-locks
 
       # Against the head's workspace lockfile, which is what the overlay put
       # in place — the same comparison the required `cargo-deny` job will make.
       # Nothing is pushed that would not pass the gate this exists to satisfy.
       - name: Re-check parity
+        if: steps.scope.outputs.in_scope == 'true'
         run: just check-fuzz-lock-parity
 
       # Lift the realigned lockfiles out, then throw the whole working tree
@@ -391,6 +404,7 @@ jobs:
       # these two files, so nothing else the realign or the overlay touched can
       # reach the PR even by accident.
       - name: Save the realigned lockfiles
+        if: steps.scope.outputs.in_scope == 'true'
         run: |
           git ls-files 'fuzz/Cargo.lock' '*/fuzz/Cargo.lock' \
             > "$RUNNER_TEMP/fuzz-locks.txt"
@@ -409,6 +423,7 @@ jobs:
       # would instead corrupt the commit if the repo ever did track one.
       - name: Restore the PR head and apply the realignment
         id: apply
+        if: steps.scope.outputs.in_scope == 'true'
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -446,7 +461,7 @@ jobs:
       # repository alone.
       - name: Mint the realign push token
         id: app-token
-        if: steps.apply.outputs.changed == 'true'
+        if: steps.scope.outputs.in_scope == 'true' && steps.apply.outputs.changed == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           # `app-id` is deprecated upstream in favour of `client-id`, and
@@ -473,7 +488,7 @@ jobs:
       # `@dependabot rebase` to hand it back; the force-push that follows fires
       # `synchronize` and this workflow realigns the new head.
       - name: Commit and push the realignment
-        if: steps.apply.outputs.changed == 'true'
+        if: steps.scope.outputs.in_scope == 'true' && steps.apply.outputs.changed == 'true'
         env:
           REALIGN_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
