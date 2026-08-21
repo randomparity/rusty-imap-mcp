@@ -203,3 +203,9 @@ succeeds on the happy path.
   (routes to `Auth`) and a drop yields a client/network error — neither sets
   `is_tls()`. Only a real handshake against an untrusted self-signed cert
   produces `Kind::Tls`.
+
+## Errata
+
+- 2026-08-20: the Context bullet "The Dovecot fixture has **no arch gate**"
+  is no longer accurate: ADR-0023 adds a fixture-image architecture check
+  that fails loudly on a host/image arch mismatch.

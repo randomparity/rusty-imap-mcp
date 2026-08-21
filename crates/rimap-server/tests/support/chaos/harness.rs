@@ -68,6 +68,42 @@ fn loud_or_skip(context: &str) -> ChaosSkip {
     ChaosSkip::DockerUnavailable
 }
 
+/// Verify both pinned fixture images' architectures match this host.
+/// Runs after `compose up -d` succeeded, so the images are local and one
+/// inspect each answers without a network path. Tears the project down
+/// and panics — the file's established loud-infrastructure-failure path —
+/// because an arch-mismatched pin is a fixture defect, loud at every
+/// posture (ADR-0023); `ChaosSkip` stays a silent-skip enum. An
+/// unparseable reference is loud for the same reason; a failed inspect
+/// after a parsed reference stands down (genuinely indeterminate, compose
+/// keeps owning it).
+fn check_image_arch(project: &str, compose_dir: &Path) {
+    for service in ["dovecot", "toxiproxy"] {
+        let Some(image) =
+            rimap_container_gate::pinned_image(&compose_dir.join(COMPOSE_FILE), service)
+        else {
+            compose_down(project, compose_dir);
+            panic!(
+                "chaos: could not determine the pinned image for service \
+                 '{service}' from {COMPOSE_FILE}; the compose parser in \
+                 rimap-container-gate needs updating"
+            );
+        };
+        let (Some(arch), Some(host)) = (
+            rimap_container_gate::image_arch(runtime(), &image),
+            rimap_container_gate::host_arch(),
+        ) else {
+            // Stand down for THIS image only — the other service in the
+            // loop is still judged independently.
+            continue;
+        };
+        if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, host) {
+            compose_down(project, compose_dir);
+            panic!("chaos: {reason}");
+        }
+    }
+}
+
 fn dovecot_container_name(project: &str) -> String {
     format!("{project}-dovecot")
 }
@@ -213,6 +249,7 @@ impl ChaosHarness {
                 .expect("compose up spawn failed");
 
             if output.status.success() {
+                check_image_arch(&project, &compose_dir);
                 return wait_for_ready(&WaitParams {
                     project: &project,
                     compose_dir: &compose_dir,

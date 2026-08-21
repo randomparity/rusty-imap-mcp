@@ -211,6 +211,120 @@ fn names_unreachable_engine(stderr: &str) -> bool {
         || s.contains("connection refused")
 }
 
+/// The host architecture in OCI image naming, or `None` when this build's
+/// target architecture is not one the check can judge. Test binaries are
+/// never cross-compiled here (CI builds every platform natively), so the
+/// compile-time arch is the host arch.
+#[must_use]
+pub fn host_arch() -> Option<&'static str> {
+    oci_arch_name(std::env::consts::ARCH)
+}
+
+fn oci_arch_name(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" => Some("arm64"),
+        "x86_64" => Some("amd64"),
+        _ => None,
+    }
+}
+
+/// The loud-failure reason when the fixture image's architecture differs
+/// from the host's, naming the pin, both arches, and the symptom the
+/// mismatch produces downstream. `None` when they match.
+#[must_use]
+pub fn arch_mismatch_reason(image_ref: &str, image_arch: &str, host_arch: &str) -> Option<String> {
+    if image_arch == host_arch {
+        return None;
+    }
+    Some(format!(
+        "fixture image {image_ref} is linux/{image_arch} but this host is \
+         {host_arch}: the container would run under emulation, which breaks \
+         the fixture (doveadm auth-userdb disconnects, TLS handshake EOFs). \
+         Re-pin the compose image to a manifest whose architecture list \
+         covers {host_arch}."
+    ))
+}
+
+/// The pinned image reference for `service` in a compose file, parsed by
+/// line scan — no YAML dependency for a two-field need. The reference is
+/// read at runtime, never duplicated as a constant, so a Dependabot digest
+/// bump cannot leave the arch check validating a ref nobody runs. `None`
+/// when the file, the service, or its `image:` key cannot be found — or
+/// when the value does not read as a plain reference (quotes, comments,
+/// interpolation): the harnesses turn `None` into a loud failure, so a
+/// misread can never silently disarm the gate.
+#[must_use]
+pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> {
+    let text = std::fs::read_to_string(compose).ok()?;
+    let service_key = format!("{service}:");
+    let mut in_service = false;
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            in_service = false;
+        } else if line.starts_with("  ") && !line.starts_with("   ") {
+            in_service = line.trim() == service_key;
+        } else if in_service && let Some(value) = line.trim_start().strip_prefix("image:") {
+            let value = value.trim();
+            if value.contains(['"', '#', '$']) {
+                // A quoted, commented, or interpolated value means the
+                // line is not the plain `image: <ref>` shape this parser
+                // reads. Returning `None` (not the garbage) routes to the
+                // harnesses' loud unparseable-pin failure instead of a
+                // misread ref that would silently disarm via inspect
+                // failure — ADR-0023's stated failure mode for this
+                // parser.
+                return None;
+            }
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+            // Any other property line inside the service falls through —
+            // a `?` on the strip_prefix would abort the whole scan on the
+            // first non-`image:` key (e.g. `container_name:`) and return
+            // `None` for every real compose file.
+        }
+    }
+    None
+}
+
+/// The architecture of a *local* image as `<tool> image inspect` reports
+/// it. The harnesses call this only after `compose up -d` succeeded, so
+/// the image is local by construction and one inspect is authoritative.
+/// `None` on any inspect failure — the check then stands down and compose
+/// keeps owning the failure, per the gate's documented asymmetry. The
+/// child is bounded by [`DAEMON_PROBE_TIMEOUT`] and killed on expiry: a
+/// stalled daemon degrades to the silent stand-down instead of hanging
+/// the suite (`Command::output()` would wait forever, which is exactly
+/// what `run_daemon_probe` exists to escape).
+#[must_use]
+pub fn image_arch(tool: &str, image_ref: &str) -> Option<String> {
+    let mut child = Command::new(tool)
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{.Architecture}}",
+            image_ref,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let status = wait_bounded(&mut child, DAEMON_PROBE_TIMEOUT)?;
+    if !status.success() {
+        return None;
+    }
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        // The child has already exited, so the pipe is at EOF and this
+        // read cannot block (same reasoning as `run_daemon_probe`).
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut stdout);
+    }
+    let arch = stdout.trim().to_owned();
+    if arch.is_empty() { None } else { Some(arch) }
+}
+
 /// Run `<tool> info` — the cheapest call that actually contacts the engine,
 /// where `binary_present` only proves the CLI is on `PATH` — and return
 /// `Some((succeeded, stderr))`, or `None` when it outlives `budget`.
@@ -267,8 +381,9 @@ mod tests {
     use std::cell::RefCell;
 
     use super::{
-        DAEMON_PROBE_TIMEOUT, Duration, Instant, RuntimeProbe, classify_probe, run_daemon_probe,
-        select_runtime, unusable_reason, wait_bounded,
+        DAEMON_PROBE_TIMEOUT, Duration, Instant, RuntimeProbe, arch_mismatch_reason,
+        classify_probe, oci_arch_name, pinned_image, run_daemon_probe, select_runtime,
+        unusable_reason, wait_bounded,
     };
     use std::process::Command;
 
@@ -482,5 +597,271 @@ mod tests {
             child.try_wait().is_ok_and(|s| s.is_some()),
             "child was not reaped"
         );
+    }
+
+    // ── arch gate (#811) ─────────────────────────────────────────────
+
+    #[test]
+    fn host_arch_maps_rust_names_to_oci_names() {
+        // Compile-time arch on this host is whatever built the tests; the
+        // mapping itself is what the check depends on. Both known values
+        // must map; the function must never guess at anything else.
+        let mapped = ["aarch64", "x86_64"]
+            .into_iter()
+            .filter_map(oci_arch_name)
+            .collect::<Vec<_>>();
+        assert_eq!(mapped, ["arm64", "amd64"]);
+    }
+
+    #[test]
+    fn arch_mismatch_reason_names_both_arches_and_the_pin() {
+        let reason = arch_mismatch_reason(
+            "docker.io/dovecot/dovecot:2.4.4-root@sha256:34c8425",
+            "amd64",
+            "arm64",
+        )
+        .expect("a mismatch is a reason");
+        assert!(reason.contains("34c8425"), "{reason:?}");
+        assert!(reason.contains("amd64"), "{reason:?}");
+        assert!(reason.contains("arm64"), "{reason:?}");
+        assert!(
+            reason.contains("emulation"),
+            "the symptom hint must be there: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn arch_mismatch_reason_is_none_on_a_match() {
+        assert_eq!(
+            arch_mismatch_reason("some@sha256:1", "arm64", "arm64"),
+            None
+        );
+    }
+
+    const COMPOSE_ONE_SERVICE: &str = "\
+services:
+  dovecot:
+    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80
+    container_name: rimap-it-dovecot
+    ports: []
+";
+
+    const COMPOSE_TWO_SERVICES: &str = "\
+services:
+  dovecot:
+    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+";
+
+    /// Best-effort removal of a scratch dir when the guard drops — keeps
+    /// `std::env::temp_dir` clean without a `tempfile` dev-dependency (the
+    /// gate crate's manifest says "No dependencies, by design"). A failed
+    /// removal is ignored: leftover temp state is cosmetic, and an assert
+    /// must not be masked by cleanup.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Unique per-process scratch dir under `std::env::temp_dir`. The
+    /// pid+counter name cannot collide across parallel test threads;
+    /// tests only ever read files they just wrote. Pair the returned file
+    /// with [`ScratchDir::parent`] for cleanup.
+    fn scratch_compose(name: &str) -> (std::path::PathBuf, ScratchDir) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rimap-gate-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let guard = ScratchDir(dir.clone());
+        (dir.join(name), guard)
+    }
+
+    #[test]
+    fn pinned_image_reads_the_named_service() {
+        let (path, _guard) = scratch_compose("compose.yml");
+        std::fs::write(&path, COMPOSE_ONE_SERVICE).expect("write");
+        assert_eq!(
+            pinned_image(&path, "dovecot").as_deref(),
+            Some("docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80")
+        );
+        std::fs::write(&path, COMPOSE_TWO_SERVICES).expect("write");
+        assert_eq!(
+            pinned_image(&path, "toxiproxy").as_deref(),
+            Some("ghcr.io/shopify/toxiproxy:2.12.0"),
+            "the second service must not inherit the first"
+        );
+    }
+
+    #[test]
+    fn pinned_image_is_none_for_a_missing_service_or_file() {
+        let (path, _guard) = scratch_compose("compose.yml");
+        std::fs::write(&path, COMPOSE_TWO_SERVICES).expect("write");
+        assert_eq!(pinned_image(&path, "mailpit"), None);
+        let dir = path.parent().expect("scratch dir");
+        assert_eq!(pinned_image(&dir.join("absent.yml"), "dovecot"), None);
+    }
+
+    #[test]
+    fn pinned_image_rejects_a_value_it_cannot_read_plainly() {
+        // A quoted, commented, or interpolated value must route to the
+        // loud unparseable-pin failure (`None`), never to a misread ref
+        // that silently disarms the gate via inspect failure.
+        for body in [
+            "image: \"docker.io/dovecot/dovecot:2.4.4-root\"",
+            "image: ghcr.io/shopify/toxiproxy:2.12.0 # comment",
+            "image: linux/${RIMAP_HOST_ARCH}",
+        ] {
+            let (path, _guard) = scratch_compose("compose.yml");
+            std::fs::write(&path, format!("services:\n  dovecot:\n    {body}\n")).expect("write");
+            assert_eq!(
+                pinned_image(&path, "dovecot"),
+                None,
+                "a misread-looking value must not pass: {body}"
+            );
+        }
+    }
+
+    /// The `test-fast` exclusion list must cover exactly the test binaries
+    /// that link a container harness — the drift #811 records: eight
+    /// container-backed binaries were missing from the justfile filter and
+    /// ran (and failed on fixture breakage) in the ~4 s inner loop.
+    ///
+    /// `HARNESS_TYPES` is the registry of container-harness public types:
+    /// a future container harness MUST add its type here in the same
+    /// change. `proton` (Proton Bridge, env-gated) is deliberately absent
+    /// from the list: without `PROTON_BRIDGE_TEST=1` it self-skips
+    /// instantly.
+    #[test]
+    fn container_backed_test_binaries_match_the_shared_list() {
+        const HARNESS_TYPES: [&str; 4] = [
+            "DovecotHarness",
+            "MailpitHarness",
+            "ChaosHarness",
+            "ConnectedHarness",
+        ];
+
+        // Two parents: CARGO_MANIFEST_DIR is
+        // <root>/crates/rimap-container-gate, so one parent is still
+        // <root>/crates.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("gate crate sits at <workspace>/crates/<crate>");
+        let list_path = root.join("scripts/container-test-binaries.txt");
+        let list: Vec<String> = std::fs::read_to_string(&list_path)
+            .expect("shared list exists")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert!(!list.is_empty(), "the shared list must not be empty");
+        // The list is only as good as its consumer: a justfile reverted to
+        // an inline filter would leave list and guard green while
+        // `test-fast` drifts again (#811).
+        let justfile =
+            std::fs::read_to_string(root.join("justfile")).expect("workspace justfile exists");
+        assert!(
+            justfile.contains("scripts/container-test-binaries.txt"),
+            "justfile test-fast must build its filter from the shared list"
+        );
+
+        let mut container_backed: Vec<String> = Vec::new();
+        // Scan only crates/*/tests — the test binaries. A whole-tree scan
+        // would match this crate's own source, whose HARNESS_TYPES literal
+        // names every harness type, and the guard would detect itself.
+        for entry in std::fs::read_dir(root.join("crates"))
+            .expect("crates dir")
+            .flatten()
+        {
+            let tests_dir = entry.path().join("tests");
+            if !tests_dir.is_dir() {
+                continue;
+            }
+            for file in walkdir_like(&tests_dir) {
+                let path = std::path::Path::new(&file);
+                if path.components().any(|c| c.as_os_str() == "support") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                if HARNESS_TYPES.iter().any(|t| source.contains(t)) {
+                    container_backed.push(binary_name_for(path));
+                }
+            }
+        }
+        container_backed.sort();
+
+        let mut listed = list;
+        listed.sort();
+        assert_eq!(
+            container_backed, listed,
+            "container-backed test binaries and scripts/container-test-binaries.txt disagree"
+        );
+    }
+
+    /// Map a test source file to its binary name. A `[[test]]` block in the
+    /// owning crate's Cargo.toml whose `path` names this file wins with its
+    /// `name`; any other file takes its stem (Cargo's autodiscovery
+    /// convention). Stem-equals-name is NOT assumed: rimap-imap declares
+    /// `name = "dovecot"`, `path = "tests/integration/dovecot.rs"`.
+    fn binary_name_for(file: &std::path::Path) -> String {
+        let crate_dir = file
+            .ancestors()
+            .find(|a| a.join("Cargo.toml").is_file())
+            .expect("test file lives in a crate");
+        let manifest =
+            std::fs::read_to_string(crate_dir.join("Cargo.toml")).expect("readable manifest");
+        let rel = file.strip_prefix(crate_dir).expect("file inside crate");
+        let mut current_name: Option<String> = None;
+        let mut current_path: Option<String> = None;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed == "[[test]]" {
+                if let (Some(name), Some(p)) = (&current_name, &current_path)
+                    && std::path::Path::new(p) == rel
+                {
+                    return name.clone();
+                }
+                current_name = None;
+                current_path = None;
+            } else if let Some(rest) = trimmed.strip_prefix("name = ") {
+                current_name = Some(rest.trim_matches('"').to_owned());
+            } else if let Some(rest) = trimmed.strip_prefix("path = ") {
+                current_path = Some(rest.trim_matches('"').to_owned());
+            }
+        }
+        if let (Some(name), Some(p)) = (&current_name, &current_path)
+            && std::path::Path::new(p) == rel
+        {
+            return name.clone();
+        }
+        file.file_stem()
+            .expect("file stem")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Collect every `.rs` file under `dir`, recursively, as strings, in
+    /// read order (the caller sorts the derived names).
+    fn walkdir_like(dir: &std::path::Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let entries = std::fs::read_dir(dir).expect("readable dir");
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(walkdir_like(&path));
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                found.push(path.to_string_lossy().into_owned());
+            }
+        }
+        found
     }
 }

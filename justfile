@@ -239,19 +239,25 @@ test: prune-containers
 test-doc:
     cargo test --workspace --doc --locked
 
-# Inner-loop unit tests. Skips the five heaviest test binaries
-# (dovecot integration, e2e/e2e_wire MCP suites, and the slow HTML
-# lookalike proptest). Use this between `cargo check` cycles during
-# inner-loop iteration. Before pushing, run `just test` (or `just ci`)
-# for the full sweep. See
-# docs/superpowers/specs/2026-05-20-local-test-runtime-trim-design.md.
+# Inner-loop unit tests. Skips every container-backed test binary — the
+# list lives in scripts/container-test-binaries.txt and a test in
+# rimap-container-gate fails when it drifts from the binaries that link
+# container harnesses (#811) — plus the slow HTML lookalike proptest. Use
+# this between `cargo check` cycles during inner-loop iteration. Before
+# pushing, run `just test` (or `just ci`) for the full sweep. See
+# docs/superpowers/specs/2026-05-20-local-test-runtime-trim-design.md and
+# docs/superpowers/specs/2026-08-20-issue-811-container-arch-gate-design.md.
 #
 # Intentionally keeps nextest's built-in fail-fast=true (not --profile ci):
 # this target is for iterating on one failure at a time, so stopping at the
 # first one is the wanted behavior, not the bug #625 fixes.
 test-fast:
-    cargo nextest run --workspace --locked --no-tests=pass \
-        -E 'not (binary(dovecot) | binary(e2e) | binary(e2e_wire) | binary(e2e_wire_cancellation) | binary(proptest_html_lookalike))'
+    #!/usr/bin/env bash
+    set -euo pipefail
+    containers=$(sed -e '/^[[:space:]]*$/d' -e 's/.*/binary(&)/' \
+        scripts/container-test-binaries.txt | paste -sd '|' -)
+    exec cargo nextest run --workspace --locked --no-tests=pass \
+        -E "not (${containers} | binary(proptest_html_lookalike))"
 
 # Verify the MSRV toolchain still builds and tests the workspace. --profile
 # ci matches CI's "test (MSRV 1.88.0)" job (#625).

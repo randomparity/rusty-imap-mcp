@@ -20,12 +20,20 @@ use rimap_container_gate::{
 };
 use rimap_core::TlsFingerprint;
 
+/// Failure modes for `DovecotHarness::try_start`. `DockerUnavailable`
+/// is the silent-skip signal: the host genuinely cannot run the fixture.
+/// `ArchMismatch` fails loudly at every posture (ADR-0023).
 #[derive(Debug)]
 pub enum HarnessError {
     DockerUnavailable,
     DockerCommandFailed(String),
     FingerprintReadFailed(String),
     PortReadFailed(String),
+    /// The pinned fixture image's architecture does not match this host,
+    /// or the pinned reference could not be parsed. Always a hard failure
+    /// at every posture: an arch-mismatched pin is a fixture defect, not
+    /// an absent host capability (ADR-0023).
+    ArchMismatch(String),
 }
 
 impl std::fmt::Display for HarnessError {
@@ -37,6 +45,7 @@ impl std::fmt::Display for HarnessError {
             Self::DockerCommandFailed(s) => write!(f, "{} command failed: {s}", runtime()),
             Self::FingerprintReadFailed(s) => write!(f, "fingerprint read failed: {s}"),
             Self::PortReadFailed(s) => write!(f, "port read failed: {s}"),
+            Self::ArchMismatch(s) => f.write_str(s),
         }
     }
 }
@@ -81,6 +90,8 @@ impl DovecotHarness {
             &mut host_port,
             &mut host_starttls_port,
         )?;
+
+        check_image_arch(&project, &compose_dir, "dovecot")?;
 
         let result = wait_for_ready(
             &project,
@@ -243,6 +254,40 @@ fn gate(tool: &str, probe: RuntimeProbe, require_runtime: bool) -> Result<(), Ha
     } else {
         Err(HarnessError::DockerUnavailable)
     }
+}
+
+/// Compose file for the Dovecot fixture, relative to `compose_dir`.
+const COMPOSE_FILE: &str = "docker-compose.yml";
+
+/// Verify the pinned fixture image's architecture matches this host.
+/// Runs after `compose up -d` succeeded, so the image is local and one
+/// inspect answers without a network path. Tears the project down before
+/// returning the loud error. An unparseable reference is loud — compose
+/// accepted the file, so `None` means parser drift, and a silent
+/// stand-down would disarm the guard on its own target class (ADR-0023).
+/// A failed inspect after a parsed reference stands down: genuinely
+/// indeterminate, compose keeps owning it.
+fn check_image_arch(project: &str, compose_dir: &Path, service: &str) -> Result<(), HarnessError> {
+    let Some(image) = rimap_container_gate::pinned_image(&compose_dir.join(COMPOSE_FILE), service)
+    else {
+        compose_down(project, compose_dir);
+        return Err(HarnessError::ArchMismatch(format!(
+            "could not determine the pinned image for service '{service}' from \
+             {COMPOSE_FILE}; the compose parser in rimap-container-gate needs \
+             updating",
+        )));
+    };
+    let (Some(arch), Some(host)) = (
+        rimap_container_gate::image_arch(runtime(), &image),
+        rimap_container_gate::host_arch(),
+    ) else {
+        return Ok(());
+    };
+    if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, host) {
+        compose_down(project, compose_dir);
+        return Err(HarnessError::ArchMismatch(reason));
+    }
+    Ok(())
 }
 
 /// Minimal interface over `docker compose up` so the retry wrapper

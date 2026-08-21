@@ -26,6 +26,11 @@
 # none was usable) and how many resources it removed, so "nothing to clean"
 # and "probed the wrong runtime" read differently.
 #
+# Arch exemption (#811 / ADR-0023): pruning never pulls or runs the fixture
+# image — it only removes stale rimap-it-* resources — so the fixture-image
+# architecture check the Rust harnesses run does not apply here. The runtime
+# *selection* contract above is still mirrored exactly.
+#
 # Usage: scripts/prune-containers.sh
 set -euo pipefail
 
