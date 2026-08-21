@@ -274,6 +274,30 @@ pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> 
     None
 }
 
+/// The architecture of a *local* image as `<tool> image inspect` reports
+/// it. The harnesses call this only after `compose up -d` succeeded, so
+/// the image is local by construction and one inspect is authoritative.
+/// `None` on any inspect failure — the check then stands down and compose
+/// keeps owning the failure, per the gate's documented asymmetry.
+#[must_use]
+pub fn image_arch(tool: &str, image_ref: &str) -> Option<String> {
+    let output = Command::new(tool)
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{.Architecture}}",
+            image_ref,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let arch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if arch.is_empty() { None } else { Some(arch) }
+}
+
 /// Run `<tool> info` — the cheapest call that actually contacts the engine,
 /// where `binary_present` only proves the CLI is on `PATH` — and return
 /// `Some((succeeded, stderr))`, or `None` when it outlives `budget`.
