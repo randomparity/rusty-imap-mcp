@@ -99,16 +99,18 @@ Decisions inside the API:
   project down and returns the loud error. The cost on the failure path is
   one emulated bring-up (seconds) — acceptable against the alternative of
   giving the gate pull/budget/network semantics.
-- **Any indeterminate answer stands down** (`None` → no verdict → proceed).
-  For the "image cannot run at all" class, compose up owns the failure
-  loudly; the check only adds the *named arch diagnosis* when it can
-  determine one. Residual, accepted: on the emulation class a stand-down
-  is silent — compose up succeeds on a foreign-arch image (that is the
-  bug), so a disarm loses the diagnosis with no signal. A loud stand-down
-  was rejected because it would false-fail on benign formatting changes to
-  the repo-owned compose files; the parser is unit-tested against the real
-  fixture shapes instead. This keeps the documented asymmetry: the gate
-  never turns a maybe into a skip or a false failure.
+- **An unparseable reference is loud; a failed inspect stands down.** If
+  `pinned_image` returns `None` for a compose file `compose up` itself
+  accepted, the parser has drifted from the fixture format — that is a
+  named loud failure (`ArchMismatch` carries a "could not determine the
+  pinned image … parser needs updating" message), because a silent
+  stand-down there disarms the guard on exactly the class it exists to
+  catch. An inspect that fails *after* a reference was parsed is genuinely
+  indeterminate (daemon-level anomaly, not a plausible pin state) and
+  stands down; compose keeps owning it. Residual, accepted: that inspect
+  stand-down is silent, and an arch-mismatched image then runs emulated
+  with no diagnosis. This keeps the documented asymmetry: the gate never
+  turns a maybe into a skip or a false failure.
 
 ### 2. Harness wiring (four call sites)
 
@@ -118,15 +120,21 @@ Each container harness (`rimap-imap`
 after its compose up succeeds:
 
 ```rust
-if let Some(image) = rimap_container_gate::pinned_image(&compose_dir.join(COMPOSE_FILE), "dovecot") {
-    if let (Some(arch), Some(host)) = (
-        rimap_container_gate::image_arch(runtime(), &image),
-        rimap_container_gate::host_arch(),
-    ) {
-        if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, &host) {
-            compose_down(&project, &compose_dir);
-            return Err(HarnessError::ArchMismatch(reason));
-        }
+let Some(image) = rimap_container_gate::pinned_image(&compose_dir.join(COMPOSE_FILE), "dovecot") else {
+    compose_down(&project, &compose_dir);
+    return Err(HarnessError::ArchMismatch(format!(
+        "could not determine the pinned image for service 'dovecot' from {}; \
+         the compose parser in rimap-container-gate needs updating",
+        COMPOSE_FILE
+    )));
+};
+if let (Some(arch), Some(host)) = (
+    rimap_container_gate::image_arch(runtime(), &image),
+    rimap_container_gate::host_arch(),
+) {
+    if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, &host) {
+        compose_down(&project, &compose_dir);
+        return Err(HarnessError::ArchMismatch(reason));
     }
 }
 ```

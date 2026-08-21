@@ -31,19 +31,21 @@ hazard (#675) holds for this check too. The image reference is parsed from
 the compose file at runtime (the chaos project's Toxiproxy image is
 tag-pinned, its Dovecot digest-pinned; the parse handles both forms), so a
 Dependabot bump cannot leave the check validating a reference nobody runs.
-The host arch is the compile-time target arch (`std::env::consts::ARCH`,
-mapped `aarch64 → arm64`, `x86_64 → amd64`); the check stands down when that
-arch is outside the known map. This assumes test binaries are never
-cross-compiled or built under emulation — true of every supported developer
-and CI flow today; a Rosetta-built test binary would see its emulation arch
-as the host arch, a residual accepted as out of scope. On mismatch the
-harness tears the project down and fails loudly at every posture — a new
-`ArchMismatch` error that never maps to the silent-skip `DockerUnavailable`.
-When the check cannot determine an answer (unparseable pin, unmapped host
-arch, inspect failure), it stands down rather than risk false-failing a
-benign formatting change to the repo-owned compose files.
-`scripts/prune-containers.sh` is exempt: it never pulls or runs the fixture
-image.
+A reference the parser cannot find in a compose file that compose itself
+accepted is a named loud failure — the parser has drifted from the fixture
+format, and a silent stand-down there would disarm the guard on precisely
+the class it exists to catch. An inspect that fails after a reference *was*
+parsed stands down: that is genuinely indeterminate, and compose up keeps
+owning it. The host arch is the compile-time target arch
+(`std::env::consts::ARCH`, mapped `aarch64 → arm64`, `x86_64 → amd64`); the
+check stands down when that arch is outside the known map. This assumes
+test binaries are never cross-compiled or built under emulation — true of
+every supported developer and CI flow today; a Rosetta-built test binary
+would see its emulation arch as the host arch, a residual accepted as out
+of scope. On mismatch the harness tears the project down and fails loudly
+at every posture — a new `ArchMismatch` error that never maps to the
+silent-skip `DockerUnavailable`. `scripts/prune-containers.sh` is exempt:
+it never pulls or runs the fixture image.
 
 ## Consequences
 
@@ -57,21 +59,22 @@ image.
   against a bumped pin.
 - The gate gains no network path and no pull logic; the local image after
   compose up is the image that runs, so one inspect is authoritative.
-- The check can silently self-disarm: a pin the parser cannot read, or a
-  failing inspect, stands down with no signal, and an arch-mismatched image
-  then runs emulated with the auth/TLS-garbage failure mode and no
-  diagnosis — `compose up` does *not* catch this class, since succeeding on
-  a foreign-arch image is the bug itself. Accepted because a loud
-  stand-down would false-fail on benign parse misses; the parser is
-  unit-tested against the real fixture shapes, so a disarm requires a
-  format change that review should catch.
-- The decision falsifies documented statements, amended in the same change:
-  AGENTS.md's gate-contract paragraph gains the arch-check sentences;
-  AGENTS.md's "There is no arch gate" (fixture section) and "Multi-arch, no
-  arch gate" (chaos section) bullets; the chaos compose file's "no arch
-  gate" comment; and each harness's `DockerUnavailable` doc comment stops
-  listing "wrong arch" among the silent-skip causes (it moves to the loud
-  `ArchMismatch`).
+- Residual stand-down: an inspect that fails after a reference was parsed
+  disarms the check with no signal, and an arch-mismatched image then runs
+  emulated with the auth/TLS-garbage failure mode and no diagnosis —
+  `compose up` does *not* catch this class, since succeeding on a
+  foreign-arch image is the bug itself. Accepted because the inspect is a
+  single local call against an image compose just created, so a failure
+  there is a daemon-level anomaly, not a plausible pin state; the
+  unparseable-reference path, the plausible disarm, is loud by decision.
+- The decision falsifies documented statements, all amended by the same
+  change that carries this record (they read as already-done only after
+  that change merges): AGENTS.md's gate-contract paragraph gains the
+  arch-check sentences; AGENTS.md's "There is no arch gate" (fixture
+  section) and "Multi-arch, no arch gate" (chaos section) bullets; the
+  chaos compose file's "no arch gate" comment; and each harness's
+  `DockerUnavailable` doc comment stops listing "wrong arch" among the
+  silent-skip causes (it moves to the loud `ArchMismatch`).
 
 ## Considered & rejected
 
@@ -89,6 +92,15 @@ image.
   charter for #811 excludes workflow changes, and adding a gate is its own
   decision. Residual: a bad pin that slips through costs one named local
   failure on the first arch-affected developer run instead of a red PR.
+- **Resolve the reference with `<tool> compose config` instead of a hand
+  parser.** One extra bounded compose invocation per harness start, and the
+  gate couples to the config subcommand's output format across both
+  runtimes — `docker compose config` and podman-compose's config disagree
+  enough (the repo already routes around podman-compose quirks elsewhere)
+  that the "single source" would need per-runtime parsing anyway, which is
+  the drift the hand parser avoids. The hand parser is ~20 lines,
+  unit-tested against the real fixture shapes, and its failure mode is a
+  named loud error rather than a silently wrong answer.
 - **Declare `platform:` in compose and let the tool enforce it.** Cannot
   express "match the host" across the two supported arches without
   env-var interpolation (`platform: linux/${RIMAP_HOST_ARCH}`), which
