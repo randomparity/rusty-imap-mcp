@@ -100,10 +100,15 @@ Decisions inside the API:
   one emulated bring-up (seconds) — acceptable against the alternative of
   giving the gate pull/budget/network semantics.
 - **Any indeterminate answer stands down** (`None` → no verdict → proceed).
-  Compose up already owns "image cannot run" failures loudly; the check
-  only adds the *named arch diagnosis* when it can determine one. This
-  keeps the documented asymmetry: the gate never turns a maybe into a skip
-  or a false failure.
+  For the "image cannot run at all" class, compose up owns the failure
+  loudly; the check only adds the *named arch diagnosis* when it can
+  determine one. Residual, accepted: on the emulation class a stand-down
+  is silent — compose up succeeds on a foreign-arch image (that is the
+  bug), so a disarm loses the diagnosis with no signal. A loud stand-down
+  was rejected because it would false-fail on benign formatting changes to
+  the repo-owned compose files; the parser is unit-tested against the real
+  fixture shapes instead. This keeps the documented asymmetry: the gate
+  never turns a maybe into a skip or a false failure.
 
 ### 2. Harness wiring (four call sites)
 

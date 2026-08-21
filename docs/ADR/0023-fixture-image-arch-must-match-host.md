@@ -40,9 +40,10 @@ as the host arch, a residual accepted as out of scope. On mismatch the
 harness tears the project down and fails loudly at every posture — a new
 `ArchMismatch` error that never maps to the silent-skip `DockerUnavailable`.
 When the check cannot determine an answer (unparseable pin, unmapped host
-arch, inspect failure), it stands down and compose up keeps owning the
-failure. `scripts/prune-containers.sh` is exempt: it never pulls or runs the
-fixture image.
+arch, inspect failure), it stands down rather than risk false-failing a
+benign formatting change to the repo-owned compose files.
+`scripts/prune-containers.sh` is exempt: it never pulls or runs the fixture
+image.
 
 ## Consequences
 
@@ -56,6 +57,14 @@ fixture image.
   against a bumped pin.
 - The gate gains no network path and no pull logic; the local image after
   compose up is the image that runs, so one inspect is authoritative.
+- The check can silently self-disarm: a pin the parser cannot read, or a
+  failing inspect, stands down with no signal, and an arch-mismatched image
+  then runs emulated with the auth/TLS-garbage failure mode and no
+  diagnosis — `compose up` does *not* catch this class, since succeeding on
+  a foreign-arch image is the bug itself. Accepted because a loud
+  stand-down would false-fail on benign parse misses; the parser is
+  unit-tested against the real fixture shapes, so a disarm requires a
+  format change that review should catch.
 - The decision falsifies documented statements, amended in the same change:
   AGENTS.md's gate-contract paragraph gains the arch-check sentences;
   AGENTS.md's "There is no arch gate" (fixture section) and "Multi-arch, no
@@ -72,10 +81,21 @@ fixture image.
   re-verify-on-every-bump procedure is exactly the discipline whose absence
   let the bad pin land.
 - **Mechanize ADR-0001's verification as a CI check on compose pins.**
-  Detection-only, and only at PR time: it would not have protected the
-  local runs of pre-bump commits, and #811's damage was done by exactly
-  such local runs. The runtime check is needed regardless, which makes a
-  parallel CI gate redundant surface for the same guarantee.
+  Necessary-but-insufficient, and post-merge where this check is
+  post-merge-avoiding: a CI manifest-list check catches a bad pin before
+  merge and protects every downstream local run; the runtime check is still
+  needed for local runs of already-merged commits — the exact runs #811's
+  damage occurred on. Pre-merge detection is deliberately traded away: the
+  charter for #811 excludes workflow changes, and adding a gate is its own
+  decision. Residual: a bad pin that slips through costs one named local
+  failure on the first arch-affected developer run instead of a red PR.
+- **Declare `platform:` in compose and let the tool enforce it.** Cannot
+  express "match the host" across the two supported arches without
+  env-var interpolation (`platform: linux/${RIMAP_HOST_ARCH}`), which
+  scatters arch detection into every developer shell and CI environment —
+  out of the single-home gate the #675 rule established — and its pull-time
+  error does not name the pin and both arches the way the issue's Expected
+  diagnostic requires.
 - **Registry manifest inspection before compose up.** Two grounds. First,
   an image manifest's body does not carry `architecture` — that field lives
   in the config blob, and only manifest-list *entries* name a platform — so
