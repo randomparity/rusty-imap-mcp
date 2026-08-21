@@ -336,22 +336,17 @@ async fn initialize_after_already_initialized() {
 // Test 7: `tools/list` before `initialize`
 // ---------------------------------------------------------------------------
 
-/// `tools/list` before `initialize` must return a JSON-RPC error
-/// envelope with code -32002 (Server not initialized), echo the
-/// request id verbatim, then close stdin and exit `0`. Fixed by #275.
+/// `tools/list` before `initialize` must return EXACTLY ONE JSON-RPC
+/// error envelope — code -32002 (Server not initialized), id echoed
+/// verbatim, no `data` field — then close stdout and exit `0`.
+/// (#275, restored by #821 / ADR-0025.)
 ///
-/// Since the rmcp 3.x migration (#733, ADR-0024), rmcp's pre-init
-/// loop validates every non-ping/non-initialize first request against
-/// the 2026-07-28 `_meta` requirements (no negotiated version exists
-/// yet to gate them by) and answers -32602 before returning
-/// `ExpectedInitializeRequest` to our init-failure handler. The wire
-/// therefore carries TWO error envelopes — rmcp's -32602 and our
-/// #275 -32002 — before the clean close. Their ORDER is not stable:
-/// rmcp hands its envelope to the transport writer task while the
-/// init-failure handler writes ours directly, so either may win the
-/// race (both orders observed across hosts). The -32002 contract
-/// itself is unchanged; this test pins the exact PAIR so a future
-/// shift in either envelope fails loudly.
+/// Under rmcp 3.x (#733, ADR-0024) the wire briefly carried TWO error
+/// envelopes: rmcp's pre-init `_meta` validation answered -32602
+/// alongside our #275 -32002, in an unstable order. ADR-0025 has the
+/// #277 validator intercept the request before rmcp ever sees it, so
+/// rmcp's -32602 can no longer reach the wire. This test pins the
+/// single-envelope contract: one -32002 envelope and nothing else.
 ///
 /// Audit log MUST record `process_end.reason: Eof` on the success
 /// path — this is the contract the bug report flagged as broken.
@@ -363,36 +358,27 @@ async fn tools_list_before_initialize() {
     // Deliberately skip initialize_handshake.
     let id = harness.send_request_no_wait("tools/list", json!({})).await;
 
-    // Phase 1: both error envelopes arrive, in either order.
-    let mut codes = Vec::new();
-    for _ in 0..2 {
-        let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
-            CloseOrResponse::Response(line) => parse_response_line(&line),
-            other => panic!(
-                "expected two error envelopes for pre-initialize tools/list, got {other:?} after {codes:?}"
-            ),
-        };
-        assert!(
-            env["error"].is_object(),
-            "must be an error envelope, got {env}",
-        );
-        assert_eq!(
-            env["id"],
-            json!(id),
-            "id must be echoed verbatim on every pre-init error envelope, got {env}",
-        );
-        assert_envelope_valid(&env);
-        codes.push(
-            env["error"]["code"]
-                .as_i64()
-                .unwrap_or_else(|| panic!("numeric error code, got {env}")),
-        );
-    }
-    codes.sort_unstable();
+    // Phase 1: exactly ONE -32002 envelope (no rmcp -32602 companion).
+    let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!(
+            "expected one -32002 error envelope for pre-initialize tools/list, got {other:?}"
+        ),
+    };
+    assert!(
+        env["error"].is_object(),
+        "must be an error envelope, got {env}",
+    );
     assert_eq!(
-        codes,
-        vec![-32602, -32002],
-        "expected exactly rmcp's -32602 (pre-init _meta) and our -32002 (not initialized), got {codes:?}",
+        env["id"],
+        json!(id),
+        "id must be echoed verbatim on the pre-init error envelope, got {env}",
+    );
+    assert_envelope_valid(&env);
+    assert_eq!(
+        env["error"]["code"],
+        json!(-32002),
+        "expected exactly one -32002 (not initialized) envelope, got {env}",
     );
 
     // Phase 2: stdout closes and the server exits 0.
@@ -424,34 +410,25 @@ async fn tools_list_before_initialize_str_id() {
     let raw = r#"{"jsonrpc":"2.0","id":"abc-123","method":"tools/list","params":{}}"#;
     harness.send_line(raw).await;
 
-    // Phase 1: both error envelopes arrive, in either order (see
-    // tools_list_before_initialize / ADR-0024).
-    let mut codes = Vec::new();
-    for _ in 0..2 {
-        let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
-            CloseOrResponse::Response(line) => parse_response_line(&line),
-            other => {
-                panic!("expected two error envelopes w/ str id, got {other:?} after {codes:?}")
-            }
-        };
-        assert_eq!(
-            env["id"],
-            json!("abc-123"),
-            "string id must survive verbatim through every pre-init envelope, got {env}",
-        );
-        assert_envelope_valid(&env);
-        codes.push(
-            env["error"]["code"]
-                .as_i64()
-                .unwrap_or_else(|| panic!("numeric error code, got {env}")),
-        );
-    }
-    codes.sort_unstable();
+    // Phase 1: exactly ONE -32002 envelope (see tools_list_before_initialize /
+    // ADR-0025).
+    let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected one -32002 error envelope w/ str id, got {other:?}"),
+    };
     assert_eq!(
-        codes,
-        vec![-32602, -32002],
-        "expected exactly rmcp's -32602 (pre-init _meta) and our -32002 (not initialized), got {codes:?}",
+        env["id"],
+        json!("abc-123"),
+        "string id must survive verbatim through the pre-init envelope, got {env}",
     );
+    assert_envelope_valid(&env);
+    assert_eq!(
+        env["error"]["code"],
+        json!(-32002),
+        "expected exactly one -32002 (not initialized) envelope, got {env}",
+    );
+
+    // Phase 2: stdout closes and the server exits 0.
     match harness.response_or_close(REQUEST_TIMEOUT).await {
         CloseOrResponse::CleanClose => {}
         other => panic!("expected clean close, got {other:?}"),
@@ -492,8 +469,9 @@ async fn pre_initialize_notification_silent_close() {
 /// Codex review finding 2026-05-14 (medium): transport-level write
 /// failures while emitting the pre-initialize envelope must NOT be
 /// classified as clean EOF. Server's stdout read end is closed
-/// before the request arrives; the envelope write fails with
-/// `BrokenPipe`; the server exits non-zero and the audit log records
+/// before the request arrives; the validator's interception write
+/// (ADR-0025) fails with `BrokenPipe` before the interception flag is
+/// raised; the server exits non-zero and the audit log records
 /// `reason: Error`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pre_initialize_envelope_write_failure_records_error() {
@@ -551,20 +529,6 @@ async fn pre_initialize_envelope_write_failure_records_error() {
     assert!(
         stderr.contains("pre-init error envelope"),
         "expected propagated 'pre-init error envelope' anyhow context in stderr, got:\n{stderr}",
-    );
-
-    // #722: this arm returns before `supervisor.shutdown_after_failure()`,
-    // so no bridge-shutdown outcome is consulted and none can displace the
-    // write error the operator needs to see. The assertion above proves the
-    // write error reached stderr; this one proves it was not replaced by the
-    // shutdown arm's message. Together they pin the ordering documented on
-    // `handle_init_failure` — a "fix" that ran the shutdown first and let its
-    // error win would keep the first assertion green and redden this one.
-    assert!(
-        !stderr.contains("validator bridge after pre-init"),
-        "envelope write failure must propagate as-is, not as a bridge-shutdown \
-         error; the write-failure arm returns before shutdown_after_failure \
-         (#722), got:\n{stderr}",
     );
 }
 
