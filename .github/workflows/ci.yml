@@ -102,6 +102,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --workspace --locked --all-targets
 
   test:
@@ -200,6 +201,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --workspace --all-targets --all-features --locked
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
@@ -222,6 +224,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: tool-schema-drift
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
           tool: just
@@ -251,6 +254,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: tools-doc-drift
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
           tool: just
@@ -355,6 +359,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: semver-checks
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
           tool: just,cargo-semver-checks@0.48.0
@@ -454,6 +459,7 @@ jobs:
         with:
           workspaces: html-oracle
           key: html-oracle
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Version-pinned, not just SHA-pinned. `install-action` otherwise resolves
       # to whatever cargo-deny is latest at run time, and a release that tightens
       # a check reddens every open PR with no repo change — this repo already ate
@@ -800,7 +806,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: mcp-conformance-node
-
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # --features test-support activates the --allow-empty-accounts
       # CLI flag (#[cfg(feature = "test-support")] in rimap-server).
       # Without it, the Node harness hits a clap rejection before the
