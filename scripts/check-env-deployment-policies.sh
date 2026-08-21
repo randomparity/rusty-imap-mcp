@@ -91,8 +91,15 @@ def api(path):
     for attempt in range(4):
         proc = subprocess.run([gh, "api", path], capture_output=True, text=True)
         if proc.returncode == 0:
-            return json.loads(proc.stdout)
-        last = proc.stderr.strip()
+            try:
+                return json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                # A non-JSON HTTP-200 body is an API failure too: it must
+                # keep this function's exit-2 contract rather than crash
+                # with a traceback that exits 1 and reads as drift.
+                last = f"HTTP success but body is not JSON: {proc.stdout[:200]!r}"
+        else:
+            last = proc.stderr.strip()
         time.sleep(retry_sleep * (2**attempt))
     print(f"error: gh api {path} failed after retries: {last}", file=sys.stderr)
     print(
