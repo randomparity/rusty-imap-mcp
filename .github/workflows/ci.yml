@@ -620,7 +620,7 @@ jobs:
       # With nextest, each test gets its own process and the shared config
       # applies: `profile.ci`'s `fail-fast = { max-fail = 20 }` now bounds this
       # arm the same way it bounds the test jobs, and the `container-backed` /
-      # `chaos-backed` groups and the 5s advisory `leak-timeout` now cover it.
+      # `chaos-backed` groups and the 5s fatal `leak-timeout` now cover it.
       #
       # `--all-features` stays, and is deliberately NOT mirrored into "test
       # (stable)": it is what makes the feature-gated code (`test-support`,
