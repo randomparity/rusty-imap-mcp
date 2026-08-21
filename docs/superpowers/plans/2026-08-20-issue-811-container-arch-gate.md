@@ -41,11 +41,12 @@ guarded against drift by a test in the gate crate.
 | `crates/rimap-imap/tests/integration/support/container.rs` | `ArchMismatch` variant + post-up check in `DovecotHarness::try_start` |
 | `crates/rimap-server/tests/support/dovecot/harness.rs` | same, for the server Dovecot harness |
 | `crates/rimap-server/tests/support/mailpit/harness.rs` | same, for Mailpit |
-| `crates/rimap-server/tests/support/chaos/harness.rs` | same, for Dovecot + Toxiproxy |
+| `crates/rimap-server/tests/support/chaos/harness.rs` | same, for Dovecot + Toxiproxy (panic-based loud path) |
 | `scripts/container-test-binaries.txt` | new: shared exclusion list |
 | `justfile` | `test-fast` builds the filter from the list |
 | `scripts/prune-containers.sh` | exemption comment |
-| `AGENTS.md` | gate-contract sentence + troubleshooting note |
+| `AGENTS.md` | arch-gate sentences, troubleshooting note, two falsified-statement rewrites |
+| `crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml` | comment-only "no arch gate" update |
 
 ## Task 1 — Gate: pure arch predicates (TDD)
 
@@ -240,7 +241,7 @@ pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> 
 
 1. Implement after `pinned_image` (thin wrapper; its failure contract —
    `None` on any error — is one match arm, covered by the container-gated
-   path and Task 4's wiring):
+   path and Task 3's wiring):
 
 ```rust
 /// The architecture of a *local* image as `<tool> image inspect` reports
@@ -276,7 +277,8 @@ pub fn image_arch(tool: &str, image_ref: &str) -> Option<String> {
 
 **Files:** the four harness files.
 **Interfaces consumed:** `host_arch`, `image_arch`, `arch_mismatch_reason`,
-`pinned_image` from Task 1/2. **Provides:** loud `ArchMismatch` behavior.
+`pinned_image` from Tasks 1–2. **Provides:** loud `ArchMismatch` behavior.
+
 For **three** of the four harnesses (`rimap-imap` `container.rs`,
 `rimap-server` `dovecot/harness.rs`, `rimap-server` `mailpit/harness.rs` —
 all of which have a `HarnessError`):
@@ -295,6 +297,11 @@ all of which have a `HarnessError`):
 
    and its `Display` arm: `Self::ArchMismatch(s) => f.write_str(s),`
 
+2. Add a private helper next to the existing `gate()` mapping function,
+   parameterized over the service name (each harness passes its own —
+   `dovecot`, `smtp`, or the chaos loop's current service — and the error
+   message interpolates it):
+
 ```rust
 /// Verify the pinned fixture image's architecture matches this host.
 /// Runs after `compose up -d` succeeded, so the image is local and one
@@ -304,12 +311,17 @@ all of which have a `HarnessError`):
 /// stand-down would disarm the guard on its own target class (ADR-0023).
 /// A failed inspect after a parsed reference stands down: genuinely
 /// indeterminate, compose keeps owning it.
-fn check_image_arch(project: &str, compose_dir: &Path) -> Result<(), HarnessError> {
-    let Some(image) = rimap_container_gate::pinned_image(&compose_dir.join(COMPOSE_FILE), "dovecot")
+fn check_image_arch(
+    project: &str,
+    compose_dir: &Path,
+    service: &str,
+) -> Result<(), HarnessError> {
+    let Some(image) =
+        rimap_container_gate::pinned_image(&compose_dir.join(COMPOSE_FILE), service)
     else {
         compose_down(project, compose_dir);
         return Err(HarnessError::ArchMismatch(format!(
-            "could not determine the pinned image for service 'dovecot' from \
+            "could not determine the pinned image for service '{service}' from \
              {COMPOSE_FILE}; the compose parser in rimap-container-gate needs \
              updating",
         )));
@@ -332,19 +344,20 @@ fn check_image_arch(project: &str, compose_dir: &Path) -> Result<(), HarnessErro
 `ChaosHarness::try_start` returns `Result<Self, ChaosSkip>`, and
 `ChaosSkip` is documented as a silent-skip enum — do not add an
 `ArchMismatch` variant to it. Instead, in the chaos harness's own
-`check_image_arch` helper (same shape as above, looping over services
-`["dovecot", "toxiproxy"]`), return the failure via the file's established
-loud path: `compose_down` then `panic!("chaos: {reason}")` — the file
-already carries `#![expect(clippy::panic, reason = "control-plane failures
-abort the test loudly")]`. That is loud at every posture, as ADR-0023
-requires; the three-tier `RIMAP_CHAOS`/skip/loud policy is unchanged.
+`check_image_arch` helper (same shape as above, parameterized over the
+service and looping over `["dovecot", "toxiproxy"]`), return the failure
+via the file's established loud path: `compose_down` then
+`panic!("chaos: {reason}")` — the file already carries
+`#![expect(clippy::panic, reason = "control-plane failures abort the test
+loudly")]`. That is loud at every posture, as ADR-0023 requires; the
+three-tier `RIMAP_CHAOS`/skip/loud policy is unchanged.
 
 3. Call it in `try_start` where compose up succeeded, before readiness
    polling — e.g. in the server Dovecot harness:
 
 ```rust
             if output.status.success() {
-                check_image_arch(&project, &compose_dir)?;
+                check_image_arch(&project, &compose_dir, "dovecot")?;
                 return wait_for_ready(&project, host_port.port(), &compose_dir);
             }
 ```
@@ -359,7 +372,7 @@ Per-harness specifics:
   `let result = wait_for_ready(...)`:
 
 ```rust
-        check_image_arch(&project, &compose_dir)?;
+        check_image_arch(&project, &compose_dir, "dovecot")?;
 ```
 
   Its `compose_down` takes `(&project, &compose_dir)` — the helper matches.
@@ -376,13 +389,12 @@ Per-harness specifics:
 4. Update `DockerUnavailable`'s doc comment where it promises "wrong arch":
    arch mismatch now lands in the loud `ArchMismatch` variant, not here.
 
-5. Verification: `just check && just lint` plus
-   `cargo nextest run -p rimap-server -p rimap-imap -E 'not (binary(dovecot) | binary(e2e) | binary(e2e_wire) | binary(e2e_wire_cancellation) | binary(proptest_html_lookalike))'`
-   — the old justfile filter is still in place until Task 4, so do NOT run
-   `just test-fast` here: it would compile and run the eight not-yet-excluded
-   container binaries (compile-checked harness mapping only; the runtime
-   path is container-gated and is exercised by Task 5's manual
-   verification). Commit:
+5. Verification: `just lint` alone — clippy `--all-targets` compiles every
+   test binary, which is all this task needs (the harness changes are
+   compile-checked; the runtime path is container-gated and is exercised
+   by Task 5's manual proof). Do NOT run `just test-fast` here: until
+   Task 4 lands, its filter still lets the eight not-yet-excluded container
+   binaries compile and run against live fixtures. Commit:
    `feat(tests): fail loudly on arch-mismatched fixture pins (#811)`.
 
 ## Task 4 — Shared binary list + `test-fast` recipe + drift guard
@@ -391,7 +403,6 @@ Per-harness specifics:
 `crates/rimap-container-gate/src/lib.rs` (drift-guard test).
 **Interfaces consumed:** nothing from Tasks 1–3 (the guard is static
 analysis). **Provides:** the drift-guarded filter; completes criterion 2.
-
 
 1. Create `scripts/container-test-binaries.txt` (one name per line, no
    blanks, no comments — the recipe and the guard both read it raw). The
@@ -448,16 +459,26 @@ e2e_wire_tool_advertisement
             ["DovecotHarness", "MailpitHarness", "ChaosHarness", "ConnectedHarness"];
 
         let mut container_backed: Vec<String> = Vec::new();
-        for entry in walkdir_like(root.join("crates")) {
-            let path = std::path::Path::new(&entry);
-            if path.components().any(|c| c.as_os_str() == "support") {
+        // Scan only crates/*/tests — the test binaries. A whole-tree scan
+        // would match this crate's own source, whose HARNESS_TYPES literal
+        // names every harness type, and the guard would detect itself.
+        for crate_dir in std::fs::read_dir(root.join("crates")).expect("crates dir").flatten()
+        {
+            let tests_dir = crate_dir.path().join("tests");
+            if !tests_dir.is_dir() {
                 continue;
             }
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if HARNESS_TYPES.iter().any(|t| source.contains(t)) {
-                container_backed.push(binary_name_for(root, path));
+            for entry in walkdir_like(tests_dir) {
+                let path = std::path::Path::new(&entry);
+                if path.components().any(|c| c.as_os_str() == "support") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                if HARNESS_TYPES.iter().any(|t| source.contains(t)) {
+                    container_backed.push(binary_name_for(root, path));
+                }
             }
         }
         container_backed.sort();
@@ -509,8 +530,8 @@ e2e_wire_tool_advertisement
         file.file_stem().expect("file stem").to_string_lossy().into_owned()
     }
 
-    /// Collect every `.rs` file under `dir`, recursively, as workspace-
-    /// absolute-ish strings sorted for a stable diff.
+    /// Collect every `.rs` file under `dir`, recursively, as strings, in
+    /// read order (the caller sorts the derived names).
     fn walkdir_like(dir: std::path::PathBuf) -> Vec<String> {
         let mut found = Vec::new();
         let entries = std::fs::read_dir(&dir).expect("readable dir");
@@ -526,11 +547,11 @@ e2e_wire_tool_advertisement
     }
 ```
 
-   (If `walkdir_like` collides with nothing, keep it inside `mod tests`.)
-   Run it — it must PASS against the list from step 1 (the list was derived
-   from the same scan; the red proof for this guard is the mutation check
-   below). Then prove it bites: temporarily append a bogus name to the list
-   → red; remove a real name (`e2e_wire_chaos`) → red; restore → green.
+   (Keep both helpers inside `mod tests`.) Run it — it must PASS against
+   the list from step 1 (the list was derived from the same scan; the red
+   proof for this guard is the mutation check below). Then prove it bites:
+   temporarily append a bogus name to the list → red; remove a real name
+   (`e2e_wire_chaos`) → red; restore → green.
 
 3. Replace the `test-fast` recipe in `justfile`:
 
@@ -565,9 +586,11 @@ test-fast:
    prek — keep it clean. Commit:
    `test: build test-fast filter from a drift-guarded shared list (#811)`.
 
-## Task 5 — Docs: prune exemption, AGENTS.md, manual proof
+## Task 5 — Docs: prune exemption, AGENTS.md amendments, manual proof
 
-**Files:** `scripts/prune-containers.sh`, `AGENTS.md`; manual verification.
+**Files:** `scripts/prune-containers.sh`, `AGENTS.md`,
+`crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml`
+(comment-only); manual verification.
 
 1. In `scripts/prune-containers.sh`, extend the header comment block:
 
@@ -592,7 +615,6 @@ test-fast:
      rewrite the lead to "**Multi-arch.**" and note the harness-level arch
      gate (ADR-0023) covers both images on any host that runs the suite.
 
-
 ```markdown
 The gate also checks fixture-image architecture (ADR-0023): after
 `compose up -d` succeeds, each harness inspects the pinned image's
@@ -608,6 +630,7 @@ disconnected from auth service` during user lookups and `tls handshake eof`
 on IMAPS handshakes across every container-backed e2e binary (#811). The
 arch gate now names the pin, the image arch, and the host arch instead.
 ```
+
    Also (spec §6 item 5): in
    `crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml`,
    update the Toxiproxy image's comment "Multi-arch (linux/amd64 +
@@ -615,15 +638,25 @@ arch gate now names the pin, the image arch, and the host arch instead.
    harnesses (ADR-0023); comment-only, no pin change. The ADR-0001 Errata
    append (spec §6 item 4) is already committed on this branch.
 
-3. Manual proof on this host (the criterion-1 red/green): edit the real
-   `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` in
-   place — the only file the harness reads — to pin the old amd64-only
-   digest
-   `sha256:34c8425a6811a80df614353dd2b0bad779b64c76c88b6a5ab3fa2e3d99b981fb`,
-   run one container test, and observe the named `ArchMismatch` failure —
-   not `auth-userdb` garbage. Restore the multi-arch pin
-   (`sha256:d6b2f80…`) and confirm the same test passes. Record both
-   observations in the completion report.
+3. Manual proof on this host (the criterion-1 red/green). The fixture file
+   is tracked, so the restore is guarded, not assumed:
+
+   - Red: edit the real
+     `crates/rimap-imap/tests/integration/dovecot/docker-compose.yml` in
+     place — the only file the harness reads — replacing the multi-arch
+     pin `sha256:d6b2f80…` with the old amd64-only
+     `sha256:34c8425a6811a80df614353dd2b0bad779b64c76c88b6a5ab3fa2e3d99b981fb`.
+     Run exactly
+     `cargo nextest run -p rimap-imap --test dovecot -E 'test(smoke)'`
+     (or the first small case in that binary) and observe the named
+     `ArchMismatch` failure — not `auth-userdb` garbage. Record the
+     observation.
+   - Restore immediately: `git checkout -- crates/rimap-imap/tests/integration/dovecot/docker-compose.yml`,
+     then verify with `git diff --stat` that the tree is clean again
+     BEFORE any commit.
+   - Green: run the same test on the restored pin and observe it pass
+     (this host resolves the multi-arch pin to native `arm64`). Record
+     the observation.
 
 4. `just fmt && just lint && just test-fast`. Commit:
    `docs: arch-gate contract and troubleshooting note (#811)`.
@@ -635,7 +668,7 @@ arch gate now names the pin, the image arch, and the host arch instead.
 3. Only genuine can't-run hosts silent-skip (Task 3: `ArchMismatch` never
    maps to `DockerUnavailable`).
 4. Prune exemption documented (Task 5).
-5. AGENTS.md note (Task 5).
+5. AGENTS.md note + both falsified-statement rewrites (Task 5).
 6. No new deps, no workflow changes (whole diff).
 
 ## Rollback
