@@ -93,7 +93,9 @@ fn check_image_arch(project: &str, compose_dir: &Path) {
             rimap_container_gate::image_arch(runtime(), &image),
             rimap_container_gate::host_arch(),
         ) else {
-            return;
+            // Stand down for THIS image only — the other service in the
+            // loop is still judged independently.
+            continue;
         };
         if let Some(reason) = rimap_container_gate::arch_mismatch_reason(&image, &arch, &host) {
             compose_down(project, compose_dir);
