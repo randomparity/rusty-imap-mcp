@@ -441,6 +441,17 @@ oracle-deny:
 test-fuzz-lock-parity:
     ./scripts/check-fuzz-lock-parity.test.sh
 
+# Unit-test check-env-deployment-policies.sh against synthetic API fixtures.
+# No network, no real gh, no repo state.
+test-env-deployment-policies:
+    ./scripts/check-env-deployment-policies.test.sh
+
+# Fail when any Actions environment's deployment-branch-policy configuration
+# drifts from the matrix issue #755 settled (read-only; needs gh auth).
+# Mirrored in the ci.yml `zizmor self-check` job.
+check-env-deployment-policies:
+    ./scripts/check-env-deployment-policies.sh
+
 # Dry-run the crates.io publish: package all 8 crates (workspace) without
 # uploading. Validates manifests/metadata; runs on a normal -dev branch.
 publish-dry-run:
@@ -483,7 +494,7 @@ test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-installer test-prune-containers semver-checks oracle-checks oracle-deny
+ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-env-deployment-policies check-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
     typos
 
 # Re-run pre-commit hooks across all files.

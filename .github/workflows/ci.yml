@@ -515,6 +515,12 @@ jobs:
   zizmor:
     name: zizmor self-check
     runs-on: ubuntu-24.04
+    # `deployments: read` covers the environments/deployment-branch-policy API
+    # the drift guard below walks (#755). Read-only, and this job holds no
+    # other credential.
+    permissions:
+      contents: read
+      deployments: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -523,6 +529,10 @@ jobs:
         with:
           tool: zizmor
       - run: zizmor .github/workflows/
+      - name: Environment deployment-policy drift guard (#755)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-env-deployment-policies.sh
 
   # The coverage half of the SonarQube analysis. This job compiles and executes
   # every build script and proc macro in the dependency graph plus the
