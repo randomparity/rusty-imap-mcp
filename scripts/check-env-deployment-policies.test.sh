@@ -177,6 +177,29 @@ json.dump(data, open(path, "w"))
 PY
 expect_fail "policy of the wrong ref kind fails" "crates-io"
 
+drift_dir="${tmp}/extra-policy"
+cp -r "$fixture_dir" "$drift_dir"
+python3 - "$drift_dir" <<'PY'
+import json, sys
+path = sys.argv[1] + "/repos_ownerr_repo_environments_crates-io_deployment-branch-policies.json"
+data = json.load(open(path))
+data["branch_policies"].append({"name": "develop", "type": "branch"})
+data["total_count"] = len(data["branch_policies"])
+json.dump(data, open(path, "w"))
+PY
+expect_fail "unexpected extra policy on crates-io fails" "crates-io"
+
+drift_dir="${tmp}/realign-custom-mode"
+cp -r "$fixture_dir" "$drift_dir"
+python3 - "$drift_dir" <<'PY'
+import json, sys
+path = sys.argv[1] + "/repos_ownerr_repo_environments_fuzz-lock-realign.json"
+data = json.load(open(path))
+data["deployment_branch_policy"] = {"protected_branches": False, "custom_branch_policies": True}
+json.dump(data, open(path, "w"))
+PY
+expect_fail "fuzz-lock-realign flipped off protected-branches-only fails" "fuzz-lock-realign"
+
 # The exit-2 contract: an API failure must be distinguishable from drift
 # (exit 1), because a required check that reports outages as policy drift
 # misdirects triage. Both failure shapes get a case so neither can regress

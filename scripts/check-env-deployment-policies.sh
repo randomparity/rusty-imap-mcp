@@ -89,17 +89,32 @@ def api(path):
     retry_sleep = float(os.environ.get("RIMAP_RETRY_SLEEP", "2"))
     last = ""
     for attempt in range(4):
-        proc = subprocess.run([gh, "api", path], capture_output=True, text=True)
-        if proc.returncode == 0:
-            try:
-                return json.loads(proc.stdout)
-            except json.JSONDecodeError:
-                # A non-JSON HTTP-200 body is an API failure too: it must
-                # keep this function's exit-2 contract rather than crash
-                # with a traceback that exits 1 and reads as drift.
-                last = f"HTTP success but body is not JSON: {proc.stdout[:200]!r}"
+        try:
+            proc = subprocess.run(
+                [gh, "api", path], capture_output=True, text=True, timeout=60
+            )
+        except subprocess.TimeoutExpired:
+            last = f"gh api {path} timed out after 60s"
+        except OSError as exc:
+            # Missing or unexecutable gh binary: same contract as any other
+            # degraded dependency — exit 2, never a traceback that reads as
+            # drift.
+            print(f"error: cannot execute {gh}: {exc}", file=sys.stderr)
+            sys.exit(2)
         else:
-            last = proc.stderr.strip()
+            if proc.returncode == 0:
+                try:
+                    return json.loads(proc.stdout)
+                except json.JSONDecodeError:
+                    # A non-JSON HTTP-200 body is an API failure too: it must
+                    # keep this function's exit-2 contract rather than crash
+                    # with a traceback that exits 1 and reads as drift.
+                    last = (
+                        f"HTTP success but body is not JSON: "
+                        f"{proc.stdout[:200]!r}"
+                    )
+            else:
+                last = proc.stderr.strip()
         time.sleep(retry_sleep * (2**attempt))
     print(f"error: gh api {path} failed after retries: {last}", file=sys.stderr)
     print(
