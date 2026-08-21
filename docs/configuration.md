@@ -488,6 +488,7 @@ accounts in multi-account configs).
 | `rotate_bytes` | u64 | 10,485,760 (10 MiB) | Rotate when the file reaches this size. `0` disables rotation. |
 | `rotate_keep` | u32 | 5 | Number of rotated files to keep after rotation |
 | `retention_seconds` | u64 | (none) | Time-based retention for rotated files. Omit to disable. |
+| `write_deadline_seconds` | u64 | 15 | Write-deadline watchdog (ADR-0022): an audit write whose completion reply does not arrive within this many seconds fails with `ERR_INTERNAL` (or is suppressed under `fail_open`) instead of blocking forever on a slow or hung `audit.path`. `0` disables the bound. |
 | `provenance_window_seconds` | u32 | 60 | Provenance ring buffer window |
 | `fail_open` | bool | false | If true, continue on audit write failure (insecure). Default: audit write failure fails the tool call. |
 | `allowed_base_dir` | string | (platform default) | Containment base for `audit.path`. Default is `directories::ProjectDirs::data_local_dir()` — `~/Library/Application Support/rusty-imap-mcp/` on macOS, `$XDG_DATA_HOME/rusty-imap-mcp/` (typically `~/.local/share/rusty-imap-mcp/`) on Linux. Set to `"/"` to disable (not recommended). |

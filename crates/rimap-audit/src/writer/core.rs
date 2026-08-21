@@ -8,11 +8,12 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use fs4::{FileExt, TryLockError};
 
+use super::deadline::{IoHandle, WorkerConfig, spawn_worker};
 use crate::AuditError;
 
 /// Options for opening an audit writer.
@@ -76,6 +77,13 @@ pub struct AuditOptions {
     /// accept losing audit records on storage failures opt in via this
     /// flag — see the audit security model docs for the trade-off.
     pub fail_open: bool,
+    /// Write deadline in seconds (ADR-0022 write-deadline watchdog). If a
+    /// write (`write_all`, `flush`, `fsync`) exceeds this duration, the write
+    /// fails with `AuditError::WriteDeadline` rather than blocking
+    /// indefinitely. A default of 15 seconds catches a completely hung mount
+    /// while not triggering on momentarily slow but healthy local disks. Set
+    /// to 0 to disable the deadline.
+    pub write_deadline_seconds: u64,
     /// First `Seq` value this writer will allocate. Callers compute this from
     /// `read_trailing_state(path)?.last_seq.map_or(Seq::FIRST, Seq::next)`
     /// before calling `open`. Set through [`AuditOptions::new`], which takes
@@ -118,6 +126,7 @@ impl AuditOptions {
             rotate_keep: 0,
             retention_seconds: None,
             fail_open: false,
+            write_deadline_seconds: 15, // Default 15 seconds per ADR-0022
             initial_seq,
         }
     }
@@ -135,19 +144,18 @@ pub(super) struct FailureInjection {
 }
 
 /// Append-only JSONL writer. Construct via [`AuditWriter::open`]. Cheaply
-/// cloneable — the underlying `File` and `BufWriter` live behind an
-/// `Arc<Mutex<_>>`, so all clones write through the same lock.
+/// cloneable — all clones submit to the same dedicated writer thread, which
+/// owns the file handle and serializes every write.
 #[derive(Debug, Clone)]
 pub struct AuditWriter {
     pub(super) path: PathBuf,
     pub(super) rotate_bytes: u64,
-    pub(super) rotate_keep: u32,
-    pub(super) retention_seconds: Option<u64>,
     pub(super) fail_open: bool,
     pub(super) process_id: crate::record::ids::ProcessId,
     pub(super) suppressed_failures: Arc<AtomicU64>,
     pub(super) tool_calls: Arc<AtomicU64>,
-    pub(super) inner: Arc<Mutex<Inner>>,
+    pub(super) next_seq: Arc<AtomicU64>,
+    pub(super) io: Arc<IoHandle>,
     #[cfg(any(test, feature = "test-injection"))]
     pub(super) failure_injection: Arc<FailureInjection>,
 }
@@ -157,8 +165,6 @@ pub(crate) struct Inner {
     pub(crate) buf: BufWriter<File>,
     /// Total bytes written to the active file (used by rotation).
     pub(crate) bytes_written: u64,
-    /// Next `Seq` value to hand out via `allocate_seq`.
-    pub(crate) next_seq: crate::record::ids::Seq,
 }
 
 impl AuditWriter {
@@ -214,20 +220,38 @@ impl AuditWriter {
             })?
             .len();
 
+        #[cfg(any(test, feature = "test-injection"))]
+        let stall_next_write_ms = Arc::new(AtomicU64::new(0));
+        let tx = spawn_worker(
+            WorkerConfig {
+                path: opts.path.clone(),
+                rotate_bytes: opts.rotate_bytes,
+                rotate_keep: opts.rotate_keep,
+                retention_seconds: opts.retention_seconds,
+            },
+            Inner {
+                buf: BufWriter::new(file),
+                bytes_written,
+            },
+            #[cfg(any(test, feature = "test-injection"))]
+            Arc::clone(&stall_next_write_ms),
+        );
+
         Ok(Self {
             path: opts.path.clone(),
             rotate_bytes: opts.rotate_bytes,
-            rotate_keep: opts.rotate_keep,
-            retention_seconds: opts.retention_seconds,
             fail_open: opts.fail_open,
             process_id: crate::record::ids::ProcessId::new_now(),
             suppressed_failures: Arc::new(AtomicU64::new(0)),
             tool_calls: Arc::new(AtomicU64::new(0)),
-            inner: Arc::new(Mutex::new(Inner {
-                buf: BufWriter::new(file),
-                bytes_written,
-                next_seq: opts.initial_seq,
-            })),
+            next_seq: Arc::new(AtomicU64::new(opts.initial_seq.0)),
+            io: Arc::new(IoHandle::new(
+                opts.path.clone(),
+                opts.write_deadline_seconds,
+                tx,
+                #[cfg(any(test, feature = "test-injection"))]
+                stall_next_write_ms,
+            )),
             #[cfg(any(test, feature = "test-injection"))]
             failure_injection: Arc::new(FailureInjection::default()),
         })
@@ -304,14 +328,24 @@ impl AuditWriter {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Test-only: make the worker thread stall exactly one upcoming write
+    /// for `millis` before performing it, simulating a slow or hung mount
+    /// for the write-deadline tests. Cleared after the one stall.
+    #[cfg(any(test, feature = "test-injection"))]
+    pub fn stall_next_write_ms(&self, millis: u64) {
+        self.io
+            .stall_next_write_ms
+            .store(millis, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Total bytes written through this writer since `open` (including bytes
     /// already present at open time). Used by rotation logic.
     ///
     /// # Errors
-    /// Returns `AuditError::Write` if the internal mutex is poisoned.
+    /// Returns `AuditError::Write` if the writer worker thread is gone.
     pub fn bytes_written(&self) -> Result<u64, AuditError> {
-        let guard = self.lock_inner()?;
-        Ok(guard.bytes_written)
+        self.io
+            .request(|reply| super::deadline::Request::BytesWritten { reply })
     }
 
     /// Returns the current on-disk length of the active file. Used by tests.
@@ -319,16 +353,8 @@ impl AuditWriter {
     /// # Errors
     /// I/O error from `metadata()`.
     pub fn on_disk_len(&self) -> Result<u64, AuditError> {
-        let guard = self.lock_inner()?;
-        let meta = guard
-            .buf
-            .get_ref()
-            .metadata()
-            .map_err(|source| AuditError::Write {
-                path: self.path.clone(),
-                source,
-            })?;
-        Ok(meta.len())
+        self.io
+            .request(|reply| super::deadline::Request::OnDiskLen { reply })
     }
 }
 
@@ -383,6 +409,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         assert_eq!(writer.path(), path);
@@ -400,6 +427,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         let err = AuditWriter::open(&AuditOptions {
@@ -409,6 +437,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap_err();
         match err {
@@ -429,6 +458,7 @@ mod tests {
                 retention_seconds: None,
                 fail_open: false,
                 initial_seq: crate::record::ids::Seq::FIRST,
+                write_deadline_seconds: 15,
             })
             .unwrap();
         }
@@ -440,6 +470,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
     }
@@ -455,6 +486,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         assert!(path.exists());
@@ -475,6 +507,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -515,6 +548,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -553,6 +587,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -626,6 +661,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -652,6 +688,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap_err();
         match err {
@@ -671,6 +708,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         let pid_a = writer.process_id();
@@ -689,6 +727,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         let s1 = writer.allocate_seq().unwrap();
@@ -710,6 +749,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq(42),
+            write_deadline_seconds: 15,
         })
         .unwrap();
         assert_eq!(writer.allocate_seq().unwrap(), crate::record::ids::Seq(42));
@@ -729,6 +769,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -771,6 +812,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         let pid = writer.process_id();
@@ -817,6 +859,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -862,6 +905,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -896,6 +940,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -941,6 +986,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         let pid = writer.process_id();
@@ -976,6 +1022,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -1015,6 +1062,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
         assert_eq!(writer.rotate_bytes(), 4242);
@@ -1038,6 +1086,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -1085,6 +1134,7 @@ mod tests {
             retention_seconds: None,
             fail_open: true,
             initial_seq: Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -1131,6 +1181,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
@@ -1155,6 +1206,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 

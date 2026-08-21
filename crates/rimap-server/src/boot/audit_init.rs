@@ -27,6 +27,7 @@ pub fn init_audit_writer_multi(
     options.rotate_keep = multi.audit.rotate_keep;
     options.retention_seconds = multi.audit.retention_seconds;
     options.fail_open = multi.audit.fail_open;
+    options.write_deadline_seconds = multi.audit.write_deadline_seconds;
     let writer = AuditWriter::open(&options)?;
 
     if let Some(parent) = writer.path().parent() {

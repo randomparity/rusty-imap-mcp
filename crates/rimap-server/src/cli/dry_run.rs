@@ -206,6 +206,7 @@ pub async fn run<W: Write>(path: &Path, out: &mut W) -> anyhow::Result<()> {
     options.rotate_keep = multi.audit.rotate_keep;
     options.retention_seconds = multi.audit.retention_seconds;
     options.fail_open = multi.audit.fail_open;
+    options.write_deadline_seconds = multi.audit.write_deadline_seconds;
     let _audit_writer = AuditWriter::open(&options)
         .with_context(|| format!("opening audit log at {}", audit_path.display()))?;
 

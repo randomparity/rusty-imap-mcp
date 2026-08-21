@@ -455,6 +455,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .expect("audit open");
 
@@ -482,6 +483,7 @@ mod tests {
             retention_seconds: None,
             fail_open: false,
             initial_seq: crate::record::ids::Seq::FIRST,
+            write_deadline_seconds: 15,
         })
         .unwrap();
 
