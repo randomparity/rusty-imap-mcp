@@ -211,7 +211,7 @@ pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> 
         if !line.starts_with(' ') {
             in_service = false;
         } else if line.starts_with("  ") && !line.starts_with("   ") {
-            in_service = line.trim_end() == service_key;
+            in_service = line.trim() == service_key;
         } else if in_service {
             if let Some(value) = line.trim_start().strip_prefix("image:") {
                 let value = value.trim();

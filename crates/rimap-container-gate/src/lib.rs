@@ -211,6 +211,69 @@ fn names_unreachable_engine(stderr: &str) -> bool {
         || s.contains("connection refused")
 }
 
+/// The host architecture in OCI image naming, or `None` when this build's
+/// target architecture is not one the check can judge. Test binaries are
+/// never cross-compiled here (CI builds every platform natively), so the
+/// compile-time arch is the host arch.
+#[must_use]
+pub fn host_arch() -> Option<&'static str> {
+    oci_arch_name(std::env::consts::ARCH)
+}
+
+fn oci_arch_name(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" => Some("arm64"),
+        "x86_64" => Some("amd64"),
+        _ => None,
+    }
+}
+
+/// The loud-failure reason when the fixture image's architecture differs
+/// from the host's, naming the pin, both arches, and the symptom the
+/// mismatch produces downstream. `None` when they match.
+#[must_use]
+pub fn arch_mismatch_reason(image_ref: &str, image_arch: &str, host_arch: &str) -> Option<String> {
+    if image_arch == host_arch {
+        return None;
+    }
+    Some(format!(
+        "fixture image {image_ref} is linux/{image_arch} but this host is \
+         {host_arch}: the container would run under emulation, which breaks \
+         the fixture (doveadm auth-userdb disconnects, TLS handshake EOFs). \
+         Re-pin the compose image to a manifest whose architecture list \
+         covers {host_arch}."
+    ))
+}
+
+/// The pinned image reference for `service` in a compose file, parsed by
+/// line scan — no YAML dependency for a two-field need. The reference is
+/// read at runtime, never duplicated as a constant, so a Dependabot digest
+/// bump cannot leave the arch check validating a ref nobody runs. `None`
+/// when the file, the service, or its `image:` key cannot be found.
+#[must_use]
+pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> {
+    let text = std::fs::read_to_string(compose).ok()?;
+    let service_key = format!("{service}:");
+    let mut in_service = false;
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            in_service = false;
+        } else if line.starts_with("  ") && !line.starts_with("   ") {
+            in_service = line.trim() == service_key;
+        } else if in_service && let Some(value) = line.trim_start().strip_prefix("image:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+            // Any other property line inside the service falls through —
+            // a `?` on the strip_prefix would abort the whole scan on the
+            // first non-`image:` key (e.g. `container_name:`) and return
+            // `None` for every real compose file.
+        }
+    }
+    None
+}
+
 /// Run `<tool> info` — the cheapest call that actually contacts the engine,
 /// where `binary_present` only proves the CLI is on `PATH` — and return
 /// `Some((succeeded, stderr))`, or `None` when it outlives `budget`.
@@ -267,8 +330,9 @@ mod tests {
     use std::cell::RefCell;
 
     use super::{
-        DAEMON_PROBE_TIMEOUT, Duration, Instant, RuntimeProbe, classify_probe, run_daemon_probe,
-        select_runtime, unusable_reason, wait_bounded,
+        DAEMON_PROBE_TIMEOUT, Duration, Instant, RuntimeProbe, arch_mismatch_reason,
+        classify_probe, oci_arch_name, pinned_image, run_daemon_probe, select_runtime,
+        unusable_reason, wait_bounded,
     };
     use std::process::Command;
 
@@ -482,5 +546,102 @@ mod tests {
             child.try_wait().is_ok_and(|s| s.is_some()),
             "child was not reaped"
         );
+    }
+
+    // ── arch gate (#811) ─────────────────────────────────────────────
+
+    #[test]
+    fn host_arch_maps_rust_names_to_oci_names() {
+        // Compile-time arch on this host is whatever built the tests; the
+        // mapping itself is what the check depends on. Both known values
+        // must map; the function must never guess at anything else.
+        let mapped = ["aarch64", "x86_64"]
+            .into_iter()
+            .filter_map(oci_arch_name)
+            .collect::<Vec<_>>();
+        assert_eq!(mapped, ["arm64", "amd64"]);
+    }
+
+    #[test]
+    fn arch_mismatch_reason_names_both_arches_and_the_pin() {
+        let reason = arch_mismatch_reason(
+            "docker.io/dovecot/dovecot:2.4.4-root@sha256:34c8425",
+            "amd64",
+            "arm64",
+        )
+        .expect("a mismatch is a reason");
+        assert!(reason.contains("34c8425"), "{reason:?}");
+        assert!(reason.contains("amd64"), "{reason:?}");
+        assert!(reason.contains("arm64"), "{reason:?}");
+        assert!(
+            reason.contains("emulation"),
+            "the symptom hint must be there: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn arch_mismatch_reason_is_none_on_a_match() {
+        assert_eq!(
+            arch_mismatch_reason("some@sha256:1", "arm64", "arm64"),
+            None
+        );
+    }
+
+    const COMPOSE_ONE_SERVICE: &str = "\
+services:
+  dovecot:
+    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80
+    container_name: rimap-it-dovecot
+    ports: []
+";
+
+    const COMPOSE_TWO_SERVICES: &str = "\
+services:
+  dovecot:
+    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+";
+
+    /// Unique per-process scratch dir under `std::env::temp_dir` — no
+    /// `tempfile` dependency: the gate crate's manifest says "No
+    /// dependencies, by design" and a dev-dep would amend that contract
+    /// for no gain. The pid+counter name cannot collide across parallel
+    /// test threads; tests only ever read files they just wrote.
+    fn scratch_compose(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rimap-gate-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir.join(name)
+    }
+
+    #[test]
+    fn pinned_image_reads_the_named_service() {
+        let path = scratch_compose("compose.yml");
+        std::fs::write(&path, COMPOSE_ONE_SERVICE).expect("write");
+        assert_eq!(
+            pinned_image(&path, "dovecot").as_deref(),
+            Some("docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80")
+        );
+        std::fs::write(&path, COMPOSE_TWO_SERVICES).expect("write");
+        assert_eq!(
+            pinned_image(&path, "toxiproxy").as_deref(),
+            Some("ghcr.io/shopify/toxiproxy:2.12.0"),
+            "the second service must not inherit the first"
+        );
+    }
+
+    #[test]
+    fn pinned_image_is_none_for_a_missing_service_or_file() {
+        let path = scratch_compose("compose.yml");
+        std::fs::write(&path, COMPOSE_TWO_SERVICES).expect("write");
+        assert_eq!(pinned_image(&path, "mailpit"), None);
+        let dir = path.parent().expect("scratch dir");
+        assert_eq!(pinned_image(&dir.join("absent.yml"), "dovecot"), None);
     }
 }
