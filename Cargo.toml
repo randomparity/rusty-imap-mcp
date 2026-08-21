@@ -221,11 +221,11 @@ phf_codegen = "0.14.0"
 lettre = { version = "0.11.21", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
 # MCP server (Sprint 5)
-# rmcp 2.1 is the Rust MCP SDK (major bump 1.8 -> 2.1; aligns model types to
+# rmcp 3.1.4 is the Rust MCP SDK (major bump 2.0 → 3.0; aligns model types to
 # the MCP 2025-11-25 spec). Transitive proc-macro: rmcp-macros (the macros
-# feature). Reviewed v2.1 on 2026-07-08 (SC-PROC-01): published by the
+# feature). Reviewed v3.1.4 on 2026-08-21 (SC-PROC-01): published by the
 # ModelContextProtocol org, Apache-2.0, standard proc-macro2/quote/syn stack,
-# no new crate names in the graph. rmcp's build.rs is byte-identical to 1.8
+# no new crate names in the graph. rmcp's build.rs is byte-identical to 2.2.0
 # and inert as a dependency (it only runs `git config core.hooksPath` inside
 # rmcp's own dev checkout, never present for a crates.io dep). Never enable
 # the optional `reqwest-native-tls` feature: rustls-only policy, and reqwest
@@ -233,8 +233,11 @@ lettre = { version = "0.11.21", default-features = false, features = ["tokio1-ru
 # protocol-acceptance pin: server.rs gates on `ProtocolVersion::LATEST`, so an
 # rmcp bump that advances LATEST past 2025-11-25 would shift the accepted
 # protocol version with no code change (a security property distinct from the
-# version pin; the spec's stop-and-escalate rule applies).
-rmcp = { version = "2.0", features = ["server", "macros", "transport-io"] }
+# version pin; the spec's stop-and-escalate rule applies). LATEST verified as
+# V_2025_11_25 in rmcp 3.1.4 model.rs:175 — 2026-07-28 exists but is not
+# advertised as LATEST, so the server remains locked to 2025-11-25 with no
+# code change.
+rmcp = { version = "3.0", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 infer = "0.22"
 
