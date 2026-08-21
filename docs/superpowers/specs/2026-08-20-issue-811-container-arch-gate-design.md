@@ -23,19 +23,23 @@ Verified on this host (Apple M5 Max, Docker 29.7.2):
 - `docker manifest inspect` on the multi-arch pins returns a manifest list /
   OCI index covering `amd64` + `arm64` (dovecot, toxiproxy, mailpit) — the
   current pins cannot false-fail the new check on CI.
-- `docker manifest inspect` on the old amd64-only child digest fails outright
-  (`manifest verification failed for digest …`) — registry-side manifest
-  inspection is unusable for exactly the bad-pin shape we need to diagnose.
-- `docker image inspect --format '{{.Architecture}}'
-  docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80…` on this arm64 host
+- `docker manifest inspect` on the old amd64-only child digest fails with
+  the `tag@digest` syntax the compose pins use (`manifest verification
+  failed for digest …`); the bare `image@digest` form succeeds but returns
+  an arch-less image manifest — registry-side inspection is incomplete for
+  exactly the bad-pin shape we need to diagnose (see ADR-0023).
+- `docker image inspect --format '{{.Architecture}}'` on the current pin
   prints `arm64` — the local inspect reports the arch of the image compose
   actually runs.
 
 ## Goals
 
-1. An arch-mismatched fixture pin fails fast with a named diagnostic: the
-   image reference, the image's architecture, the host's architecture, and a
-   pointer to the emulation symptom.
+1. On a host that emulates the foreign arch (so `compose up` itself
+   succeeds), an arch-mismatched fixture pin fails fast with a named
+   diagnostic: the image reference, the image's architecture, the host's
+   architecture, and a pointer to the emulation symptom. On a host that
+   cannot emulate, `compose up` fails loudly on its own before any of this
+   matters.
 2. `just test-fast` runs only non-container tests: every container-backed
    test binary is excluded, and the exclusion list cannot silently drift from
    the binaries that link container harnesses.
@@ -45,7 +49,8 @@ Verified on this host (Apple M5 Max, Docker 29.7.2):
 ## Non-goals
 
 - No production (`src/`) code changes; test infrastructure only.
-- No compose pin bumps (Dependabot owns pins).
+- No compose pin bumps (Dependabot owns pins). Comment-only edits to a
+  compose file (the chaos "no arch gate" comment, §6) are not pin bumps.
 - No `.github/workflows/` changes; no new runtime dependencies.
 - No change to runtime selection (`RIMAP_CONTAINER_TOOL` autodetect, daemon
   probe, `RIMAP_REQUIRE_DOCKER` semantics).
@@ -114,10 +119,16 @@ Decisions inside the API:
 
 ### 2. Harness wiring (four call sites)
 
-Each container harness (`rimap-imap`
-`tests/integration/support/container.rs`, `rimap-server`
-`tests/support/{dovecot,mailpit,chaos}/harness.rs`) gains, immediately
-after its compose up succeeds:
+Each container harness gains the check immediately after its compose up
+succeeds. Service keys, verified against the compose files: the two Dovecot
+harnesses check service `dovecot` (`docker-compose.yml`); the Mailpit
+harness checks service `smtp` in `.../integration/smtp/docker-compose.yml`
+(the service is named `smtp`, not `mailpit`); the chaos harness checks both
+`dovecot` and `toxiproxy` in `docker-compose.chaos.yml`.
+
+The three `HarnessError` harnesses (`rimap-imap` `container.rs`,
+`rimap-server` `dovecot/harness.rs`, `rimap-server` `mailpit/harness.rs`)
+share this shape:
 
 ```rust
 let Some(image) = rimap_container_gate::pinned_image(&compose_dir.join(COMPOSE_FILE), "dovecot") else {
@@ -139,20 +150,29 @@ if let (Some(arch), Some(host)) = (
 }
 ```
 
-- `HarnessError` gains `ArchMismatch(String)` in each harness. It maps to a
-  **hard failure at every posture** — it is never `DockerUnavailable` and
-  never silent-skips, not even without `RIMAP_REQUIRE_DOCKER`. An
-  arch-mismatched pin is a fixture defect, not an absent host capability;
-  the documented contract already makes "an unpullable image" a hard
-  failure at every posture, and this is the same class. (The harnesses'
-  skip path is deliberately quiet — a test matches
+- `HarnessError` gains `ArchMismatch(String)` in those three harnesses. It
+  maps to a **hard failure at every posture** — it is never
+  `DockerUnavailable` and never silent-skips, not even without
+  `RIMAP_REQUIRE_DOCKER`. An arch-mismatched pin is a fixture defect, not
+  an absent host capability; the documented contract already makes "an
+  unpullable image" a hard failure at every posture, and this is the same
+  class. (The harnesses' skip path is deliberately quiet — a test matches
   `Err(DockerUnavailable) => return` and prints nothing — so a skip could
   not carry the diagnosis to the operator.)
-- The chaos harness checks both images (dovecot, toxiproxy); the mailpit
-  harness checks mailpit; the two Dovecot harnesses check dovecot.
-- `DockerUnavailable`'s doc comment already promises "wrong arch" lands in
-  the loud path — this change makes the promise true; the comment is
-  updated to name `ArchMismatch`.
+- **The chaos harness is the exception**: `ChaosHarness::try_start` returns
+  `Result<Self, ChaosSkip>`, and `ChaosSkip` is documented as a
+  silent-skip enum — an `ArchMismatch` variant there would contradict its
+  contract. The chaos harness instead uses its own established
+  loud-infrastructure-failure path: on mismatch (or unparseable pin) it
+  runs `compose_down` and panics with the reason, under the file's existing
+  `#![expect(clippy::panic, reason = "control-plane failures abort the
+  test loudly")]`. That is loud at every posture, which is what ADR-0023
+  requires; `ChaosSkip` is untouched, so the three-tier `RIMAP_CHAOS` /
+  skip / loud policy is unchanged. The check runs for both services
+  (`dovecot`, then `toxiproxy`) right where chaos's compose up succeeds.
+- `DockerUnavailable`'s doc comment in each harness promises "wrong arch"
+  lands in the loud path — this change makes the promise true; the comment
+  is updated to name `ArchMismatch`.
 
 ### 3. `test-fast` filter from a shared source
 
@@ -171,10 +191,13 @@ if let (Some(arch), Some(host)) = (
   a dev-dependency of both harness-owning crates and can reach the
   workspace root via `CARGO_MANIFEST_DIR`) scans `crates/*/tests/**/*.rs`
   (excluding any `support/` path segment), maps file stem → binary name,
-  and fails when (a) a test binary references a container harness type but
-  is missing from the list, or (b) a list entry matches no such file. This
-  runs in every `just test` / CI test job — a gate that runs where the
-  drift would happen, not in a script only `just ci` reaches.
+  and asserts **set equality** between the scanned container-backed set and
+  the list: it fails when a test binary references a container harness type
+  but is missing from the list, and equally when a list entry matches no
+  such file (a stale entry pointing at a de-containerized binary fails the
+  same assertion). This runs in every `just test` / CI test job — a gate
+  that runs where the drift would happen, not in a script only `just ci`
+  reaches.
 - The `test-fast` doc comment and the AGENTS.md description stop saying
   "five heaviest binaries" and say "every container-backed binary plus the
   slow HTML-lookalike proptest".
@@ -191,10 +214,36 @@ a documented exemption") so a future reader does not re-derive it.
 - Troubleshooting note: an amd64-only digest pin on Apple Silicon manifests
   as `doveadm … Unexpectedly disconnected from auth service` / TLS
   handshake EOF, not as an arch error; the gate now names it.
-- The gate-contract paragraph gains one sentence: fixture image
+- The gate-contract paragraph gains the arch-check sentences: fixture image
   architecture is checked against the host after compose up, mismatch is a
-  loud failure at every posture, and `prune-containers.sh` is exempt
-  because it never runs the fixture image.
+  loud failure at every posture, the reference is parsed from the compose
+  file at runtime, and `prune-containers.sh` is exempt because it never
+  runs the fixture image.
+- The "There is no arch gate" sentence (fixture section) and the
+  "Multi-arch, no arch gate" bullet (chaos section) are updated: the arch
+  gate now exists; what remains true is that no *CI* arch gate blocks a
+  pin bump before merge (see ADR-0023's rejected alternative).
+- The `test-fast` description ("Skips the five heaviest test binaries")
+  matches §3's new wording.
+
+### 6. Documented-statement amendments (full ADR-0023 inventory)
+
+ADR-0023's Consequences promise that the carrying change amends every
+documented statement it falsifies. The complete list, each a comment- or
+sentence-level edit:
+
+1. AGENTS.md gate-contract paragraph — arch-check sentences (§5).
+2. AGENTS.md "There is no arch gate" (fixture section) — updated (§5).
+3. AGENTS.md "Multi-arch, no arch gate" (chaos section) — updated (§5).
+4. `docs/ADR/0001-smtp-real-socket-e2e-and-auth-taxonomy.md` — its Context
+   bullet "The Dovecot fixture has **no arch gate**" is corrected by a
+   dated `## Errata` append, the one edit an accepted ADR permits (already
+   drafted in this branch's history; carried in the final diff).
+5. `crates/rimap-imap/tests/integration/dovecot/docker-compose.chaos.yml` —
+   the "no arch gate" comment on the Toxiproxy image is updated
+   (comment-only; no pin change).
+6. Each harness's `DockerUnavailable` doc comment — "wrong arch" moves to
+   the loud `ArchMismatch` (§2).
 
 ## Threat model note
 
@@ -217,7 +266,8 @@ comparison against a mapped constant.
 - **Drift-guard test**: positive case (the real tree passes), and mutation
   cases via tempdirs? No — it reads the real tree. Its bite is proven by
   the TDD red step: adding a fake harness-referencing test file turns it
-  red, removing it turns it green.
+  red, removing it turns it green; adding a bogus list entry also turns it
+  red (set equality, both directions).
 - **Harness mapping tests**: each harness's existing pure `gate()`
   mapping test style extends to `ArchMismatch` (always loud, message
   carried).
@@ -231,9 +281,10 @@ comparison against a mapped constant.
 
 | # | Criterion (source) | Where |
 |---|---|---|
-| 1 | Arch-mismatched pin fails fast, naming both arches and the pin (issue Expected ¶1) | gate `arch_mismatch_reason` + `ArchMismatch` wiring |
+| 1 | On an emulation-capable host, an arch-mismatched pin fails fast, naming both arches and the pin (issue Expected ¶1) | gate `arch_mismatch_reason` + `ArchMismatch` wiring |
 | 2 | `just test-fast` excludes every container-backed binary (issue Expected ¶2) | shared list + recipe + drift guard |
 | 3 | Only genuine can't-run hosts silent-skip (issue Context, AGENTS.md) | `ArchMismatch` never maps to `DockerUnavailable` |
 | 4 | `prune-containers.sh` same treatment or documented exemption (issue Proposed 1) | header comment |
 | 5 | AGENTS.md troubleshooting note (issue Proposed 3) | AGENTS.md |
 | 6 | No new dependencies, no workflow changes, philosophy preserved (charter exclusions) | whole diff |
+| 7 | All six ADR-0023 falsified-statement amendments land in the carrying change (ADR-0023 Consequences) | §6 |
