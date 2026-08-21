@@ -494,7 +494,7 @@ test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-env-deployment-policies check-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
+ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity test-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
     typos
 
 # Re-run pre-commit hooks across all files.

@@ -30,7 +30,8 @@ if [[ "${1:-}" != "api" ]]; then
     echo "stub gh: unsupported invocation: $*" >&2
     exit 64
 fi
-key="${2//\//_}"
+key="${2%%\?*}"
+key="${key//\//_}"
 if [[ ! -s "${FIXTURE_DIR}/${key}.json" ]]; then
     echo "stub gh: no fixture for ${2}" >&2
     exit 3
@@ -42,6 +43,7 @@ chmod +x "${tmp}/gh"
 # The all-green matrix. `environments` lists exactly the five names the issue
 # covers; per-environment files carry the shape GET /environments/{name}
 # returns; deployment-branch-policies listings carry {name, type} pairs.
+
 write_green_fixtures() {
     local d="${1}"
     cat >"${d}/repos_ownerr_repo_environments.json" <<'JSON'
@@ -83,7 +85,7 @@ JSON
 
 expect_ok() {
     local label="$1"
-    if RIMAP_GH_BIN="${tmp}/gh" FIXTURE_DIR="$fixture_dir" \
+    if RIMAP_GH_BIN="${tmp}/gh" RIMAP_RETRY_SLEEP=0 FIXTURE_DIR="$fixture_dir" \
         bash "$script" ownerr/repo >"${tmp}/out.txt" 2>&1; then
         : # pass
     else
@@ -95,7 +97,7 @@ expect_ok() {
 
 expect_fail() {
     local label="$1" needle="$2"
-    if RIMAP_GH_BIN="${tmp}/gh" FIXTURE_DIR="$drift_dir" \
+    if RIMAP_GH_BIN="${tmp}/gh" RIMAP_RETRY_SLEEP=0 FIXTURE_DIR="$drift_dir" \
         bash "$script" ownerr/repo >"${tmp}/out.txt" 2>&1; then
         failures=$((failures + 1))
         printf 'FAIL %s: expected nonzero exit\n' "$label"
@@ -116,6 +118,7 @@ cp -r "$fixture_dir" "$drift_dir"
 rm "${drift_dir}/repos_ownerr_repo_environments_release_deployment-branch-policies.json"
 printf '{"total_count": 0, "branch_policies": []}\n' \
     >"${drift_dir}/repos_ownerr_repo_environments_release_deployment-branch-policies.json"
+expect_fail "empty policy list on release fails" "release"
 
 drift_dir="${tmp}/sonarcloud-has-policy"
 cp -r "$fixture_dir" "$drift_dir"

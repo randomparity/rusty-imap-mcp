@@ -45,10 +45,10 @@
 # Defaults to GITHUB_REPOSITORY inside Actions, else the origin remote. Set
 # RIMAP_GH_BIN to route the API calls through a stub in tests.
 #
-# Wired into the ci.yml `zizmor self-check` job and `just ci`
-# (`check-env-deployment-policies`). Tested by
-# scripts/check-env-deployment-policies.test.sh.
-set -euo pipefail
+# Wired into the ci.yml `zizmor self-check` job, which is where the live
+# check runs; the justfile recipes expose it (`check-env-deployment-policies`)
+# and its hermetic unit suite (`test-env-deployment-policies`, part of `just
+# ci`). Tested by scripts/check-env-deployment-policies.test.sh.
 
 REPO="${1:-${GITHUB_REPOSITORY:-}}"
 if [[ -z "$REPO" ]]; then
@@ -59,8 +59,10 @@ GH_BIN="${RIMAP_GH_BIN:-gh}"
 
 python3 - "$REPO" "$GH_BIN" <<'PY'
 import json
+import os
 import subprocess
 import sys
+import time
 import urllib.parse
 
 repo, gh = sys.argv[1], sys.argv[2]
@@ -80,22 +82,44 @@ MATRIX = {
 
 
 def api(path):
-    proc = subprocess.run([gh, "api", path], capture_output=True, text=True)
-    if proc.returncode != 0:
-        print(f"error: gh api {path} failed: {proc.stderr.strip()}", file=sys.stderr)
-        sys.exit(2)
-    return json.loads(proc.stdout)
+    # Transient 429/5xx/timeout must not redden a required check: retry the
+    # read a few times before failing. The failure itself stays fail-closed.
+    # RIMAP_RETRY_SLEEP exists for tests, which stub the API and must not
+    # spend the real backoff sleeping.
+    retry_sleep = float(os.environ.get("RIMAP_RETRY_SLEEP", "2"))
+    last = ""
+    for attempt in range(4):
+        proc = subprocess.run([gh, "api", path], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return json.loads(proc.stdout)
+        last = proc.stderr.strip()
+        time.sleep(retry_sleep * (2**attempt))
+    print(f"error: gh api {path} failed after retries: {last}", file=sys.stderr)
+    print(
+        "error: this is an API failure, not drift — re-run the check before "
+        "treating it as a policy violation",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def env_path(name):
     return f"repos/{repo}/environments/{urllib.parse.quote(name, safe='')}"
 
-
 drift = []
 
-listing = api(f"repos/{repo}/environments")
+listing = api(f"repos/{repo}/environments?per_page=100")
 actual_names = [e["name"] for e in listing.get("environments", [])]
-
+# The matrix is small, but the guard's headline property — every environment
+# outside it fails closed — only holds if the listing was not truncated. A
+# repo past one page needs --paginate here plus a matrix that says why.
+if listing.get("total_count", len(actual_names)) != len(actual_names):
+    print(
+        "error: environment listing spans more than one page (per_page=100); "
+        "extend scripts/check-env-deployment-policies.sh to paginate",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 for name in sorted(set(actual_names) - set(MATRIX)):
     drift.append(
         f"{name}: not in the policy matrix — add a row to "
@@ -149,8 +173,16 @@ for name in actual_names:
             f"{dbp.get('protected_branches')}"
         )
         continue
-    listed = api(f"{env_path(name)}/deployment-branch-policies")
-    actual = {(p["type"], p["name"]) for p in listed.get("branch_policies", [])}
+    listed = api(f"{env_path(name)}/deployment-branch-policies?per_page=100")
+    actual = {
+        (p["type"], p["name"]) for p in listed.get("branch_policies", [])
+    }
+    if listed.get("total_count", len(actual)) != len(actual):
+        drift.append(
+            f"{name}: deployment-branch-policies listing spans more than one "
+            f"page — extend the checker to paginate before trusting it"
+        )
+        continue
     for missing in sorted(policies - actual):
         drift.append(f"{name}: missing {missing[0]} policy {missing[1]!r}")
     for extra in sorted(actual - policies):
