@@ -19,7 +19,7 @@ keywords = ["mime", "email", "sanitization", "unicode"]
 workspace = true
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.2.0-dev" }
+rimap-core = { path = "../rimap-core", version = "0.2.0" }
 schemars = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
