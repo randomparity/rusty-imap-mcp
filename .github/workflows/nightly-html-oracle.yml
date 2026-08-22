@@ -14,6 +14,10 @@ concurrency:
 
 jobs:
   html-oracle:
+    # Scopes CORPUS_READ_TOKEN to this job's environment instead of leaving
+    # it readable by every workflow (#755 follow-up). The nightly runs on
+    # schedule and dispatch, both from main — hence the branch-only policy.
+    environment: corpus-oracle
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

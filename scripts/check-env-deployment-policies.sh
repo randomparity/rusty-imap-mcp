@@ -23,6 +23,10 @@
 #                      `release` within release.yml.
 #   crates-io          custom policies: tag v*. Its job is push-gated, so it is
 #                      never reached from a branch ref.
+#   corpus-oracle      custom policies: branch main. The nightly html-oracle
+#                      job (schedule + dispatch, both from main) scopes
+#                      CORPUS_READ_TOKEN here instead of repository level.
+#
 #   sonarcloud         NO deployment branch policy — deliberate carve-out. The
 #                      sonarqube job runs on plain pull_request, whose ref
 #                      refs/pull/N/merge matches no branch-name pattern; a
@@ -77,6 +81,7 @@ MATRIX = {
     "release": ("custom", frozenset({("tag", "v*"), ("branch", "main")})),
     "homebrew-tap": ("custom", frozenset({("tag", "v*"), ("branch", "main")})),
     "crates-io": ("custom", frozenset({("tag", "v*")})),
+    "corpus-oracle": ("custom", frozenset({("branch", "main")})),
     "sonarcloud": ("none", frozenset()),
 }
 
