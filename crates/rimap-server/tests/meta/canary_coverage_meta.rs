@@ -42,7 +42,7 @@ fn tests_dir() -> PathBuf {
 
 fn wire_suite_sources() -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(tests_dir()).unwrap() {
+    for entry in std::fs::read_dir(tests_dir().join("wire")).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let is_rs = path
