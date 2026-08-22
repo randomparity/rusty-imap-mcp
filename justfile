@@ -4,7 +4,7 @@
 # for checks — use these targets so CI and local dev stay in lockstep.
 
 set shell := ["bash", "-uc"]
-
+set positional-arguments
 MSRV := "1.88.0"
 
 # cargo-nextest version floor, stated once and enforced by `setup` below.
@@ -224,8 +224,14 @@ test-installer:
 # Unit and fast tests (no Proton Bridge). --profile ci matches CI's "test
 # (stable)" job (#625): a bounded number of independent failures all get
 # reported, instead of the first one cancelling the rest of the run.
-test: prune-containers
-    cargo nextest run --workspace --locked --no-tests=pass --profile ci
+#
+# Extra args pass through to `cargo nextest run` verbatim (#827): nextest
+# flags like `--no-capture`, or positional substring filters for scoping
+# (`just test -- some_test`). Never document additional `-E` expressions as
+# scoping — multiple filtersets are ORed and would widen past any default
+# filter rather than narrow it.
+test *args: prune-containers
+    cargo nextest run --workspace --locked --no-tests=pass --profile ci "$@"
 
 # Doctests. Separate from `test` because nextest does not run doctests at all
 # (upstream limitation), so `cargo nextest run` above silently skips every one
@@ -251,13 +257,19 @@ test-doc:
 # Intentionally keeps nextest's built-in fail-fast=true (not --profile ci):
 # this target is for iterating on one failure at a time, so stopping at the
 # first one is the wanted behavior, not the bug #625 fixes.
-test-fast:
+#
+# Extra args pass through to `cargo nextest run` verbatim (#827), appended
+# AFTER the -E exclusion filter: positional substring filters intersect with
+# the filterset union, so `just test-fast -- some_test` narrows the run while
+# keeping the container-binary exclusion. Additional `-E` flags would OR into
+# the union and widen past the exclusion — do not use them for scoping.
+test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
     containers=$(sed -e '/^[[:space:]]*$/d' -e 's/.*/binary(&)/' \
         scripts/container-test-binaries.txt | paste -sd '|' -)
     exec cargo nextest run --workspace --locked --no-tests=pass \
-        -E "not (${containers} | binary(proptest_html_lookalike))"
+        -E "not (${containers} | binary(proptest_html_lookalike))" "$@"
 
 # Verify the MSRV toolchain still builds and tests the workspace. --profile
 # ci matches CI's "test (MSRV 1.88.0)" job (#625).
