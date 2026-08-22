@@ -6,11 +6,21 @@ use crate::connection::ImapSession;
 use crate::error::ImapError;
 use crate::types::{SearchQuery, StructuredQuery, Uid};
 
+/// Outcome of a `SEARCH`: the matched UIDs plus the observed UIDVALIDITY.
+#[derive(Debug)]
+#[must_use = "check uidvalidity to pin the session"]
+pub struct SearchOutcome {
+    /// Matched UIDs, ascending.
+    pub uids: Vec<Uid>,
+    /// UIDVALIDITY observed for the searched folder, if reported.
+    pub uidvalidity: Option<u32>,
+}
+
 pub(crate) async fn search(
     session: &mut ImapSession,
     folder: &str,
     query: SearchQuery,
-) -> Result<(Vec<Uid>, Option<u32>), ImapError> {
+) -> Result<SearchOutcome, ImapError> {
     // Read-only SELECT (EXAMINE) so the UID set and its UIDVALIDITY come
     // from the same selected-mailbox operation.
     let selected = super::folders::select(session, folder, true).await?;
@@ -25,7 +35,10 @@ pub(crate) async fn search(
         .uid_search(&key)
         .await
         .map_err(super::folders::map_err)?;
-    Ok((sorted_uids(uids), uid_validity))
+    Ok(SearchOutcome {
+        uids: sorted_uids(uids),
+        uidvalidity: uid_validity,
+    })
 }
 
 /// Convert the raw `UID SEARCH` response into a numerically ascending
@@ -72,7 +85,7 @@ pub(crate) async fn thread_related(
     folder: &str,
     own_message_id: Option<&str>,
     ancestor_ids: &[String],
-) -> Result<(Vec<Uid>, Option<u32>), ImapError> {
+) -> Result<SearchOutcome, ImapError> {
     let mut clauses = Vec::new();
     if let Some(id) = own_message_id {
         clauses.push(format!("HEADER References {}", quote(id)?));
@@ -86,7 +99,10 @@ pub(crate) async fn thread_related(
         // nothing can be causally related to this message; the target
         // itself (added by the caller) is the whole "thread".
         let selected = super::folders::select(session, folder, true).await?;
-        return Ok((Vec::new(), selected.uid_validity));
+        return Ok(SearchOutcome {
+            uids: Vec::new(),
+            uidvalidity: selected.uid_validity,
+        });
     };
     search(session, folder, SearchQuery::Raw(key)).await
 }

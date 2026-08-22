@@ -57,7 +57,7 @@ pub fn parse_message(raw: &[u8]) -> Result<Content, ContentError> {
 /// Parse `raw` and additionally extract the header names in `wanted`
 /// (case-insensitive, sanitized) from the **same scrubbed message** as
 /// the body/meta extraction, so a CRLF-smuggled header removed by
-/// [`scrub_header_smuggling`] can never reappear in the returned headers.
+/// `scrub_header_smuggling` can never reappear in the returned headers.
 ///
 /// Returns the [`Content`] plus the selected headers in requested order;
 /// requested names absent from the message are omitted. An empty `wanted`

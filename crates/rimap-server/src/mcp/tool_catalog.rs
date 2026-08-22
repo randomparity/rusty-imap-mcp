@@ -8,7 +8,11 @@
 //!
 //! Also hosts the argument-serialization helpers ([`ser`], [`parse_args`])
 //! used by the dispatch pipeline.
+//!
+//! Also hosts the `tools/list` pagination primitives (page size, cursor
+//! decoding, window arithmetic), split out of `mcp::server`.
 
+use rmcp::model::ErrorData;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -829,5 +833,124 @@ mod tests {
                 }
             }
         }
+    }
+}
+/// Number of tools per `tools/list` page. Chosen comfortably above a
+/// single-account full-posture catalog (infrastructure + one account's
+/// advertised tools) so single- and few-account deployments always fit in
+/// one page and see no pagination behavior change; larger multi-account
+/// catalogs page. The `single_account_catalog_fits_one_page` test pins the
+/// single-account invariant so a future tool addition that breaks it fails
+/// loudly instead of silently paginating single-account deployments.
+pub(super) const TOOLS_PER_PAGE: usize = 25;
+/// Decode an opaque `tools/list` cursor (a decimal catalog offset) into a
+/// start index. An unparsable cursor is a client error, mapped to
+/// `-32602 Invalid params` per the MCP pagination contract.
+pub(super) fn decode_tool_cursor(cursor: &str) -> Result<usize, ErrorData> {
+    cursor.parse::<usize>().map_err(|_| {
+        ErrorData::invalid_params(format!("invalid tools/list cursor: {cursor:?}"), None)
+    })
+}
+
+/// Compute the page window over a catalog of `len` tools starting at
+/// `start`. Returns the clamped start (so slicing is always in bounds even
+/// for a stale/oversized cursor), the exclusive end, and the next page's
+/// start offset (`None` on the last page).
+pub(super) fn tool_page_window(len: usize, start: usize) -> (usize, usize, Option<usize>) {
+    let start = start.min(len);
+    let end = start.saturating_add(TOOLS_PER_PAGE).min(len);
+    let next = (end < len).then_some(end);
+    (start, end, next)
+}
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
+mod pagination_tests {
+    use std::collections::BTreeMap;
+
+    use rimap_authz::matrix::EffectiveMatrix;
+    use rimap_core::posture::Posture;
+    use rimap_core::tool::ToolName;
+
+    use super::{TOOLS_PER_PAGE, decode_tool_cursor, tool_page_window};
+    use crate::mcp::tool_catalog::TOOL_DEFS;
+
+    #[test]
+    fn empty_catalog_yields_one_empty_page() {
+        assert_eq!(tool_page_window(0, 0), (0, 0, None));
+    }
+
+    #[test]
+    fn short_catalog_fits_one_page_without_next_cursor() {
+        let (start, end, next) = tool_page_window(TOOLS_PER_PAGE - 1, 0);
+        assert_eq!((start, end), (0, TOOLS_PER_PAGE - 1));
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn exactly_one_page_has_no_next_cursor() {
+        let (_start, end, next) = tool_page_window(TOOLS_PER_PAGE, 0);
+        assert_eq!(end, TOOLS_PER_PAGE);
+        assert_eq!(next, None, "a full-but-final page must not advertise more");
+    }
+
+    #[test]
+    fn overflowing_catalog_pages_without_gap_or_overlap() {
+        // Walk a 2.5-page catalog end to end via next_cursor and assert the
+        // visited indices are exactly 0..len — no tool dropped or duplicated
+        // (the advertised set is preserved across pages).
+        let len = TOOLS_PER_PAGE * 2 + 10;
+        let mut visited: Vec<usize> = Vec::new();
+        let mut start = 0;
+        loop {
+            let (s, e, next) = tool_page_window(len, start);
+            visited.extend(s..e);
+            match next {
+                Some(n) => start = n,
+                None => break,
+            }
+        }
+        assert_eq!(visited, (0..len).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn stale_cursor_past_end_yields_empty_final_page() {
+        let (start, end, next) = tool_page_window(5, 1000);
+        assert_eq!((start, end), (5, 5));
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn decode_cursor_accepts_offset_and_rejects_garbage() {
+        assert_eq!(decode_tool_cursor("25").expect("valid offset"), 25);
+        assert!(decode_tool_cursor("abc").is_err());
+        assert!(decode_tool_cursor("").is_err());
+        assert!(decode_tool_cursor("-1").is_err());
+    }
+
+    #[test]
+    fn single_account_catalog_fits_one_page() {
+        // Invariant behind TOOLS_PER_PAGE: a single-account, most-permissive
+        // (full) catalog — infrastructure tools plus one account's advertised
+        // tools that have a TOOL_DEFS entry — must fit in one page so
+        // single-account deployments never paginate (AC: no single-account
+        // behavior change). If a future tool addition breaks this, bump
+        // TOOLS_PER_PAGE.
+        let matrix = EffectiveMatrix::build(Posture::Full, &BTreeMap::new());
+        let per_account = matrix
+            .advertised()
+            .iter()
+            .filter(|tn| TOOL_DEFS.get(tn).is_some())
+            .count();
+        let infra = [ToolName::UseAccount, ToolName::ListAccounts]
+            .iter()
+            .filter(|tn| TOOL_DEFS.get(tn).is_some())
+            .count();
+        let single_len = infra + per_account;
+        let (_s, _e, next) = tool_page_window(single_len, 0);
+        assert_eq!(
+            next, None,
+            "single-account catalog of {single_len} tools must fit one page \
+             (TOOLS_PER_PAGE={TOOLS_PER_PAGE}); bump the page size",
+        );
     }
 }

@@ -42,6 +42,36 @@ pub(crate) struct PinningVerifier {
     provider: Arc<tokio_rustls::rustls::crypto::CryptoProvider>,
 }
 
+/// Shared TLS 1.2 signature verification for the provider-delegating verifiers.
+fn verify_tls12_signature_with_provider(
+    provider: &tokio_rustls::rustls::crypto::CryptoProvider,
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &DigitallySignedStruct,
+) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    tokio_rustls::rustls::crypto::verify_tls12_signature(
+        message,
+        cert,
+        dss,
+        &provider.signature_verification_algorithms,
+    )
+}
+
+/// Shared TLS 1.3 signature verification for the provider-delegating verifiers.
+fn verify_tls13_signature_with_provider(
+    provider: &tokio_rustls::rustls::crypto::CryptoProvider,
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &DigitallySignedStruct,
+) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    tokio_rustls::rustls::crypto::verify_tls13_signature(
+        message,
+        cert,
+        dss,
+        &provider.signature_verification_algorithms,
+    )
+}
+
 impl ServerCertVerifier for PinningVerifier {
     fn verify_server_cert(
         &self,
@@ -69,12 +99,7 @@ impl ServerCertVerifier for PinningVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
-        tokio_rustls::rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_tls12_signature_with_provider(&self.provider, message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -83,12 +108,7 @@ impl ServerCertVerifier for PinningVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
-        tokio_rustls::rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_tls13_signature_with_provider(&self.provider, message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -195,12 +215,7 @@ impl ServerCertVerifier for CaptureOnlyVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
-        tokio_rustls::rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_tls12_signature_with_provider(&self.provider, message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -209,12 +224,7 @@ impl ServerCertVerifier for CaptureOnlyVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
-        tokio_rustls::rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_tls13_signature_with_provider(&self.provider, message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {

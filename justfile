@@ -326,6 +326,13 @@ test-epvme *args:
 deny:
     cargo deny --all-features check
 
+
+# Unused-direct-dependency gate. cargo-machete is the same tool the
+# `[package.metadata.cargo-machete]` blocks (e.g. rimap-content's `phf`)
+# already assume; wiring it here makes the manual pass a CI-enforced one.
+machete:
+    cargo machete
+
 # Enforce the rustls-only invariant: OpenSSL may be pinned in Cargo.lock (via
 # dbus-secret-service's `vendored` -> `openssl?/vendored` weak edge) but must
 # never enter the *build* graph. Fails if openssl-sys is reachable for any
@@ -513,7 +520,7 @@ test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-doc test-msrv deny check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
+ci: fmt-check lint test test-doc test-msrv deny machete check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
     typos
 
 # Re-run pre-commit hooks across all files.

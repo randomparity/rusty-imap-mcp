@@ -72,11 +72,10 @@ fn two_search_dialog() -> Vec<Step> {
 }
 
 async fn search(conn: &rimap_imap::Connection) -> Vec<Uid> {
-    let (found, _uidvalidity) = conn
-        .search("INBOX", SearchQuery::Structured(StructuredQuery::default()))
+    conn.search("INBOX", SearchQuery::Structured(StructuredQuery::default()))
         .await
-        .expect("scripted search should succeed");
-    found
+        .expect("scripted search should succeed")
+        .uids
 }
 
 /// Control: with no poison, two searches share one connection. This is what

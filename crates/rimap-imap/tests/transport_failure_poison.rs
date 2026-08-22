@@ -120,9 +120,10 @@ fn store_exchange() -> Vec<Step> {
 }
 
 async fn search(conn: &Connection) -> Result<Vec<Uid>, ImapError> {
-    let (found, _uidvalidity) = conn
+    let found = conn
         .search("INBOX", SearchQuery::Structured(StructuredQuery::default()))
-        .await?;
+        .await?
+        .uids;
     Ok(found)
 }
 

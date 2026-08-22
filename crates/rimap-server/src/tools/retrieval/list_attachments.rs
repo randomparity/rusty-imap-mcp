@@ -8,14 +8,8 @@ use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
 use crate::tools::retrieval::part_walker::walk_body_structure;
 
-// Design note (not published — see #405): this tool intentionally takes
-// a single scalar `uid` rather than a batch. The asymmetry with
-// batch-capable tools (`flag`, `add_label`, `move_message`) is
-// deliberate: batch shapes (`uid` XOR `uids`) are reserved for
-// commutative, idempotent mutations where per-UID ordering does not
-// matter and results fan out uniformly. Read-side and destructive
-// single-target tools keep a scalar `uid` so the response schema and
-// error semantics stay unambiguous.
+// Scalar-uid rationale: this tool intentionally has no batch shape, see
+// the `Scalar vs batch uid shapes` section of `crate::tools` module docs (#405).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListAttachmentsInput {
     /// IMAP folder containing the message.

@@ -77,6 +77,12 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Unused-direct-dependency gate. Mirrors `just machete` (part of the
+      # `just ci` chain); keeps the [package.metadata.cargo-machete] blocks
+      # honest. Installed from crates.io --locked rather than a third-party
+      # action to avoid adding an unpinned supply-chain edge.
+      - name: Check for unused direct dependencies
+        run: cargo install --locked cargo-machete && cargo machete
       # Enforce the rustls-only invariant: OpenSSL is pinned in Cargo.lock via
       # dbus-secret-service's `vendored` -> `openssl?/vendored` weak edge, but
       # must never enter the build graph. Mirrors `just check-no-openssl`.

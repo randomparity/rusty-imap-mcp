@@ -216,7 +216,7 @@ This happens when transient Docker Compose networks accumulate. The test runner 
 
 ### Wire-driven Dovecot e2e (Phase 3, #265)
 
-`crates/rimap-server/tests/e2e_wire.rs` drives the production binary
+`crates/rimap-server/tests/wire/e2e_wire.rs` drives the production binary
 over its stdio JSON-RPC wire against the same Dovecot fixture
 `e2e_full_session` uses. It exercises every draft-safe and read-only
 posture tool, validates every response against the vendored MCP spec
@@ -241,7 +241,7 @@ audit-log pairing + namespace attribution.
 
 ### Network chaos e2e (nightly, #522)
 
-`crates/rimap-server/tests/e2e_wire_chaos.rs` interposes a Toxiproxy container
+`crates/rimap-server/tests/wire/e2e_wire_chaos.rs` interposes a Toxiproxy container
 between the server binary and the same Dovecot fixture to exercise
 degraded-but-alive networks: delayed greeting, mid-FETCH stall, RST during
 STARTTLS, and byte-trickle. Each scenario asserts the typed `ERR_*` wire code,
@@ -339,14 +339,16 @@ token, then the pin.
 
 ```
 crates/
-├── rimap-core/      # shared types (Message, Folder, Posture, audit records)
-├── rimap-config/    # config loading, validation, credential resolution
-├── rimap-imap/      # async-imap wrapper with TLS fingerprint pinning
-├── rimap-content/   # MIME parse, Unicode, HTML→text, look-alike, sanitization
-├── rimap-audit/     # append-only JSONL audit log with exclusive file locking
-├── rimap-authz/     # posture matrix, rate limiter, circuit breaker
-├── rimap-smtp/      # lettre wrapper, SMTP connection, TLS
-└── rimap-server/    # rmcp server (bin), tool dispatch, main.rs
+├── rimap-core/           # shared types (Posture, ToolName, audit record shapes, folder_name)
+├── rimap-config/         # config loading, validation, credential resolution
+├── rimap-imap/           # async-imap wrapper, TLS fingerprint pinning, FetchedMessage/Folder types
+├── rimap-content/        # MIME parse, Unicode, HTML→text, look-alike, sanitization
+├── rimap-audit/          # append-only JSONL audit log with exclusive file locking
+├── rimap-authz/          # posture matrix, rate limiter, circuit breaker
+├── rimap-smtp/           # lettre wrapper, SMTP connection, TLS
+├── rimap-fake-imap/      # in-process scriptable fake IMAP server (test support, publish = false)
+├── rimap-container-gate/ # docker/podman autodetect + arch gate shared by container harnesses (publish = false)
+└── rimap-server/         # rmcp server (bin), tool dispatch, main.rs
 ```
 
 Each library crate has one clear responsibility and communicates through typed
@@ -407,7 +409,7 @@ are the ones that trip people up or aren't obvious from the lint set.
 - **Snapshot tests** (`insta`) for sanitizer output so changes are visible in
   diffs.
 - **Golden agent transcripts** (`insta`, issue #524).
-  `crates/rimap-server/tests/e2e_wire_transcript_*.rs` snapshot the full JSON-RPC
+  `crates/rimap-server/tests/wire/e2e_wire_transcript_*.rs` snapshot the full JSON-RPC
   transcript an agent sees across a scripted session (initialize instructions, the
   advertised tool catalog, and each tool response's `meta`/`untrusted`/
   `security_warnings`), driven against the in-process fake (no container,

@@ -10,13 +10,8 @@ use crate::mcp::response::ToolResponse;
 
 /// Input for `move_message`. Accepts either a single `uid` or a batch
 /// `uids` (exactly one of the two; batch max 100).
-// Design note (not published — see #405): the asymmetry with
-// single-target tools (`fetch_message`, `list_attachments`,
-// `download_attachment`, `delete_message`) is deliberate: batch shapes
-// are reserved for commutative, idempotent mutations where per-UID
-// ordering does not matter and results fan out uniformly. Read-side and
-// destructive single-target tools keep a scalar `uid` so the response
-// schema and error semantics stay unambiguous.
+// Scalar-vs-batch uid shape rationale: deliberate asymmetry, see the
+// `Scalar vs batch uid shapes` section of `crate::tools` module docs (#405).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MoveMessageInput {
     /// Source folder.
@@ -72,7 +67,7 @@ pub struct MoveMessageMeta {
 /// Execute the `move_message` tool.
 ///
 /// In addition to the posture-matrix gate in `DispatchGuard::pre_dispatch`,
-/// this handler runs [`rimap_authz::folder_name::FolderName`] structural
+/// this handler runs [`rimap_core::folder_name::FolderName`] structural
 /// validation on both source and destination. The protected-folder list
 /// is intentionally not consulted here: it gates folder-mutation
 /// operations (delete, rename, create), not message moves between
@@ -91,12 +86,7 @@ pub async fn handle(
 ) -> Result<ToolResponse<MoveMessageMeta>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
     crate::tools::validation::validate_folder_input("destination", &input.destination)?;
-    let uids: Vec<Uid> = input
-        .target
-        .into_uids()
-        .into_iter()
-        .map(Uid::from)
-        .collect();
+    let uids: Vec<Uid> = Uid::uids_from_selector(input.target);
     let outcome = account
         .imap
         .move_messages(

@@ -243,17 +243,28 @@ fn validate_multi_inner(config: MultiAccountConfig) -> Result<ValidatedMultiConf
         accounts.insert(id, validated);
     }
 
-    paths::validate_audit_config(&config.audit)?;
-    paths::validate_paths_multi(&config.audit, &config.attachments)?;
-    paths::validate_export_download_root(
-        &config.attachments,
-        export_messages_enabled(accounts.values()),
-    )?;
+    finish_validated_multi(accounts, config.audit, config.attachments)
+}
+
+/// Shared tail of [`validate_multi_inner`] and
+/// [`validate_legacy_as_multi`]: run the global path checks over the
+/// validated accounts and assemble the `ValidatedMultiConfig`.
+///
+/// # Errors
+/// Returns `ConfigError` on any path-validation failure.
+fn finish_validated_multi(
+    accounts: BTreeMap<AccountId, ValidatedAccountConfig>,
+    audit: AuditConfig,
+    attachments: AttachmentsConfig,
+) -> Result<ValidatedMultiConfig, ConfigError> {
+    paths::validate_audit_config(&audit)?;
+    paths::validate_paths_multi(&audit, &attachments)?;
+    paths::validate_export_download_root(&attachments, export_messages_enabled(accounts.values()))?;
 
     Ok(ValidatedMultiConfig {
         accounts,
-        audit: config.audit,
-        attachments: config.attachments,
+        audit,
+        attachments,
     })
 }
 
@@ -301,21 +312,9 @@ pub fn validate_legacy_as_multi(config: Config) -> Result<ValidatedMultiConfig, 
         account_written_protected_folders: true,
         account_written_expunge_folders: true,
     })?;
-    paths::validate_audit_config(&config.audit)?;
-    paths::validate_paths_multi(&config.audit, &config.attachments)?;
-    paths::validate_export_download_root(
-        &config.attachments,
-        export_messages_enabled(std::iter::once(&account)),
-    )?;
-
     let mut accounts = BTreeMap::new();
     accounts.insert(id, account);
-
-    Ok(ValidatedMultiConfig {
-        accounts,
-        audit: config.audit,
-        attachments: config.attachments,
-    })
+    finish_validated_multi(accounts, config.audit, config.attachments)
 }
 
 /// Inputs to [`validate_account`]. Bundles the per-account fields a caller

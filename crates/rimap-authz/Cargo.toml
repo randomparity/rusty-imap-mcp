@@ -14,8 +14,8 @@ keywords = ["authorization", "rate-limiting", "email", "mcp"]
 workspace = true
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.2.1-dev" }
-rimap-config = { path = "../rimap-config", version = "0.2.1-dev" }
+rimap-core = { path = "../rimap-core", version = "0.3.0-dev" }
+rimap-config = { path = "../rimap-config", version = "0.3.0-dev" }
 thiserror = { workspace = true }
 governor = { workspace = true }
 parking_lot = { workspace = true }

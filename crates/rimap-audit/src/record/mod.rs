@@ -44,6 +44,7 @@ use rimap_core::{ErrorCode, Posture, WarningCode, tool::ToolName};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod ids;
+pub mod kind;
 
 use crate::record::ids::{ProcessId, Seq, Timestamp};
 

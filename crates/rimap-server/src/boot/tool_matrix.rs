@@ -41,7 +41,7 @@ use rimap_core::tool::ToolName;
 /// Truncation threshold for folder names in audit records (`folder_policy` /
 /// `process_start`): a name longer than this many bytes is truncated at the
 /// nearest UTF-8 character boundary at or below this point and suffixed with
-/// [`FOLDER_AUDIT_ABRIDGED`] before being written. The `FolderGuard` always
+/// `FOLDER_AUDIT_ABRIDGED` before being written. The `FolderGuard` always
 /// receives the full name.
 ///
 /// The **output bound** for an abridged entry is
@@ -286,7 +286,6 @@ pub fn log_account_folder_policy(matrix: &AccountToolMatrix) {
 #[expect(clippy::unwrap_used, reason = "tests")]
 #[expect(clippy::expect_used, reason = "tests")]
 mod tests {
-    use std::path::PathBuf;
 
     use rimap_audit::record::{FolderSource, SpecialUseDiscovery, VerdictSource};
     use rimap_config::loader::load_and_validate;
@@ -301,46 +300,8 @@ mod tests {
         cap_folder_name_for_audit, render_folder_list, render_verdict,
     };
 
-    /// Write a two-layer config whose `[defaults.security.tools]` allows
-    /// `delete_message` and whose `work` account tightens posture to
-    /// `readonly` without restating that tool — the #632 reproduction.
-    fn inherited_allow_config(dir: &TempDir) -> PathBuf {
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[defaults.security]
-posture = "full"
-
-[defaults.security.tools]
-delete_message = "allow"
-
-[[accounts]]
-name = "work"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@work.test"
-
-[accounts.security]
-posture = "readonly"
-
-[accounts.security.tools]
-search = "deny"
-
-[audit]
-path = "{audit}"
-allowed_base_dir = "{base}"
-"#,
-            audit = dir.path().join("audit.jsonl").display(),
-            base = dir.path().display(),
-        );
-        std::fs::write(&config_path, body).unwrap();
-        config_path
-    }
-
     fn work_account(dir: &TempDir) -> ValidatedAccountConfig {
-        let path = inherited_allow_config(dir);
+        let path = crate::test_support::write_inherited_allow_config(dir);
         let multi = load_and_validate(&path).unwrap();
         multi.accounts[&AccountId::new("work").unwrap()].clone()
     }
@@ -409,54 +370,8 @@ allowed_base_dir = "{base}"
         );
     }
 
-    /// Two accounts against one `[defaults.security]` that names both folder
-    /// lists: `work` restates neither and inherits both, `personal` writes
-    /// its own `expunge_folders`.
-    fn inherited_folders_config(dir: &TempDir) -> PathBuf {
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[defaults.security]
-posture = "draft-safe"
-protected_folders = ["INBOX", "Sent"]
-expunge_folders = ["Trash"]
-
-[[accounts]]
-name = "work"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@work.test"
-
-[accounts.security]
-posture = "readonly"
-
-[[accounts]]
-name = "personal"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@personal.test"
-
-[accounts.security]
-protected_folders = ["Archive"]
-expunge_folders = ["Junk"]
-
-[audit]
-path = "{audit}"
-allowed_base_dir = "{base}"
-"#,
-            audit = dir.path().join("audit.jsonl").display(),
-            base = dir.path().display(),
-        );
-        std::fs::write(&config_path, body).unwrap();
-        config_path
-    }
-
     fn folder_account(dir: &TempDir, name: &str) -> ValidatedAccountConfig {
-        let path = inherited_folders_config(dir);
+        let path = crate::test_support::write_inherited_folders_config(dir, true);
         let multi = load_and_validate(&path).unwrap();
         multi.accounts[&AccountId::new(name).unwrap()].clone()
     }

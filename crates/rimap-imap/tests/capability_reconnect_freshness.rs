@@ -173,10 +173,11 @@ async fn delete_after_reconnect_does_not_issue_an_unadvertised_move() {
 
     conn.poison();
 
-    let (result, _uidvalidity) = conn
+    let result = conn
         .delete_message("INBOX", uid(5), "Trash", None)
         .await
-        .expect("the reconnected session lacks MOVE, so the fallback must run");
+        .expect("the reconnected session lacks MOVE, so the fallback must run")
+        .result;
 
     assert!(
         result.used_fallback,

@@ -14,14 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::boot::registry::AccountState;
 use crate::mcp::response::ToolResponse;
 
-// Design note (not published — see #405): this tool intentionally takes
-// a single scalar `uid` rather than a batch. The asymmetry with
-// batch-capable tools (`flag`, `add_label`, `move_message`) is
-// deliberate: batch shapes (`uid` XOR `uids`) are reserved for
-// commutative, idempotent mutations where per-UID ordering does not
-// matter and results fan out uniformly. Read-side and destructive
-// single-target tools keep a scalar `uid` so the response schema and
-// error semantics stay unambiguous.
+// Scalar-uid rationale: this tool intentionally has no batch shape, see
+// the `Scalar vs batch uid shapes` section of `crate::tools` module docs (#405).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteMessageInput {
     /// Source folder containing the message.
@@ -87,10 +81,12 @@ pub async fn handle(
 
     let uid = rimap_imap::types::Uid::from(input.uid);
 
-    let (result, uid_validity) = account
+    let outcome = account
         .imap
         .delete_message(&input.folder, uid, trash_folder, input.expected_uidvalidity)
         .await?;
+    let result = outcome.result;
+    let uid_validity = outcome.uidvalidity;
 
     let warnings =
         super::fallback_security_warnings(result.used_fallback, result.folder_wide_expunge);
@@ -170,7 +166,7 @@ mod tests {
         // `FolderName::new("Trash")` must not error — the handler
         // revalidates whatever the fallback produced and would surface
         // `RimapError::invalid_input` otherwise.
-        assert!(rimap_authz::folder_name::FolderName::new("Trash").is_ok());
+        assert!(rimap_core::folder_name::FolderName::new("Trash").is_ok());
     }
 
     #[test]

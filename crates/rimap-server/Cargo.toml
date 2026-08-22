@@ -70,13 +70,13 @@ name = "rusty-imap-mcp"
 path = "src/main.rs"
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.2.1-dev" }
-rimap-config = { path = "../rimap-config", version = "0.2.1-dev" }
-rimap-authz = { path = "../rimap-authz", version = "0.2.1-dev" }
-rimap-audit = { path = "../rimap-audit", version = "0.2.1-dev" }
-rimap-content = { path = "../rimap-content", version = "0.2.1-dev" }
-rimap-imap = { path = "../rimap-imap", version = "0.2.1-dev" }
-rimap-smtp = { path = "../rimap-smtp", version = "0.2.1-dev" }
+rimap-core = { path = "../rimap-core", version = "0.3.0-dev" }
+rimap-config = { path = "../rimap-config", version = "0.3.0-dev" }
+rimap-authz = { path = "../rimap-authz", version = "0.3.0-dev" }
+rimap-audit = { path = "../rimap-audit", version = "0.3.0-dev" }
+rimap-content = { path = "../rimap-content", version = "0.3.0-dev" }
+rimap-imap = { path = "../rimap-imap", version = "0.3.0-dev" }
+rimap-smtp = { path = "../rimap-smtp", version = "0.3.0-dev" }
 mail-builder = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
@@ -111,10 +111,10 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 jsonschema = { workspace = true }
 mail-parser = { workspace = true }
-rimap-audit = { path = "../rimap-audit", version = "0.2.1-dev", features = ["test-injection"] }
-rimap-config = { path = "../rimap-config", version = "0.2.1-dev", features = ["test-support"] }
-rimap-imap = { path = "../rimap-imap", version = "0.2.1-dev", features = ["test-support"] }
-rimap-smtp = { path = "../rimap-smtp", version = "0.2.1-dev", features = ["test-support"] }
+rimap-audit = { path = "../rimap-audit", version = "0.3.0-dev", features = ["test-injection"] }
+rimap-config = { path = "../rimap-config", version = "0.3.0-dev", features = ["test-support"] }
+rimap-imap = { path = "../rimap-imap", version = "0.3.0-dev", features = ["test-support"] }
+rimap-smtp = { path = "../rimap-smtp", version = "0.3.0-dev", features = ["test-support"] }
 # Self dev-dep enables the `test-support` feature unconditionally for
 # integration tests, so `ImapMcpServer::execute_tool_for_test` is in
 # scope without every test harness passing `--features test-support`.
@@ -229,3 +229,156 @@ mode = "644"
 source = "NOTICE"
 dest = "/usr/share/licenses/rusty-imap-mcp/NOTICE"
 mode = "644"
+
+# Integration-test targets, grouped by domain under `tests/`. The `name` of
+# each target keeps the historical binary stem so nextest filters
+# (`binary(e2e_wire_chaos)`), insta snapshot names, and CI invocations are
+# unchanged by the reorganization.
+[[test]]
+name = "audit_fail_open"
+path = "tests/audit/audit_fail_open.rs"
+
+[[test]]
+name = "audit_merge"
+path = "tests/audit/audit_merge.rs"
+
+[[test]]
+name = "audit_records_lost"
+path = "tests/audit/audit_records_lost.rs"
+
+[[test]]
+name = "audit_undrained_dispatches"
+path = "tests/audit/audit_undrained_dispatches.rs"
+
+[[test]]
+name = "mcp_audit_failure"
+path = "tests/audit/mcp_audit_failure.rs"
+
+[[test]]
+name = "boot_folder_policy"
+path = "tests/boot/boot_folder_policy.rs"
+
+[[test]]
+name = "cli_smoke"
+path = "tests/cli/cli_smoke.rs"
+
+[[test]]
+name = "dry_run_cli"
+path = "tests/cli/dry_run_cli.rs"
+
+[[test]]
+name = "dump_tool_catalog"
+path = "tests/cli/dump_tool_catalog.rs"
+
+[[test]]
+name = "dispatch_ticket"
+path = "tests/dispatch/dispatch_ticket.rs"
+
+[[test]]
+name = "lenient_int_dispatch"
+path = "tests/dispatch/lenient_int_dispatch.rs"
+
+[[test]]
+name = "server_capabilities"
+path = "tests/dispatch/server_capabilities.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/e2e.rs"
+
+[[test]]
+name = "e2e_smtp"
+path = "tests/e2e/e2e_smtp.rs"
+
+[[test]]
+name = "e2e_smtp_real"
+path = "tests/e2e/e2e_smtp_real.rs"
+
+[[test]]
+name = "e2e_wire"
+path = "tests/wire/e2e_wire.rs"
+
+[[test]]
+name = "e2e_wire_cancellation"
+path = "tests/wire/e2e_wire_cancellation.rs"
+
+[[test]]
+name = "e2e_wire_chaos"
+path = "tests/wire/e2e_wire_chaos.rs"
+
+[[test]]
+name = "e2e_wire_destructive"
+path = "tests/wire/e2e_wire_destructive.rs"
+
+[[test]]
+name = "e2e_wire_fault_injection"
+path = "tests/wire/e2e_wire_fault_injection.rs"
+
+[[test]]
+name = "e2e_wire_fetch_skipped"
+path = "tests/wire/e2e_wire_fetch_skipped.rs"
+
+[[test]]
+name = "e2e_wire_folder_management"
+path = "tests/wire/e2e_wire_folder_management.rs"
+
+[[test]]
+name = "e2e_wire_folder_not_found"
+path = "tests/wire/e2e_wire_folder_not_found.rs"
+
+[[test]]
+name = "e2e_wire_login_rejected"
+path = "tests/wire/e2e_wire_login_rejected.rs"
+
+[[test]]
+name = "e2e_wire_multi_account_advertisement"
+path = "tests/wire/e2e_wire_multi_account_advertisement.rs"
+
+[[test]]
+name = "e2e_wire_shutdown_audit_ordering"
+path = "tests/wire/e2e_wire_shutdown_audit_ordering.rs"
+
+[[test]]
+name = "e2e_wire_tls_pin_mismatch"
+path = "tests/wire/e2e_wire_tls_pin_mismatch.rs"
+
+[[test]]
+name = "e2e_wire_tool_advertisement"
+path = "tests/wire/e2e_wire_tool_advertisement.rs"
+
+[[test]]
+name = "e2e_wire_transcript_cleanup"
+path = "tests/wire/e2e_wire_transcript_cleanup.rs"
+
+[[test]]
+name = "e2e_wire_transcript_triage"
+path = "tests/wire/e2e_wire_transcript_triage.rs"
+
+[[test]]
+name = "e2e_wire_uidvalidity"
+path = "tests/wire/e2e_wire_uidvalidity.rs"
+
+[[test]]
+name = "mcp_wire_conformance"
+path = "tests/conformance/mcp_wire_conformance.rs"
+
+[[test]]
+name = "mcp_wire_negative"
+path = "tests/conformance/mcp_wire_negative.rs"
+
+[[test]]
+name = "mcp_wire_proptest"
+path = "tests/conformance/mcp_wire_proptest.rs"
+
+[[test]]
+name = "canary_coverage_meta"
+path = "tests/meta/canary_coverage_meta.rs"
+
+[[test]]
+name = "canary_sweep_meta"
+path = "tests/meta/canary_sweep_meta.rs"
+
+[[test]]
+name = "transcript_normalize"
+path = "tests/meta/transcript_normalize.rs"
+

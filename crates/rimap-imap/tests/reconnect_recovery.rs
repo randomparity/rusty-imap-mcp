@@ -83,19 +83,21 @@ async fn read_only_search_reconnects_and_recovers_after_idle_disconnect() {
 
     // First call succeeds, then the fake exhausts its script and drops the
     // connection, leaving the client's cached session stale.
-    let (first_uids, _uidv) = conn
+    let first_uids = conn
         .search("INBOX", SearchQuery::Structured(StructuredQuery::default()))
         .await
-        .expect("first search should succeed");
+        .expect("first search should succeed")
+        .uids;
     assert_eq!(first_uids, uids(&[5, 7, 9]), "first search results");
 
     // Second call hits the dead cached session -> ConnectionLost internally ->
     // transparent reconnect against the re-served script -> success. No error
     // reaches the caller.
-    let (second_uids, _uidv) = conn
+    let second_uids = conn
         .search("INBOX", SearchQuery::Structured(StructuredQuery::default()))
         .await
-        .expect("second search must recover transparently, not surface an error");
+        .expect("second search must recover transparently, not surface an error")
+        .uids;
     assert_eq!(
         second_uids,
         uids(&[5, 7, 9]),

@@ -1,7 +1,7 @@
 //! Folder safety checks: protected folders and expunge allowlist.
 
 use crate::error::AuthzError;
-use crate::folder_name::FolderName;
+use rimap_core::folder_name::FolderName;
 
 /// Runtime folder safety guard built from config.
 #[derive(Debug, Clone)]

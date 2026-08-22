@@ -5,6 +5,17 @@ use crate::error::ImapError;
 use crate::ops::store;
 use crate::types::{Flag, FlagAction, Uid};
 
+/// Outcome of a `delete_message` dispatch: the operation result plus the
+/// observed UIDVALIDITY of the folder it ran against.
+#[derive(Debug)]
+#[must_use = "check used_fallback for security warnings"]
+pub struct DeleteOutcome {
+    /// What the delete did.
+    pub result: DeleteResult,
+    /// UIDVALIDITY observed for the source folder, if reported.
+    pub uidvalidity: Option<u32>,
+}
+
 /// Delete a message: flag it as `\Deleted` and move it to Trash.
 ///
 /// Takes the whole [`SessionEntry`] rather than a session and an advertisement,

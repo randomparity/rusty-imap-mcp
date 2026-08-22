@@ -199,7 +199,7 @@ pub enum ConfigError {
     /// silently accepting empty-accounts configs in production makes
     /// broken deployments look identical to healthy zero-data servers.
     /// The check stays in production; tests opt in via
-    /// [`crate::validate::validate_multi_allowing_empty`] behind the
+    /// `crate::validate::validate_multi_allowing_empty` behind the
     /// `test-support` feature.
     #[error("no accounts defined in [[accounts]] array")]
     NoAccounts,

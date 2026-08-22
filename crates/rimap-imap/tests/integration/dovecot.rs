@@ -194,7 +194,10 @@ async fn case_06_search_structured_subject_match() {
         subject: Some("Sprint 3 plain text fixture".to_string()),
         ..StructuredQuery::default()
     });
-    let (uids, _) = Box::pin(h.connection.search("INBOX", q)).await.unwrap();
+    let uids = Box::pin(h.connection.search("INBOX", q))
+        .await
+        .unwrap()
+        .uids;
     assert!(
         !uids.is_empty(),
         "expected at least one UID for the seeded subject"
@@ -209,7 +212,10 @@ async fn case_07_search_raw_passthrough() {
         return;
     };
     let q = SearchQuery::Raw("HEADER \"X-Test\" \"marker\"".to_string());
-    let (uids, _) = Box::pin(h.connection.search("INBOX", q)).await.unwrap();
+    let uids = Box::pin(h.connection.search("INBOX", q))
+        .await
+        .unwrap()
+        .uids;
     assert!(
         !uids.is_empty(),
         "expected at least one UID for X-Test: marker"
@@ -227,7 +233,10 @@ async fn case_08_fetch_envelope_and_bodystructure() {
         subject: Some("Sprint 3 multipart fixture".to_string()),
         ..StructuredQuery::default()
     });
-    let (uids, _) = Box::pin(h.connection.search("INBOX", q)).await.unwrap();
+    let uids = Box::pin(h.connection.search("INBOX", q))
+        .await
+        .unwrap()
+        .uids;
     assert!(!uids.is_empty());
     let spec = FetchSpec {
         envelope: true,
@@ -259,7 +268,10 @@ async fn case_09_fetch_body_under_limit() {
         subject: Some("Sprint 3 plain text fixture".to_string()),
         ..StructuredQuery::default()
     });
-    let (uids, _) = Box::pin(h.connection.search("INBOX", q)).await.unwrap();
+    let uids = Box::pin(h.connection.search("INBOX", q))
+        .await
+        .unwrap()
+        .uids;
     assert!(!uids.is_empty());
     let body = h
         .connection
@@ -311,7 +323,7 @@ async fn case_10_fetch_body_over_limit_drops_connection() {
         subject: Some("Sprint 3 multipart fixture".to_string()),
         ..StructuredQuery::default()
     });
-    let (uids, _) = Box::pin(conn.search("INBOX", q)).await.unwrap();
+    let uids = Box::pin(conn.search("INBOX", q)).await.unwrap().uids;
     let result = conn.fetch_body("INBOX", uids[0], None).await;
     match result {
         Err(ImapError::SizeLimit { limit }) => assert_eq!(limit, 10),
@@ -383,7 +395,7 @@ async fn case_12_store_add_seen_flag() {
         .unwrap();
 
     // Search for it.
-    let (uids, _) = Box::pin(h.connection.search(
+    let uids = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("store-seen".to_string()),
@@ -391,7 +403,8 @@ async fn case_12_store_add_seen_flag() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(!uids.is_empty(), "seeded message not found");
     let uid = uids[0];
 
@@ -440,7 +453,7 @@ async fn case_13_store_remove_seen_flag() {
         .await
         .unwrap();
 
-    let (uids, _) = Box::pin(h.connection.search(
+    let uids = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("store-unseen".to_string()),
@@ -448,7 +461,8 @@ async fn case_13_store_remove_seen_flag() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(!uids.is_empty());
     let uid = uids[0];
 
@@ -537,7 +551,7 @@ async fn case_15_append_message_to_inbox() {
     assert_eq!(result.uid, None);
 
     // Verify the message is in INBOX by searching for it.
-    let (uids, _) = Box::pin(h.connection.search(
+    let uids = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("append-test".to_string()),
@@ -545,7 +559,8 @@ async fn case_15_append_message_to_inbox() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(!uids.is_empty(), "appended message not found");
 
     // Verify it has the \Draft flag.
@@ -579,7 +594,7 @@ async fn case_16_move_message_between_folders() {
         .await
         .unwrap();
 
-    let (uids, _) = Box::pin(h.connection.search(
+    let uids = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("move-test".to_string()),
@@ -587,7 +602,8 @@ async fn case_16_move_message_between_folders() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(!uids.is_empty(), "seeded message not found");
     let uid = uids[0];
 
@@ -601,7 +617,7 @@ async fn case_16_move_message_between_folders() {
     assert_eq!(outcome.results[0].old_uid, uid);
 
     // Verify the message is gone from INBOX.
-    let (after_uids, _) = Box::pin(h.connection.search(
+    let after_uids = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("move-test".to_string()),
@@ -609,14 +625,15 @@ async fn case_16_move_message_between_folders() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(
         after_uids.is_empty(),
         "message should be gone from INBOX after move"
     );
 
     // Verify the message is in Archive.
-    let (archive_uids, _) = Box::pin(h.connection.search(
+    let archive_uids = Box::pin(h.connection.search(
         "Archive",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("move-test".to_string()),
@@ -624,7 +641,8 @@ async fn case_16_move_message_between_folders() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(
         !archive_uids.is_empty(),
         "message should be in Archive after move"
@@ -656,12 +674,12 @@ async fn case_25_move_message_uidvalidity_guard() {
         .append_message(folder, &msg, &[], &[])
         .await
         .unwrap();
-    let (uids, uid_validity) = Box::pin(h.connection.search(folder, subject_query()))
+    let outcome = Box::pin(h.connection.search(folder, subject_query()))
         .await
         .unwrap();
-    assert!(!uids.is_empty(), "seeded message not found");
-    let uid = uids[0];
-    let good_validity = uid_validity.expect("dovecot reports UIDVALIDITY");
+    assert!(!outcome.uids.is_empty(), "seeded message not found");
+    let uid = outcome.uids[0];
+    let good_validity = outcome.uidvalidity.expect("dovecot reports UIDVALIDITY");
 
     // Matching UIDVALIDITY: the guard passes and the move proceeds.
     let outcome = h
@@ -671,9 +689,10 @@ async fn case_25_move_message_uidvalidity_guard() {
         .unwrap();
     assert_eq!(outcome.results.len(), 1);
     assert_eq!(outcome.source_uid_validity, Some(good_validity));
-    let (after, _) = Box::pin(h.connection.search(folder, subject_query()))
+    let after = Box::pin(h.connection.search(folder, subject_query()))
         .await
-        .unwrap();
+        .unwrap()
+        .uids;
     assert!(
         after.is_empty(),
         "message should have left the source folder"
@@ -694,13 +713,16 @@ async fn case_25_move_message_uidvalidity_guard() {
         .append_message(folder, &msg, &[], &[])
         .await
         .unwrap();
-    let (uids, fresh_validity) = Box::pin(h.connection.search(folder, subject_query()))
+    let recreated = Box::pin(h.connection.search(folder, subject_query()))
         .await
         .unwrap();
-    assert!(!uids.is_empty(), "seeded message not found after recreate");
-    let fresh_uid = uids[0];
+    assert!(
+        !recreated.uids.is_empty(),
+        "seeded message not found after recreate"
+    );
+    let fresh_uid = recreated.uids[0];
     assert_ne!(
-        fresh_validity,
+        recreated.uidvalidity,
         Some(good_validity),
         "recreating the folder should rotate UIDVALIDITY"
     );
@@ -715,9 +737,10 @@ async fn case_25_move_message_uidvalidity_guard() {
         matches!(err, ImapError::UidValidityChanged { .. }),
         "expected UidValidityChanged, got {err:?}"
     );
-    let (still, _) = Box::pin(h.connection.search(folder, subject_query()))
+    let still = Box::pin(h.connection.search(folder, subject_query()))
         .await
-        .unwrap();
+        .unwrap()
+        .uids;
     assert!(
         !still.is_empty(),
         "message must remain after an aborted move"
@@ -738,7 +761,7 @@ async fn case_17_delete_message() {
         .unwrap();
 
     // Find the appended message
-    let (uids, _) = Box::pin(h.connection.search(
+    let uids = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("delete-test".to_string()),
@@ -746,7 +769,8 @@ async fn case_17_delete_message() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(!uids.is_empty(), "seeded message not found");
     let uid = uids[0];
 
@@ -754,15 +778,15 @@ async fn case_17_delete_message() {
     let _ = h.connection.create_folder("Trash").await;
 
     // Delete it (move to Trash)
-    let (result, _uid_validity) = h
+    let outcome = h
         .connection
         .delete_message("INBOX", uid, "Trash", None)
         .await
         .unwrap();
-    assert!(result.moved_to_trash);
+    assert!(outcome.result.moved_to_trash);
 
     // Verify it's gone from INBOX
-    let (after, _) = Box::pin(h.connection.search(
+    let after = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("delete-test".to_string()),
@@ -770,7 +794,8 @@ async fn case_17_delete_message() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(
         !after.contains(&uid),
         "message should be gone from INBOX after delete"
@@ -795,7 +820,7 @@ async fn case_23_delete_message_uidvalidity_guard() {
         .append_message(folder, &msg, &[], &[])
         .await
         .unwrap();
-    let (uids, uid_validity) = Box::pin(h.connection.search(
+    let outcome = Box::pin(h.connection.search(
         folder,
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("delete-guard-test".to_string()),
@@ -804,18 +829,18 @@ async fn case_23_delete_message_uidvalidity_guard() {
     ))
     .await
     .unwrap();
-    assert!(!uids.is_empty(), "seeded message not found");
-    let uid = uids[0];
-    let stale_validity = uid_validity.expect("dovecot reports UIDVALIDITY");
+    assert!(!outcome.uids.is_empty(), "seeded message not found");
+    let uid = outcome.uids[0];
+    let stale_validity = outcome.uidvalidity.expect("dovecot reports UIDVALIDITY");
 
     // Matching UIDVALIDITY: the delete proceeds and echoes the value back.
-    let (result, observed) = h
+    let outcome = h
         .connection
         .delete_message(folder, uid, "Trash", Some(stale_validity))
         .await
         .unwrap();
-    assert!(result.moved_to_trash);
-    assert_eq!(observed, Some(stale_validity));
+    assert!(outcome.result.moved_to_trash);
+    assert_eq!(outcome.uidvalidity, Some(stale_validity));
 
     // Force a new UIDVALIDITY by deleting and recreating the folder. The
     // prior `delete_message` call left `folder` selected via SELECT on this
@@ -834,7 +859,7 @@ async fn case_23_delete_message_uidvalidity_guard() {
         .append_message(folder, &msg, &[], &[])
         .await
         .unwrap();
-    let (uids, fresh_validity) = Box::pin(h.connection.search(
+    let outcome = Box::pin(h.connection.search(
         folder,
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("delete-guard-test".to_string()),
@@ -843,10 +868,13 @@ async fn case_23_delete_message_uidvalidity_guard() {
     ))
     .await
     .unwrap();
-    assert!(!uids.is_empty(), "seeded message not found after recreate");
-    let fresh_uid = uids[0];
+    assert!(
+        !outcome.uids.is_empty(),
+        "seeded message not found after recreate"
+    );
+    let fresh_uid = outcome.uids[0];
     assert_ne!(
-        fresh_validity,
+        outcome.uidvalidity,
         Some(stale_validity),
         "recreating the folder should rotate UIDVALIDITY"
     );
@@ -863,7 +891,7 @@ async fn case_23_delete_message_uidvalidity_guard() {
     );
 
     // The message must still be present — the guard aborted before delete.
-    let (after, _) = Box::pin(h.connection.search(
+    let after = Box::pin(h.connection.search(
         folder,
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("delete-guard-test".to_string()),
@@ -871,7 +899,8 @@ async fn case_23_delete_message_uidvalidity_guard() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(
         after.contains(&fresh_uid),
         "message must survive a guard-aborted delete"
@@ -894,7 +923,7 @@ async fn case_18_expunge() {
         .unwrap();
 
     // Find it
-    let (uids, _) = Box::pin(h.connection.search(
+    let uids = Box::pin(h.connection.search(
         "Trash",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("expunge-test".to_string()),
@@ -902,7 +931,8 @@ async fn case_18_expunge() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(!uids.is_empty());
     let uid = uids[0];
 
@@ -927,7 +957,7 @@ async fn case_18_expunge() {
     assert!(count > 0, "should expunge at least one message");
 
     // Verify it's gone
-    let (after, _) = Box::pin(h.connection.search(
+    let after = Box::pin(h.connection.search(
         "Trash",
         rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
             subject: Some("expunge-test".to_string()),
@@ -935,7 +965,8 @@ async fn case_18_expunge() {
         }),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert!(
         !after.contains(&uid),
         "message should be gone after expunge"
@@ -1190,22 +1221,24 @@ async fn case_24_thread_related_chain_walk_finds_reply_and_parent() {
 
     // Locate the parent's own UID by its exact Message-ID (SUBJECT search
     // would substring-match both the parent and "Re: <parent subject>").
-    let (parent_uids, _) = Box::pin(h.connection.search(
+    let parent_uids = Box::pin(h.connection.search(
         "INBOX",
         rimap_imap::types::SearchQuery::Raw(format!("HEADER Message-ID \"{parent_message_id}\"")),
     ))
     .await
-    .unwrap();
+    .unwrap()
+    .uids;
     assert_eq!(parent_uids.len(), 1, "expected exactly one parent match");
     let parent_uid = parent_uids[0];
 
     // Descendant direction: search from the parent's own Message-ID
     // should find the reply (via its References/In-Reply-To).
-    let (descendants, _) = h
+    let descendants = h
         .connection
         .thread_related("INBOX", Some(parent_message_id), &[])
         .await
-        .unwrap();
+        .unwrap()
+        .uids;
     assert!(
         !descendants.contains(&parent_uid),
         "descendant search must not match the parent itself"
@@ -1236,7 +1269,7 @@ async fn case_24_thread_related_chain_walk_finds_reply_and_parent() {
 
     // Ancestor direction: search from the reply's own ancestor chain
     // (its References, which name the parent) should find the parent.
-    let (ancestors, _) = h
+    let ancestors = h
         .connection
         .thread_related(
             "INBOX",
@@ -1244,7 +1277,8 @@ async fn case_24_thread_related_chain_walk_finds_reply_and_parent() {
             &[parent_message_id.to_string()],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .uids;
     assert!(
         ancestors.contains(&parent_uid),
         "parent not found via thread_related ancestor search; got {ancestors:?}",

@@ -66,6 +66,18 @@ impl AccountId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    /// The legacy single-account sentinel renders as *no* account.
+    ///
+    /// A flat pre-multi-account config names its sole account
+    /// `"default"`; every surface that presents an **optional** account
+    /// identity — `ConnectionConfig::account`, audit-record
+    /// attribution, bare-tool-name preservation — must map the
+    /// sentinel to absence through this one function so the sites
+    /// cannot drift.
+    #[must_use]
+    pub fn as_optional(&self) -> Option<&AccountId> {
+        (self.as_str() != DEFAULT_ACCOUNT_NAME).then_some(self)
+    }
 }
 
 impl fmt::Display for AccountId {

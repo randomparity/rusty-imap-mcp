@@ -125,7 +125,7 @@ mod tests {
         // `FolderName::new("Drafts")` must not error — the handler
         // revalidates whatever the fallback produced and would surface
         // `RimapError::invalid_input` otherwise.
-        assert!(rimap_authz::folder_name::FolderName::new("Drafts").is_ok());
+        assert!(rimap_core::folder_name::FolderName::new("Drafts").is_ok());
     }
 
     #[test]
@@ -133,7 +133,7 @@ mod tests {
         // If a server somehow reported an empty special-use folder name,
         // the revalidation at the handler would reject it. Pin the
         // structural invariant so a regression doesn't bypass the check.
-        assert!(rimap_authz::folder_name::FolderName::new("").is_err());
+        assert!(rimap_core::folder_name::FolderName::new("").is_err());
     }
 
     #[test]

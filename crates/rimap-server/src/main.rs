@@ -3,6 +3,7 @@
 #![deny(missing_docs)]
 
 use rimap_server::boot::{audit_init, logging, registry};
+use rimap_server::mcp::drain as mcp_drain;
 use rimap_server::mcp::server;
 
 use std::io::Write;
@@ -24,7 +25,7 @@ use rimap_config::login::{run_login, tty_prompt};
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_imap::Connection;
 use rmcp::model::ErrorCode as McpErrorCode;
-use rmcp::service::ServerInitializeError;
+use rmcp::service::{RoleServer, ServerInitializeError};
 use secrecy::ExposeSecret;
 use tokio::io::AsyncWriteExt;
 
@@ -147,7 +148,7 @@ const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
 /// that never reached a dispatch: an idle drain returns `0` without parking, so
 /// the zero those paths record is measured rather than assumed. That matters
 /// because `ProcessEnd::new` treats a zero as an affirmative durable claim.
-async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
+async fn drain_dispatches(dispatch_drain: &mcp_drain::DispatchDrain) -> u64 {
     let undrained = dispatch_drain.shutdown(DISPATCH_DRAIN_BUDGET).await;
     if undrained > 0 {
         tracing::warn!(
@@ -171,7 +172,7 @@ async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
 /// that later becomes reachable before init returns is counted rather
 /// than silently affirmed as zero.
 async fn intercepted_clean_exit(
-    dispatch_drain: &server::DispatchDrain,
+    dispatch_drain: &mcp_drain::DispatchDrain,
     supervisor: rimap_server::mcp::wire_validator::ValidatorSupervisor,
 ) -> ServeOutcome {
     let undrained_dispatches = drain_dispatches(dispatch_drain).await;
@@ -419,31 +420,14 @@ async fn serve_mcp(
     // BrokenPipe (e.g. closed stdout) during normal operation
     // surfaces as a non-zero exit rather than silently leaving rmcp
     // wedged on an unwritable transport.
-    let mut service_fut = Box::pin(service.waiting());
-    let service_outcome: anyhow::Result<()> = tokio::select! {
-        biased;
-        bridge = supervisor.watch_for_error() => match bridge {
-            Err(e) => Err(anyhow::anyhow!("validator bridge: {e}")),
-            Ok(()) => {
-                // Both bridges exited cleanly while service is still
-                // running (exotic). Let service finish — it'll see EOF.
-                (&mut service_fut)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
-            }
-        },
-        result = &mut service_fut =>
-            result.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
-    };
+    let (service_outcome, supervisor) = run_service_until_done(service, supervisor).await;
 
-    // Phase 2: drop service future to release rmcp's transport ends,
-    // then shut down the supervisor. On success, `drain()` awaits
-    // both bridges (inbound already saw EOF via rmcp); on failure,
-    // `shutdown_after_failure()` aborts inbound first because the
-    // client may keep stdin open while waiting for the error
-    // response.
-    drop(service_fut);
+    // Phase 2: `run_service_until_done` already dropped the service
+    // future (releasing rmcp's transport ends). Now shut down the
+    // supervisor: on success, `drain()` awaits both bridges (inbound
+    // already saw EOF via rmcp); on failure, `shutdown_after_failure()`
+    // aborts inbound first because the client may keep stdin open while
+    // waiting for the error response.
 
     // rmcp spawns each request handler as a detached task, so the drop above
     // released the transport but not the handlers. Cancel and drain them here,
@@ -475,6 +459,37 @@ async fn serve_mcp(
         undrained_dispatches: undrained,
         drainer_aborted_records,
     }
+}
+
+/// Phase 1 of the serving loop: race the rmcp service against validator
+/// bridge errors so a `BrokenPipe` during normal operation surfaces as a
+/// non-zero exit rather than silently leaving rmcp wedged on an
+/// unwritable transport. Consumes the service; returns its outcome and
+/// the supervisor for the shutdown phase.
+///
+/// Both bridges exiting cleanly while the service is still running
+/// (exotic) lets the service finish — it will see EOF.
+async fn run_service_until_done(
+    service: rmcp::service::RunningService<RoleServer, server::ImapMcpServer>,
+    mut supervisor: rimap_server::mcp::wire_validator::ValidatorSupervisor,
+) -> (
+    anyhow::Result<()>,
+    rimap_server::mcp::wire_validator::ValidatorSupervisor,
+) {
+    let mut service_fut = Box::pin(service.waiting());
+    let outcome: anyhow::Result<()> = tokio::select! {
+        biased;
+        bridge = supervisor.watch_for_error() => match bridge {
+            Err(e) => Err(anyhow::anyhow!("validator bridge: {e}")),
+            Ok(()) => (&mut service_fut)
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
+        },
+        result = &mut service_fut =>
+            result.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
+    };
+    (outcome, supervisor)
 }
 
 /// Wait, bounded, for the cancellation drainer to flush its queue.
@@ -971,7 +986,7 @@ mod resolve_download_dir_tests {
 mod process_end_tests {
     #![expect(clippy::expect_used, reason = "unit tests")]
 
-    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::AuditOptions;
     use rimap_audit::{AuditWriter, Seq};
 
     use super::emit_process_end;

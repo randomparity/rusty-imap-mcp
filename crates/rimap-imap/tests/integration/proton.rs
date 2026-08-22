@@ -107,10 +107,10 @@ async fn proton_bridge_connect_and_fetch_one_envelope() {
     };
     let conn = build_connection(&cfg);
     let _ = conn.select("INBOX", true).await.unwrap();
-    let (uids, _) =
-        Box::pin(conn.search("INBOX", rimap_imap::types::SearchQuery::Raw("ALL".into())))
-            .await
-            .unwrap();
+    let uids = Box::pin(conn.search("INBOX", rimap_imap::types::SearchQuery::Raw("ALL".into())))
+        .await
+        .unwrap()
+        .uids;
     assert!(!uids.is_empty(), "expected at least one message in INBOX");
     let spec = FetchSpec {
         envelope: true,

@@ -172,7 +172,7 @@ pub fn deserialize_opt_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64
 ///
 /// # Errors
 ///
-/// In addition to the integer-range errors from [`intorstr_to_int`]
+/// In addition to the integer-range errors from `intorstr_to_int`
 /// scoped to `u32`, returns an error when the parsed value is `0`.
 pub fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(d: D) -> Result<NonZeroU32, D::Error> {
     let v = IntOrStr::deserialize(d)?;
@@ -559,10 +559,11 @@ mod tests {
         assert!(!types.contains(&"null"));
     }
 
-    #[test]
-    fn schema_opt_usize_integer_branch_capped_at_i64_max() {
+    fn assert_integer_branch_capped_at_i64_max(
+        schema: impl FnOnce(&mut schemars::SchemaGenerator) -> schemars::Schema,
+    ) {
         let mut g = schemars::SchemaGenerator::default();
-        let s = super::schema_opt_usize(&mut g);
+        let s = schema(&mut g);
         let v = serde_json::to_value(s).unwrap();
         let one_of = v
             .get("oneOf")
@@ -582,25 +583,13 @@ mod tests {
     }
 
     #[test]
+    fn schema_opt_usize_integer_branch_capped_at_i64_max() {
+        assert_integer_branch_capped_at_i64_max(super::schema_opt_usize);
+    }
+
+    #[test]
     fn schema_opt_u64_integer_branch_capped_at_i64_max() {
-        let mut g = schemars::SchemaGenerator::default();
-        let s = super::schema_opt_u64(&mut g);
-        let v = serde_json::to_value(s).unwrap();
-        let one_of = v
-            .get("oneOf")
-            .and_then(|x| x.as_array())
-            .expect("oneOf array");
-        let integer_branch = one_of
-            .iter()
-            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("integer"))
-            .expect("integer branch present");
-        assert_eq!(
-            integer_branch
-                .get("maximum")
-                .and_then(serde_json::Value::as_u64),
-            Some(9_223_372_036_854_775_807),
-            "integer branch must cap at i64::MAX to match IntOrStr::Int(i64); got {integer_branch:?}",
-        );
+        assert_integer_branch_capped_at_i64_max(super::schema_opt_u64);
     }
 
     #[test]

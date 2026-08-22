@@ -89,7 +89,7 @@ pub(crate) type ImapSession = Session<TlsStream<TcpStream>>;
 /// What one session's post-login `CAPABILITY` probe established about the two
 /// extensions this crate branches on.
 ///
-/// Produced only by `imap_login`, and only as half of the [`SessionEntry`] it
+/// Produced only by `imap_login`, and only as half of the `SessionEntry` it
 /// returns, so a value of this type always arrives attached to the session
 /// that answered the probe (#652).
 ///
@@ -99,7 +99,7 @@ pub(crate) type ImapSession = Session<TlsStream<TcpStream>>;
 /// listing in it, was recorded as `(false, false)` — the same value a server
 /// that affirmatively advertises neither extension produces. Those two states
 /// need different answers, because `(false, false)` is *exactly* the condition
-/// [`crate::ops::expunge::fallback_uses_folder_wide_expunge`] selects the RFC
+/// `crate::ops::expunge::fallback_uses_folder_wide_expunge` selects the RFC
 /// 3501 folder-wide `EXPUNGE` on, which removes every `\Deleted` message in the
 /// mailbox rather than the requested UIDs. Encoding "we do not know" as "the
 /// server does not have it" therefore failed *open*, into the most destructive
@@ -110,7 +110,7 @@ pub(crate) type ImapSession = Session<TlsStream<TcpStream>>;
 /// describes either. There is no reachable state in which MOVE is known and
 /// UIDPLUS is not.
 ///
-/// [`Self::require_known`] is the only way to get the pair back out, so a
+/// `Self::require_known` is the only way to get the pair back out, so a
 /// caller that wants to branch on a capability has to decide what `Unknown`
 /// means to it first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,7 +565,7 @@ impl Connection {
     /// one.
     ///
     /// **Not a protocol input.** Code that selects a protocol from a capability
-    /// reads it from the [`SessionEntry`] `with_session` hands its body, where
+    /// reads it from the `SessionEntry` `with_session` hands its body, where
     /// the advertisement and the session that will serve the command are the
     /// same value (#634, #652). `dispatch::move_messages` and
     /// `dispatch::delete_message` are the only two that branch on a capability
@@ -586,7 +586,7 @@ impl Connection {
     /// It takes the session lock, which that body already holds, and
     /// `tokio::sync::Mutex` is not reentrant — the call would deadlock the
     /// account for good. Use the entry's own
-    /// [`SessionEntry::capabilities`] there; it is in scope and needs no lock.
+    /// `SessionEntry::capabilities` there; it is in scope and needs no lock.
     pub async fn capabilities(&self) -> ServerCapabilities {
         self.inner
             .session
@@ -609,7 +609,7 @@ impl Connection {
     /// * The per-tool-call ceiling in `rimap-server` (#594, ADR-0012),
     ///   which calls this directly because its own code runs when it
     ///   fires.
-    /// * [`SessionGuard`], which holds the session lock inside
+    /// * `SessionGuard`, which holds the session lock inside
     ///   `dispatch::attempt`, for the cuts where none of our code runs at
     ///   all — a client cancellation or a runtime shutdown dropping the
     ///   dispatch future (#620).

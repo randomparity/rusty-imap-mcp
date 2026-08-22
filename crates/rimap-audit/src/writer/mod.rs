@@ -6,7 +6,7 @@
 //!   lifetime. The lock is released implicitly on drop (OS cleanup — no
 //!   explicit `unlock()` call required).
 //! - `try_lock` is non-blocking; a second writer against the same
-//!   path fails immediately with [`AuditError::Locked`].
+//!   path fails immediately with `AuditError::Locked`.
 //! - Per-record writes go through a buffered writer, flushed after each
 //!   record. `fsync` is only issued on `process_*` / `auth` records
 //!   (Task 16 wires that).

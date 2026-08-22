@@ -68,13 +68,8 @@ fn invalid_input(message: &str) -> rimap_core::RimapError {
 /// Input for `add_label` and `remove_label` tools. Accepts either a
 /// single `uid` or a batch `uids` (exactly one of the two; batch max
 /// 100).
-// Design note (not published — see #405): the asymmetry with
-// single-target tools (`fetch_message`, `list_attachments`,
-// `download_attachment`, `delete_message`) is deliberate: batch shapes
-// are reserved for commutative, idempotent mutations where per-UID
-// ordering does not matter and results fan out uniformly. Read-side and
-// destructive single-target tools keep a scalar `uid` so the response
-// schema and error semantics stay unambiguous.
+// Scalar-vs-batch uid shape rationale: deliberate asymmetry, see the
+// `Scalar vs batch uid shapes` section of `crate::tools` module docs (#405).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LabelInput {
     /// Target folder.
@@ -183,12 +178,7 @@ async fn handle_label_op(
 ) -> Result<ToolResponse<LabelsMeta>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
     validate_label(&input.label)?;
-    let uids: Vec<Uid> = input
-        .target
-        .into_uids()
-        .into_iter()
-        .map(Uid::from)
-        .collect();
+    let uids: Vec<Uid> = Uid::uids_from_selector(input.target);
     let (updated, uid_validity) = account
         .imap
         .store_flags(

@@ -25,6 +25,15 @@ impl Uid {
     pub fn get(self) -> u32 {
         self.0.get()
     }
+
+    /// Translate a schema-level [`UidSelector`] into domain UIDs.
+    ///
+    /// The schema-to-domain translation lives once here, at the
+    /// transport seam, so batch handlers cannot re-derive it.
+    #[must_use]
+    pub fn uids_from_selector(selector: rimap_core::uid_selector::UidSelector) -> Vec<Self> {
+        selector.into_uids().into_iter().map(Self::from).collect()
+    }
 }
 
 impl From<NonZeroU32> for Uid {

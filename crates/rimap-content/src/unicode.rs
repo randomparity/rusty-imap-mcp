@@ -254,6 +254,36 @@ fn build_warnings(result: &FilterResult, location: &str) -> Vec<SecurityWarning>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rimap_core::folder_name::is_rejected_display_codepoint;
+
+    /// Lock-step guard for `rimap-core::folder_name`'s
+    /// `is_rejected_display_codepoint`: the predicate must strip exactly
+    /// the codepoints [`filter_codepoints`] strips as zero-width or bidi
+    /// (C0/C1 controls are out of scope — folder names reject those by a
+    /// different rule). Checked over *every* scalar value so a table
+    /// edit on either side cannot silently diverge.
+    #[test]
+    fn folder_name_rejection_matches_filter_codepoints() {
+        let mut checked = 0_usize;
+        for scalar in 0_u32..=0x0010_FFFF {
+            // Surrogates are not `char`s.
+            let Ok(ch) = char::try_from(scalar) else {
+                continue;
+            };
+            let result = filter_codepoints(&ch.to_string());
+            let stripped_by_filter = result.zero_width_stripped + result.bidi_stripped == 1;
+            assert_eq!(
+                is_rejected_display_codepoint(ch),
+                stripped_by_filter,
+                "U+{scalar:04X}: folder_name rejection and unicode filter disagree"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 1_100_000,
+            "expected to sweep every Unicode scalar, got {checked}"
+        );
+    }
 
     #[test]
     fn decode_utf8_passthrough() {
