@@ -73,7 +73,6 @@ ci). Nothing else consumes the profile keys.
    step is the tripwire. Record whether these zero-test runs produce an empty
    report or no report at all: the AGENTS.md ingestion bullet must match the
    observed behavior.
-
 4. Confirm-it-fails: temporarily invert one assertion in the test module of
    `crates/rimap-config/src/loader.rs` (`mod tests`, line 179), then
    `cargo nextest run -p rimap-config -E 'test(loader)'` must exit non-zero
@@ -84,7 +83,10 @@ ci). Nothing else consumes the profile keys.
    grep -c '<failure' target/nextest/default/junit.xml   # expect >= 1
    ```
 
-   Revert the assertion immediately (`git checkout -- crates/rimap-config`).
+   Revert the assertion immediately
+   (`git checkout -- crates/rimap-config/src/loader.rs` — only the file the
+   proof touched; never a crate-wide checkout, which would discard unrelated
+   in-flight work).
    Then re-run step 3's default-profile command so the artifact on disk is
    green again.
 
