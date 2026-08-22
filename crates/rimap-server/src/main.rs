@@ -25,7 +25,7 @@ use rimap_config::login::{run_login, tty_prompt};
 use rimap_config::validate::ValidatedAccountConfig;
 use rimap_imap::Connection;
 use rmcp::model::ErrorCode as McpErrorCode;
-use rmcp::service::ServerInitializeError;
+use rmcp::service::{RoleServer, ServerInitializeError};
 use secrecy::ExposeSecret;
 use tokio::io::AsyncWriteExt;
 
@@ -420,31 +420,14 @@ async fn serve_mcp(
     // BrokenPipe (e.g. closed stdout) during normal operation
     // surfaces as a non-zero exit rather than silently leaving rmcp
     // wedged on an unwritable transport.
-    let mut service_fut = Box::pin(service.waiting());
-    let service_outcome: anyhow::Result<()> = tokio::select! {
-        biased;
-        bridge = supervisor.watch_for_error() => match bridge {
-            Err(e) => Err(anyhow::anyhow!("validator bridge: {e}")),
-            Ok(()) => {
-                // Both bridges exited cleanly while service is still
-                // running (exotic). Let service finish — it'll see EOF.
-                (&mut service_fut)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
-            }
-        },
-        result = &mut service_fut =>
-            result.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
-    };
+    let (service_outcome, supervisor) = run_service_until_done(service, supervisor).await;
 
-    // Phase 2: drop service future to release rmcp's transport ends,
-    // then shut down the supervisor. On success, `drain()` awaits
-    // both bridges (inbound already saw EOF via rmcp); on failure,
-    // `shutdown_after_failure()` aborts inbound first because the
-    // client may keep stdin open while waiting for the error
-    // response.
-    drop(service_fut);
+    // Phase 2: `run_service_until_done` already dropped the service
+    // future (releasing rmcp's transport ends). Now shut down the
+    // supervisor: on success, `drain()` awaits both bridges (inbound
+    // already saw EOF via rmcp); on failure, `shutdown_after_failure()`
+    // aborts inbound first because the client may keep stdin open while
+    // waiting for the error response.
 
     // rmcp spawns each request handler as a detached task, so the drop above
     // released the transport but not the handlers. Cancel and drain them here,
@@ -476,6 +459,37 @@ async fn serve_mcp(
         undrained_dispatches: undrained,
         drainer_aborted_records,
     }
+}
+
+/// Phase 1 of the serving loop: race the rmcp service against validator
+/// bridge errors so a `BrokenPipe` during normal operation surfaces as a
+/// non-zero exit rather than silently leaving rmcp wedged on an
+/// unwritable transport. Consumes the service; returns its outcome and
+/// the supervisor for the shutdown phase.
+///
+/// Both bridges exiting cleanly while the service is still running
+/// (exotic) lets the service finish — it will see EOF.
+async fn run_service_until_done(
+    service: rmcp::service::RunningService<RoleServer, server::ImapMcpServer>,
+    mut supervisor: rimap_server::mcp::wire_validator::ValidatorSupervisor,
+) -> (
+    anyhow::Result<()>,
+    rimap_server::mcp::wire_validator::ValidatorSupervisor,
+) {
+    let mut service_fut = Box::pin(service.waiting());
+    let outcome: anyhow::Result<()> = tokio::select! {
+        biased;
+        bridge = supervisor.watch_for_error() => match bridge {
+            Err(e) => Err(anyhow::anyhow!("validator bridge: {e}")),
+            Ok(()) => (&mut service_fut)
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
+        },
+        result = &mut service_fut =>
+            result.map(|_| ()).map_err(|e| anyhow::anyhow!("MCP server error: {e}")),
+    };
+    (outcome, supervisor)
 }
 
 /// Wait, bounded, for the cancellation drainer to flush its queue.
