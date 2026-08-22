@@ -1,0 +1,148 @@
+# Agent-facing unit-test output contract (#827)
+
+Date: 2026-08-22
+Issue: [#827 — Improve Agent Experience for Unit Test](https://github.com/randomparity/rusty-imap-mcp/issues/827)
+Scope token: `q827-665ceb80`
+
+## Problem
+
+An agent running the test suite ingests results through the terminal stream.
+Today that stream is hostile to ingestion: thousands of PASS lines precede any
+failure, failure bodies interleave across parallel tests mid-stream, terminal
+capture truncates long runs, and there is no standing guidance for expected
+runtime — so every session re-derives timeouts and re-runs killed jobs with
+larger budgets.
+
+## Goal
+
+Make test results machine-ingestible and the terminal stream quiet by default,
+with documented escape hatches and runtime expectations, so an agent needs at
+most one run plus file reads to go from "suite ran" to "here is what failed
+and why".
+
+## Non-goals
+
+- **No `-verbose` boolean flag** (rejected in brainstorm): nextest already has
+  the verbs (`--no-capture`, `--status-level=all`, `RUST_BACKTRACE`);
+  passthrough beats a wrapper.
+- **No committed per-test timing tables**: rot immediately, host-dependent;
+  fresh timing comes free from `final-status-level = slow` and JUnit `time`
+  attributes.
+- **No per-test timeout metadata attributes**: `slow-timeout` already is that
+  mechanism.
+- **No `retry-failed` helper yet**: revisit after real use demonstrates the
+  friction; the JUnit artifact makes it a ~20-line addition later if needed.
+- **No CI workflow edits**: the JUnit sink is additive; uploading it as a
+  workflow artifact is separate scope.
+- **html-oracle crate**: workspace-excluded; out of reach of these profiles.
+
+## Design
+
+### 1. Nextest profile changes (`.config/nextest.toml`)
+
+Single-profile quiet defaults (user decision, 2026-08-22 session — no
+agent-specific profile):
+
+```toml
+[profile.default]
+# existing leak-timeout / slow-timeout keys stay
+status-level = "fail"                    # live lines: failures only
+failure-output = "immediate-final"       # failure bodies grouped at end
+final-status-level = "fail,slow"         # tail lists failures + slow tests w/ durations
+
+[profile.default.junit]
+path = "junit.xml"                       # -> target/nextest/default/junit.xml
+
+[profile.ci.junit]
+path = "junit.xml"                       # -> target/nextest/ci/junit.xml
+```
+
+- `[profile.ci]` inherits the default-profile status settings; `just test`,
+  `test-msrv`, and `test-injection` (`--profile ci`) therefore get the same
+  quiet behavior and write `target/nextest/ci/junit.xml`; `just test-fast`
+  (default profile) writes `target/nextest/default/junit.xml`. Both files sit
+  under `target/` — never tracked.
+- JUnit defaults do the right thing: `store-failure-output = true` embeds each
+  failing test's captured stdout/stderr; success output stays unstored.
+- Human cost, accepted: the live progress heartbeat and mid-run slow warnings
+  disappear; failures still print live at status-level `fail`, per-test
+  durations above 60 s land in the run tail via the existing `slow-timeout`
+  machinery, and the final summary is unchanged in completeness. The trade
+  was explicitly approved by the operator.
+- Requires nextest ≥ 0.9.95 (already floored as `NEXTEST_MIN` in the
+  justfile); all keys used predate that release.
+- Note: with `status-level = "fail"`, the mid-run 60-second slow-period warn
+  lines are suppressed; slow attribution arrives in the final summary instead.
+
+### 2. Justfile: argument passthrough + timing recipe
+
+- `test` and `test-fast` gain `*args` forwarded to `cargo nextest run`
+  verbatim, enabling `just test-fast -- --no-capture`,
+  `just test-fast -- --status-level=all`, or scoping with `-E 'test(name)'`
+  without editing the justfile. `test-fast`'s container-binary exclusion
+  filter is preserved; passthrough appends after it (later `-E` expressions
+  compose; callers overriding the filter do so knowingly).
+- New `test-timing PROFILE="ci"` recipe: `jq` over the profile's
+  `target/nextest/<PROFILE>/junit.xml` printing the slowest test cases with
+  durations. Read-only convenience over data §1 already produces; errors
+  loudly when the file is absent ("run the suite first").
+
+### 3. AGENTS.md guidance block
+
+A compact "Running tests as an agent" section under *Development commands*:
+
+1. **Recipe map with warm-machine runtime ranges**: single filtered test =
+   seconds; `test-fast` ≈ 1–3 min; `test` = minutes with individual
+   container-backed tests up to ~60 s warm (~180 s cold first pull); `ci` =
+   tens of minutes.
+2. **The background rule**: run `just test` / `just ci` in the background and
+   poll to completion; never bind them to a foreground timeout. Only the
+   filtered inner loop belongs in a bounded foreground call.
+3. **Inner loop**: `cargo nextest run -p <crate> -E 'test(substring)'` — never
+   a workspace sweep to iterate one failure.
+4. **JUnit ingestion**: where the file lands per profile; a `jq` example
+   extracting failed test names; failure bodies live in the same file.
+5. **Verbose escape hatches**: `--no-capture` (live output, hang diagnosis),
+   `--status-level=all`, `RUST_BACKTRACE=1`, all via recipe passthrough.
+6. **Noise triage note**: proptest shrink transcripts and insta diffs appear
+   only on genuine failures; volume signals a red, not brokenness.
+
+## Considered & rejected
+
+- **Agent-specific nextest profile.** judgment: two profiles for one knob;
+  single-profile simplicity explicitly approved by the operator.
+- **`-verbose` wrapper flag.** judgment: duplicates nextest's own CLI verbs
+  behind new surface; passthrough composes better.
+- **Committed per-test timing table.** verified: JUnit XML carries per-test
+  `time` attributes and `final-status-level = slow` lists slow tests with
+  durations every run (nextest docs, nexte.st/docs/reporting + /machine-readable/junit),
+  so a static table rots for no informational gain.
+- **Per-test timeout attributes.** verified: `.config/nextest.toml` already
+  sets `slow-timeout = { period = "60s", terminate-after = 3 }` workspace-wide.
+- **`retry-failed` helper now.** judgment: build after demonstrated friction;
+  the JUnit artifact keeps it cheap.
+
+## Security
+
+Not security-relevant: no untrusted-input handling, no entry-point or
+permission change, no dependency additions; the JUnit path is a fixed relative
+path under `target/`. Failure output embedded in `junit.xml` can contain test
+fixture content — it lands in an untracked build directory with default
+permissions, same exposure as nextest's own captured output today.
+
+## Testing strategy
+
+Config + docs + shell tooling; no Rust feature code, so the TDD loop applies
+as explicit verification commands:
+
+- After the profile change: run a scoped nextest command, assert
+  `target/nextest/*/junit.xml` exists, parses as XML, and its `<testcase>`
+  count matches nextest's summary line.
+- Force exactly one deliberate failure (temporary broken assertion, reverted
+  in the same step) to prove `<failure>` with captured output appears in the
+  JUnit file — the confirm-it-fails step for this change.
+- `just -n test-fast -- --no-capture` shows the flag reaching `cargo nextest
+  run`; `just test-timing` prints slowest cases from the file produced above.
+- Guardrails for touched files: `typos`, `just fmt-check`/`lint` unaffected
+  but run as part of the branch sweep; AGENTS.md prose reviewed against actual
+  recipe behavior (doc drift is the named hazard).
