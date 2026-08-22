@@ -304,8 +304,11 @@ impl Drop for Registration {
 /// Core MCP server. Owns every resource the handler methods need.
 pub struct ImapMcpServer {
     /// Account registry holding per-account state.
-    #[doc(hidden)]
-    pub registry: AccountRegistry,
+    ///
+    /// Integration tests reach it through the `test-support`-gated
+    /// [`ImapMcpServer::registry`] accessor instead of a public field, so
+    /// the published surface keeps one managed escape hatch per internal.
+    pub(crate) registry: AccountRegistry,
     /// Append-only audit writer.
     pub(crate) audit: AuditWriter,
     /// Channel used by `AuditEnvelopeGuard::drop` to emit synthetic
@@ -437,6 +440,11 @@ impl ImapMcpServer {
 /// cannot see this method, and `dispatch_tool` itself is `pub(crate)`.
 #[cfg(any(test, feature = "test-support"))]
 impl ImapMcpServer {
+    /// Read-only view of the account registry for integration tests.
+    pub fn registry(&self) -> &AccountRegistry {
+        &self.registry
+    }
+
     /// Execute `tool` through the full dispatch pipeline. Mirrors
     /// [`ServerHandler::call_tool`] but takes a pre-parsed `ToolName`
     /// and a raw JSON args value; returns the handler's JSON body

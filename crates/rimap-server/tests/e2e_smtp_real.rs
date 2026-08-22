@@ -248,7 +248,7 @@ fn forward_source(subject: &str, body: &str) -> Vec<u8> {
 }
 
 async fn seed_forward_source(server: &ImapMcpServer, subject: &str, body: &str) -> u32 {
-    let account = server.registry.resolve(None).expect("resolve account");
+    let account = server.registry().resolve(None).expect("resolve account");
     account
         .imap
         .append_message("INBOX", &forward_source(subject, body), &[], &[])

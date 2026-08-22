@@ -257,7 +257,7 @@ async fn assert_list_folders(server: &ImapMcpServer) {
 }
 
 async fn seed_message(server: &ImapMcpServer) {
-    let account = server.registry.resolve(None).expect("resolve account");
+    let account = server.registry().resolve(None).expect("resolve account");
     account
         .imap
         .append_message("INBOX", &test_message(), &[], &[])
@@ -407,7 +407,7 @@ async fn assert_create_draft(server: &ImapMcpServer, reply_uid: u32) {
 }
 
 async fn assert_create_draft_uses_special_use_when_available(server: &ImapMcpServer) {
-    let account = server.registry.resolve(None).expect("resolve account");
+    let account = server.registry().resolve(None).expect("resolve account");
     let expected = account
         .special_use
         .drafts()
@@ -490,7 +490,7 @@ async fn search_uid_and_validity(
 async fn assert_export_happy_path(server: &ImapMcpServer, harness: &DovecotHarness) {
     let folder = "PatchExport";
     harness.create_mailbox(folder);
-    let account = server.registry.resolve(None).expect("resolve account");
+    let account = server.registry().resolve(None).expect("resolve account");
     account
         .imap
         .append_message(folder, &patch_message(), &[], &[])
@@ -590,7 +590,7 @@ async fn assert_export_partial_success(server: &ImapMcpServer, present_uid: u32)
 async fn assert_export_uidvalidity_change(server: &ImapMcpServer, harness: &DovecotHarness) {
     let folder = "UidValidityExport";
     harness.create_mailbox(folder);
-    let account = server.registry.resolve(None).expect("resolve account");
+    let account = server.registry().resolve(None).expect("resolve account");
     account
         .imap
         .append_message(folder, &test_message(), &[], &[])

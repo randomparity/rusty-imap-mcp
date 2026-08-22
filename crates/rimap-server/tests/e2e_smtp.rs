@@ -249,7 +249,7 @@ fn newest_uid(search_result: &serde_json::Value) -> Option<u32> {
 /// Fetch a message's raw bytes from `folder` by `uid` over IMAP.
 async fn fetch_body(server: &ImapMcpServer, folder: &str, uid: u32) -> Vec<u8> {
     let uid = core::num::NonZeroU32::new(uid).expect("server UIDs are non-zero");
-    let account = server.registry.resolve(None).expect("resolve account");
+    let account = server.registry().resolve(None).expect("resolve account");
     account
         .imap
         .fetch_body(folder, rimap_imap::types::Uid::from(uid), None)
@@ -284,7 +284,7 @@ fn first_address<'a>(header: Option<&'a mail_parser::Address<'a>>) -> &'a str {
 
 /// APPEND a to-be-forwarded message to INBOX and return its server UID.
 async fn seed_forward_source(server: &ImapMcpServer, subject: &str, body: &str) -> u32 {
-    let account = server.registry.resolve(None).expect("resolve account");
+    let account = server.registry().resolve(None).expect("resolve account");
     account
         .imap
         .append_message("INBOX", &forward_source(subject, body), &[], &[])
