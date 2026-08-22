@@ -35,7 +35,7 @@
 
 // Import dovecot directly (not via support/mod.rs) so this binary does not
 // compile the wire driver it doesn't use.
-#[path = "support/dovecot/mod.rs"]
+#[path = "../support/dovecot/mod.rs"]
 mod dovecot;
 
 use std::collections::BTreeMap;

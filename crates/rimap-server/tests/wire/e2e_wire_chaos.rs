@@ -26,16 +26,16 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-#[path = "support/chaos/mod.rs"]
+#[path = "../support/chaos/mod.rs"]
 mod chaos;
 // Only the fixtures are needed here (not the DovecotHarness) — include the
 // self-contained fixtures module directly so the harness's items don't appear
 // dead in this binary.
-#[path = "support/canary.rs"]
+#[path = "../support/canary.rs"]
 mod canary;
-#[path = "support/dovecot/fixtures.rs"]
+#[path = "../support/dovecot/fixtures.rs"]
 mod fixtures;
-#[path = "support/wire/mod.rs"]
+#[path = "../support/wire/mod.rs"]
 mod wire;
 
 use chaos::{ChaosHarness, ChaosSkip, audit};

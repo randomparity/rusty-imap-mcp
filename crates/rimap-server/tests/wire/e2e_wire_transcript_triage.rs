@@ -13,10 +13,10 @@
 
 #![expect(clippy::expect_used, reason = "integration tests")]
 
-#[path = "support/wire/mod.rs"]
+#[path = "../support/wire/mod.rs"]
 mod wire;
 
-#[path = "support/canary.rs"]
+#[path = "../support/canary.rs"]
 mod canary;
 
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};
@@ -29,8 +29,8 @@ use wire::{Harness, PINNED_PROTOCOL_VERSION, assert_valid};
 const PASSWORD_ENV_VAR: &str = "RUSTY_IMAP_MCP_PASSWORD";
 
 /// Frozen, transcript-owned fixtures (decoupled from the injection corpus).
-const CLEAN_EML: &[u8] = include_bytes!("fixtures/transcript/clean.eml");
-const HOSTILE_EML: &[u8] = include_bytes!("fixtures/transcript/hostile.eml");
+const CLEAN_EML: &[u8] = include_bytes!("../fixtures/transcript/clean.eml");
+const HOSTILE_EML: &[u8] = include_bytes!("../fixtures/transcript/hostile.eml");
 
 /// Prints the fake's recorded client-command dialog to stderr iff the test is
 /// unwinding, so a miscalibrated script surfaces as a legible divergence.

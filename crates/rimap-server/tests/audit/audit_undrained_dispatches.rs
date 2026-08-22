@@ -24,7 +24,7 @@
 #![expect(clippy::expect_used, reason = "integration tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]
 
-#[path = "support/mod.rs"]
+#[path = "../support/mod.rs"]
 mod support;
 
 /// The one `process_end` line in `path`, as raw text.

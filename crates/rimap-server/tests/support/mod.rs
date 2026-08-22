@@ -3,7 +3,7 @@
 //! (Phase 3 + the legacy `e2e_full_session`).
 //!
 //! Each integration-test file pulls in the sub-module(s) it needs via
-//! `#[path = "support/<sub>/mod.rs"] mod <sub>;` rather than including
+//! `#[path = "../support/<sub>/mod.rs"] mod <sub>;` rather than including
 //! this file wholesale, so that each test binary compiles only the code
 //! it actually uses and avoids spurious dead-code warnings.
 

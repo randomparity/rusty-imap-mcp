@@ -13,7 +13,7 @@
 #![expect(clippy::expect_used, reason = "tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]
 
-#[path = "support/mod.rs"]
+#[path = "../support/mod.rs"]
 mod support;
 
 use rimap_audit::record::{ProcessEnd, ProcessEndReason};

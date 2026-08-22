@@ -26,10 +26,10 @@
 #![expect(clippy::expect_used, reason = "integration tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]
 
-#[path = "support/wire/mod.rs"]
+#[path = "../support/wire/mod.rs"]
 mod wire;
 
-#[path = "support/canary.rs"]
+#[path = "../support/canary.rs"]
 mod canary;
 
 use rimap_core::TlsFingerprint;

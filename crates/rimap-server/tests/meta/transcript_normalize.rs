@@ -6,7 +6,7 @@
 //! this root file carries no blanket `#![expect(...)]` — the included support
 //! modules keep their own module-scoped attributes.
 
-#[path = "support/wire/mod.rs"]
+#[path = "../support/wire/mod.rs"]
 mod wire;
 
 use serde_json::json;

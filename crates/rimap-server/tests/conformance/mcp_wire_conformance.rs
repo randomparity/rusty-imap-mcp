@@ -7,7 +7,7 @@
 
 #![expect(clippy::expect_used, reason = "integration tests")]
 
-#[path = "support/mod.rs"]
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::time::Duration;

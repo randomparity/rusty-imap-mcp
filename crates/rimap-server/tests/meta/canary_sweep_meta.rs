@@ -8,7 +8,7 @@
 
 use tempfile::TempDir;
 
-#[path = "support/canary.rs"]
+#[path = "../support/canary.rs"]
 mod canary;
 
 #[test]

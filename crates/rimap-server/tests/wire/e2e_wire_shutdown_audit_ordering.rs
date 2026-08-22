@@ -37,7 +37,7 @@
 #![expect(clippy::expect_used, reason = "integration tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]
 
-#[path = "support/canary.rs"]
+#[path = "../support/canary.rs"]
 mod canary;
 
 use std::process::Stdio;

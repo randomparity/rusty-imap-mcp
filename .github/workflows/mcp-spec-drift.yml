@@ -1,5 +1,5 @@
 # Weekly drift detector for the vendored MCP spec schemas consumed by
-# crates/rimap-server/tests/mcp_wire_conformance.rs. See
+# crates/rimap-server/tests/conformance/mcp_wire_conformance.rs. See
 # docs/superpowers/specs/2026-05-12-mcp-wire-conformance-design.md §3.5.
 
 name: mcp-spec-drift

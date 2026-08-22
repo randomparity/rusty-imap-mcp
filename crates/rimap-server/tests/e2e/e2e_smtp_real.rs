@@ -14,9 +14,9 @@
 #![expect(clippy::expect_used, reason = "tests")]
 #![expect(clippy::panic, reason = "test diagnostics")]
 
-#[path = "support/dovecot/mod.rs"]
+#[path = "../support/dovecot/mod.rs"]
 mod dovecot;
-#[path = "support/mailpit/mod.rs"]
+#[path = "../support/mailpit/mod.rs"]
 mod mailpit;
 
 use std::collections::BTreeMap;

@@ -11,10 +11,10 @@
 
 #![expect(clippy::expect_used, reason = "integration tests")]
 
-#[path = "support/wire/mod.rs"]
+#[path = "../support/wire/mod.rs"]
 mod wire;
 
-#[path = "support/canary.rs"]
+#[path = "../support/canary.rs"]
 mod canary;
 
 use rimap_fake_imap::fake_imap::{FakeImapServer, Step, login_preamble};

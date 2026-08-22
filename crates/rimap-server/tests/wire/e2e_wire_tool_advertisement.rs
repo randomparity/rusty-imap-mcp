@@ -35,11 +35,11 @@ use std::time::Duration;
 
 // Each integration-test binary imports only its needed support submodules
 // directly to avoid cross-binary dead-code warnings.
-#[path = "support/canary.rs"]
+#[path = "../support/canary.rs"]
 mod canary;
-#[path = "support/dovecot/mod.rs"]
+#[path = "../support/dovecot/mod.rs"]
 mod dovecot;
-#[path = "support/wire/mod.rs"]
+#[path = "../support/wire/mod.rs"]
 mod wire;
 
 use serde_json::json;

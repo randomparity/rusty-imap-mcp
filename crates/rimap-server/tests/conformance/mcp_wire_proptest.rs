@@ -30,7 +30,7 @@
 #![expect(clippy::expect_used, reason = "integration tests")]
 #![expect(clippy::panic, reason = "integration tests")]
 
-#[path = "support/mod.rs"]
+#[path = "../support/mod.rs"]
 mod support;
 
 use std::sync::{Mutex, OnceLock};
