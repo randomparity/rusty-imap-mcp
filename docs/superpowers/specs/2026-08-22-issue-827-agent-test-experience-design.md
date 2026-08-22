@@ -84,11 +84,13 @@ path = "junit.xml"                       # -> target/nextest/ci/junit.xml
   `-E` expressions are ORed into the filterset union and therefore *widen*
   past the exclusion filter rather than narrowing — never advertise `-E`
   passthrough as scoping.
-- New `test-timing PROFILE="ci"` recipe: `jq` over the profile's
-  `target/nextest/<PROFILE>/junit.xml` printing the file's modification time
-  (staleness is self-evident after a fast-only session) plus the slowest test
-  cases with durations. Read-only convenience over data §1 already produces;
-  errors loudly when the file is absent ("run the suite first").
+- New `test-timing PROFILE="default"` recipe (inner-loop profile is the
+  primary audience): `jq` over `target/nextest/<PROFILE>/junit.xml` printing
+  the file's modification time (staleness is self-evident after a fast-only
+  session) plus the slowest test cases with durations. Read-only convenience
+  over data §1 already produces; errors loudly when the file is absent ("run
+  the suite first") and — mirroring `scripts/mcp-probe-tools.sh` — with "jq
+  is required" when jq is missing.
 
 ### 3. AGENTS.md guidance block
 
@@ -107,7 +109,12 @@ A compact "Running tests as an agent" section under *Development commands*:
    extracting failed test names; failure bodies live in the same file. A
    missing `target/nextest/<profile>/junit.xml` after a run means the run did
    not complete cleanly — treat it as void, shrink scope or raise the budget,
-   and re-run; never parse a partial file.
+   and re-run; never parse a partial file. Existence alone is not proof of
+   freshness: ingest only files whose mtime is newer than the start of the
+   run being diagnosed (a compile error before test start leaves the previous
+   run's report in place), and pair the file with nextest's exit code — a
+   non-zero exit (`max-fail`/fail-fast abort) means only the recorded tests
+   ran; ingest their failure records without concluding overall health.
 5. **Verbose escape hatches**: `--no-capture` (live output, hang diagnosis)
    and `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
    environment variable — set it as a prefix (`RUST_BACKTRACE=1 just
