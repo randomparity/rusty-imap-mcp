@@ -183,7 +183,7 @@ pub fn read_trailing_state(path: &Path) -> Result<TrailingState, AuditError> {
 
         last_seq = Some(envelope.seq);
         last_process_id = Some(envelope.process_id);
-        if envelope.kind == "process_start" {
+        if envelope.kind == crate::record::kind::PROCESS_START {
             last_recorded_inode = envelope.previous_file_inode;
         }
     }

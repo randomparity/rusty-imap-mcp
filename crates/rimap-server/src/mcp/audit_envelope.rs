@@ -292,7 +292,7 @@ impl Drop for AuditEnvelopeGuard {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
-    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::AuditOptions;
     use rimap_audit::{AuditWriter, Seq, ToolStartInputs, cancellation_channel, spawn_drainer};
     use rimap_core::tool::ToolName;
     use tempfile::tempdir;

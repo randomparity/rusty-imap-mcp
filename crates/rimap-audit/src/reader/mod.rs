@@ -91,7 +91,7 @@ impl Filter {
             return false;
         }
         if let Some(ref want) = self.kind
-            && kind_of(&record.payload) != want
+            && crate::record::kind::of(&record.payload) != want
         {
             return false;
         }
@@ -131,49 +131,12 @@ impl Filter {
     }
 }
 
-const KIND_PROCESS_START: &str = "process_start";
-const KIND_PROCESS_END: &str = "process_end";
-const KIND_AUTH: &str = "auth";
-const KIND_TOOL_START: &str = "tool_start";
-const KIND_TOOL_END: &str = "tool_end";
-const KIND_CONFIG: &str = "config";
-const KIND_FOLDER_POLICY: &str = "folder_policy";
-
-/// Every `kind` discriminator this build recognizes.
-///
-/// This is the same list [`kind_of`] returns from, spelled once: a `kind`
-/// absent from here is a record type added after this binary was built, and
-/// [`stream_records`] skips such a line instead of calling the file corrupt.
-/// A new [`Payload`] variant breaks `kind_of`'s exhaustive match, and the arm
-/// it needs has to name a constant — so widening this array is part of adding
-/// a kind rather than a step that can be forgotten separately.
-const KNOWN_KINDS: [&str; 7] = [
-    KIND_PROCESS_START,
-    KIND_PROCESS_END,
-    KIND_AUTH,
-    KIND_TOOL_START,
-    KIND_TOOL_END,
-    KIND_CONFIG,
-    KIND_FOLDER_POLICY,
-];
-
-fn kind_of(payload: &Payload) -> &'static str {
-    match payload {
-        Payload::ProcessStart(_) => KIND_PROCESS_START,
-        Payload::ProcessEnd(_) => KIND_PROCESS_END,
-        Payload::Auth(_) => KIND_AUTH,
-        Payload::ToolStart(_) => KIND_TOOL_START,
-        Payload::ToolEnd(_) => KIND_TOOL_END,
-        Payload::Config(_) => KIND_CONFIG,
-        Payload::FolderPolicy(_) => KIND_FOLDER_POLICY,
-    }
-}
 
 /// The `kind` of `line`, when that `kind` is one this build does not know.
 ///
 /// Deliberately narrow, and the narrowness is the point: `Some` requires the
 /// line to be a well-formed JSON object carrying a **string** `kind` that is
-/// absent from [`KNOWN_KINDS`]. Every other shape of parse failure — invalid
+/// absent from [`crate::record::kind::KNOWN`]. Every other shape of parse failure — invalid
 /// JSON, a missing or non-string `kind`, a known `kind` whose payload does
 /// not deserialize — returns `None` and keeps aborting. Tolerating those
 /// would hide real corruption, which is the opposite of what an audit trail
@@ -184,7 +147,7 @@ fn kind_of(payload: &Payload) -> &'static str {
 fn unknown_kind(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let kind = value.get("kind")?.as_str()?;
-    (!KNOWN_KINDS.contains(&kind)).then(|| kind.to_owned())
+    (!crate::record::kind::KNOWN.contains(&kind)).then(|| kind.to_owned())
 }
 
 /// Parse a single JSONL line into an [`AuditRecord`].
@@ -993,7 +956,7 @@ mod tests {
 
     #[test]
     fn known_kinds_are_never_read_as_unrecognized() {
-        for kind in super::KNOWN_KINDS {
+        for kind in crate::record::kind::KNOWN {
             assert!(
                 super::unknown_kind(&format!(r#"{{"kind":"{kind}"}}"#)).is_none(),
                 "`{kind}` is a kind this build produces; it must not read as unrecognized",
@@ -1005,10 +968,10 @@ mod tests {
             "a kind outside the list is what the skip path keys on",
         );
         assert_eq!(
-            super::KNOWN_KINDS.len(),
+            crate::record::kind::KNOWN.len(),
             7,
             "one entry per `Payload` variant. Adding a variant reddens \
-             `kind_of`'s exhaustive match; widen `KNOWN_KINDS` in the same \
+             `kind::of`'s exhaustive match; widen `kind::KNOWN` in the same \
              change or the reader will skip records it can in fact parse",
         );
     }

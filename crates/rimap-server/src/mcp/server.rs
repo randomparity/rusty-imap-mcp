@@ -1831,7 +1831,7 @@ mod tool_call_ceiling_tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::AuditOptions;
     use rimap_audit::{AuditWriter, Seq, cancellation_channel, spawn_drainer};
     use rimap_core::tool::ToolName;
     use tempfile::tempdir;
@@ -1996,7 +1996,7 @@ mod dispatch_drain_tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::AuditOptions;
     use rimap_audit::{AuditWriter, Seq, cancellation_channel, spawn_drainer};
     use rimap_core::tool::ToolName;
     use rmcp::model::{CallToolResult, ErrorData};

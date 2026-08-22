@@ -971,7 +971,7 @@ mod resolve_download_dir_tests {
 mod process_end_tests {
     #![expect(clippy::expect_used, reason = "unit tests")]
 
-    use rimap_audit::writer::AuditOptions;
+    use rimap_audit::AuditOptions;
     use rimap_audit::{AuditWriter, Seq};
 
     use super::emit_process_end;
