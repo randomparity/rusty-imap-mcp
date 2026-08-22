@@ -524,11 +524,21 @@ async fn pre_initialize_envelope_write_failure_records_error() {
          masking transport failures as clean EOF defeats the audit-correctness goal",
     );
 
-    // The propagated anyhow context must surface in stderr.
+    // The stderr record depends on which side of an rmcp-internal race
+    // observes the broken pipe first (#830): when rmcp dispatches the
+    // pre-init request to the server, the envelope write fails and the
+    // propagated anyhow context ("writing pre-init error envelope to
+    // stdout") surfaces; when rmcp's stdout sink task notices the dead
+    // pipe first, serve_server reports ConnectionClosed("initialize
+    // request") and the envelope write is never attempted. Both are
+    // faithful records of the same induced failure — the contract this
+    // test pins is reason == Error above, not which task wins the race.
     let stderr = detached.captured_stderr();
     assert!(
-        stderr.contains("pre-init error envelope"),
-        "expected propagated 'pre-init error envelope' anyhow context in stderr, got:\n{stderr}",
+        stderr.contains("pre-init error envelope")
+            || stderr.contains("connection closed: initialize request"),
+        "expected either the envelope-write failure context or rmcp's \
+         connection-closed record in stderr, got:\n{stderr}",
     );
 }
 

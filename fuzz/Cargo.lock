@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-audit"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "fs4",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-content"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "addr",
  "ammonia",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-core"
-version = "0.2.0-dev"
+version = "0.2.0"
 dependencies = [
  "hex",
  "schemars",
