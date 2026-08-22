@@ -72,6 +72,61 @@ just test-integration  # Proton Bridge integration tests (gated, future)
 `just` targets are defined in the `justfile` at the repo root. Add new targets
 there, not in ad-hoc scripts.
 
+### Running tests as an agent
+
+Agents ingesting test results should read this section together with
+[Testing expectations](#testing-expectations), which covers what the tests
+assert; this section covers how to run and read them.
+
+1. **Recipe map with warm-machine runtime ranges** (a cold first pull of
+   fixture images multiplies container-backed costs): a filtered single
+   `cargo nextest run -p <crate> -E 'test(name)'` = seconds; `just test-fast`
+   ≈ 1–3 min; `just test` = minutes, with individual container-backed tests
+   up to ~60 s warm / ~180 s cold; `just ci` = tens of minutes.
+2. **Background long recipes.** Run `just test` / `just ci` in the background
+   and poll to completion — never under a foreground timeout. nextest's own
+   `slow-timeout` kills any individual hung test at 3 minutes, so an
+   unbounded wait is safe. Only the filtered inner loop belongs in a bounded
+   foreground call.
+3. **Inner loop:** scope to the failure with
+   `cargo nextest run -p <crate> -E 'test(substring)'` or
+   `just test-fast -- substring` — never a workspace sweep. Positional
+   substring filters intersect with the default filtersets, so scoping keeps
+   the container-binary exclusions. Warning: additional `-E` expressions are
+   ORed into the filterset union and *widen* past `test-fast`'s exclusion
+   filter — do not use them for narrowing.
+4. **JUnit ingestion:** every nextest run writes
+   `target/nextest/default/junit.xml` (`target/nextest/ci/junit.xml` under
+   `--profile ci`) containing failed test names AND their captured output.
+   `xmllint --xpath '//testcase[failure]/@name' <report>` lists failing test
+   names; xmllint is a convenience, not a gate — any XML parser works and
+   `grep -c '<failure' <report>` is the zero-dependency fallback. Ingestion
+   guards: a missing file means the run did not complete cleanly (void);
+   ingest only files whose mtime is newer than the start of the run being
+   diagnosed; pair the file with nextest's exit code — non-zero
+   (`max-fail`/fail-fast abort) means only the recorded tests ran; confirm it
+   parses as XML before trusting it; a report recording zero tests means the
+   filter matched nothing, never "healthy"; never run two same-profile suites
+   concurrently in one workspace (the JUnit path collides). The report never
+   outranks the run's own summary line (`N tests run`). On a run with no
+   failures the xpath selector returns an empty set (xmllint exits 11) and
+   `grep -c` prints 0 and exits 1 — both mean "green", not "broken".
+5. **Verbose escape hatches:** pass through recipe args —
+   `just test-fast --no-capture` for live output when diagnosing a hang,
+   `--status-level=all` for full chatter. (A leading `--` separator is also
+   accepted and stripped by the recipes.) `RUST_BACKTRACE=1` is an
+   environment variable: use the prefix form `RUST_BACKTRACE=1 just
+   test-fast`, not a passthrough argument. Note that `--no-capture` runs
+   serially and its JUnit report has no embedded failure output — watch with
+   it, ingest from a normal captured run.
+6. **Noise triage:** proptest shrink transcripts and insta snapshot diffs
+   appear only on genuine failures — volume signals a red, not brokenness.
+   Tests exceeding 60 s are listed with durations in every run's tail
+   (`final-status-level = "slow"`). Version caveat: on nextest < 0.9.133
+   (which the 0.9.95 tooling floor permits), the mid-run 60-second slow
+   warning renders as a corrupt line instead of being hidden; slow
+   attribution still arrives in the run tail either way.
+
 ### Container runtime for integration tests
 
 The Dovecot integration harness autodetects `docker` first, then falls

@@ -109,6 +109,25 @@ leak-timeout = { period = "5s", result = "fail" }
 # and no attribution, which is the problem this fixes.
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+# Quiet-by-default output for agent ingestion (#827). `status-level = "fail"`
+# prints live lines for failures only — the per-test PASS heartbeat is context
+# waste for an agent and noise for humans. `failure-output = "final"` groups
+# captured failure bodies at the end of the run instead of interleaving them
+# across parallel tests mid-stream ("immediate-final" would print each body
+# twice). `final-status-level = "slow"` is cumulative (includes retry + fail),
+# so the run tail lists every failure and every test above the slow-timeout
+# period with its duration — fresh timing data on every run, which is what
+# lets an agent calibrate runtimes without a committed timing table.
+#
+# Version note: suppressing the mid-run slow-period warn lines under
+# `status-level = "fail"` holds on nextest >= 0.9.133 (upstream #3236 fixed
+# their display); older versions — including the NEXTEST_MIN floor 0.9.95 —
+# render a corrupt mid-run line (duration and name, no status) instead of
+# hiding it. The final summary is unaffected either way.
+status-level = "fail"
+failure-output = "final"
+final-status-level = "slow"
+
 # nextest's built-in default is fail-fast = true: the first failure cancels
 # the run and every test still in flight is reported as "not run" rather than
 # pass or fail (#625). That is fine for a quick local iteration loop — see
@@ -137,3 +156,13 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # a systemic failure.
 [profile.ci]
 fail-fast = { max-fail = 20 }
+
+# Machine-readable results for agent ingestion (#827). One table under the
+# default profile; [profile.ci] inherits it, so `--profile ci` runs write
+# target/nextest/ci/junit.xml and default-profile runs (test-fast, ad-hoc)
+# write target/nextest/default/junit.xml. Defaults do the right thing:
+# store-failure-output = true embeds each failing test's captured
+# stdout/stderr; success output stays unstored. The file is written once at
+# the end of a run — a missing file means the run did not complete.
+[profile.default.junit]
+path = "junit.xml"
