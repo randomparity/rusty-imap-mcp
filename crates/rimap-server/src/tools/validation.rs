@@ -1,6 +1,6 @@
 //! Cross-cutting input-validation helpers for tool handlers.
 
-use rimap_authz::folder_name::FolderName;
+use rimap_core::folder_name::FolderName;
 use rimap_core::RimapError;
 
 /// Validate `name` as a structurally well-formed IMAP folder, mapping

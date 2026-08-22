@@ -72,7 +72,7 @@ pub struct MoveMessageMeta {
 /// Execute the `move_message` tool.
 ///
 /// In addition to the posture-matrix gate in `DispatchGuard::pre_dispatch`,
-/// this handler runs [`rimap_authz::folder_name::FolderName`] structural
+/// this handler runs [`rimap_core::folder_name::FolderName`] structural
 /// validation on both source and destination. The protected-folder list
 /// is intentionally not consulted here: it gates folder-mutation
 /// operations (delete, rename, create), not message moves between

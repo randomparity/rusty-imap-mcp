@@ -120,7 +120,7 @@ pub async fn handle(
     // fixture.
     let sent_folder: &str = account.special_use.sent().unwrap_or("Sent");
     let append_outcome: Option<Result<Option<u32>, rimap_core::ErrorCode>> =
-        if let Err(e) = rimap_authz::folder_name::FolderName::new(sent_folder) {
+        if let Err(e) = rimap_core::folder_name::FolderName::new(sent_folder) {
             // Stable warn fields go in the structured record; the full
             // Display goes to DEBUG so it is available when tracing is
             // configured verbose but not piped into the default stderr

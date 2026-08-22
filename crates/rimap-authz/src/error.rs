@@ -116,12 +116,48 @@ impl From<AuthzError> for RimapError {
     }
 }
 
+impl From<rimap_core::folder_name::FolderNameError> for AuthzError {
+    fn from(err: rimap_core::folder_name::FolderNameError) -> Self {
+        Self::InvalidFolderName {
+            reason: err.reason.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
-#[expect(clippy::panic, reason = "tests")]
+#[expect(clippy::panic, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use crate::error::AuthzError;
     use rimap_core::error::{ErrorCode, RimapError};
     use rimap_core::tool::ToolName;
+    use rimap_core::folder_name::{FolderName, FolderNameError};
+
+    #[test]
+    fn folder_name_rejection_maps_to_authz_invalid_folder_name() {
+        let err: AuthzError = FolderName::new("test\0folder")
+            .err()
+            .map(FolderNameError::into)
+            .unwrap();
+        assert!(matches!(err, AuthzError::InvalidFolderName { .. }));
+    }
+
+    #[test]
+    fn authz_error_carries_canonical_reason() {
+        let err: AuthzError =
+            FolderName::new("").err().map(FolderNameError::into).unwrap();
+        match err {
+            AuthzError::InvalidFolderName { reason } => {
+                assert!(reason.contains("empty"), "got reason: {reason}");
+            }
+            other => panic!("expected InvalidFolderName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_inbox_round_trips_through_canonical() {
+        let f = FolderName::new("INBOX").unwrap();
+        assert_eq!(f.as_str(), "INBOX");
+    }
 
     #[test]
     fn rate_limited_routes_to_typed_variant() {

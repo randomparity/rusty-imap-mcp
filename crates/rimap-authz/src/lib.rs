@@ -5,7 +5,6 @@
 pub mod breaker;
 pub mod error;
 pub mod folder_guard;
-pub mod folder_name;
 pub mod guard;
 pub mod matrix;
 pub mod rate_limit;

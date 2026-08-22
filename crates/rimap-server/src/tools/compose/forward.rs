@@ -174,7 +174,7 @@ fn build_envelope(from_addr: &str, input: &ForwardInput) -> rimap_smtp::SendEnve
 /// through the returned `SentCopyInfo`, never as a handler error.
 async fn append_sent_copy(account: &AccountState, raw_msg: &[u8]) -> SentCopyInfo {
     let sent_folder: &str = account.special_use.sent().unwrap_or("Sent");
-    if let Err(e) = rimap_authz::folder_name::FolderName::new(sent_folder) {
+    if let Err(e) = rimap_core::folder_name::FolderName::new(sent_folder) {
         tracing::warn!(
             tool = "forward",
             error_code = "invalid_sent_folder",

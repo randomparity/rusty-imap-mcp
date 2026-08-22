@@ -170,7 +170,7 @@ mod tests {
         // `FolderName::new("Trash")` must not error — the handler
         // revalidates whatever the fallback produced and would surface
         // `RimapError::invalid_input` otherwise.
-        assert!(rimap_authz::folder_name::FolderName::new("Trash").is_ok());
+        assert!(rimap_core::folder_name::FolderName::new("Trash").is_ok());
     }
 
     #[test]
