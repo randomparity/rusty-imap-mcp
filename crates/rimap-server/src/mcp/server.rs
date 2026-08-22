@@ -45,14 +45,14 @@ const WORKFLOWS_DOC_URI: &str = "rimap://docs/workflows";
 /// Content of the `rimap://docs/postures` resource. Literally
 /// `docs/postures.md` — the human-facing doc IS the agent-facing doc, so
 /// there is nothing to drift.
-const POSTURES_DOC: &str = include_str!("../../../../docs/postures.md");
+const POSTURES_DOC: &str = include_str!("../../docs/postures.md");
 
 /// Content of the `rimap://docs/workflows` resource: search → fetch →
 /// act, UIDVALIDITY pinning, attachment retrieval, draft lifecycle,
 /// `export_messages` opt-in, and a numeric-limits table. The limits
 /// table is pinned against the Rust constants it describes by
 /// `workflows_doc_limits_match_source_constants` below.
-const WORKFLOWS_DOC: &str = include_str!("../../../../docs/mcp-workflows.md");
+const WORKFLOWS_DOC: &str = include_str!("../../docs/mcp-workflows.md");
 
 /// MCP `ServerInfo.instructions` text used when exactly one account is
 /// configured. No namespacing sentence; no `use_account` guidance.
@@ -1121,6 +1121,39 @@ fn account_resource_metadata(account_name: &str, state: &AccountState) -> serde_
         "smtp_configured": state.smtp.is_some(),
         "available_tools": available_tools,
     })
+}
+
+#[cfg(test)]
+mod embedded_doc_drift_tests {
+    //! The embedded copies under `docs/` are what ships in the published
+    //! crate (the repo-root originals cannot be packaged — cargo refuses
+    //! paths outside the package root), but the repo-root files are the
+    //! ones humans edit and the generated `docs/tools.md` links. This
+    //! guard fails `just ci` the moment the two diverge, so an edit to
+    //! the root doc that skips the crate copy cannot ship stale
+    //! agent-facing content.
+
+    use super::{POSTURES_DOC, WORKFLOWS_DOC};
+
+    #[test]
+    fn embedded_docs_match_repo_root_canonical_copies() {
+        for (embedded, canonical) in [
+            (POSTURES_DOC, "docs/postures.md"),
+            (WORKFLOWS_DOC, "docs/mcp-workflows.md"),
+        ] {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(canonical);
+            let source = std::fs::read_to_string(&root)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()));
+            assert_eq!(
+                embedded, source,
+                "{canonical} drifted from the crate-local copy at \
+                 crates/rimap-server/docs/ — update both or the published \
+                 crate ships stale content"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
