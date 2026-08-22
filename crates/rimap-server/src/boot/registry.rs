@@ -245,8 +245,10 @@ pub fn build_account_connection(
     id: &rimap_core::account::AccountId,
     acfg: &ValidatedAccountConfig,
 ) -> ConnectionConfig {
-    let account =
-        id.as_optional().map(rimap_core::account::AccountId::as_str).map(str::to_string);
+    let account = id
+        .as_optional()
+        .map(rimap_core::account::AccountId::as_str)
+        .map(str::to_string);
     ConnectionConfig {
         account,
         account_id: id.clone(),

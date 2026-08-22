@@ -3,6 +3,7 @@
 #![deny(missing_docs)]
 
 use rimap_server::boot::{audit_init, logging, registry};
+use rimap_server::mcp::drain as mcp_drain;
 use rimap_server::mcp::server;
 
 use std::io::Write;
@@ -147,7 +148,7 @@ const DRAINER_JOIN_BUDGET: Duration = Duration::from_secs(1);
 /// that never reached a dispatch: an idle drain returns `0` without parking, so
 /// the zero those paths record is measured rather than assumed. That matters
 /// because `ProcessEnd::new` treats a zero as an affirmative durable claim.
-async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
+async fn drain_dispatches(dispatch_drain: &mcp_drain::DispatchDrain) -> u64 {
     let undrained = dispatch_drain.shutdown(DISPATCH_DRAIN_BUDGET).await;
     if undrained > 0 {
         tracing::warn!(
@@ -171,7 +172,7 @@ async fn drain_dispatches(dispatch_drain: &server::DispatchDrain) -> u64 {
 /// that later becomes reachable before init returns is counted rather
 /// than silently affirmed as zero.
 async fn intercepted_clean_exit(
-    dispatch_drain: &server::DispatchDrain,
+    dispatch_drain: &mcp_drain::DispatchDrain,
     supervisor: rimap_server::mcp::wire_validator::ValidatorSupervisor,
 ) -> ServeOutcome {
     let undrained_dispatches = drain_dispatches(dispatch_drain).await;

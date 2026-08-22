@@ -2,6 +2,7 @@
 
 pub(crate) mod audit_envelope;
 pub(crate) mod dispatch;
+pub mod drain;
 pub mod error;
 pub mod preinit;
 pub mod response;
