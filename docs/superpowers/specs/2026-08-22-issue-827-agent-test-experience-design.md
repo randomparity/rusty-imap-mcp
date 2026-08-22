@@ -48,7 +48,7 @@ agent-specific profile):
 # existing leak-timeout / slow-timeout keys stay
 status-level = "fail"                    # live lines: failures only
 failure-output = "final"                 # failure bodies grouped at run end
-final-status-level = "slow"              # cumulative: includes flaky + fail
+final-status-level = "slow"              # cumulative: includes retry + fail
 
 [profile.default.junit]
 path = "junit.xml"                       # -> target/nextest/default/junit.xml
@@ -85,12 +85,13 @@ path = "junit.xml"                       # -> target/nextest/ci/junit.xml
   past the exclusion filter rather than narrowing — never advertise `-E`
   passthrough as scoping.
 - New `test-timing PROFILE="default"` recipe (inner-loop profile is the
-  primary audience): `jq` over `target/nextest/<PROFILE>/junit.xml` printing
-  the file's modification time (staleness is self-evident after a fast-only
-  session) plus the slowest test cases with durations. Read-only convenience
-  over data §1 already produces; errors loudly when the file is absent ("run
-  the suite first") and — mirroring `scripts/mcp-probe-tools.sh` — with "jq
-  is required" when jq is missing.
+  primary audience): `xmllint --xpath` over
+  `target/nextest/<PROFILE>/junit.xml` printing the file's modification time
+  plus every `<testcase>`'s `time`/`name` attributes, sorted by duration.
+  Read-only convenience over data §1 already produces; errors loudly when the
+  file is absent ("run the suite first") and — mirroring
+  `scripts/mcp-probe-tools.sh`'s convention — with "xmllint is required" when
+  xmllint is missing. (jq is a JSON processor and cannot read the XML report.)
 
 ### 3. AGENTS.md guidance block
 
@@ -105,16 +106,20 @@ A compact "Running tests as an agent" section under *Development commands*:
    filtered inner loop belongs in a bounded foreground call.
 3. **Inner loop**: `cargo nextest run -p <crate> -E 'test(substring)'` — never
    a workspace sweep to iterate one failure.
-4. **JUnit ingestion**: where the file lands per profile; a `jq` example
-   extracting failed test names; failure bodies live in the same file. A
-   missing `target/nextest/<profile>/junit.xml` after a run means the run did
-   not complete cleanly — treat it as void, shrink scope or raise the budget,
-   and re-run; never parse a partial file. Existence alone is not proof of
-   freshness: ingest only files whose mtime is newer than the start of the
-   run being diagnosed (a compile error before test start leaves the previous
-   run's report in place), and pair the file with nextest's exit code — a
-   non-zero exit (`max-fail`/fail-fast abort) means only the recorded tests
-   ran; ingest their failure records without concluding overall health.
+4. **JUnit ingestion**: where the file lands per profile; an `xmllint`
+   example extracting failed test names; failure bodies live in the same
+   file. A missing `target/nextest/<profile>/junit.xml` after a run means the
+   run did not complete cleanly — treat it as void, shrink scope or raise the
+   budget, and re-run; never parse a partial file. Existence alone is not
+   proof of freshness: ingest only files whose mtime is newer than the start
+   of the run being diagnosed (a compile error before test start leaves the
+   previous run's report in place), pair the file with nextest's exit code —
+   non-zero (`max-fail`/fail-fast abort) means only recorded tests ran;
+   ingest their failure records without concluding overall health — and
+   confirm it parses as XML first (a malformed or truncated file gets the
+   void treatment). Never run two same-profile suites concurrently in one
+   workspace: the JUnit path collides and last-writer-wins corrupts
+   attribution.
 5. **Verbose escape hatches**: `--no-capture` (live output, hang diagnosis)
    and `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
    environment variable — set it as a prefix (`RUST_BACKTRACE=1 just
