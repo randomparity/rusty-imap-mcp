@@ -8,8 +8,8 @@ AGENTS.md carries the guidance. No Rust source changes.
 
 Tech stack: cargo-nextest ≥ 0.9.95 (already floored as `NEXTEST_MIN` in the
 justfile), just with `set positional-arguments` (long-established setting; host
-has 1.57.0), xmllint for the documented ingestion examples (libxml, present on
-all supported dev hosts; loud error if absent).
+has 1.57.0), xmllint as a documented convenience for ingestion examples (any
+XML parser works; `grep -c '<failure'` is the zero-dependency fallback).
 
 Spec: `docs/superpowers/specs/2026-08-22-issue-827-agent-test-experience-design.md`
 
@@ -18,6 +18,9 @@ Spec: `docs/superpowers/specs/2026-08-22-issue-827-agent-test-experience-design.
 - No new dependencies. Surface limited to `.config/nextest.toml`, `justfile`,
   `AGENTS.md`. No `test-timing` recipe (rejected in spec — jq cannot read the
   XML report; the run-tail slow listing already carries durations).
+- One junit table lives under `[profile.default]`; `[profile.ci]` inherits it
+  (`--profile ci` writes `target/nextest/ci/junit.xml`). No explicit
+  `[profile.ci.junit]` table.
 - Every nextest profile key used must be valid on nextest ≥ 0.9.95;
   `final-status-level` takes ONE cumulative enum value (`"slow"` includes
   retry + fail) — never a comma-combined form.
@@ -28,6 +31,7 @@ Spec: `docs/superpowers/specs/2026-08-22-issue-827-agent-test-experience-design.
 - junit.xml is written once at the end of a run: a missing file means the run
   did not complete; a stale file (older than the run being diagnosed) is void;
   a non-zero nextest exit (`max-fail`/fail-fast) means only recorded tests ran;
+  a zero-test report means the filter matched nothing — never a health signal;
   never run two same-profile suites concurrently in one workspace.
 - Commits: conventional, imperative, ≤72 chars, explicit paths only.
 - Branch: `feat/agent-test-experience-827`; BASE_BRANCH `main`.
@@ -53,32 +57,37 @@ ci). Nothing else consumes the profile keys.
    ```toml
    [profile.default.junit]
    path = "junit.xml"
-
-   [profile.ci.junit]
-   path = "junit.xml"
    ```
 
-   (`junit.xml` resolves relative to `target/nextest/<profile>/`.)
+   (`junit.xml` resolves relative to `target/nextest/<profile>/`; ci inherits
+   the table.)
 
-3. Confirm-it-parses: `cargo nextest run -p rimap-config --locked --no-tests=pass`
-   exits 0 (a bad key here is a bare config-parse error on EVERY run — this
-   step is the tripwire).
+3. Confirm-it-parses and inheritance proof:
+   `cargo nextest run -p rimap-config --locked --no-tests=pass` exits 0 AND
+   writes `target/nextest/default/junit.xml`; rerun with `--profile ci` and
+   assert `target/nextest/ci/junit.xml` exists (proves ci inherits the junit
+   table). A bad key would be a bare config-parse error on EVERY run — this
+   step is the tripwire. Record whether these zero-test runs produce an empty
+   report or no report at all: the AGENTS.md ingestion bullet must match the
+   observed behavior.
 
 4. Confirm-it-fails: temporarily invert one assertion in the test module of
    `crates/rimap-config/src/loader.rs` (`mod tests`, line 179), then
    `cargo nextest run -p rimap-config -E 'test(loader)'` must exit non-zero
-   AND write `target/nextest/default/junit.xml` containing a `<failure>` element
-   whose body embeds the assertion's captured output:
+   AND update `target/nextest/default/junit.xml` containing a `<failure>`
+   element whose body embeds the assertion's captured output:
 
    ```sh
    grep -c '<failure' target/nextest/default/junit.xml   # expect >= 1
    ```
 
    Revert the assertion immediately (`git checkout -- crates/rimap-config`).
+   Then re-run step 3's default-profile command so the artifact on disk is
+   green again.
 
-5. Acceptance: `target/nextest/default/junit.xml` exists (from step 4) and
-   parses; its `<testcase>` count equals nextest's reported test count for the
-   same run; no diff remains under `crates/`.
+5. Acceptance: both profile junit paths exist and parse; their `<testcase>`
+   counts match nextest's summary lines for the same runs; no diff remains
+   under `crates/`.
 
 ## Task 2 — Justfile: argument passthrough
 
@@ -130,7 +139,9 @@ nothing consumes it programmatically.
 
 1. Insert a new `### Running tests as an agent` subsection immediately after
    the fenced command block in *Development commands* (before the *Container
-   runtime* subsection), containing exactly six numbered points:
+   runtime* subsection). Open it with one cross-reference line to the existing
+   *Testing expectations* section (the noise-triage note points there rather
+   than duplicating it), then six numbered points:
    1. Recipe map with warm-machine ranges: filtered single test = seconds;
       `just test-fast` ≈ 1–3 min; `just test` = minutes (container-backed
       tests individually up to ~60 s warm / ~180 s cold first pull); `just ci`
@@ -146,18 +157,22 @@ nothing consumes it programmatically.
       `target/nextest/default/junit.xml` otherwise; failing test names AND
       their captured output are embedded.
       `xmllint --xpath '//testcase[failure]/@name' <report>` extracts failed
-      test names. A missing or empty file after a run means the run did not
-      complete cleanly — treat the run as void, shrink scope or raise budget,
-      re-run; never parse a partial file. Existence alone is not proof of
-      freshness: ingest only files whose mtime is newer than the start of the
-      run being diagnosed (a compile error before test start leaves the
-      previous run's report in place), pair the file with nextest's exit code
-      — non-zero (`max-fail`/fail-fast abort) means only the recorded tests
-      ran; ingest their failure records without concluding overall health —
-      and confirm it parses as XML first (a malformed or truncated file gets
-      the void treatment). Never run two same-profile suites concurrently in
-      one workspace: the JUnit path collides and last-writer-wins corrupts
-      attribution.
+      test names; xmllint is a convenience, not a gate — any XML parser works,
+      and `grep -c '<failure' <report>` is the zero-dependency fallback.
+      A missing or empty file after a run means the run did not complete
+      cleanly — treat the run as void, shrink scope or raise budget, re-run;
+      never parse a partial file. Existence alone is not proof of freshness:
+      ingest only files whose mtime is newer than the start of the run being
+      diagnosed (a compile error before test start leaves the previous run's
+      report in place), pair the file with nextest's exit code — non-zero
+      (`max-fail`/fail-fast abort) means only the recorded tests ran; ingest
+      their failure records without concluding overall health — confirm it
+      parses as XML first (a malformed or truncated file gets the void
+      treatment), and treat a report recording zero tests as "the filter
+      matched nothing", never a health signal. Never run two same-profile
+      suites concurrently in one workspace: the JUnit path collides and
+      last-writer-wins corrupts attribution. Match the zero-report wording to
+      what Task 1 step 3 actually observed.
    5. Verbose escape hatches: `--no-capture` (live output; hang diagnosis) and
       `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
       environment variable — prefix form `RUST_BACKTRACE=1 just test-fast`,
@@ -168,8 +183,8 @@ nothing consumes it programmatically.
 
 2. Verification: `typos AGENTS.md` exits 0; every command and path in the new
    section was executed or exercised by Tasks 1–2 (doc drift is the named
-   hazard — do not write an untested invocation). The xmllint one-liner is run
-   against Task 1's failing-test artifact.
+   hazard — do not write an untested invocation). The xmllint one-liner and
+   the grep fallback are each run against Task 1's failing-test artifact.
 
 3. Acceptance: section present under *Development commands*; every documented
    command matches actual recipe/config behavior verified above.
