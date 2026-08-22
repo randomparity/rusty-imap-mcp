@@ -5,6 +5,7 @@ pub(crate) mod dispatch;
 pub mod drain;
 pub mod error;
 pub mod preinit;
+pub mod resources;
 pub mod response;
 pub(crate) mod result_provenance;
 pub mod server;
