@@ -23,7 +23,9 @@ Spec: `docs/superpowers/specs/2026-08-22-issue-827-agent-test-experience-design.
   `[profile.ci.junit]` table.
 - Every nextest profile key used must be valid on nextest ≥ 0.9.95;
   `final-status-level` takes ONE cumulative enum value (`"slow"` includes
-  retry + fail) — never a comma-combined form.
+  retry + fail) — never a comma-combined form. Slow-warning suppression under
+  `status-level = "fail"` holds only on nextest ≥ 0.9.133; older versions
+  render a corrupt mid-run line (upstream #3236) — document accordingly.
 - Multiple `-E` filtersets are ORed; substring positional filters intersect
   with the filterset union. Never document `-E` passthrough as scoping.
 - `failure-output = "final"` groups failure bodies only at run end;
@@ -32,7 +34,8 @@ Spec: `docs/superpowers/specs/2026-08-22-issue-827-agent-test-experience-design.
   did not complete; a stale file (older than the run being diagnosed) is void;
   a non-zero nextest exit (`max-fail`/fail-fast) means only recorded tests ran;
   a zero-test report means the filter matched nothing — never a health signal;
-  never run two same-profile suites concurrently in one workspace.
+  never run two same-profile suites concurrently in one workspace. The report
+  never outranks the run's own summary line (`N tests run`).
 - Commits: conventional, imperative, ≤72 chars, explicit paths only.
 - Branch: `feat/agent-test-experience-827`; BASE_BRANCH `main`.
 
@@ -86,8 +89,9 @@ ci). Nothing else consumes the profile keys.
    green again.
 
 5. Acceptance: both profile junit paths exist and parse; their `<testcase>`
-   counts match nextest's summary lines for the same runs; no diff remains
-   under `crates/`.
+   counts equal nextest's "N tests run" figure for the same runs (passed +
+   failed + flaky, excluding skipped — skipped tests do not appear in the
+   report); no diff remains under `crates/`.
 
 ## Task 2 — Justfile: argument passthrough
 
@@ -169,14 +173,17 @@ nothing consumes it programmatically.
       their failure records without concluding overall health — confirm it
       parses as XML first (a malformed or truncated file gets the void
       treatment), and treat a report recording zero tests as "the filter
-      matched nothing", never a health signal. Never run two same-profile
+      matched nothing", never a health signal. The report never outranks the
+      run's own summary line (`N tests run`). Never run two same-profile
       suites concurrently in one workspace: the JUnit path collides and
       last-writer-wins corrupts attribution. Match the zero-report wording to
       what Task 1 step 3 actually observed.
    5. Verbose escape hatches: `--no-capture` (live output; hang diagnosis) and
       `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
       environment variable — prefix form `RUST_BACKTRACE=1 just test-fast`,
-      never a passthrough argument.
+      never a passthrough argument. `--no-capture` caveat: it runs the
+      selection serially and produces a JUnit report without embedded failure
+      output — for watching a run, never for ingesting it.
    6. Noise triage: proptest shrink transcripts and insta snapshot diffs appear
       only on genuine failures; volume signals a red, not brokenness. Slow
       tests (>60 s) are listed with durations in every run's tail.
@@ -195,7 +202,8 @@ Files: none (verification only).
 
 1. `typos` (repo-wide) exits 0.
 2. `just fmt-check && just lint` exit 0 (Rust untouched; proves it).
-3. Background-run `just test-fast` (~1–3 min warm): exits 0; terminal shows no
-   PASS lines; tail lists failures/slow entries only; fresh
-   `target/nextest/default/junit.xml` exists (mtime after run start).
+3. Background-run `just test-fast` (~1–3 min warm): exits 0; captured stdout
+   has zero per-test PASS lines (`grep -c '^ *PASS'` == 0); tail lists
+   failures/slow entries only; fresh `target/nextest/default/junit.xml` exists
+   (mtime after run start).
 4. Commit any straggler with explicit paths; branch is ready for review.
