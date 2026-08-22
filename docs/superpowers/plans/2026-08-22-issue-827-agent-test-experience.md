@@ -63,9 +63,10 @@ ci). Nothing else consumes the profile keys.
 3. Confirm-it-parses: `cargo nextest run -p rimap-config --locked --no-tests=pass`
    exits 0 (a bad key here is a bare config-parse error on EVERY run — this
    step is the tripwire).
-4. Confirm-it-fails: temporarily invert one assertion in a `rimap-config` unit
-   test (locate the test module with `glob crates/rimap-config/src/**`), then
-   `cargo nextest run -p rimap-config -E 'test(config)'` must exit non-zero
+
+4. Confirm-it-fails: temporarily invert one assertion in the test module of
+   `crates/rimap-config/src/loader.rs` (`mod tests`, line 179), then
+   `cargo nextest run -p rimap-config -E 'test(loader)'` must exit non-zero
    AND write `target/nextest/default/junit.xml` containing a `<failure>` element
    whose body embeds the assertion's captured output:
 
@@ -74,6 +75,7 @@ ci). Nothing else consumes the profile keys.
    ```
 
    Revert the assertion immediately (`git checkout -- crates/rimap-config`).
+
 5. Acceptance: `target/nextest/default/junit.xml` exists (from step 4) and
    parses; its `<testcase>` count equals nextest's reported test count for the
    same run; no diff remains under `crates/`.
@@ -115,6 +117,7 @@ by AGENTS.md docs (Task 3) which document these exact invocations.
    - `just test-fast -- nonexistent_substring_zz` runs ~zero tests and exits 0
      (`--no-tests=pass` semantics) — proves substring intersection without a
      long run.
+
 5. Acceptance: no existing recipe line changed except the two signatures/exec
    lines named above; `just --list` exits 0 (justfile parses).
 
@@ -162,10 +165,12 @@ nothing consumes it programmatically.
    6. Noise triage: proptest shrink transcripts and insta snapshot diffs appear
       only on genuine failures; volume signals a red, not brokenness. Slow
       tests (>60 s) are listed with durations in every run's tail.
+
 2. Verification: `typos AGENTS.md` exits 0; every command and path in the new
    section was executed or exercised by Tasks 1–2 (doc drift is the named
    hazard — do not write an untested invocation). The xmllint one-liner is run
    against Task 1's failing-test artifact.
+
 3. Acceptance: section present under *Development commands*; every documented
    command matches actual recipe/config behavior verified above.
 
