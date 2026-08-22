@@ -86,12 +86,7 @@ pub async fn handle(
 ) -> Result<ToolResponse<MoveMessageMeta>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
     crate::tools::validation::validate_folder_input("destination", &input.destination)?;
-    let uids: Vec<Uid> = input
-        .target
-        .into_uids()
-        .into_iter()
-        .map(Uid::from)
-        .collect();
+    let uids: Vec<Uid> = Uid::uids_from_selector(input.target);
     let outcome = account
         .imap
         .move_messages(

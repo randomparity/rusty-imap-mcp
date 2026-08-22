@@ -129,8 +129,8 @@ impl From<rimap_core::folder_name::FolderNameError> for AuthzError {
 mod tests {
     use crate::error::AuthzError;
     use rimap_core::error::{ErrorCode, RimapError};
-    use rimap_core::tool::ToolName;
     use rimap_core::folder_name::{FolderName, FolderNameError};
+    use rimap_core::tool::ToolName;
 
     #[test]
     fn folder_name_rejection_maps_to_authz_invalid_folder_name() {
@@ -143,8 +143,10 @@ mod tests {
 
     #[test]
     fn authz_error_carries_canonical_reason() {
-        let err: AuthzError =
-            FolderName::new("").err().map(FolderNameError::into).unwrap();
+        let err: AuthzError = FolderName::new("")
+            .err()
+            .map(FolderNameError::into)
+            .unwrap();
         match err {
             AuthzError::InvalidFolderName { reason } => {
                 assert!(reason.contains("empty"), "got reason: {reason}");

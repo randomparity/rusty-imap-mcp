@@ -131,7 +131,6 @@ impl Filter {
     }
 }
 
-
 /// The `kind` of `line`, when that `kind` is one this build does not know.
 ///
 /// Deliberately narrow, and the narrowness is the point: `Some` requires the

@@ -178,12 +178,7 @@ async fn handle_label_op(
 ) -> Result<ToolResponse<LabelsMeta>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
     validate_label(&input.label)?;
-    let uids: Vec<Uid> = input
-        .target
-        .into_uids()
-        .into_iter()
-        .map(Uid::from)
-        .collect();
+    let uids: Vec<Uid> = Uid::uids_from_selector(input.target);
     let (updated, uid_validity) = account
         .imap
         .store_flags(
