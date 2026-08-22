@@ -108,7 +108,9 @@ assert; this section covers how to run and read them.
    parses as XML before trusting it; a report recording zero tests means the
    filter matched nothing, never "healthy"; never run two same-profile suites
    concurrently in one workspace (the JUnit path collides). The report never
-   outranks the run's own summary line (`N tests run`).
+   outranks the run's own summary line (`N tests run`). On a run with no
+   failures the xpath selector returns an empty set (xmllint exits 11) and
+   `grep -c` prints 0 and exits 1 — both mean "green", not "broken".
 5. **Verbose escape hatches:** pass through recipe args —
    `just test-fast --no-capture` for live output when diagnosing a hang,
    `--status-level=all` for full chatter. (A leading `--` separator is also

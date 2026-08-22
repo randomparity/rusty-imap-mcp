@@ -136,6 +136,14 @@ by AGENTS.md docs (Task 3) which document these exact invocations.
 5. Acceptance: no existing recipe line changed except the two signatures/exec
    lines named above; `just --list` exits 0 (justfile parses).
 
+> **Amendment (2026-08-22, commit 1e0bc521, branch-review finding):** the
+> shipped recipes differ from steps 2–3 above — both are shebang scripts that
+> strip a leading `--` separator (`[ "${1:-}" = "--" ] && shift`) before
+> forwarding `"$@"`, because `just` forwards the separator verbatim and
+> nextest rejects flags after `--` (a dry-run `just -n` could not catch this;
+> it validates textual placement, not CLI acceptance). Documented invocation
+> form is separator-free: `just test-fast --no-capture`.
+
 ## Task 3 — AGENTS.md guidance block
 
 Files: `AGENTS.md` (modify).
