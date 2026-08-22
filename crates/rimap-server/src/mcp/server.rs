@@ -135,7 +135,7 @@ const SHUTDOWN_CUT_MESSAGE: &str = "server is shutting down";
 /// terminal; see `docs/audit-log.md`.
 ///
 /// Audit writes the dispatch offloads to the blocking pool register separately,
-/// through [`DispatchDrain::spawn_blocking_tracked`], because a detached
+/// through `DispatchDrain::spawn_blocking_tracked`, because a detached
 /// blocking closure outlives the dispatch that submitted it (#672).
 ///
 /// Both halves are cheap clones of one shared cell, so the server can hand a

@@ -172,7 +172,7 @@ pub fn deserialize_opt_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64
 ///
 /// # Errors
 ///
-/// In addition to the integer-range errors from [`intorstr_to_int`]
+/// In addition to the integer-range errors from `intorstr_to_int`
 /// scoped to `u32`, returns an error when the parsed value is `0`.
 pub fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(d: D) -> Result<NonZeroU32, D::Error> {
     let v = IntOrStr::deserialize(d)?;

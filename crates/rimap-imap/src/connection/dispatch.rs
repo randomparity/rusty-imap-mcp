@@ -191,7 +191,7 @@ impl Connection {
     /// `LIST` against `pattern` (e.g. `"*"`, `"INBOX/*"`).
     ///
     /// A read-only op: on `ConnectionLost` it reconnects and retries once
-    /// (see [`Self::with_session`]) so a stale idle session recovers
+    /// (see `Self::with_session`) so a stale idle session recovers
     /// transparently.
     ///
     /// # Errors

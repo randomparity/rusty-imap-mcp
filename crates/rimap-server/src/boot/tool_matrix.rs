@@ -41,7 +41,7 @@ use rimap_core::tool::ToolName;
 /// Truncation threshold for folder names in audit records (`folder_policy` /
 /// `process_start`): a name longer than this many bytes is truncated at the
 /// nearest UTF-8 character boundary at or below this point and suffixed with
-/// [`FOLDER_AUDIT_ABRIDGED`] before being written. The `FolderGuard` always
+/// `FOLDER_AUDIT_ABRIDGED` before being written. The `FolderGuard` always
 /// receives the full name.
 ///
 /// The **output bound** for an abridged entry is

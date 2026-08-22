@@ -130,8 +130,8 @@ fn structured_error_data(err: &RimapError) -> Option<serde_json::Value> {
 }
 
 /// Build a tool-execution error `CallToolResult` (`isError: true`) for
-/// `err`: the human-readable [`wire_message`] as `content` text and the
-/// machine-readable `error_code` (+ typed [`structured_error_data`]) as
+/// `err`: the human-readable `wire_message` as `content` text and the
+/// machine-readable `error_code` (+ typed `structured_error_data`) as
 /// `structured_content`. Codes with no typed data still carry
 /// `{ "error_code": "ERR_…" }` so the agent always has the stable code.
 ///

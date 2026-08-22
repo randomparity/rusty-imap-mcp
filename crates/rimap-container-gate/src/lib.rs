@@ -62,7 +62,7 @@ pub fn runtime() -> &'static str {
 }
 
 /// State of the runtime [`runtime`] selected. Cached alongside that choice in
-/// [`selection`], because the verdict cannot usefully change within one test
+/// `selection`, because the verdict cannot usefully change within one test
 /// process: a daemon that dies after the probe surfaces at `compose up`, which
 /// is a hard error at every posture.
 #[must_use]
@@ -292,7 +292,7 @@ pub fn pinned_image(compose: &std::path::Path, service: &str) -> Option<String> 
 /// the image is local by construction and one inspect is authoritative.
 /// `None` on any inspect failure — the check then stands down and compose
 /// keeps owning the failure, per the gate's documented asymmetry. The
-/// child is bounded by [`DAEMON_PROBE_TIMEOUT`] and killed on expiry: a
+/// child is bounded by `DAEMON_PROBE_TIMEOUT` and killed on expiry: a
 /// stalled daemon degrades to the silent stand-down instead of hanging
 /// the suite (`Command::output()` would wait forever, which is exactly
 /// what `run_daemon_probe` exists to escape).

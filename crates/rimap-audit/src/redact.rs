@@ -32,7 +32,7 @@ pub enum FieldPolicy {
     /// cannot smuggle arbitrary text into the audit log by mistyping a
     /// "structural" field. `tool_start` is emitted before argument
     /// deserialization runs, so the type check here is the only defense
-    /// against that vector. See [`Redactor::redact_string`] for the
+    /// against that vector. See `Redactor::redact_string` for the
     /// fall-through output shape.
     Verbatim(VerbatimType),
     /// Replace string values with `"<redacted:N>"`. Non-string values are
@@ -289,7 +289,7 @@ pub fn hash_arguments(args: &Value) -> String {
     hex::encode(digest)
 }
 
-/// Re-apply the per-tool [`RedactionSchema`] to an [`AuditRecord`].
+/// Re-apply the per-tool [`RedactionSchema`] to an [`crate::record::AuditRecord`].
 ///
 /// For [`crate::record::Payload::ToolStart`] this re-runs [`Redactor::apply`]
 /// on `arguments_redacted` using the tool's declared schema and the

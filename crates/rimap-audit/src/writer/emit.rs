@@ -74,7 +74,7 @@ impl AuditWriter {
     /// `symlink_metadata`, and `remove_file`. The I/O itself runs on the
     /// writer's dedicated worker thread; the caller waits for the
     /// completion reply, bounded by `write_deadline_seconds` (unbounded
-    /// when the deadline is 0) — see [`super::deadline`]. An async caller
+    /// when the deadline is 0) — see `super::deadline`. An async caller
     /// should still move it onto the blocking pool rather than stall a
     /// runtime worker for up to the deadline — in this workspace through
     /// `DispatchDrain::spawn_blocking_tracked`, which also registers the

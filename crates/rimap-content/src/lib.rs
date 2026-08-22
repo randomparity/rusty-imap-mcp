@@ -80,7 +80,7 @@ pub struct OutboundHtml {
 /// Sanitize agent-authored HTML for an *outbound* message body.
 ///
 /// Runs the caller's HTML through the same tag-allowlist ammonia pipeline used
-/// for inbound mail ([`crate::html`]'s `sanitize`), so the server never emits
+/// for inbound mail (`crate::html`'s `sanitize`), so the server never emits
 /// agent-supplied `<script>`, event handlers, remote images, or `javascript:`
 /// URLs. Only the sanitized HTML and the strip warnings are returned; the
 /// inbound-only `body_text` / `anchor_hrefs` are dropped. Callers must still
