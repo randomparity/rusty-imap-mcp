@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-content"
-version = "0.2.1-dev"
+version = "0.3.0-dev"
 dependencies = [
  "addr",
  "ammonia",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "rimap-core"
-version = "0.2.1-dev"
+version = "0.3.0-dev"
 dependencies = [
  "hex",
  "schemars",
