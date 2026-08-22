@@ -10,12 +10,14 @@ use serde::Serialize;
 /// `untrusted` (sanitized content derived from email data, when the
 /// tool returns any), and `security_warnings` (structured security
 /// observations from content sanitization).
-// `M` and `U` are the meta/untrusted type parameters (both `Serialize`);
-// handlers with no untrusted body use `ToolResponse<M, ()>` with
-// `untrusted: None`. Kept as a plain comment (not `///`) so this
-// implementation detail does not leak into the published schema.
+// `M` and `U` are the meta/untrusted type parameters (both `Serialize`).
+// Handlers with no untrusted body write `ToolResponse<M>` — the `U = ()`
+// default makes "no untrusted payload" the unannotated majority form;
+// handlers that return sanitized content name both parameters. Kept as a
+// plain comment (not `///`) so this implementation detail does not leak
+// into the published schema.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ToolResponse<M: Serialize = serde_json::Value, U: Serialize = serde_json::Value> {
+pub struct ToolResponse<M: Serialize = serde_json::Value, U: Serialize = ()> {
     /// Server-controlled metadata. Trusted.
     pub meta: M,
     /// Sanitized content derived from email data. Untrusted.

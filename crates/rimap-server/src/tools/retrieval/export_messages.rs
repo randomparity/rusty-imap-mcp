@@ -271,7 +271,7 @@ impl ExportSource for AccountState {
 pub async fn handle(
     account: &AccountState,
     input: ExportMessagesInput,
-) -> Result<ToolResponse<ExportMessagesMeta, ()>, rimap_core::RimapError> {
+) -> Result<ToolResponse<ExportMessagesMeta>, rimap_core::RimapError> {
     crate::tools::validation::validate_folder_input("folder", &input.folder)?;
 
     let prefix = sanitize_filename_prefix(input.filename.as_deref())?;
@@ -346,7 +346,7 @@ fn incomplete_export_error(failed_uids: &[u32]) -> rimap_core::RimapError {
 async fn run_export(
     source: &impl ExportSource,
     plan: RunPlan,
-) -> Result<ToolResponse<ExportMessagesMeta, ()>, rimap_core::RimapError> {
+) -> Result<ToolResponse<ExportMessagesMeta>, rimap_core::RimapError> {
     let RunPlan {
         folder,
         dest,
