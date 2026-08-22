@@ -1125,6 +1125,7 @@ fn account_resource_metadata(account_name: &str, state: &AccountState) -> serde_
 
 #[cfg(test)]
 mod embedded_doc_drift_tests {
+    #![expect(clippy::panic, reason = "tests")]
     //! The embedded copies under `docs/` are what ships in the published
     //! crate (the repo-root originals cannot be packaged — cargo refuses
     //! paths outside the package root), but the repo-root files are the
