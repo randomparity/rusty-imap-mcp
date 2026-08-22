@@ -285,27 +285,6 @@ mod tests {
         dir
     }
 
-    fn write_minimal_config(dir: &TempDir) -> PathBuf {
-        let audit = dir.path().join("audit.jsonl");
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@example.test"
-
-[audit]
-path = "{}"
-allowed_base_dir = "{}"
-"#,
-            audit.display(),
-            dir.path().display()
-        );
-        std::fs::write(&config_path, body).unwrap();
-        config_path
-    }
-
     fn synth_fp(seed: &[u8]) -> TlsFingerprint {
         TlsFingerprint::from_cert_der(seed)
     }
@@ -313,7 +292,7 @@ allowed_base_dir = "{}"
     #[tokio::test]
     async fn dry_run_prints_matrix_with_default_posture() {
         let dir = TempDir::new().unwrap();
-        let path = write_minimal_config(&dir);
+        let path = crate::test_support::write_single_account_config(&dir, false);
         let mut out = Vec::new();
         run(&path, &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -330,7 +309,7 @@ allowed_base_dir = "{}"
         use rimap_audit::{AuditOptions, AuditWriter, Seq};
 
         let dir = TempDir::new().unwrap();
-        let path = write_minimal_config(&dir);
+        let path = crate::test_support::write_single_account_config(&dir, false);
 
         // First dry-run acquires the lock for the duration of the call.
         let mut out1 = Vec::new();
@@ -360,7 +339,7 @@ allowed_base_dir = "{}"
         // tools misleads users into thinking the tools are unavailable. They
         // should appear in their own "always available" section instead.
         let dir = TempDir::new().unwrap();
-        let path = write_minimal_config(&dir);
+        let path = crate::test_support::write_single_account_config(&dir, false);
         let mut out = Vec::new();
         run(&path, &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -393,37 +372,7 @@ allowed_base_dir = "{}"
         // Same rows the boot log line and the process_start record carry, so
         // an operator reading either sees the same provenance (#632).
         let dir = tight_tempdir();
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[defaults.security]
-posture = "full"
-
-[defaults.security.tools]
-delete_message = "allow"
-
-[[accounts]]
-name = "work"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@work.test"
-
-[accounts.security]
-posture = "readonly"
-
-[accounts.security.tools]
-search = "deny"
-
-[audit]
-path = "{audit}"
-allowed_base_dir = "{base}"
-"#,
-            audit = dir.path().join("audit.jsonl").display(),
-            base = dir.path().display(),
-        );
-        std::fs::write(&config_path, body).unwrap();
+        let config_path = crate::test_support::write_inherited_allow_config(&dir);
 
         let mut out = Vec::new();
         run(&config_path, &mut out).await.unwrap();
@@ -450,44 +399,7 @@ allowed_base_dir = "{base}"
         // migration note told operators to review by hand are now printed,
         // each entry marked with the layer that put it there.
         let dir = tight_tempdir();
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[defaults.security]
-posture = "draft-safe"
-protected_folders = ["INBOX", "Sent"]
-expunge_folders = ["Trash"]
-
-[[accounts]]
-name = "work"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@work.test"
-
-[accounts.security]
-posture = "readonly"
-
-[[accounts]]
-name = "personal"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@personal.test"
-
-[accounts.security]
-expunge_folders = ["Junk"]
-
-[audit]
-path = "{audit}"
-allowed_base_dir = "{base}"
-"#,
-            audit = dir.path().join("audit.jsonl").display(),
-            base = dir.path().display(),
-        );
-        std::fs::write(&config_path, body).unwrap();
+        let config_path = crate::test_support::write_inherited_folders_config(&dir, false);
 
         let mut out = Vec::new();
         run(&config_path, &mut out).await.unwrap();
@@ -521,7 +433,7 @@ allowed_base_dir = "{base}"
         // The default config makes nothing expungeable. Saying so is the
         // point — an absent section would read as missing information.
         let dir = tight_tempdir();
-        let path = write_minimal_config(&dir);
+        let path = crate::test_support::write_single_account_config(&dir, false);
         let mut out = Vec::new();
         run(&path, &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -540,7 +452,7 @@ allowed_base_dir = "{base}"
     #[tokio::test]
     async fn dry_run_reports_no_explicit_overrides_as_none() {
         let dir = tight_tempdir();
-        let path = write_minimal_config(&dir);
+        let path = crate::test_support::write_single_account_config(&dir, false);
         let mut out = Vec::new();
         run(&path, &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -721,7 +633,7 @@ allowed_base_dir = "{base}"
         // With exactly one account the "Account: <name>" header should be
         // absent — it is only useful when multiple accounts share the output.
         let dir = tight_tempdir();
-        let path = write_minimal_config(&dir);
+        let path = crate::test_support::write_single_account_config(&dir, false);
         let mut out = Vec::new();
         run(&path, &mut out).await.unwrap();
         let text = String::from_utf8(out).unwrap();

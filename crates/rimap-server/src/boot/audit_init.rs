@@ -128,37 +128,14 @@ mod tests {
     use tempfile::TempDir;
 
     use super::init_audit_writer_multi;
-
-    fn write_config(dir: &TempDir) -> std::path::PathBuf {
-        let audit = dir.path().join("audit.jsonl");
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@example.test"
-
-[security]
-posture = "readonly"
-
-[audit]
-path = "{}"
-allowed_base_dir = "{}"
-"#,
-            audit.display(),
-            dir.path().display()
-        );
-        std::fs::write(&config_path, body).unwrap();
-        config_path
-    }
+    use crate::test_support::write_single_account_config;
 
     #[test]
     fn process_start_emitted_as_first_record() {
         use sha2::{Digest, Sha256};
 
         let dir = TempDir::new().unwrap();
-        let config_path = write_config(&dir);
+        let config_path = write_single_account_config(&dir, true);
 
         let raw = rimap_config::loader::load_from_path(&config_path).unwrap();
         let validated = rimap_config::validate::validate_legacy_as_multi(raw).unwrap();
@@ -190,45 +167,6 @@ allowed_base_dir = "{}"
         assert_eq!(first["config_hash_sha256"].as_str().unwrap(), expected_hash);
     }
 
-    /// Two-account config whose `[defaults.security.tools]` allows
-    /// `delete_message` and whose `work` account tightens posture to
-    /// `readonly` without restating that tool. This is the #632 case: the
-    /// account holds a destructive tool purely by inheritance.
-    fn write_inherited_allow_config(dir: &TempDir) -> std::path::PathBuf {
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[defaults.security]
-posture = "full"
-
-[defaults.security.tools]
-delete_message = "allow"
-
-[[accounts]]
-name = "work"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@work.test"
-
-[accounts.security]
-posture = "readonly"
-
-[accounts.security.tools]
-search = "deny"
-
-[audit]
-path = "{audit}"
-allowed_base_dir = "{base}"
-"#,
-            audit = dir.path().join("audit.jsonl").display(),
-            base = dir.path().display(),
-        );
-        std::fs::write(&config_path, body).unwrap();
-        config_path
-    }
-
     #[test]
     fn process_start_records_inherited_allow_on_tightened_posture() {
         // Acceptance criteria for #632. Asserted against the raw JSONL line
@@ -236,7 +174,7 @@ allowed_base_dir = "{base}"
         // `#[serde(default)]`, so a lenient parse would report an empty
         // matrix as a successful read.
         let dir = TempDir::new().unwrap();
-        let config_path = write_inherited_allow_config(&dir);
+        let config_path = crate::test_support::write_inherited_allow_config(&dir);
         let validated = rimap_config::loader::load_and_validate(&config_path).unwrap();
         let audit_path = validated.audit.path.clone();
         {
@@ -273,54 +211,6 @@ allowed_base_dir = "{base}"
         assert_eq!(search["source"], "account");
     }
 
-    /// Two-account config whose `[defaults.security]` names both folder
-    /// lists and whose `work` account writes a partial `[accounts.security]`
-    /// block that restates neither. Post-#624 that account inherits both —
-    /// including an `expunge_folders` making `Trash` expungeable, which is
-    /// the widening #696 exists to surface. `personal` writes its own
-    /// `expunge_folders`, so the two provenances appear in one record.
-    fn write_inherited_folders_config(dir: &TempDir) -> std::path::PathBuf {
-        let config_path = dir.path().join("config.toml");
-        let body = format!(
-            r#"
-[defaults.security]
-posture = "draft-safe"
-protected_folders = ["INBOX", "Sent"]
-expunge_folders = ["Trash"]
-
-[[accounts]]
-name = "work"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@work.test"
-
-[accounts.security]
-posture = "readonly"
-
-[[accounts]]
-name = "personal"
-
-[accounts.imap]
-host = "127.0.0.1"
-port = 1143
-username = "alice@personal.test"
-
-[accounts.security]
-expunge_folders = ["Junk"]
-
-[audit]
-path = "{audit}"
-allowed_base_dir = "{base}"
-"#,
-            audit = dir.path().join("audit.jsonl").display(),
-            base = dir.path().display(),
-        );
-        std::fs::write(&config_path, body).unwrap();
-        config_path
-    }
-
     #[test]
     fn process_start_records_inherited_and_account_written_folder_lists() {
         // Acceptance criteria for #696. Asserted against the raw JSONL line
@@ -328,7 +218,7 @@ allowed_base_dir = "{base}"
         // `#[serde(default)]`, so a lenient parse would report an absent
         // list as an empty one.
         let dir = TempDir::new().unwrap();
-        let config_path = write_inherited_folders_config(&dir);
+        let config_path = crate::test_support::write_inherited_folders_config(&dir, false);
         let validated = rimap_config::loader::load_and_validate(&config_path).unwrap();
         let audit_path = validated.audit.path.clone();
         {
@@ -383,7 +273,7 @@ allowed_base_dir = "{base}"
         // The `posture` / `accounts` fields branch on account count; the
         // tool matrix deliberately does not, so a reader never has to.
         let dir = TempDir::new().unwrap();
-        let config_path = write_config(&dir);
+        let config_path = write_single_account_config(&dir, true);
         let raw = rimap_config::loader::load_from_path(&config_path).unwrap();
         let validated = rimap_config::validate::validate_legacy_as_multi(raw).unwrap();
         let audit_path = validated.audit.path.clone();
@@ -412,7 +302,7 @@ allowed_base_dir = "{base}"
         use rimap_audit::{ProcessEnd, ProcessEndReason};
 
         let dir = TempDir::new().unwrap();
-        let config_path = write_config(&dir);
+        let config_path = write_single_account_config(&dir, true);
         let raw = rimap_config::loader::load_from_path(&config_path).unwrap();
         let validated = rimap_config::validate::validate_legacy_as_multi(raw).unwrap();
         let audit_path = validated.audit.path.clone();
@@ -444,7 +334,7 @@ allowed_base_dir = "{base}"
         };
 
         let dir = TempDir::new().unwrap();
-        let config_path = write_config(&dir);
+        let config_path = write_single_account_config(&dir, true);
         let raw = rimap_config::loader::load_from_path(&config_path).unwrap();
         let validated = rimap_config::validate::validate_legacy_as_multi(raw).unwrap();
         let audit_path = validated.audit.path.clone();

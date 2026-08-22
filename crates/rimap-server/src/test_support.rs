@@ -155,3 +155,144 @@ pub(crate) fn make_test_account_state_with_sink(
         tool_call_timeout,
     }
 }
+
+/// Writes `body` as `config.toml` under `dir` and returns the config path.
+///
+/// Shared tail for every config fixture below so each builder stays a pure
+/// body template.
+pub(crate) fn write_config_toml(dir: &tempfile::TempDir, body: String) -> std::path::PathBuf {
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, body).expect("write test config.toml");
+    config_path
+}
+
+/// Single-account config with an audit log and no defaults layer.
+///
+/// Pass `readonly_posture = true` to include a `[security]` section pinning
+/// `posture = "readonly"`; pass `false` for the bare config the dry-run
+/// tests use to exercise default (draft-safe) posture.
+pub(crate) fn write_single_account_config(
+    dir: &tempfile::TempDir,
+    readonly_posture: bool,
+) -> std::path::PathBuf {
+    let security = if readonly_posture {
+        "\n[security]\nposture = \"readonly\"\n"
+    } else {
+        ""
+    };
+    write_config_toml(
+        dir,
+        format!(
+            r#"
+[imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@example.test"
+{security}
+[audit]
+path = "{}"
+allowed_base_dir = "{}"
+"#,
+            dir.path().join("audit.jsonl").display(),
+            dir.path().display()
+        ),
+    )
+}
+
+/// Two-account config whose `[defaults.security.tools]` allows
+/// `delete_message` and whose `work` account tightens posture to `readonly`
+/// without restating that tool. This is the #632 case: the account holds a
+/// destructive tool purely by inheritance.
+pub(crate) fn write_inherited_allow_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    write_config_toml(
+        dir,
+        format!(
+            r#"
+[defaults.security]
+posture = "full"
+
+[defaults.security.tools]
+delete_message = "allow"
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[accounts.security]
+posture = "readonly"
+
+[accounts.security.tools]
+search = "deny"
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        ),
+    )
+}
+
+/// Two-account config whose `[defaults.security]` names both folder lists.
+///
+/// The `work` account writes a partial `[accounts.security]` block that
+/// restates neither list, so post-#624 it inherits both — including an
+/// `expunge_folders` making `Trash` expungeable, which is the widening #696
+/// exists to surface. With `personal_restates_protected` the `personal`
+/// account also writes its own `protected_folders`, so both provenances
+/// appear in one record; without it, only its `expunge_folders`.
+pub(crate) fn write_inherited_folders_config(
+    dir: &tempfile::TempDir,
+    personal_restates_protected: bool,
+) -> std::path::PathBuf {
+    let personal_protected = if personal_restates_protected {
+        "protected_folders = [\"Archive\"]\n"
+    } else {
+        ""
+    };
+    write_config_toml(
+        dir,
+        format!(
+            r#"
+[defaults.security]
+posture = "draft-safe"
+protected_folders = ["INBOX", "Sent"]
+expunge_folders = ["Trash"]
+
+[[accounts]]
+name = "work"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@work.test"
+
+[accounts.security]
+posture = "readonly"
+
+[[accounts]]
+name = "personal"
+
+[accounts.imap]
+host = "127.0.0.1"
+port = 1143
+username = "alice@personal.test"
+
+[accounts.security]
+{personal_protected}expunge_folders = ["Junk"]
+
+[audit]
+path = "{audit}"
+allowed_base_dir = "{base}"
+"#,
+            personal_protected = personal_protected,
+            audit = dir.path().join("audit.jsonl").display(),
+            base = dir.path().display(),
+        ),
+    )
+}
