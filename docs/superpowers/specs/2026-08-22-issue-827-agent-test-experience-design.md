@@ -63,15 +63,18 @@ path = "junit.xml"                       # -> target/nextest/default/junit.xml
   under `target/` — never tracked.
 - JUnit defaults do the right thing: `store-failure-output = true` embeds each
   failing test's captured stdout/stderr; success output stays unstored.
-- Human cost, accepted: the live progress heartbeat and mid-run slow warnings
-  disappear; failures still print live at status-level `fail`, per-test
-  durations above 60 s land in the run tail via the existing `slow-timeout`
-  machinery, and the final summary is unchanged in completeness. The trade
-  was explicitly approved by the operator.
+- Human cost, accepted: the live progress heartbeat disappears; failures
+  still print live at status-level `fail`, per-test durations above 60 s land
+  in the run tail via the existing `slow-timeout` machinery, and the final
+  summary is unchanged in completeness. The trade was explicitly approved by
+  the operator.
 - Requires nextest ≥ 0.9.95 (already floored as `NEXTEST_MIN` in the
   justfile); all keys used predate that release.
-- Note: with `status-level = "fail"`, the mid-run 60-second slow-period warn
-  lines are suppressed; slow attribution arrives in the final summary instead.
+- Note: on nextest ≥ 0.9.133, `status-level = "fail"` suppresses the mid-run
+  60-second slow-period warn lines; on older versions — including the 0.9.95
+  `NEXTEST_MIN` floor — such a line renders corrupt (duration and name, no
+  status) instead of being hidden (upstream #3236). Slow attribution arrives
+  in the final summary either way.
 
 ### 2. Justfile: argument passthrough
 
@@ -115,11 +118,15 @@ noise-triage note points there rather than duplicating it):
    treatment). Never run two same-profile suites concurrently in one
    workspace: the JUnit path collides and last-writer-wins corrupts
    attribution. A report recording zero tests means the filter matched
-   nothing — never a health signal.
+   nothing — never a health signal. The report never outranks the run's own
+   summary line (`N tests run`): pair every report-based conclusion with it.
 5. **Verbose escape hatches**: `--no-capture` (live output, hang diagnosis)
    and `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
    environment variable — set it as a prefix (`RUST_BACKTRACE=1 just
-   test-fast`), not as a passthrough argument.
+   test-fast`), not as a passthrough argument. `--no-capture` caveat: it
+   runs the selection serially and produces a JUnit report without embedded
+   failure output — for watching a run, never for ingesting it; ingest from
+   a normal captured run.
 6. **Noise triage note**: proptest shrink transcripts and insta diffs appear
    only on genuine failures; volume signals a red, not brokenness.
 
@@ -154,16 +161,17 @@ permissions, same exposure as nextest's own captured output today.
 
 ## Testing strategy
 
-Config + docs + shell tooling; no Rust feature code, so the TDD loop applies
-as explicit verification commands:
-
+- After the profile change: capture a scoped run's stdout and assert quietness
+  holds: zero per-test PASS lines (`grep -c '^ *PASS'` == 0); record how many
+  progress lines remain.
 - After the profile change: run a scoped nextest command under each profile
   (`default` and `--profile ci`), assert both `target/nextest/default/junit.xml`
   and `target/nextest/ci/junit.xml` exist (proving ci inherits the junit
-  table), parse as XML, and their `<testcase>` counts match nextest's summary
-  lines; also record empirically whether a zero-match run
-  (`-E 'test(nonexistent_zz)'`) writes an empty report — the AGENTS.md
-  ingestion bullet must match what is observed.
+  table), parse as XML, and their `<testcase>` counts equal nextest's
+  "N tests run" figure (passed + failed + flaky, excluding skipped — skipped
+  tests do not appear in the report); also record empirically whether a
+  zero-match run (`-E 'test(nonexistent_zz)'`) writes an empty report — the
+  AGENTS.md ingestion bullet must match what is observed.
 - Force exactly one deliberate failure (temporary broken assertion, reverted
   in the same step) to prove `<failure>` with captured output appears in the
   JUnit file — the confirm-it-fails step for this change.
