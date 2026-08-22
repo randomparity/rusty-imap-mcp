@@ -26,7 +26,7 @@ test-support = []
 vendored-keyring = ["dep:dbus-secret-service", "dbus-secret-service/vendored"]
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.2.0" }
+rimap-core = { path = "../rimap-core", version = "0.2.1-dev" }
 utf7-imap = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

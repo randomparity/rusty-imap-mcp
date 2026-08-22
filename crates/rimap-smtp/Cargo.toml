@@ -22,8 +22,8 @@ workspace = true
 test-support = []
 
 [dependencies]
-rimap-core = { path = "../rimap-core", version = "0.2.0" }
-rimap-config = { path = "../rimap-config", version = "0.2.0" }
+rimap-core = { path = "../rimap-core", version = "0.2.1-dev" }
+rimap-config = { path = "../rimap-config", version = "0.2.1-dev" }
 
 lettre = { workspace = true }
 thiserror = { workspace = true }
