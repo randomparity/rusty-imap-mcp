@@ -47,8 +47,8 @@ agent-specific profile):
 [profile.default]
 # existing leak-timeout / slow-timeout keys stay
 status-level = "fail"                    # live lines: failures only
-failure-output = "immediate-final"       # failure bodies grouped at end
-final-status-level = "fail,slow"         # tail lists failures + slow tests w/ durations
+failure-output = "final"                 # failure bodies grouped at run end
+final-status-level = "slow"              # cumulative: includes flaky + fail
 
 [profile.default.junit]
 path = "junit.xml"                       # -> target/nextest/default/junit.xml
@@ -77,15 +77,18 @@ path = "junit.xml"                       # -> target/nextest/ci/junit.xml
 ### 2. Justfile: argument passthrough + timing recipe
 
 - `test` and `test-fast` gain `*args` forwarded to `cargo nextest run`
-  verbatim, enabling `just test-fast -- --no-capture`,
-  `just test-fast -- --status-level=all`, or scoping with `-E 'test(name)'`
-  without editing the justfile. `test-fast`'s container-binary exclusion
-  filter is preserved; passthrough appends after it (later `-E` expressions
-  compose; callers overriding the filter do so knowingly).
+  verbatim: flags like `--no-capture` or `--status-level=all`, and
+  **positional substring filters** for scoping (`just test-fast -- my_test`
+  intersects the substring union with test-fast's container-exclusion
+  filterset, keeping the inner loop fast). Warning for AGENTS.md: additional
+  `-E` expressions are ORed into the filterset union and therefore *widen*
+  past the exclusion filter rather than narrowing — never advertise `-E`
+  passthrough as scoping.
 - New `test-timing PROFILE="ci"` recipe: `jq` over the profile's
-  `target/nextest/<PROFILE>/junit.xml` printing the slowest test cases with
-  durations. Read-only convenience over data §1 already produces; errors
-  loudly when the file is absent ("run the suite first").
+  `target/nextest/<PROFILE>/junit.xml` printing the file's modification time
+  (staleness is self-evident after a fast-only session) plus the slowest test
+  cases with durations. Read-only convenience over data §1 already produces;
+  errors loudly when the file is absent ("run the suite first").
 
 ### 3. AGENTS.md guidance block
 
@@ -101,9 +104,14 @@ A compact "Running tests as an agent" section under *Development commands*:
 3. **Inner loop**: `cargo nextest run -p <crate> -E 'test(substring)'` — never
    a workspace sweep to iterate one failure.
 4. **JUnit ingestion**: where the file lands per profile; a `jq` example
-   extracting failed test names; failure bodies live in the same file.
-5. **Verbose escape hatches**: `--no-capture` (live output, hang diagnosis),
-   `--status-level=all`, `RUST_BACKTRACE=1`, all via recipe passthrough.
+   extracting failed test names; failure bodies live in the same file. A
+   missing `target/nextest/<profile>/junit.xml` after a run means the run did
+   not complete cleanly — treat it as void, shrink scope or raise the budget,
+   and re-run; never parse a partial file.
+5. **Verbose escape hatches**: `--no-capture` (live output, hang diagnosis)
+   and `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
+   environment variable — set it as a prefix (`RUST_BACKTRACE=1 just
+   test-fast`), not as a passthrough argument.
 6. **Noise triage note**: proptest shrink transcripts and insta diffs appear
    only on genuine failures; volume signals a red, not brokenness.
 
