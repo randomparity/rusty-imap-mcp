@@ -3,30 +3,32 @@
 Goal: make test results machine-ingestible (JUnit artifact), quiet the default
 terminal stream, and give agents standing runtime/escape-hatch guidance.
 
-Architecture: config-only nextest profile changes plus justfile passthrough and
-a timing recipe; AGENTS.md carries the guidance. No Rust source changes.
+Architecture: config-only nextest profile changes plus justfile passthrough;
+AGENTS.md carries the guidance. No Rust source changes.
 
 Tech stack: cargo-nextest ≥ 0.9.95 (already floored as `NEXTEST_MIN` in the
 justfile), just with `set positional-arguments` (long-established setting; host
-has 1.57.0), jq/jaq for the timing recipe (convention already used by
-`scripts/mcp-probe-tools.sh`).
+has 1.57.0), xmllint for the documented ingestion examples (libxml, present on
+all supported dev hosts; loud error if absent).
 
 Spec: `docs/superpowers/specs/2026-08-22-issue-827-agent-test-experience-design.md`
 
 ## Global Constraints
 
 - No new dependencies. Surface limited to `.config/nextest.toml`, `justfile`,
-  `AGENTS.md`.
+  `AGENTS.md`. No `test-timing` recipe (rejected in spec — jq cannot read the
+  XML report; the run-tail slow listing already carries durations).
 - Every nextest profile key used must be valid on nextest ≥ 0.9.95;
   `final-status-level` takes ONE cumulative enum value (`"slow"` includes
-  flaky + fail) — never a comma-combined form.
+  retry + fail) — never a comma-combined form.
 - Multiple `-E` filtersets are ORed; substring positional filters intersect
   with the filterset union. Never document `-E` passthrough as scoping.
 - `failure-output = "final"` groups failure bodies only at run end;
   `immediate-final` would print them twice.
 - junit.xml is written once at the end of a run: a missing file means the run
   did not complete; a stale file (older than the run being diagnosed) is void;
-  a non-zero nextest exit (`max-fail`/fail-fast) means only recorded tests ran.
+  a non-zero nextest exit (`max-fail`/fail-fast) means only recorded tests ran;
+  never run two same-profile suites concurrently in one workspace.
 - Commits: conventional, imperative, ≤72 chars, explicit paths only.
 - Branch: `feat/agent-test-experience-827`; BASE_BRANCH `main`.
 
@@ -76,12 +78,12 @@ ci). Nothing else consumes the profile keys.
    parses; its `<testcase>` count equals nextest's reported test count for the
    same run; no diff remains under `crates/`.
 
-## Task 2 — Justfile: passthrough + timing recipe
+## Task 2 — Justfile: argument passthrough
 
 Files: `justfile` (modify).
 
-Interfaces: consumes Task 1's junit artifacts; consumed by AGENTS.md docs
-(Task 3) which document these exact invocations.
+Interfaces: produces Task 1's artifact-writing runs with passthrough; consumed
+by AGENTS.md docs (Task 3) which document these exact invocations.
 
 1. Below the existing `set shell := ["bash", "-uc"]` line, add:
 
@@ -106,41 +108,14 @@ Interfaces: consumes Task 1's junit artifacts; consumed by AGENTS.md docs
            -E "not (${containers} | binary(proptest_html_lookalike))" "$@"
    ```
 
-4. Add the timing recipe after `test-fast`:
-
-   ```just
-   # Print the modification time of a profile's junit report plus its slowest
-   # test cases with durations. Read-only; errors if the report is absent.
-   test-timing PROFILE="default":
-       #!/usr/bin/env bash
-       set -euo pipefail
-       if ! command -v jq >/dev/null; then
-           echo "jq is required" >&2
-           exit 1
-       fi
-       f="target/nextest/{{PROFILE}}/junit.xml"
-       if [ ! -s "$f" ]; then
-           echo "no junit report at $f — run the suite first" >&2
-           exit 1
-       fi
-       date -r "$f" '+report written: %F %T'
-       jq -r '.. | objects | select(.name? != null and .time? != null)
-              | [(.time | tonumber), .classname // "", .name] | @tsv' "$f" \
-           | sort -rn | head -25
-   ```
-
-5. Verification:
+4. Verification:
    - `just -n test-fast -- --no-capture` prints the exec line with
      `--no-capture` appended after the `-E` argument.
    - `just -n test ci-extra` shows `"$@"` position receiving `ci-extra`.
-   - `just test-timing` (no argument) prints the report timestamp and a
-     duration-sorted list built from Task 1's `default`-profile artifact.
    - `just test-fast -- nonexistent_substring_zz` runs ~zero tests and exits 0
      (`--no-tests=pass` semantics) — proves substring intersection without a
      long run.
-   - `just test-timing nosuchprofile` exits 1 with the "no junit report"
-     message.
-6. Acceptance: no existing recipe line changed except the two signatures/exec
+5. Acceptance: no existing recipe line changed except the two signatures/exec
    lines named above; `just --list` exits 0 (justfile parses).
 
 ## Task 3 — AGENTS.md guidance block
@@ -166,16 +141,20 @@ nothing consumes it programmatically.
       widen past `test-fast`'s container exclusion; use substring filters.
    4. JUnit ingestion: `target/nextest/ci/junit.xml` for `--profile ci` runs,
       `target/nextest/default/junit.xml` otherwise; failing test names AND
-      their captured output are embedded. Example:
-      `jq -r '.. | .failure? // empty' target/nextest/default/junit.xml`.
-      A missing or empty file after a run means the run did not complete
-      cleanly — treat the run as void, shrink scope or raise budget, re-run;
-      never parse a partial file. Existence alone is not proof of freshness:
-      ingest only files whose mtime is newer than the start of the run being
-      diagnosed (a compile error before test start leaves the previous run's
-      report in place), and pair the file with nextest's exit code — non-zero
-      (`max-fail`/fail-fast abort) means only the recorded tests ran; ingest
-      their failure records without concluding overall health.
+      their captured output are embedded.
+      `xmllint --xpath '//testcase[failure]/@name' <report>` extracts failed
+      test names. A missing or empty file after a run means the run did not
+      complete cleanly — treat the run as void, shrink scope or raise budget,
+      re-run; never parse a partial file. Existence alone is not proof of
+      freshness: ingest only files whose mtime is newer than the start of the
+      run being diagnosed (a compile error before test start leaves the
+      previous run's report in place), pair the file with nextest's exit code
+      — non-zero (`max-fail`/fail-fast abort) means only the recorded tests
+      ran; ingest their failure records without concluding overall health —
+      and confirm it parses as XML first (a malformed or truncated file gets
+      the void treatment). Never run two same-profile suites concurrently in
+      one workspace: the JUnit path collides and last-writer-wins corrupts
+      attribution.
    5. Verbose escape hatches: `--no-capture` (live output; hang diagnosis) and
       `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
       environment variable — prefix form `RUST_BACKTRACE=1 just test-fast`,
@@ -185,7 +164,8 @@ nothing consumes it programmatically.
       tests (>60 s) are listed with durations in every run's tail.
 2. Verification: `typos AGENTS.md` exits 0; every command and path in the new
    section was executed or exercised by Tasks 1–2 (doc drift is the named
-   hazard — do not write an untested invocation).
+   hazard — do not write an untested invocation). The xmllint one-liner is run
+   against Task 1's failing-test artifact.
 3. Acceptance: section present under *Development commands*; every documented
    command matches actual recipe/config behavior verified above.
 
