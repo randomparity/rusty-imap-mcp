@@ -367,12 +367,11 @@ impl ImapMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         // Legacy single-account `"default"` records `None`; multi-account
         // records the account name.
-        let audit_account: Option<String> =
-            if account.id.as_str() == rimap_core::account::DEFAULT_ACCOUNT_NAME {
-                None
-            } else {
-                Some(account.id.as_str().to_string())
-            };
+        let audit_account: Option<String> = account
+            .id
+            .as_optional()
+            .map(rimap_core::account::AccountId::as_str)
+            .map(str::to_string);
         let posture = PostureContext::Account(account.guard.matrix().posture());
 
         self.run_with_audit_envelope(tool, audit_account, posture, args, |ticket| async move {

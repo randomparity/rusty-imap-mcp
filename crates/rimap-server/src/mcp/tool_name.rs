@@ -7,7 +7,7 @@
 
 use std::str::FromStr;
 
-use rimap_core::account::{AccountId, DEFAULT_ACCOUNT_NAME};
+use rimap_core::account::AccountId;
 use rimap_core::tool::ToolName;
 use rmcp::model::ErrorData;
 
@@ -23,7 +23,7 @@ pub(super) fn is_legacy_single_account(
         && accounts
             .keys()
             .next()
-            .is_some_and(|id| id.as_str() == DEFAULT_ACCOUNT_NAME)
+            .is_some_and(|id| id.as_optional().is_none())
 }
 
 /// Promote a base `ToolName` to a sub-capability variant based on args.
