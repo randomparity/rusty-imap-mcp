@@ -227,11 +227,15 @@ test-installer:
 #
 # Extra args pass through to `cargo nextest run` verbatim (#827): nextest
 # flags like `--no-capture`, or positional substring filters for scoping
-# (`just test -- some_test`). Never document additional `-E` expressions as
-# scoping — multiple filtersets are ORed and would widen past any default
-# filter rather than narrow it.
+# (`just test some_test`). A leading `--` separator is stripped — just would
+# otherwise forward it and nextest rejects flags after `--`. Never document
+# additional `-E` expressions as scoping — multiple filtersets are ORed and
+# would widen past any default filter rather than narrow it.
 test *args: prune-containers
-    cargo nextest run --workspace --locked --no-tests=pass --profile ci "$@"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ "${1:-}" = "--" ] && shift
+    exec cargo nextest run --workspace --locked --no-tests=pass --profile ci "$@"
 
 # Doctests. Separate from `test` because nextest does not run doctests at all
 # (upstream limitation), so `cargo nextest run` above silently skips every one
@@ -260,12 +264,15 @@ test-doc:
 #
 # Extra args pass through to `cargo nextest run` verbatim (#827), appended
 # AFTER the -E exclusion filter: positional substring filters intersect with
-# the filterset union, so `just test-fast -- some_test` narrows the run while
-# keeping the container-binary exclusion. Additional `-E` flags would OR into
-# the union and widen past the exclusion — do not use them for scoping.
+# the filterset union, so `just test-fast some_test` narrows the run while
+# keeping the container-binary exclusion. A leading `--` separator is
+# stripped — just would otherwise forward it and nextest rejects flags after
+# `--`. Additional `-E` flags would OR into the union and widen past the
+# exclusion — do not use them for scoping.
 test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    [ "${1:-}" = "--" ] && shift
     containers=$(sed -e '/^[[:space:]]*$/d' -e 's/.*/binary(&)/' \
         scripts/container-test-binaries.txt | paste -sd '|' -)
     exec cargo nextest run --workspace --locked --no-tests=pass \

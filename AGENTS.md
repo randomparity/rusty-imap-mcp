@@ -110,8 +110,9 @@ assert; this section covers how to run and read them.
    concurrently in one workspace (the JUnit path collides). The report never
    outranks the run's own summary line (`N tests run`).
 5. **Verbose escape hatches:** pass through recipe args —
-   `just test-fast -- --no-capture` for live output when diagnosing a hang,
-   `--status-level=all` for full chatter. `RUST_BACKTRACE=1` is an
+   `just test-fast --no-capture` for live output when diagnosing a hang,
+   `--status-level=all` for full chatter. (A leading `--` separator is also
+   accepted and stripped by the recipes.) `RUST_BACKTRACE=1` is an
    environment variable: use the prefix form `RUST_BACKTRACE=1 just
    test-fast`, not a passthrough argument. Note that `--no-capture` runs
    serially and its JUnit report has no embedded failure output — watch with
@@ -119,7 +120,10 @@ assert; this section covers how to run and read them.
 6. **Noise triage:** proptest shrink transcripts and insta snapshot diffs
    appear only on genuine failures — volume signals a red, not brokenness.
    Tests exceeding 60 s are listed with durations in every run's tail
-   (`final-status-level = "slow"`).
+   (`final-status-level = "slow"`). Version caveat: on nextest < 0.9.133
+   (which the 0.9.95 tooling floor permits), the mid-run 60-second slow
+   warning renders as a corrupt line instead of being hidden; slow
+   attribution still arrives in the run tail either way.
 
 ### Container runtime for integration tests
 
