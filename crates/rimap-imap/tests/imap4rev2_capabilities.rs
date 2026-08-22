@@ -76,10 +76,11 @@ async fn a_rev2_listing_advertises_move_and_uidplus_without_naming_them() {
     let server = FakeImapServer::start(steps).await;
     let conn = server.connection_timeout("user@example.com", BACKSTOP);
 
-    let (result, _uidvalidity) = conn
+    let result = conn
         .delete_message("INBOX", uid(5), "Trash", None)
         .await
-        .expect("an IMAP4rev2 server supports UID MOVE whether or not it lists the atom");
+        .expect("an IMAP4rev2 server supports UID MOVE whether or not it lists the atom")
+        .result;
 
     assert_eq!(
         conn.capabilities().await,
@@ -148,10 +149,11 @@ async fn a_rev1_only_listing_is_unaffected_by_the_rev2_fold() {
     let server = FakeImapServer::start(steps).await;
     let conn = server.connection_timeout("user@example.com", BACKSTOP);
 
-    let (result, _uidvalidity) = conn
+    let result = conn
         .delete_message("INBOX", uid(5), "Trash", None)
         .await
-        .expect("an IMAP4rev1-only server is a known state, not an unknown one");
+        .expect("an IMAP4rev1-only server is a known state, not an unknown one")
+        .result;
 
     assert_eq!(
         conn.capabilities().await,

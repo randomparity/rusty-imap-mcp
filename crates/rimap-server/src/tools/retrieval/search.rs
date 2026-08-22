@@ -296,7 +296,9 @@ pub async fn handle(
 
     let query = build_query(&input)?;
 
-    let (uids, uid_validity) = Box::pin(account.imap.search(&input.folder, query)).await?;
+    let outcome = Box::pin(account.imap.search(&input.folder, query)).await?;
+    let uids = outcome.uids;
+    let uid_validity = outcome.uidvalidity;
     let total_matched = uids.len();
 
     let offset = input.offset.unwrap_or(0);
@@ -345,12 +347,14 @@ async fn handle_thread(
     let (own_message_id, ancestor_ids) =
         fetch_thread_headers(account, &input.folder, target_uid).await?;
 
-    let (mut related, uid_validity) = Box::pin(account.imap.thread_related(
+    let outcome = Box::pin(account.imap.thread_related(
         &input.folder,
         own_message_id.as_deref(),
         &ancestor_ids,
     ))
     .await?;
+    let mut related = outcome.uids;
+    let uid_validity = outcome.uidvalidity;
 
     // cargo-mutants: best-effort — deleting `!` here flips the "ensure the
     // target UID is in its own thread" guard. `related` is the result of an

@@ -272,7 +272,7 @@ impl Connection {
         &self,
         folder: &str,
         query: crate::types::SearchQuery,
-    ) -> Result<(Vec<crate::types::Uid>, Option<u32>), ImapError> {
+    ) -> Result<crate::ops::search::SearchOutcome, ImapError> {
         self.with_session("search", Idempotency::ReadOnly, || {
             async |entry| crate::ops::search::search(entry.session(), folder, query.clone()).await
         })
@@ -292,7 +292,7 @@ impl Connection {
         folder: &str,
         own_message_id: Option<&str>,
         ancestor_ids: &[String],
-    ) -> Result<(Vec<crate::types::Uid>, Option<u32>), ImapError> {
+    ) -> Result<crate::ops::search::SearchOutcome, ImapError> {
         self.with_session("thread_related", Idempotency::ReadOnly, || {
             async |entry| {
                 crate::ops::search::thread_related(
@@ -565,7 +565,7 @@ impl Connection {
         uid: crate::types::Uid,
         trash_folder: &str,
         expected_uidvalidity: Option<u32>,
-    ) -> Result<(crate::ops::delete::DeleteResult, Option<u32>), ImapError> {
+    ) -> Result<crate::ops::delete::DeleteOutcome, ImapError> {
         self.with_session("delete_message", Idempotency::Mutating, || {
             async |entry| {
                 let selected = crate::ops::folders::select(entry.session(), folder, false).await?;
@@ -573,7 +573,10 @@ impl Connection {
                 crate::ops::fetch::check_uidvalidity(folder, expected_uidvalidity, uid_validity)?;
                 let result =
                     crate::ops::delete::delete_message(entry, uid, folder, trash_folder).await?;
-                Ok((result, uid_validity))
+                Ok(crate::ops::delete::DeleteOutcome {
+                    result,
+                    uidvalidity: uid_validity,
+                })
             }
         })
         .await

@@ -78,10 +78,11 @@ async fn assert_move_and_uidplus_advertised(caps: &str) {
     let server = FakeImapServer::start(steps).await;
     let conn = server.connection_timeout("user@example.com", BACKSTOP);
 
-    let (result, _uidvalidity) = conn
+    let result = conn
         .delete_message("INBOX", uid(5), "Trash", None)
         .await
-        .expect("a server advertising MOVE in any case supports UID MOVE");
+        .expect("a server advertising MOVE in any case supports UID MOVE")
+        .result;
 
     assert_eq!(
         conn.capabilities().await,
@@ -174,10 +175,11 @@ async fn assert_neither_extension_advertised(caps: &str) {
     let server = FakeImapServer::start(steps).await;
     let conn = server.connection_timeout("user@example.com", BACKSTOP);
 
-    let (result, _uidvalidity) = conn
+    let result = conn
         .delete_message("INBOX", uid(5), "Trash", None)
         .await
-        .expect("an IMAP4rev1 listing is a known state, not an unknown one");
+        .expect("an IMAP4rev1 listing is a known state, not an unknown one")
+        .result;
 
     assert_eq!(
         conn.capabilities().await,

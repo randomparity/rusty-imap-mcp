@@ -259,10 +259,7 @@ fn finish_validated_multi(
 ) -> Result<ValidatedMultiConfig, ConfigError> {
     paths::validate_audit_config(&audit)?;
     paths::validate_paths_multi(&audit, &attachments)?;
-    paths::validate_export_download_root(
-        &attachments,
-        export_messages_enabled(accounts.values()),
-    )?;
+    paths::validate_export_download_root(&attachments, export_messages_enabled(accounts.values()))?;
 
     Ok(ValidatedMultiConfig {
         accounts,

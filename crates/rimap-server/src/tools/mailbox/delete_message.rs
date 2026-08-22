@@ -81,10 +81,12 @@ pub async fn handle(
 
     let uid = rimap_imap::types::Uid::from(input.uid);
 
-    let (result, uid_validity) = account
+    let outcome = account
         .imap
         .delete_message(&input.folder, uid, trash_folder, input.expected_uidvalidity)
         .await?;
+    let result = outcome.result;
+    let uid_validity = outcome.uidvalidity;
 
     let warnings =
         super::fallback_security_warnings(result.used_fallback, result.folder_wide_expunge);

@@ -42,7 +42,6 @@ impl From<NonZeroU32> for Uid {
     }
 }
 
-
 /// Opaque RFC 5322 `Message-ID` header value, as raw bytes (no decoding).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageId(Vec<u8>);

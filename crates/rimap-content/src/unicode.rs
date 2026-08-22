@@ -285,7 +285,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn decode_utf8_passthrough() {
         let out = decode(b"hello world", Some("utf-8"));
