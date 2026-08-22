@@ -339,14 +339,16 @@ token, then the pin.
 
 ```
 crates/
-├── rimap-core/      # shared types (Message, Folder, Posture, audit records)
-├── rimap-config/    # config loading, validation, credential resolution
-├── rimap-imap/      # async-imap wrapper with TLS fingerprint pinning
-├── rimap-content/   # MIME parse, Unicode, HTML→text, look-alike, sanitization
-├── rimap-audit/     # append-only JSONL audit log with exclusive file locking
-├── rimap-authz/     # posture matrix, rate limiter, circuit breaker
-├── rimap-smtp/      # lettre wrapper, SMTP connection, TLS
-└── rimap-server/    # rmcp server (bin), tool dispatch, main.rs
+├── rimap-core/           # shared types (Posture, ToolName, audit record shapes, folder_name)
+├── rimap-config/         # config loading, validation, credential resolution
+├── rimap-imap/           # async-imap wrapper, TLS fingerprint pinning, FetchedMessage/Folder types
+├── rimap-content/        # MIME parse, Unicode, HTML→text, look-alike, sanitization
+├── rimap-audit/          # append-only JSONL audit log with exclusive file locking
+├── rimap-authz/          # posture matrix, rate limiter, circuit breaker
+├── rimap-smtp/           # lettre wrapper, SMTP connection, TLS
+├── rimap-fake-imap/      # in-process scriptable fake IMAP server (test support, publish = false)
+├── rimap-container-gate/ # docker/podman autodetect + arch gate shared by container harnesses (publish = false)
+└── rimap-server/         # rmcp server (bin), tool dispatch, main.rs
 ```
 
 Each library crate has one clear responsibility and communicates through typed
