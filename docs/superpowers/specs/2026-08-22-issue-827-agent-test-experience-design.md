@@ -52,9 +52,8 @@ final-status-level = "slow"              # cumulative: includes retry + fail
 
 [profile.default.junit]
 path = "junit.xml"                       # -> target/nextest/default/junit.xml
-
-[profile.ci.junit]
-path = "junit.xml"                       # -> target/nextest/ci/junit.xml
+                                         # (ci inherits this table; --profile ci
+                                         #  writes target/nextest/ci/junit.xml)
 ```
 
 - `[profile.ci]` inherits the default-profile status settings; `just test`,
@@ -85,9 +84,10 @@ path = "junit.xml"                       # -> target/nextest/ci/junit.xml
   past the exclusion filter rather than narrowing — never advertise `-E`
   passthrough as scoping.
 
-### 3. AGENTS.md guidance block
+A compact "Running tests as an agent" section under *Development commands*,
+cross-referenced one line to the existing *Testing expectations* section (the
+noise-triage note points there rather than duplicating it):
 
-A compact "Running tests as an agent" section under *Development commands*:
 
 1. **Recipe map with warm-machine runtime ranges**: single filtered test =
    seconds; `test-fast` ≈ 1–3 min; `test` = minutes with individual
@@ -101,18 +101,21 @@ A compact "Running tests as an agent" section under *Development commands*:
 4. **JUnit ingestion**: where the file lands per profile;
    `xmllint --xpath '//testcase[failure]/@name' <report>` extracts failed
    test names (verified against a representative JUnit document); failure
-   bodies live in the same file. A missing `target/nextest/<profile>/junit.xml`
-   after a run means the run did not complete cleanly — treat it as void,
-   shrink scope or raise the budget, and re-run; never parse a partial file.
-   Existence alone is not proof of freshness: ingest only files whose mtime is
-   newer than the start of the run being diagnosed (a compile error before
-   test start leaves the previous run's report in place), pair the file with
-   nextest's exit code — non-zero (`max-fail`/fail-fast abort) means only
-   recorded tests ran; ingest their failure records without concluding overall
-   health — and confirm it parses as XML first (a malformed or truncated file
-   gets the void treatment). Never run two same-profile suites concurrently in
-   one workspace: the JUnit path collides and last-writer-wins corrupts
-   attribution.
+   bodies live in the same file. xmllint is a convenience, not a gate — any
+   XML parser works, and `grep -c '<failure' <report>` is the zero-dependency
+   fallback. A missing `target/nextest/<profile>/junit.xml` after a run means
+   the run did not complete cleanly — treat it as void, shrink scope or raise
+   the budget, and re-run; never parse a partial file. Existence alone is not
+   proof of freshness: ingest only files whose mtime is newer than the start
+   of the run being diagnosed (a compile error before test start leaves the
+   previous run's report in place), pair the file with nextest's exit code —
+   non-zero (`max-fail`/fail-fast abort) means only recorded tests ran; ingest
+   their failure records without concluding overall health — and confirm it
+   parses as XML first (a malformed or truncated file gets the void
+   treatment). Never run two same-profile suites concurrently in one
+   workspace: the JUnit path collides and last-writer-wins corrupts
+   attribution. A report recording zero tests means the filter matched
+   nothing — never a health signal.
 5. **Verbose escape hatches**: `--no-capture` (live output, hang diagnosis)
    and `--status-level=all` via recipe passthrough; `RUST_BACKTRACE=1` is an
    environment variable — set it as a prefix (`RUST_BACKTRACE=1 just
@@ -154,14 +157,18 @@ permissions, same exposure as nextest's own captured output today.
 Config + docs + shell tooling; no Rust feature code, so the TDD loop applies
 as explicit verification commands:
 
-- After the profile change: run a scoped nextest command, assert
-  `target/nextest/*/junit.xml` exists, parses as XML, and its `<testcase>`
-  count matches nextest's summary line.
+- After the profile change: run a scoped nextest command under each profile
+  (`default` and `--profile ci`), assert both `target/nextest/default/junit.xml`
+  and `target/nextest/ci/junit.xml` exist (proving ci inherits the junit
+  table), parse as XML, and their `<testcase>` counts match nextest's summary
+  lines; also record empirically whether a zero-match run
+  (`-E 'test(nonexistent_zz)'`) writes an empty report — the AGENTS.md
+  ingestion bullet must match what is observed.
 - Force exactly one deliberate failure (temporary broken assertion, reverted
   in the same step) to prove `<failure>` with captured output appears in the
   JUnit file — the confirm-it-fails step for this change.
 - `just -n test-fast -- --no-capture` shows the flag reaching `cargo nextest
-  run`; `just test-timing` prints slowest cases from the file produced above.
+  run`.
 - Guardrails for touched files: `typos`, `just fmt-check`/`lint` unaffected
   but run as part of the branch sweep; AGENTS.md prose reviewed against actual
   recipe behavior (doc drift is the named hazard).
