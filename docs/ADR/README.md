@@ -47,3 +47,4 @@ compile it.
 | [0023](0023-fixture-image-arch-must-match-host.md) | Fixture image architecture must match the host; mismatch is a loud gate failure | Accepted |
 | [0024](0024-pre-init-wire-sequence-under-rmcp-3.md) | Pre-init requests carry rmcp 3.x's -32602 before our -32002 envelope | Accepted |
 | [0025](0025-pre-init-single-envelope-validator-interception.md) | Pre-init validator interception restores the deterministic single-envelope contract | Accepted |
+| [0026](0026-published-data-records-non-exhaustive.md) | Published public-field data records are non-exhaustive | Accepted |
