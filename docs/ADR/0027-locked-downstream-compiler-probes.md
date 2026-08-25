@@ -39,15 +39,18 @@ Their existing positive and negative tests exercise the copied lock under both
 the development and MSRV test suites. A manifest/lock mismatch therefore fails
 the same focused contract before an E0639 assertion can pass.
 
-A repository guard enforces the boundary over tracked Rust test sources. Direct
-Cargo binary resolution through the `CARGO` environment or a literal `cargo`
-process is permitted only inside `rimap-compiler-probe`; every exact-E0639
+A repository guard enforces the boundary over every tracked test/support source:
+files below a `tests/` directory and `scripts/*.test.{sh,py,js,ts}`. It rejects
+direct Cargo `check` or `rustc` process construction in Rust `Command`, shell
+command position, Python `subprocess`, and JavaScript/TypeScript process APIs.
+Only `rimap-compiler-probe` may resolve and spawn Cargo; every exact-E0639
 harness must depend on that crate and own a tracked fixture manifest and lock.
-Synthetic negative tests cover direct `Command` invocation, a second wrapper,
-missing helper use, and missing locked/offline semantics in the helper. This
-prevents ordinary alternate spellings from creating a second invocation path;
-deliberate source obfuscation remains subject to review like any other attempt
-to evade a repository guard.
+
+Synthetic negative tests cover each supported language form, environment-based
+and literal Cargo resolution, a second wrapper, missing helper use, and missing
+locked/offline semantics in the helper. This covers the repository's ordinary
+test and support harness shapes. Deliberate source obfuscation remains subject
+to review like any other attempt to evade a repository guard.
 
 The same guard verifies that every registry package identity in each fixture
 lock—name, version, source, and checksum—occurs in the root `Cargo.lock`. Its
