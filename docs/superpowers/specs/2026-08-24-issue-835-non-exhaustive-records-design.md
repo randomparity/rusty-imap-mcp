@@ -48,12 +48,14 @@ public field in the six permitted crates; 30 already carry the attribute and
 
 ## Decision
 
-Apply `#[non_exhaustive]` to every one of the 27 missing public-field record
-structs. The inventory boundary is structural and reviewable: the struct is
-public, at least one field is public outside its defining crate, and the value
-represents configuration, input, output, captured data, or a structured error.
-A public type with only private or restricted fields is opaque rather than a
-public data record and stays outside this change.
+Apply `#[non_exhaustive]` to every one of the 27 missing public named-field
+record structs. The inventory boundary is structural and reviewable: the
+struct is public, at least one named field is public outside its defining
+crate, and the value represents configuration, input, output, captured data,
+or a structured error. A public type with only private or restricted fields is
+opaque rather than a public data record and stays outside this change. Tuple
+newtypes and tuple error wrappers also stay outside: their single positional
+field is the type's identity, not an extensible record contract.
 
 ### Complete inventory
 
@@ -96,19 +98,20 @@ Cross-crate destructures add `..` and keep their existing behavior.
 
 ### Compile contract
 
-Each changed type receives a concise `compile_fail,E0639` doctest that attempts
-a downstream struct expression using the type's actual public surface. Before
-the attribute, the doctest must fail because the expression compiles; after the
-attribute, it passes because rustc rejects the expression. The snippets must
-not depend on a missing import, private field, unavailable `Default`, or any
-other failure mode.
+Focused `compile_fail,E0639` doctests attempt downstream struct expressions
+using actual public surfaces. Together they cover plain literals and
+functional-update syntax across the changed crate families. Before the
+attribute, each new doctest must fail because the expression compiles; after
+the attribute, it passes because rustc rejects the expression. The snippets
+must not depend on a missing import, private field, unavailable `Default`, or
+any other failure mode.
 
 Because stable rustdoc does not validate the error-code suffix, a focused
 cross-crate integration probe also checks `error[E0639]` for representative
-plain-literal and functional-update forms across the changed crate families.
-The probe follows `rimap-audit/tests/non_exhaustive_e0639.rs`: a temporary
-crate depends on local path crates and the test inspects `cargo check` stderr.
-It does not test source text.
+plain-literal and functional-update forms. The probe follows
+`rimap-audit/tests/non_exhaustive_e0639.rs`: a temporary crate depends on local
+path crates and the test inspects `cargo check` stderr. It does not test source
+text.
 
 ## Runtime and data behavior
 
@@ -163,9 +166,10 @@ doctest failures.
 
 ## Durable execution context
 
-- Branch: `feat/non-exhaustive-records-835`
+- Branch: `work/835-non-exhaustive-records`
 - Base branch: `main`
 - Guardrails: focused crate doctests/tests during TDD; `just
   regen-tool-schemas`; `just semver-checks`; final `just ci`.
-- Open findings: none at design authoring.
-- Review deferrals: none at design authoring.
+- Open findings: none.
+- Review deferrals: ADR-0025's pre-initialize semantic defect is outside this
+  implementation surface and tracked by #837.

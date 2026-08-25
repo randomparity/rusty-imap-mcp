@@ -4,8 +4,9 @@
 
 ## Context
 
-Public Rust structs with public fields permit downstream struct literals and
-exhaustive destructuring. Adding a field is therefore a source-breaking change
+Public Rust named-field structs with public fields permit downstream struct
+literals and exhaustive destructuring. Adding a field is therefore a
+source-breaking change
 unless the struct is marked `#[non_exhaustive]`. v0.2.0 is already released
 and the workspace is on the unreleased 0.3.0-dev major transition, so applying
 the attribute before v0.3.0 consumes no additional version break; after that
@@ -14,25 +15,28 @@ release it would require another major version.
 Issues #665, #706, #707, #715, and #716 established the repository convention
 for config and audit records. Issue #835 found the remaining gap across six
 published library crates. Its named examples are illustrative: an AST inventory
-at `b708b96b5d3095f06b34b61a8ac065687cd1f016` found 57 public structs with at
-least one externally public field, 30 already non-exhaustive and 27 still
-exhaustive.
+at `b708b96b5d3095f06b34b61a8ac065687cd1f016` found 57 public named-field
+structs with at least one externally public field, 30 already non-exhaustive
+and 27 still exhaustive.
 
 ## Decision
 
-Every public struct in a published library crate that exposes at least one
-public data field is `#[non_exhaustive]`. The rule includes configuration,
-input, output, captured-test data, and structured error records. This decision
-governs the six library crates named by issue #835. It excludes opaque structs
-whose fields are private or restricted and, by explicit operator decision, the
-separate public tool-record surface in the published `rimap-server` crate.
+Every public named-field record struct in the six issue #835 library crates
+that exposes at least one public data field is `#[non_exhaustive]`. The rule
+includes configuration, input, output, captured-test data, and structured
+error records. It excludes tuple newtypes and tuple error wrappers, whose
+single positional field is the type's identity rather than an extensible
+record contract; opaque structs whose fields are private or restricted; and,
+by explicit operator decision, the separate public tool-record surface in the
+published `rimap-server` crate.
 
 Retrofits use the existing construction path first. A new constructor is added
 only when a current cross-crate caller has neither a suitable constructor nor a
 meaningful `Default`; it takes exactly the fields without meaningful defaults.
 Downstream mutation after construction and destructuring with `..` remain
-supported. Each retrofitted type carries a downstream compile-fail contract,
-with representative integration coverage checking rustc E0639 specifically.
+supported. Focused downstream compile-fail contracts cover the relevant
+literal and functional-update forms, with representative integration coverage
+checking rustc E0639 specifically.
 
 ## Consequences
 
@@ -66,6 +70,13 @@ with representative integration coverage checking rustc E0639 specifically.
   clients, state holders, and private-field error wrappers whose fields do not
   expose a data-record construction contract; the public-field boundary is
   narrower and directly tied to the failure being prevented.
+- **Include public tuple newtypes and tuple error wrappers.** judgment:
+  `Host(pub String)`, `Username(pub String)`, `ParseErrorCodeError(pub String)`,
+  and `UnknownPosture(pub String)` expose one positional value as the type's
+  identity. Adding another position would change that identity rather than
+  extend a named data record; making their constructors inaccessible would
+  impose migration cost without protecting the field-addition contract this
+  decision governs.
 - **Add `Default` or builders to every covered type.** verified: completed
   issues #665 and #706 established that `#[non_exhaustive]` rejects
   functional-update syntax too, and that constructors are added only for
