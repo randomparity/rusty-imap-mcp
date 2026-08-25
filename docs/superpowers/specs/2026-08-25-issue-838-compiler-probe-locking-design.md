@@ -100,11 +100,12 @@ is no online retry or lock regeneration.
 
 ## Focused recurrence and parity guard
 
-`scripts/check-compiler-probe-locks.sh` scans every
-`std::process::Command::new` invocation in tracked integration-test Rust files
-under `crates/*/tests/`. Tracked crate `src/`, `build.rs`, examples, and
-benchmarks are outside this focused source set. The guard resolves ordinary
-Cargo expressions independently per invocation:
+`scripts/check-compiler-probe-locks.sh` scans every process-command constructor
+invocation in tracked integration-test Rust files under `crates/*/tests/`.
+Tracked crate `src/`, `build.rs`, examples, and benchmarks are outside this
+focused source set. The guard resolves both `std::process::Command` and
+`tokio::process::Command` across qualified paths, ordinary imports, and import
+aliases. It resolves ordinary Cargo expressions independently per invocation:
 
 - direct literals and `PathBuf::from(\"cargo\")`;
 - `std::env::var(\"CARGO\")`, `std::env::var_os(\"CARGO\")`, or
@@ -151,6 +152,7 @@ covers:
 
 - the complete good case;
 - two in-scope Cargo builders in one file where only one is compliant;
+- qualified, imported, and aliased standard and Tokio process constructors;
 - direct, `PathBuf`, environment, compile-time environment, simple alias, and
   zero-argument helper-return Cargo expressions;
 - temporary-project setup split into a separate local helper from the Cargo

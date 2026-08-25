@@ -35,17 +35,19 @@ crate and invokes:
 cargo check --locked --offline --message-format=short
 ```
 
-A focused repository guard scans every `std::process::Command::new` invocation
-in tracked `crates/*/tests/**/*.rs` integration-test sources and resolves
-`\"cargo\"`, `PathBuf::from(\"cargo\")`, `CARGO` environment lookups, simple
-local aliases assigned from those forms, and zero-argument local helpers that
-return one of those forms. It builds a local helper-call graph and propagates
-temporary-project roots to a fixed point, so setup may create and return the
-root from a helper separate from the Cargo launch. A Cargo invocation is an
-in-scope nested downstream probe when it runs `check` with `current_dir` or
-`--manifest-path` rooted in a local temporary project whose setup writes
-`Cargo.toml`. Other direct Cargo commands, such as repository metadata checks,
-remain outside this decision.
+A focused repository guard scans every process-command constructor invocation
+in tracked `crates/*/tests/**/*.rs` integration-test sources. It resolves both
+`std::process::Command` and `tokio::process::Command`, including qualified
+paths, ordinary imports, and import aliases. It then resolves Cargo executable
+expressions: `\"cargo\"`, `PathBuf::from(\"cargo\")`, `CARGO` environment
+lookups, simple local aliases assigned from those forms, and zero-argument local
+helpers that return one of those forms. It builds a local helper-call graph.
+Temporary-project root provenance propagates to a fixed point, so setup may
+create and return the root from a helper separate from the Cargo launch. A
+Cargo invocation is an in-scope nested downstream probe when it runs `check`
+with `current_dir` or `--manifest-path` rooted in a local temporary project
+whose setup writes `Cargo.toml`. Other direct Cargo commands, such as
+repository metadata checks, remain outside this decision.
 
 Each in-scope invocation is validated independently; file-level evidence cannot
 satisfy a second builder. Every such invocation must use one literal
@@ -62,12 +64,13 @@ fixture root. A root lock plus an injected fixture block therefore cannot pass
 as a pruned fixture graph.
 
 Its regression suite covers mixed compliant and noncompliant builders in one
-file, every supported direct, aliased, and helper-return Cargo expression,
-temporary-project setup split into a separate local helper, excluded `src/`,
-`build.rs`, and Cargo commands without a temporary downstream manifest, exact
-manifest copying, each missing flag, missing registration, missing or untracked
-fixture files, malformed or unreachable lock blocks, root/fixture drift, an
-unpruned root copy with a fixture block, and empty discovery. This is a focused
+file; qualified, imported, and aliased standard and Tokio process constructors;
+every supported direct, aliased, and helper-return Cargo expression;
+temporary-project setup split into a separate local helper; excluded `src/`,
+`build.rs`, and Cargo commands without a temporary downstream manifest; exact
+manifest copying; each missing flag; missing registration; missing or untracked
+fixture files; malformed or unreachable lock blocks; root/fixture drift; an
+unpruned root copy with a fixture block; and empty discovery. This is a focused
 recurrence gate for nested Cargo in integration tests, not a universal
 executable or compiler inventory.
 
