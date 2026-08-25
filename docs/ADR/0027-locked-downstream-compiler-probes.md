@@ -34,21 +34,28 @@ cargo check --locked --offline --message-format=short
 
 A focused repository guard scans every `std::process::Command::new` invocation
 in tracked Rust tests and resolves ordinary Cargo expressions: literal
-`\"cargo\"`, `PathBuf::from(\"cargo\")`, `CARGO` environment lookups, and simple
-local aliases assigned from those forms. Each discovered Cargo invocation is
-validated independently; file-level evidence cannot satisfy a second builder.
-Every invocation must use one literal `COMPILER_PROBE_FIXTURE`, derive its
-manifest from the registered fixture, copy its `Cargo.lock`, and pass both
-`--locked` and `--offline`. The fixture path must resolve inside the owning
-crate and contain tracked manifest, lock, and source files.
+`\"cargo\"`, `PathBuf::from(\"cargo\")`, `CARGO` environment lookups, simple
+local aliases assigned from those forms, and zero-argument local helpers that
+return one of those forms. A Cargo invocation is an in-scope nested downstream
+probe only when its enclosing helper writes a temporary `Cargo.toml` and sets
+the Cargo process current directory to that manifest's root. Other direct Cargo
+commands, such as repository metadata checks, remain outside this decision.
+
+Each in-scope invocation is validated independently; file-level evidence cannot
+satisfy a second builder. Every such invocation must use one literal
+`COMPILER_PROBE_FIXTURE`, derive its manifest from the registered fixture, copy
+its `Cargo.lock`, and pass both `--locked` and `--offline`. The fixture path
+must resolve inside the owning crate and contain tracked manifest, lock, and
+source files.
 
 The guard compares each fixture lock against the root lock using complete
 registry package identity: name, version, source, and checksum. It also
 requires exactly one fixture package identity from the fixture manifest, which
 a verbatim root-lock seed lacks. Its regression suite covers mixed compliant
-and noncompliant builders in one file, every supported direct and aliased Cargo
-expression, fixture/generated-manifest drift, each missing flag, missing
-registration, missing or untracked fixture files, malformed locks,
+and noncompliant builders in one file, every supported direct, aliased, and
+helper-return Cargo expression, an excluded Cargo command without a temporary
+downstream manifest, fixture/generated-manifest drift, each missing flag,
+missing registration, missing or untracked fixture files, malformed locks,
 root/fixture drift, an unpruned root copy, and empty discovery. This is a
 focused recurrence gate for nested Cargo in Rust tests, not a universal
 executable or compiler inventory.

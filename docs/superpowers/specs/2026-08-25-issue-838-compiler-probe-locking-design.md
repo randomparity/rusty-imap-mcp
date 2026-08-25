@@ -102,10 +102,16 @@ It resolves ordinary Cargo expressions independently per invocation:
 
 - direct literals and `PathBuf::from(\"cargo\")`;
 - `std::env::var(\"CARGO\")`, `std::env::var_os(\"CARGO\")`, or
-  `env!(\"CARGO\")`; and
-- simple local aliases assigned from those expressions.
+  `env!(\"CARGO\")`;
+- simple local aliases assigned from those expressions; and
+- zero-argument local helpers that return one of those expressions, including
+  the current `cargo_bin()` shape.
 
-For every discovered Cargo invocation—not merely every containing file—it
+A resolved Cargo invocation is an in-scope nested downstream probe only when
+its enclosing helper writes a temporary `Cargo.toml` and sets that invocation's
+current directory to the same manifest root. A direct Cargo command without
+that structure, such as a repository metadata check, is explicitly ignored.
+For every in-scope invocation—not merely every containing file—the guard
 requires:
 
 - one literal `COMPILER_PROBE_FIXTURE` registration used by that invocation's
@@ -122,21 +128,24 @@ requires:
 - every fixture registry package identity—name, version, source, checksum—to
   occur in the root lock.
 
-The script fails on unreadable Git state, an unresolved `Command::new`
-expression, malformed lock/package blocks, an empty candidate set, duplicate
-registration, or an unrecognized registered path. It never interprets
-documentation, workflows, Just recipes, shell, Python, JavaScript, direct
-compiler processes, or third-party compiler APIs. Those are explicit
+The script fails on unreadable Git state, a partially recognized Cargo helper
+that cannot be resolved, malformed lock/package blocks, an empty in-scope probe
+set, duplicate registration, or an unrecognized registered path. It never
+interprets documentation, workflows, Just recipes, shell, Python, JavaScript,
+direct compiler processes, unrelated Cargo commands without a temporary
+downstream manifest, or third-party compiler APIs. Those are explicit
 exclusions rather than silent blind spots.
 
 `scripts/check-compiler-probe-locks.test.sh` builds synthetic tracked trees and
 covers:
 
 - the complete good case;
-- two Cargo builders in one file where only one is compliant;
-- direct, `PathBuf`, environment, compile-time environment, and simple alias
-  Cargo expressions;
-- an unresolved alias, missing `--locked`, and missing `--offline`
+- two in-scope Cargo builders in one file where only one is compliant;
+- direct, `PathBuf`, environment, compile-time environment, simple alias, and
+  zero-argument helper-return Cargo expressions;
+- a direct Cargo command without a temporary downstream manifest, which stays
+  excluded;
+- an unresolved Cargo helper, missing `--locked`, and missing `--offline`
   independently;
 - missing, duplicate, absolute, escaping, and untracked fixture registration;
 - fixture/generated-manifest drift or a second raw manifest authority;
@@ -145,7 +154,7 @@ covers:
 - missing or duplicate fixture package identity and a verbatim root-lock seed;
 - fixture registry identity absent or different in the root lock;
 - a root package absent from a smaller fixture lock, which remains valid; and
-- empty candidate discovery.
+- empty in-scope probe discovery.
 
 The test also runs the guard against the real repository so a source scanner
 that no longer recognizes the two current probes fails instead of greening.
@@ -199,9 +208,11 @@ bump set and unknown-lock cases.
 - A missing lock copy is a hard harness failure.
 - `--locked` rejects manifest/lock disagreement; `--offline` prevents registry
   network access; no fallback exists.
-- The focused source guard validates each direct nested Cargo invocation
-  independently, including simple aliases, and rejects missing registration,
-  derived-manifest evidence, lock operation, or flags.
+- The focused source guard classifies temporary downstream Cargo probes, then
+  validates each invocation independently, including local aliases and
+  zero-argument helper returns. It rejects missing registration,
+  derived-manifest evidence, lock operation, or flags without capturing
+  unrelated Cargo commands.
 - Fixture identity plus full package identity parity restricts fixture registry
   artifacts to the root lock and rejects an unpruned root copy.
 - The required `cargo-deny` job runs the focused and parity checks.
@@ -236,8 +247,9 @@ Repository review and the no-new-dependency rule own those paths.
 - Each direct nested Cargo Rust invocation independently registers a tracked
   fixture, derives its manifest from that fixture, installs its lock, and
   passes `--locked --offline`.
-- Missing controls, mixed builders, manifest drift, an unpruned root seed, and
-  fixture/root lock drift fail focused regression tests.
+- Missing controls, mixed builders, helper-return resolution, manifest drift,
+  an unpruned root seed, and fixture/root lock drift fail focused regression
+  tests; unrelated direct Cargo commands remain excluded.
 - Dependency and release bumps atomically realign and commit both fixture locks.
 - The required `cargo-deny` CI context and local `just ci` run the guard.
 - No production behavior, public contract, or dependency version changes.
