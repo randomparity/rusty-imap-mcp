@@ -141,11 +141,20 @@ diagnosed rather than accepted blindly.
 
 ## Failure handling
 
-The authoritative fallout inventory is the union of E0639 sites reported by
-repeated `cargo check --workspace --all-targets --all-features --locked` runs
-after adding the attributes. A failing dependency can hide later dependent
-targets, so each reported batch is migrated before the command is run again.
-The inventory closes only when a final full command succeeds without E0639.
+The authoritative fallout inventory is
+`target/quest-835/e0639-fallout.tsv`. Each unique compiler site is one sorted
+tab-separated row:
+`type<TAB>relative_path:line<TAB>plain-literal|functional-update|pattern`.
+After every failed
+`cargo check --workspace --all-targets --all-features --locked`, the current
+E0639 batch is normalized and merged into that file before migration. A
+failing dependency can hide later dependent targets, so batches continue
+until the full command succeeds without E0639. The final union is reconciled
+against every migrated site and every new constructor; a constructor without
+a forcing row is removed. Delivery copies the sorted union and reconciliation
+into the pull request's required `WORK:REVIEW` evidence so it survives the
+gitignored `target/` working artifact.
+
 Other compiler errors are diagnosed independently rather than assumed to be
 fallout. Guardrail failures are corrected only from their current failure
 artifact. The implementation does not suppress lints, semver checks, schema
@@ -156,36 +165,41 @@ drift, or doctest failures.
 1. Add the compile-fail contract before attributes and run focused doctests;
    observe failure because the struct expressions still compile.
 2. Add attributes, run
-   `cargo check --workspace --all-targets --all-features --locked`, and retain
-   the current E0639 batch.
-3. Migrate that batch and repeat the full command until it succeeds without
-   E0639; the union of retained batches is the complete fallout artifact.
-4. Rerun focused crate doctests and tests.
-5. Run the representative E0639 integration probe and focused behavior tests
+   `cargo check --workspace --all-targets --all-features --locked`, and merge
+   the normalized E0639 batch into `target/quest-835/e0639-fallout.tsv`.
+3. Migrate that batch and repeat the full command plus merge until it succeeds
+   without E0639.
+4. Reconcile every retained row with a migrated site and every new constructor
+   with at least one forcing row; remove any unforced constructor.
+5. Rerun focused crate doctests and tests.
+6. Run the representative E0639 integration probe and focused behavior tests
    for every crate that gained a constructor or caller rewrite.
-6. Run `just regen-tool-schemas` and inspect whether any generated file moved.
-7. Run `just semver-checks`; expected result is green but vacuous for the
+7. Run `just regen-tool-schemas` and inspect whether any generated file moved.
+8. Run `just semver-checks`; expected result is green but vacuous for the
    already-declared 0.3.0-dev breaking-version transition, so it is a gate
    rather than evidence that the API did not break.
-8. Run `just ci` in the background to completion.
+9. Run `just ci` in the background to completion.
 
 ## Acceptance criteria
 
 - All 27 inventory entries carry `#[non_exhaustive]`.
 - Every cross-crate construction and destructuring site compiles through the
   established constructor/default-plus-assignment/rest-pattern idiom.
-- New constructors exist only for compiler-proven callers without an existing
-  construction route and preserve the prior field values.
+- New constructors exist only for callers proven by reconciled
+  `target/quest-835/e0639-fallout.tsv` rows, have no existing construction
+  route, and preserve prior field values.
 - Focused doctests fail before the attributes and pass after them; the
   representative integration probe observes E0639 specifically.
 - Runtime behavior, serialized output, and generated tool schemas do not drift.
 - `CHANGELOG.md` explains the breaking construction change and the supported
   downstream idiom.
 - `just semver-checks` and `just ci` pass.
+- The pull request's `WORK:REVIEW` evidence carries the sorted E0639 union and
+  its migrated-site/constructor reconciliation.
 
 ## Durable execution context
 
-- Branch: `work/835-non-exhaustive-records`
+- Branch: `feat/non-exhaustive-records-835`
 - Base branch: `main`
 - Guardrails: focused crate doctests/tests during TDD; `just
   regen-tool-schemas`; `just semver-checks`; final `just ci`.
