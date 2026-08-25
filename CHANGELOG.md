@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Public named-field data records in `rimap-core`, `rimap-authz`, `rimap-config`,
+  `rimap-content`, `rimap-imap`, and `rimap-smtp` are now non-exhaustive.
+  Downstream code must construct them through the provided constructors or
+  defaults plus field assignment and add `..` to record patterns.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added
