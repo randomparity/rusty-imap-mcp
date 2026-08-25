@@ -110,7 +110,7 @@ impl ResolutionPolicy {
     /// * `fallback_mode` - Whether fallback credential sources are permitted.
     /// * `protocol` - The protocol whose credential is being resolved.
     #[must_use]
-    pub const fn new(fallback_mode: FallbackMode, protocol: Protocol) -> Self {
+    pub const fn new(fallback_mode: crate::model::FallbackMode, protocol: Protocol) -> Self {
         Self {
             fallback_mode,
             protocol,
@@ -417,7 +417,7 @@ Implement the constructor with these exact arguments and field assignments:
 )]
 #[must_use]
 pub fn new(
-    account_id: AccountId,
+    account_id: rimap_core::account::AccountId,
     host: String,
     port: u16,
     encryption: ImapEncryption,
