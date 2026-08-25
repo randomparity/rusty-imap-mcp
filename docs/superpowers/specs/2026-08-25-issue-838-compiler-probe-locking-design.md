@@ -143,8 +143,10 @@ requires:
 - every reachable registry package identity—name, version, source,
   checksum—to occur in the root lock.
 
-A recognized Cargo invocation in a body that creates a temporary `Cargo.toml`
-enters the focused policy before subcommand validation. `check` may use the
+Classification is constructor- and function-body-local: evidence in another
+body cannot capture an unrelated invocation. A recognized Cargo invocation
+whose own body creates a temporary `Cargo.toml` enters the focused policy before
+subcommand validation. `check` may use the
 canonical form. Other compiler-driving subcommands—`build`, `test`, `bench`,
 `run`, `rustc`, `clippy`, and `fix`—fail closed with a diagnostic requiring an
 explicit focused-guard extension. Split builders, setup helpers, parameter

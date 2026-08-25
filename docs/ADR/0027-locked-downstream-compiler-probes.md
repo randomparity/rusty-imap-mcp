@@ -54,8 +54,10 @@ argument separator. It must copy the registered manifest and `Cargo.lock`
 byte-for-byte. The fixture path must resolve inside the owning crate and contain
 tracked manifest, lock, and source files.
 
-A recognized Cargo invocation combined with temporary `Cargo.toml` setup enters
-the focused policy before subcommand validation. `check` may use the canonical
+Classification is constructor- and function-body-local: temporary setup or a
+subcommand in another body cannot capture an unrelated invocation. A recognized
+Cargo invocation whose own body creates a temporary `Cargo.toml` enters the
+focused policy before subcommand validation. `check` may use the canonical
 form; other compiler-driving subcommands (`build`, `test`, `bench`, `run`,
 `rustc`, `clippy`, or `fix`) fail closed with a diagnostic requiring an
 explicit focused-guard extension. Split builders, setup helpers, parameter

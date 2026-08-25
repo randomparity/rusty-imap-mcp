@@ -120,7 +120,9 @@ flags-after-double-dash
 std-qualified / std-imported / std-import-alias
 tokio-qualified-await / tokio-imported-await / tokio-import-alias-await
 cargo-literal / cargo-pathbuf / cargo-helper-return
-non-check-build-rewrite / non-check-test-rewrite / non-check-rustc-rewrite
+non-check-build-rewrite / non-check-test-rewrite / non-check-bench-rewrite
+non-check-run-rewrite / non-check-rustc-rewrite / non-check-clippy-rewrite
+non-check-fix-rewrite
 split-builder-rewrite / split-setup-rewrite / arbitrary-helper-rewrite
 excluded-crate-src / excluded-build-rs / excluded-repository-metadata
 missing-locked / missing-offline
@@ -173,14 +175,14 @@ the default repository root with `git rev-parse --show-toplevel`, then use
 or benches. Exit non-zero when Git fails or discovery yields no in-scope probe.
 
 - [ ] **Step 3: Implement the canonical direct-probe source check**
-
 Inside the embedded Python, implement `strip_comments(source)`,
-`extract_check_probe(source)`, `process_constructors(source)`, and
+`extract_function_bodies(source)`, `process_constructors(source)`, and
 `fluent_calls(body, constructors)` using the frozen records above.
 `strip_comments` removes line and nested block comments while preserving source
-offsets and all Rust string/raw-string contents. `extract_check_probe` requires
-exactly one `fn check_probe` when the file contains a temporary downstream Cargo
-check and brace-matches only that body. This is not a general Rust scope model.
+offsets and all Rust string/raw-string contents. `extract_function_bodies`
+brace-matches every `fn` body only far enough to associate each constructor
+offset with its enclosing body and function name. It does not resolve method
+types, calls, parameters, or returns and is not a general Rust scope model.
 
 Constructor resolution recognizes:
 
@@ -193,20 +195,25 @@ StdCommand::new after use std::process::Command as StdCommand
 TokioCommand::new after use tokio::process::Command as TokioCommand
 ```
 
-For each recognized constructor in `check_probe`, take one fluent expression
-through `.output()`, `.status()`, or `.spawn()`, an optional `.await` after
-Tokio `.output()`/`.status()`, and its terminating semicolon. The three Tokio
-cases must contain syntactically valid `async fn check_probe()` bodies with
+For each recognized constructor, take one fluent expression through
+`.output()`, `.status()`, or `.spawn()`, an optional `.await` after Tokio
+`.output()`/`.status()`, and its terminating semicolon. Canonical acceptance
+also requires the enclosing function name `check_probe`. The three Tokio cases
+must contain syntactically valid `async fn check_probe()` bodies with
 `.output().await;` or `.status().await;`, not synchronous lookalikes.
 
-Reject assignment to a command variable, a missing terminal call, or a
-constructor outside the canonical body when the same file also creates a
-temporary `Cargo.toml`. Enter this policy before inspecting the Cargo
-subcommand. The diagnostic must say to rewrite the probe to the canonical
-single-function fluent form or explicitly extend the focused guard. This
-detects noncanonical split builders and setup helpers without implementing
-statement tracking, method extraction, parameter substitution, or a
-helper-call graph.
+Discover recognized process constructors first and associate each with its
+enclosing function body. Within that body, resolve the Cargo executable,
+temporary `Cargo.toml` setup, and literal subcommand independently from every
+other body in the file. A noncompiling `metadata` call remains excluded even
+when another function in the same file creates a temporary manifest.
+
+When a Cargo constructor's body creates a temporary manifest but its fluent
+chain has no literal subcommand, assigns the command to a variable, lacks a
+terminal call, or uses setup outside the body, fail with the canonical rewrite
+diagnostic. This detects noncanonical split builders and setup helpers without
+statement tracking, method typing, parameter substitution, or a helper-call
+graph.
 
 - [ ] **Step 4: Validate each canonical invocation and its exact root**
 
