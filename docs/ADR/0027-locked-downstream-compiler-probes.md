@@ -63,8 +63,10 @@ execution kind:
 
 - a persistent-workspace build binds to an exact tracked workspace manifest,
   including the root, HTML oracle, and fuzz workspaces; or
-- a manifestless install binds to exact package/source/version arguments and
-  forbids a working-directory manifest.
+- an existing manifestless install binds to one exact pre-change fingerprint,
+  requires a literal package and `--locked`, and forbids a working-directory
+  manifest. It does not claim a version pin the command does not carry; new
+  install fingerprints are outside this change.
 
 Temporary or dynamically selected manifests have no non-probe exception.
 Changing only executable, arguments, `current_dir`, environment, manifest, or
@@ -76,6 +78,15 @@ fixture manifest and lock. The helper's exact fingerprint must contain
 `check`, `--locked`, and `--offline`; no allowlist entry can override those
 requirements.
 
+Library-mediated compiler harnesses are prohibited outside
+`rimap-compiler-probe`. The guard scans workspace manifests and tracked test
+sources for compiler-harness dependencies and APIs, including `trybuild`,
+`trycmd`, `ui_test`, `compiletest_rs`, and `rustc-test`, and fails on any match.
+Adding or renaming such a dependency requires an explicit update to this guard
+and ADR; the repository's no-new-dependency review rule is the second boundary.
+Synthetic fixtures cover a `trybuild` dependency and API call with no Cargo
+token in the test source.
+
 The inventory runs every embedded-language recognizer over every command
 container rather than selecting one parser from the file extension. It detects
 Python subprocesses in shell heredocs, shell in Just recipes and workflow YAML,
@@ -86,11 +97,13 @@ unknown non-document command container, in-source Rust tests, arbitrarily named
 support scripts, every standalone language form, built-in compiler
 subcommands, `+toolchain` selectors, aliases, unknown subcommands, direct
 `cargo-*` and `cross` executables, and the `nextest`, `llvm-cov`, `auditable`,
-and `fuzz` forms. They also cover a second wrapper with a false non-probe label;
-changed executable, arguments, working directory, manifest, or execution kind
-on a fixed fingerprint; a temporary manifest disguised as a persistent
-workspace; a manifestless install that sees a workspace; missing helper use;
-and missing locked/offline helper flags. Every fixed fingerprint must
+and `fuzz` forms. They also cover a library-mediated `trybuild` probe with no
+Cargo token, a second wrapper with a false non-probe label; changed executable,
+arguments, working directory, manifest, or execution kind on a fixed
+fingerprint; a temporary manifest disguised as a persistent workspace; an
+existing unversioned install with and without its required literal package and
+`--locked`; an attempted new install fingerprint; missing helper use; and
+missing locked/offline helper flags. Every fixed fingerprint must
 match exactly once, so stale or path-wide exemptions cannot hide a new launch.
 Deliberate source obfuscation remains subject to review like any other attempt
 to evade a repository guard.

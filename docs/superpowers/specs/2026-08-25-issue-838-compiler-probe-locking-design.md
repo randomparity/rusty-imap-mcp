@@ -135,22 +135,27 @@ versions.
 7. include path, normalized executable and arguments, environment overrides,
    effective working directory, manifest selection, and execution kind in each
    fingerprint; mechanically require either a persistent-workspace build bound
-   to an exact tracked root, HTML-oracle, or fuzz manifest, or a manifestless
-   install bound to exact package/source/version arguments and no working
-   directory manifest; temporary and dynamic manifests have no exception;
+   to an exact tracked root, HTML-oracle, or fuzz manifest, or one exact
+   pre-change manifestless install with a literal package, `--locked`, and no
+   working-directory manifest; temporary and dynamic manifests and new install
+   fingerprints have no exception;
 8. require every other launch to match one checked-in exact fingerprint, with
    every fingerprint matching exactly once;
 9. require the helper fingerprint to contain `check`, `--locked`, and
    `--offline`, with no allowlist override;
-10. require every tracked exact-E0639 integration harness to use
+10. reject compiler-harness dependencies and APIs outside
+    `rimap-compiler-probe`, including `trybuild`, `trycmd`, `ui_test`,
+    `compiletest_rs`, and `rustc-test`; adding a new compiler-harness dependency
+    requires updating this guard and ADR;
+11. require every tracked exact-E0639 integration harness to use
     `rimap-compiler-probe` and own no direct process construction;
-11. require each harness crate to own a matching tracked
+12. require each harness crate to own a matching tracked
     `tests/fixtures/e0639-probe/Cargo.toml` and `Cargo.lock`;
-12. compare fixture and helper-declared package identity, workspace boundary,
+13. compare fixture and helper-declared package identity, workspace boundary,
     dependency names, and enabled features;
-13. parse the root and fixture lockfiles completely, failing on malformed or
+14. parse the root and fixture lockfiles completely, failing on malformed or
     empty package blocks; and
-14. require every registry package identity—name, version, source, and
+15. require every registry package identity—name, version, source, and
     checksum—in each fixture lock to occur in the root lock.
 
 Discovery fails loud on an unreadable repository, an empty probe set, or an
@@ -164,12 +169,14 @@ instructions, unknown non-document command containers, environment and literal
 resolution, in-source tests, arbitrarily named support scripts, built-in
 compiler subcommands, `+toolchain` selectors, aliases, unknown subcommands,
 direct `cargo-*` and `cross` executables, and `nextest`, `llvm-cov`,
-`auditable`, and `fuzz` forms. It also covers a second wrapper carrying a false
-non-probe label; changed executable, arguments, environment, working directory,
-manifest, or execution kind on a fingerprint; a temporary manifest disguised
-as persistent; a manifestless install that sees a workspace; stale or
-path-wide fingerprints; missing helper use; manifest drift; an orphan fixture;
-and empty discovery. It asserts that the
+`auditable`, and `fuzz` forms. It also covers a library-mediated `trybuild`
+probe with no Cargo token; a second wrapper carrying a false non-probe label;
+changed executable, arguments, environment, working directory, manifest, or
+execution kind on a fingerprint; a temporary manifest disguised as
+persistent; an existing unversioned install missing its literal package or
+`--locked`; an attempted new install fingerprint; stale or path-wide
+fingerprints; missing helper use; manifest drift; an orphan fixture; and empty
+discovery. It asserts that the
 existing embedded Cargo metadata launch in
 `scripts/check-fuzz-lock-parity.sh` has exactly one inventory entry. Static
 inventory cannot defeat deliberate source obfuscation; review owns intentional
@@ -209,10 +216,10 @@ Its unit test expands the accepted lock inventory and expected real bump set.
 
 - The private helper is the sole supported nested Cargo process boundary. The
   structural gate inventories Cargo and direct wrapper launches in every
-  tracked executable surface and fails unknown non-document forms. It
-  classifies wrappers fail closed, reserves the compiler-probe exception
-  structurally, and binds non-probe compiler fingerprints to exact persistent
-  workspaces or manifestless-install semantics.
+  tracked executable surface, fails unknown non-document forms, prohibits
+  compiler-harness dependencies and APIs, and uses fail-closed wrapper
+  classification. Non-probe compiler fingerprints bind to exact persistent
+  workspaces or bounded existing-install semantics.
 - The fixture lock is copied byte-for-byte before Cargo starts; a missing copy
   is a hard test failure.
 - `--locked` rejects manifest/lock disagreement; `--offline` prevents index or
@@ -252,11 +259,12 @@ policies remain authoritative.
    block, a package script, a Dockerfile, and an unknown non-document command
    container. Cover built-in compiler subcommands, `+toolchain` selectors,
    aliases, unknown subcommands, direct `cargo-*` and `cross`, `nextest`,
-   `llvm-cov`, `auditable`, and `fuzz`; also cover a second wrapper with a false
-   non-probe label, each single-field fingerprint mutation, a temporary
-   manifest disguised as persistent, and a manifestless install that sees a
-   workspace. Observe the inventory test reject every unclassified compiler
-   launch.
+   `llvm-cov`, `auditable`, and `fuzz`; also cover a library-mediated
+   `trybuild` probe with no Cargo token, a second wrapper with a false non-probe
+   label, each single-field fingerprint mutation, a temporary manifest
+   disguised as persistent, each required field removed from an existing
+   unversioned install, and an attempted new install fingerprint. Observe the
+   inventory test reject every unclassified compiler launch.
 6. Run `just test-compiler-probe-locks`, `just
    check-compiler-probe-locks`, and the focused post-release-bump tests.
 7. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
@@ -267,20 +275,21 @@ policies remain authoritative.
 - Both exact-E0639 test binaries preserve all current positive and negative assertions.
 - `rimap-compiler-probe` is the sole supported nested Cargo compiler-probe
   boundary; both harnesses use it.
-- Every direct Cargo launch in a tracked executable surface matches one exact
-  reviewed fingerprint; compiler-producing exceptions are structurally fixed,
-  Cargo and direct wrappers fail closed, non-probe compiler fingerprints bind
-  exact persistent-workspace or manifestless-install semantics, and any new,
-  changed, or unclassified launch fails the recurrence guard.
+- Every direct Cargo or Cargo-driving launch in a tracked executable surface
+  matches one exact reviewed fingerprint; compiler-producing exceptions are
+  structurally fixed, library-mediated compiler harnesses are prohibited,
+  persistent-workspace and bounded existing-install semantics are mechanical,
+  and any new, changed, or unclassified launch fails the recurrence guard.
 - Every nested downstream Cargo check installs a committed fixture lock and passes
   `--locked --offline`.
 - Every fixture registry package identity is present in the root `Cargo.lock`.
 - Missing locks, drift, malformed input, manifest-identity drift, direct
-  compiler processes in each supported language or command container, an
-  embedded-language launch, a falsely labeled second wrapper, a direct
-  Cargo-driving executable, a changed fingerprint field, a temporary manifest,
-  a manifestless install that sees a workspace, online checks, and empty
-  discovery each fail a focused regression test.
+  compiler processes in each supported language or command container, a
+  library-mediated probe, an embedded-language launch, a falsely labeled
+  second wrapper, a direct Cargo-driving executable, a changed fingerprint
+  field, a temporary manifest, a malformed existing install, a new install
+  fingerprint, online checks, and empty discovery each fail a focused
+  regression test.
 - Ordinary dependency updates have a documented realignment recipe; post-release bumps
   re-resolve and commit both fixture locks automatically.
 - The required `cargo-deny` CI context and local `just ci` both execute the recurrence
