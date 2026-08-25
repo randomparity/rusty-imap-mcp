@@ -48,3 +48,4 @@ compile it.
 | [0024](0024-pre-init-wire-sequence-under-rmcp-3.md) | Pre-init requests carry rmcp 3.x's -32602 before our -32002 envelope | Accepted |
 | [0025](0025-pre-init-single-envelope-validator-interception.md) | Pre-init validator interception restores the deterministic single-envelope contract | Accepted |
 | [0026](0026-published-data-records-non-exhaustive.md) | Published public-field data records are non-exhaustive | Accepted |
+| [0027](0027-locked-downstream-compiler-probes.md) | Downstream compiler probes use fixture lockfiles | Accepted |
