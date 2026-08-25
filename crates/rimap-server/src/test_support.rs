@@ -117,7 +117,7 @@ pub(crate) fn make_test_account_state_with_sink(
     sink: Arc<dyn AuthEventSink>,
 ) -> AccountState {
     let id = AccountId::new(name).expect("test account name must be valid");
-    let mut conn_cfg = ConnectionConfig::new(
+    let conn_cfg = ConnectionConfig::new(
         id.clone(),
         "127.0.0.1".into(),
         port,
@@ -128,11 +128,6 @@ pub(crate) fn make_test_account_state_with_sink(
         1024,
         1024,
     );
-    conn_cfg.account = if name == rimap_core::account::DEFAULT_ACCOUNT_NAME {
-        None
-    } else {
-        Some(name.to_string())
-    };
     let creds: Arc<dyn CredentialResolver> = Arc::new(PanickingCreds);
     let imap = Connection::new(conn_cfg, sink, creds);
 

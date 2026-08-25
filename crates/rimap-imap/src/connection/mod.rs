@@ -88,7 +88,7 @@ impl ConnectionConfig {
     ///
     /// # Arguments
     ///
-    /// * `account_id` - Account identifier used for credential lookups.
+    /// * `account_id` - Account identifier used for credentials and audit attribution.
     /// * `host` - IMAP server host.
     /// * `port` - IMAP server port.
     /// * `encryption` - Transport encryption mode.
@@ -113,9 +113,13 @@ impl ConnectionConfig {
         max_fetch_body_bytes: u64,
         max_append_bytes: u64,
     ) -> Self {
+        let account = account_id
+            .as_optional()
+            .map(rimap_core::account::AccountId::as_str)
+            .map(str::to_owned);
         Self {
+            account,
             account_id,
-            account: None,
             host,
             port,
             encryption,
@@ -876,6 +880,26 @@ mod tests {
             legacy.max_fetch_body_bytes
         );
         assert_eq!(constructed.max_append_bytes, legacy.max_append_bytes);
+    }
+
+    #[test]
+    fn connection_config_new_derives_named_account_attribution() {
+        let account_id =
+            rimap_core::account::AccountId::new("work").expect("valid account identifier");
+
+        let constructed = super::ConnectionConfig::new(
+            account_id,
+            "imap.example.test".to_owned(),
+            993,
+            super::ImapEncryption::Tls,
+            "alice@example.test".to_owned(),
+            std::time::Duration::from_secs(11),
+            std::time::Duration::from_secs(17),
+            1_048_576,
+            2_097_152,
+        );
+
+        assert_eq!(constructed.account.as_deref(), Some("work"));
     }
 
     fn fp_zeros() -> TlsFingerprint {

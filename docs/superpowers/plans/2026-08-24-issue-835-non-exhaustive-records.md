@@ -385,13 +385,13 @@ git commit -m "feat: protect SMTP data records"
 **Interfaces:**
 
 - Consumes: exact validated account fields and existing TLS/operation behavior.
-- Produces: `ConnectionConfig::new(account_id, host, port, encryption, username, connect_timeout, command_timeout, max_fetch_body_bytes, max_append_bytes)` with `account` and `pinned_fingerprint` initialized to `None`; non-exhaustive `ConnectionConfig`, `DeleteOutcome`, `SearchOutcome`, and `TlsConfigBundle`.
+- Produces: `ConnectionConfig::new(account_id, host, port, encryption, username, connect_timeout, command_timeout, max_fetch_body_bytes, max_append_bytes)` with `account` derived from `account_id` and `pinned_fingerprint` initialized to `None`; non-exhaustive `ConnectionConfig`, `DeleteOutcome`, `SearchOutcome`, and `TlsConfigBundle`.
 
 - [ ] **Step 1: Add red compile and equivalence contracts**
 
 Add a `compile_fail,E0639` example to `SearchOutcome` using `uids: Vec::new()` and `uidvalidity: None`.
 
-Add `connection_config_new_preserves_required_fields_and_defaults_optionals` in `connection/mod.rs`. Construct one value through the proposed API, construct the legacy literal in the same module, and compare all eleven fields individually, including `account == None` and `pinned_fingerprint == None`.
+Add `connection_config_new_preserves_required_fields_and_defaults_optionals` in `connection/mod.rs`. Construct one default-account value through the proposed API, construct the legacy literal in the same module, and compare all eleven fields individually, including `account == None` and `pinned_fingerprint == None`. Add `connection_config_new_derives_named_account_attribution` to prove a named `AccountId` produces the matching audit-account label.
 
 - [ ] **Step 2: Observe the failures**
 
@@ -427,9 +427,13 @@ pub fn new(
     max_fetch_body_bytes: u64,
     max_append_bytes: u64,
 ) -> Self {
+    let account = account_id
+        .as_optional()
+        .map(rimap_core::account::AccountId::as_str)
+        .map(str::to_owned);
     Self {
+        account,
         account_id,
-        account: None,
         host,
         port,
         encryption,
@@ -463,11 +467,12 @@ At every captured external `ConnectionConfig` literal:
 
 1. Pass the nine required fields to `ConnectionConfig::new` in declaration
    order.
-2. Copy the exact prior `account` and `pinned_fingerprint` expressions after
-   construction unless the prior expression was literally `None`. This
-   includes `account` and `acfg.tls_fingerprint` in
-   `build_account_connection`, either of which can contain `Some(...)`.
-3. Preserve cloned versus moved values, timeout values, byte limits, account
+2. Let the constructor derive `account` from `account_id`. Retain an explicit
+   assignment only if a legacy expression differs from that derivation.
+3. Copy the exact prior `pinned_fingerprint` expression after construction
+   unless it was literally `None`; this includes `acfg.tls_fingerprint` in
+   `build_account_connection`.
+4. Preserve cloned versus moved values, timeout values, byte limits, account
    labels, and certificate fingerprints exactly.
 
 Rerun the full all-target/all-feature check. Before migrating any newly exposed
@@ -480,7 +485,7 @@ Run:
 
 ```bash
 cargo test --doc -p rimap-imap --locked
-cargo nextest run -p rimap-imap -E 'test(connection_config_new_preserves_required_fields_and_defaults_optionals)'
+cargo nextest run -p rimap-imap -E 'test(connection_config_new)'
 just check
 ```
 

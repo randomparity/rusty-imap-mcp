@@ -245,10 +245,6 @@ pub fn build_account_connection(
     id: &rimap_core::account::AccountId,
     acfg: &ValidatedAccountConfig,
 ) -> ConnectionConfig {
-    let account = id
-        .as_optional()
-        .map(rimap_core::account::AccountId::as_str)
-        .map(str::to_string);
     let mut config = ConnectionConfig::new(
         id.clone(),
         acfg.imap.host.clone(),
@@ -260,7 +256,6 @@ pub fn build_account_connection(
         acfg.limits.max_fetch_body_bytes,
         acfg.limits.max_append_bytes,
     );
-    config.account = account;
     config.pinned_fingerprint = acfg.tls_fingerprint;
     config
 }

@@ -96,6 +96,11 @@ For each compiler-reported cross-crate construction site:
    required identity, host, credential-policy, or message-address fields must
    not gain invented empty defaults.
 
+`ConnectionConfig::new` derives the optional audit-account label from
+`account_id`: the default sentinel produces `None`, while a named account
+produces `Some(name)`. This matches the defining crate's production
+construction path and prevents credential and audit attribution from diverging.
+
 `StatusItems` requires no new constructor. Each external partial-selector
 caller starts from the existing `StatusItems::all()` and explicitly assigns
 all five public flags to its prior values. Focused rendering tests pin the
