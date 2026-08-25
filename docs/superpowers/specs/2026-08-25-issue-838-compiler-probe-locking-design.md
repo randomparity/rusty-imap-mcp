@@ -143,11 +143,13 @@ requires:
 - every reachable registry package identity—name, version, source,
   checksum—to occur in the root lock.
 
-A recognized Cargo `check` in a body that creates a temporary `Cargo.toml` but
-uses a split builder, setup helper, parameter substitution, or another
-noncanonical shape fails closed with a diagnostic directing the contributor to
-the canonical form. A direct Cargo command without temporary downstream setup,
-such as a repository metadata check, is explicitly ignored.
+A recognized Cargo invocation in a body that creates a temporary `Cargo.toml`
+enters the focused policy before subcommand validation. `check` may use the
+canonical form. Other compiler-driving subcommands—`build`, `test`, `bench`,
+`run`, `rustc`, `clippy`, and `fix`—fail closed with a diagnostic requiring an
+explicit focused-guard extension. Split builders, setup helpers, parameter
+substitution, and other noncanonical shapes likewise fail closed. Direct
+noncompiling Cargo commands such as repository metadata remain excluded.
 
 The script also fails on unreadable Git state, malformed lock/package blocks,
 an empty in-scope probe set, duplicate registration, or an unrecognized
@@ -169,6 +171,7 @@ covers:
   helper;
 - flags placed after `--`, which remain invalid;
 - noncanonical split builder and split setup rejection;
+- non-`check` compiler-driving subcommand rejection;
 - two temporary roots where copies and `current_dir` disagree;
 - excluded nested-Cargo-shaped files under crate `src/` and at `build.rs`;
 - a direct Cargo command without a temporary downstream manifest;

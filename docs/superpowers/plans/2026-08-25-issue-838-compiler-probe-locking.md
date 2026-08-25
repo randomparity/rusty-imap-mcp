@@ -120,6 +120,7 @@ flags-after-double-dash
 std-qualified / std-imported / std-import-alias
 tokio-qualified-await / tokio-imported-await / tokio-import-alias-await
 cargo-literal / cargo-pathbuf / cargo-helper-return
+non-check-build-rewrite / non-check-test-rewrite / non-check-rustc-rewrite
 split-builder-rewrite / split-setup-rewrite / arbitrary-helper-rewrite
 excluded-crate-src / excluded-build-rs / excluded-repository-metadata
 missing-locked / missing-offline
@@ -199,11 +200,13 @@ cases must contain syntactically valid `async fn check_probe()` bodies with
 `.output().await;` or `.status().await;`, not synchronous lookalikes.
 
 Reject assignment to a command variable, a missing terminal call, or a
-constructor outside the canonical body when the same file also contains Cargo
-`check` and temporary `Cargo.toml` setup. The diagnostic must say to rewrite
-the probe to the canonical single-function fluent form. This detects
-noncanonical split builders and setup helpers without implementing statement
-tracking, method extraction, parameter substitution, or a helper-call graph.
+constructor outside the canonical body when the same file also creates a
+temporary `Cargo.toml`. Enter this policy before inspecting the Cargo
+subcommand. The diagnostic must say to rewrite the probe to the canonical
+single-function fluent form or explicitly extend the focused guard. This
+detects noncanonical split builders and setup helpers without implementing
+statement tracking, method extraction, parameter substitution, or a
+helper-call graph.
 
 - [ ] **Step 4: Validate each canonical invocation and its exact root**
 
@@ -225,17 +228,19 @@ for name in ["Cargo.toml", "Cargo.lock"] {
 
 Require `fixture_root()` to join the owning crate root with
 `COMPILER_PROBE_FIXTURE`, and require `copy_fixture_file` to byte-copy its named
-source to its named destination with `std::fs::copy`. For every fluent Cargo
-builder independently, extract its literal argv in order. Require `check`,
-`--locked`, and `--offline`, with both flags before the first `--` separator,
-plus `.current_dir(dir.path())`. A second builder missing a flag fails even when
-the first is compliant. A builder using another root, or fixture copies
-targeting another root, fails the same-root check.
+source to its named destination with `std::fs::copy`. Extract every fluent Cargo
+builder's literal argv in order. A `check` invocation must contain `--locked`
+and `--offline` before the first `--` separator, plus
+`.current_dir(dir.path())`. `build`, `test`, `bench`, `run`, `rustc`, `clippy`,
+and `fix` in a temporary downstream project fail with the focused-extension
+diagnostic. A second `check` builder missing a flag fails even when the first is
+compliant. A builder using another root, or fixture copies targeting another
+root, fails the same-root check.
 
-An integration-test file with a direct `cargo metadata` command and no
-temporary `Cargo.toml` remains excluded. Files outside `crates/*/tests/` are
-never scanned. Print one deterministic summary line with the exact canonical
-invocation count; the real repository must report two.
+An integration-test file with a direct noncompiling `cargo metadata` command
+remains excluded. Files outside `crates/*/tests/` are never scanned. Print one
+deterministic summary line with the exact canonical invocation count; the real
+repository must report two.
 
 - [ ] **Step 5: Implement canonical lock parsing, reachability, and root containment**
 

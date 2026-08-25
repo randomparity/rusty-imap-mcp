@@ -54,12 +54,14 @@ argument separator. It must copy the registered manifest and `Cargo.lock`
 byte-for-byte. The fixture path must resolve inside the owning crate and contain
 tracked manifest, lock, and source files.
 
-A recognized Cargo `check` combined with temporary `Cargo.toml` setup that
-departs from this canonical in-function form fails closed with a
-rewrite-to-canonical diagnostic. The guard does not accept split builders,
-setup helpers, parameter substitution, or arbitrary helper call graphs. Other
-direct Cargo commands, such as repository metadata checks without a temporary
-downstream manifest, remain outside this decision.
+A recognized Cargo invocation combined with temporary `Cargo.toml` setup enters
+the focused policy before subcommand validation. `check` may use the canonical
+form; other compiler-driving subcommands (`build`, `test`, `bench`, `run`,
+`rustc`, `clippy`, or `fix`) fail closed with a diagnostic requiring an
+explicit focused-guard extension. Split builders, setup helpers, parameter
+substitution, and arbitrary helper call graphs likewise fail closed. Direct
+noncompiling Cargo commands, such as repository metadata checks, remain outside
+this decision.
 
 The guard compares each fixture lock against the root lock using complete
 registry package identity: name, version, source, and checksum. It requires
@@ -71,10 +73,11 @@ as a pruned fixture graph.
 Its regression suite covers mixed compliant and noncompliant canonical builders
 in one file; qualified, imported, and aliased standard and asynchronously
 awaited Tokio constructors; the Cargo literal and current `cargo_bin()` helper;
-flags after `--`; noncanonical split builder/setup rejection; excluded `src/`,
-`build.rs`, and Cargo commands without a temporary downstream manifest; exact
-same-root manifest and lock copying; each missing flag; missing registration;
-missing or untracked fixture files; malformed or unreachable lock blocks;
+flags after `--`; noncanonical split builder/setup rejection; non-`check`
+compiler-driving subcommand rejection; excluded `src/`, `build.rs`, and
+noncompiling Cargo commands; exact same-root manifest and lock copying; each
+missing flag; missing registration; missing or untracked fixture files;
+malformed or unreachable lock blocks;
 root/fixture drift; an unpruned root copy with a fixture block; and empty
 discovery. This is a focused canonical-shape gate for direct nested Cargo
 probes, not a general Rust analyzer or universal executable inventory.
