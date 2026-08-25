@@ -7,17 +7,19 @@
 Public Rust named-field structs with public fields permit downstream struct
 literals and exhaustive destructuring. Adding a field is therefore a
 source-breaking change
-unless the struct is marked `#[non_exhaustive]`. v0.2.0 is already released
-and the workspace is on the unreleased 0.3.0-dev major transition, so applying
-the attribute before v0.3.0 consumes no additional version break; after that
-release it would require another major version.
+unless the struct is marked `#[non_exhaustive]`. v0.2.0 is already released,
+and the workspace is on the unreleased 0.3.0-dev pre-1.0 breaking-version
+transition. Applying the attribute before v0.3.0 consumes no additional
+breaking release; after that release it would require the next minor line.
 
 Issues #665, #706, #707, #715, and #716 established the repository convention
 for config and audit records. Issue #835 found the remaining gap across six
-published library crates. Its named examples are illustrative: an AST inventory
-at `b708b96b5d3095f06b34b61a8ac065687cd1f016` found 57 public named-field
-structs with at least one externally public field, 30 already non-exhaustive
-and 27 still exhaustive.
+published library crates. Its named examples are illustrative. Two AST
+inventories at `b708b96b5d3095f06b34b61a8ac065687cd1f016` found 58 public
+named-field structs with at least one externally public field: 57 non-generic
+candidates and generic `CircuitBreaker<C>`. The latter is a state holder whose
+public clock is a test seam, not a data record. The remaining 57 qualifying
+records divide into 30 already non-exhaustive and 27 still exhaustive.
 
 ## Decision
 
@@ -59,13 +61,15 @@ checking rustc E0639 specifically.
 ## Considered & rejected
 
 - **Limit the sweep to the examples named in issue #835.** verified:
-  `ast-grep run -p 'pub struct $S { $$$FIELDS }' -l rust --json=compact` over
-  the six published crate `src` trees at
+  brace-form AST queries for non-generic and generic public structs over the
+  six published crate `src` trees at
   `b708b96b5d3095f06b34b61a8ac065687cd1f016`, followed by checking externally
-  public fields and preceding attributes, found 27 missing records, including
-  `AppendResult`, `ConnectionConfig`, and `FilterResult` outside the issue's
-  explicit examples. An example-only sweep would leave the stated “every”
-  criterion false.
+  public fields, preceding attributes, and the data-record boundary, found 27
+  missing records. They include `AppendResult`, `ConnectionConfig`, and
+  `FilterResult` outside the issue's explicit examples. The only other raw
+  public-field candidate is generic `CircuitBreaker<C>`, classified as a state
+  holder because its public clock is a test seam. An example-only sweep would
+  leave the stated “every record” criterion false.
 - **Mark every public struct mechanically.** judgment: this would change opaque
   clients, state holders, and private-field error wrappers whose fields do not
   expose a data-record construction contract; the public-field boundary is
@@ -90,8 +94,8 @@ checking rustc E0639 specifically.
 - **Wait until after v0.3.0.** verified:
   `crates/rimap-audit/tests/non_exhaustive_e0639.rs` compiles downstream probes
   and observes rustc E0639 for the attribute itself; applying the policy after
-  the current unreleased major transition would consume another breaking
-  release.
+  the current unreleased breaking-version transition would consume the next
+  minor line.
 - **Include published `rimap-server` tool records.** judgment: the operator
   explicitly excluded that separate internal/schema surface; compiler-forced
   server callsites remain in scope, but schema-facing tool records do not.

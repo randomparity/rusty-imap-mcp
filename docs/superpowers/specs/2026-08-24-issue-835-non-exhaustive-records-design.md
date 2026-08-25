@@ -33,18 +33,20 @@ Decision: [ADR-0026](../../ADR/0026-published-data-records-non-exhaustive.md).
 A public Rust struct with public fields is exhaustive unless marked
 `#[non_exhaustive]`. Adding a field to such a struct breaks downstream struct
 literals and exhaustive destructures. The workspace's `cargo semver-checks`
-baseline is v0.1.0 while the manifests are already 0.3.0-dev, so the current
-major-version transition permits and therefore does not diagnose these breaks.
-The attribute is itself breaking, making the unreleased v0.3.0 window the
-current point where the policy can be completed without consuming another
-major version.
+baseline is v0.2.0 while the manifests are already 0.3.0-dev, so the current
+pre-1.0 breaking-version transition permits and therefore does not diagnose
+these breaks. The attribute is itself breaking, making the unreleased v0.3.0
+window the current point where the policy can be completed without consuming
+the next minor line.
 
 The earlier changes applied this policy to `rimap-config`, `rimap-audit`, and
 `AuthEvent`. Issue #835 identifies the remaining published-crate gap but gives
-an illustrative rather than exhaustive type list. An AST inventory at the
-verified base found 57 `pub struct` definitions with at least one externally
-public field in the six permitted crates; 30 already carry the attribute and
-27 do not.
+an illustrative rather than exhaustive type list. Brace-form AST queries at
+the verified base found 58 public named-field structs with at least one
+externally public field: 57 non-generic candidates plus generic
+`CircuitBreaker<C>`. The breaker is a state holder whose public clock is a test
+seam, not a data record. The 57 qualifying records divide into 30 already
+non-exhaustive and the 27 listed below.
 
 ## Decision
 
@@ -93,6 +95,11 @@ For each compiler-reported cross-crate construction site:
    required identity, host, credential-policy, or message-address fields must
    not gain invented empty defaults.
 
+`StatusItems` has one explicit migration route despite lacking `Default`:
+`StatusItems::none()` initializes all five selector flags to `false`, and
+callers enable only requested items through field assignment. Its focused test
+must preserve the empty-selector rendering before partial callers migrate.
+
 Types produced only by their defining crate gain no speculative constructor.
 Cross-crate destructures add `..` and keep their existing behavior.
 
@@ -119,9 +126,11 @@ The attribute changes compile-time downstream construction and destructuring
 only. It does not alter layout guarantees, serde output, MCP tool schemas,
 network behavior, validation, authorization, or error mapping. Constructor and
 caller rewrites must produce field-for-field equivalent values. Existing
-behavior tests remain the primary proof; constructor-specific tests compare
-against the defining crate's existing production construction path where a
-new constructor is required.
+behavior tests remain the primary proof. Constructor-specific tests compare
+against the defining crate's existing production construction path when one
+exists. Otherwise an in-crate test constructs the same value once with the
+legacy literal and once with the new constructor, compares every field, and
+retains downstream behavior coverage for each rewritten caller.
 
 Generated tool schemas are regenerated only if `just regen-tool-schemas`
 produces a diff. An attribute-only schema diff would be unexpected and must be
@@ -129,26 +138,29 @@ diagnosed rather than accepted blindly.
 
 ## Failure handling
 
-The first complete compile after adding the attributes is the authoritative
-inventory of cross-crate fallout. E0639 sites are migrated; other compiler
-errors are diagnosed independently rather than assumed to be fallout.
-Guardrail failures are corrected only from their current failure artifact.
-The implementation does not suppress lints, semver checks, schema drift, or
-doctest failures.
+The authoritative fallout inventory is the first
+`cargo check --workspace --all-targets --all-features --locked` after adding
+the attributes. This includes published feature-gated APIs and cross-crate
+integration-test literals. E0639 sites are migrated; other compiler errors are
+diagnosed independently rather than assumed to be fallout. Guardrail failures
+are corrected only from their current failure artifact. The implementation
+does not suppress lints, semver checks, schema drift, or doctest failures.
 
 ## Verification
 
 1. Add the compile-fail contract before attributes and run focused doctests;
    observe failure because the struct expressions still compile.
-2. Add attributes and migrate compiler-reported callsites; rerun focused crate
-   doctests and tests.
-3. Run the representative E0639 integration probe and focused behavior tests
+2. Add attributes, then run
+   `cargo check --workspace --all-targets --all-features --locked` and retain
+   its E0639 output as the complete fallout artifact.
+3. Migrate every reported callsite; rerun focused crate doctests and tests.
+4. Run the representative E0639 integration probe and focused behavior tests
    for every crate that gained a constructor or caller rewrite.
-4. Run `just regen-tool-schemas` and inspect whether any generated file moved.
-5. Run `just semver-checks`; expected result is green but vacuous for the
-   already-declared 0.3.0-dev major transition, so it is a gate rather than
-   evidence that the API did not break.
-6. Run `just ci` in the background to completion.
+5. Run `just regen-tool-schemas` and inspect whether any generated file moved.
+6. Run `just semver-checks`; expected result is green but vacuous for the
+   already-declared 0.3.0-dev breaking-version transition, so it is a gate
+   rather than evidence that the API did not break.
+7. Run `just ci` in the background to completion.
 
 ## Acceptance criteria
 
