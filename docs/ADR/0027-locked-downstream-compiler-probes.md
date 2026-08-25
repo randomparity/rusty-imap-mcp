@@ -39,30 +39,41 @@ Their existing positive and negative tests exercise the copied lock under both
 the development and MSRV test suites. A manifest/lock mismatch therefore fails
 the same focused contract before an E0639 assertion can pass.
 
-A repository guard inventories every direct Cargo process launch in every
-tracked Rust, shell, Python, JavaScript, and TypeScript source file, regardless
-of directory or Cargo subcommand. It derives the subcommand class from the
-invocation instead of trusting an author-supplied purpose. Compiler-producing
-launches are rejected outside `rimap-compiler-probe` except for the repository's
-fixed, exact root-build fingerprints already used for documentation, packaging,
-and test runners. Every other recognized launch must match a checked-in path and
-normalized invocation fingerprint. A new second wrapper therefore fails even
-when its author adds a descriptive label.
+A repository guard inventories every direct Cargo process launch in tracked
+executable surfaces: Rust, shell, Python, JavaScript, and TypeScript sources;
+executable files; Just and Make recipes; package-manager scripts; Dockerfile
+`RUN` instructions; and GitHub Actions `run:` blocks. A catch-all token pass
+fails when a non-document tracked text file contains an apparent Cargo launch
+that no surface parser classified, so a new command-container format cannot
+silently bypass inventory.
+
+The guard derives the subcommand class from the invocation instead of trusting
+an author-supplied purpose. Compiler-producing launches are rejected outside
+`rimap-compiler-probe` except for fixed root-build fingerprints already used
+for documentation, packaging, and test runners. Each fingerprint includes the
+path, normalized executable and arguments, environment overrides, effective
+working directory, and manifest-path selection. A root-build exception must
+resolve both working directory and manifest to the repository workspace.
+Changing only `current_dir` or `--manifest-path` therefore invalidates it.
+Every other recognized launch must match a checked-in exact fingerprint.
 
 Every exact-E0639 harness must depend on `rimap-compiler-probe` and own a tracked
 fixture manifest and lock. The helper's exact fingerprint must contain
 `check`, `--locked`, and `--offline`; no allowlist entry can override those
 requirements.
 
-The inventory runs every language recognizer over every source file rather than
-selecting one parser from the file extension. It therefore detects embedded
-Python subprocesses in shell heredocs, including the existing Cargo metadata
-launch in `scripts/check-fuzz-lock-parity.sh`. Synthetic negative tests cover
-that mixed-language case, in-source Rust tests, arbitrarily named support
-scripts, every standalone language form, common compiler-producing subcommands,
-a second wrapper with a false non-probe label, missing helper use, and missing
-locked/offline helper flags. Every fixed allowlist fingerprint must match
-exactly once, so stale or path-wide exemptions cannot hide a new launch.
+The inventory runs every embedded-language recognizer over every command
+container rather than selecting one parser from the file extension. It detects
+Python subprocesses in shell heredocs, shell in Just recipes and workflow YAML,
+and package-script command strings. Synthetic negative tests cover the existing
+embedded Cargo metadata launch in `scripts/check-fuzz-lock-parity.sh`, a
+Just recipe, a workflow `run:` block, a package script, a Dockerfile, an
+unknown non-document command container, in-source Rust tests, arbitrarily named
+support scripts, every standalone language form, common compiler-producing
+subcommands, a second wrapper with a false non-probe label, changed working
+directory or manifest selection on a root-build fingerprint, missing helper
+use, and missing locked/offline helper flags. Every fixed fingerprint must
+match exactly once, so stale or path-wide exemptions cannot hide a new launch.
 Deliberate source obfuscation remains subject to review like any other attempt
 to evade a repository guard.
 
