@@ -141,29 +141,33 @@ diagnosed rather than accepted blindly.
 
 ## Failure handling
 
-The authoritative fallout inventory is the first
-`cargo check --workspace --all-targets --all-features --locked` after adding
-the attributes. This includes published feature-gated APIs and cross-crate
-integration-test literals. E0639 sites are migrated; other compiler errors are
-diagnosed independently rather than assumed to be fallout. Guardrail failures
-are corrected only from their current failure artifact. The implementation
-does not suppress lints, semver checks, schema drift, or doctest failures.
+The authoritative fallout inventory is the union of E0639 sites reported by
+repeated `cargo check --workspace --all-targets --all-features --locked` runs
+after adding the attributes. A failing dependency can hide later dependent
+targets, so each reported batch is migrated before the command is run again.
+The inventory closes only when a final full command succeeds without E0639.
+Other compiler errors are diagnosed independently rather than assumed to be
+fallout. Guardrail failures are corrected only from their current failure
+artifact. The implementation does not suppress lints, semver checks, schema
+drift, or doctest failures.
 
 ## Verification
 
 1. Add the compile-fail contract before attributes and run focused doctests;
    observe failure because the struct expressions still compile.
-2. Add attributes, then run
-   `cargo check --workspace --all-targets --all-features --locked` and retain
-   its E0639 output as the complete fallout artifact.
-3. Migrate every reported callsite; rerun focused crate doctests and tests.
-4. Run the representative E0639 integration probe and focused behavior tests
+2. Add attributes, run
+   `cargo check --workspace --all-targets --all-features --locked`, and retain
+   the current E0639 batch.
+3. Migrate that batch and repeat the full command until it succeeds without
+   E0639; the union of retained batches is the complete fallout artifact.
+4. Rerun focused crate doctests and tests.
+5. Run the representative E0639 integration probe and focused behavior tests
    for every crate that gained a constructor or caller rewrite.
-5. Run `just regen-tool-schemas` and inspect whether any generated file moved.
-6. Run `just semver-checks`; expected result is green but vacuous for the
+6. Run `just regen-tool-schemas` and inspect whether any generated file moved.
+7. Run `just semver-checks`; expected result is green but vacuous for the
    already-declared 0.3.0-dev breaking-version transition, so it is a gate
    rather than evidence that the API did not break.
-7. Run `just ci` in the background to completion.
+8. Run `just ci` in the background to completion.
 
 ## Acceptance criteria
 
