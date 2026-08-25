@@ -8,4 +8,7 @@ publish = false
 rimap-audit = { path = "../../.." }
 rimap-core = { path = "../../../../rimap-core" }
 
+[package.metadata.cargo-machete]
+ignored = ["rimap-audit", "rimap-core"]
+
 [workspace]

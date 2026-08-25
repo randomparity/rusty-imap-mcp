@@ -8,4 +8,7 @@ publish = false
 rimap-imap = { path = "../../.." }
 rimap-authz = { path = "../../../../rimap-authz" }
 
+[package.metadata.cargo-machete]
+ignored = ["rimap-authz", "rimap-imap"]
+
 [workspace]

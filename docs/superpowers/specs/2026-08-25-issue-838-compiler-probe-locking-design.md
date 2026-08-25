@@ -64,7 +64,9 @@ The package names are unique (`rimap-audit-e0639-probe` and
 manifest contains an empty `[workspace]` table. The audit fixture depends on
 `rimap-audit` and `rimap-core`; the IMAP fixture depends on `rimap-imap` and
 `rimap-authz`. Dependencies are relative local paths and declare no registry
-package directly.
+package directly. Each manifest marks those dependencies ignored by
+`cargo-machete`: the committed empty source cannot reference them because the
+harness replaces that source with each actual compiler probe at runtime.
 
 The fixture source is an empty valid program used only for lock generation and
 maintenance. At runtime each harness creates a unique temporary directory

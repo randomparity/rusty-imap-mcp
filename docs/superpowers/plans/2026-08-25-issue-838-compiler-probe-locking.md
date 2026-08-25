@@ -406,6 +406,9 @@ publish = false
 rimap-audit = { path = "../../.." }
 rimap-core = { path = "../../../../rimap-core" }
 
+[package.metadata.cargo-machete]
+ignored = ["rimap-audit", "rimap-core"]
+
 [workspace]
 ```
 
@@ -421,6 +424,9 @@ publish = false
 [dependencies]
 rimap-imap = { path = "../../.." }
 rimap-authz = { path = "../../../../rimap-authz" }
+
+[package.metadata.cargo-machete]
+ignored = ["rimap-authz", "rimap-imap"]
 
 [workspace]
 ```
