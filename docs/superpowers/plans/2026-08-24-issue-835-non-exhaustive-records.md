@@ -463,8 +463,10 @@ At every captured external `ConnectionConfig` literal:
 
 1. Pass the nine required fields to `ConnectionConfig::new` in declaration
    order.
-2. Assign `account` and `pinned_fingerprint` afterward only when the legacy
-   literal used `Some(...)`.
+2. Copy the exact prior `account` and `pinned_fingerprint` expressions after
+   construction unless the prior expression was literally `None`. This
+   includes `account` and `acfg.tls_fingerprint` in
+   `build_account_connection`, either of which can contain `Some(...)`.
 3. Preserve cloned versus moved values, timeout values, byte limits, account
    labels, and certificate fingerprints exactly.
 
@@ -546,7 +548,7 @@ Add a `compile_fail,E0639` functional-update example to `FetchSpec`:
 
 ```rust
 let _ = rimap_imap::types::FetchSpec {
-    include_body: true,
+    bodystructure: true,
     ..rimap_imap::types::FetchSpec::default()
 };
 ```
@@ -558,7 +560,7 @@ Folder::new(name): empty attributes, no delimiter, no special use
 Envelope::empty(): absent date/subject/addresses/message-id and empty reply_to/to/cc/bcc vectors
 Address::empty(): all four optional fields absent
 HeaderSearch::new(name, value): both fields preserved
-FetchedMessage::new(uid): uid preserved, every optional field absent, flags empty
+FetchedMessage::new(uid): uid preserved and every optional field, including flags, absent
 ```
 
 Each test creates the expected value with the legacy literal inside `rimap-imap` and compares every field. Do not add `Default` solely to make these tests shorter.
@@ -603,7 +605,7 @@ Use these exact defaults:
 Folder: attributes = [], delimiter = None, special_use = None
 Envelope: scalar option fields = None, address vectors = []
 Address: every option field = None
-FetchedMessage: every option field = None, flags = []
+FetchedMessage: every option field, including flags, = None
 ```
 
 Mark each constructor `#[must_use]`. Do not add constructors for records produced only by `rimap-imap`.
@@ -669,11 +671,13 @@ Run:
 ```bash
 cargo test --doc -p rimap-imap --locked
 cargo nextest run -p rimap-imap -E 'test(record_constructor) | test(status_items)'
-cargo nextest run -p rimap-server -E 'test(search) | test(list_folders) | test(fetch_by_uid)'
+cargo nextest run -p rimap-server -E 'test(no_warnings_for_clean_folder_name) | test(non_empty_fetch_returns_first_message) | test(format_search_result_populates_cc_from_envelope)'
 ```
 
-Expected: compile contracts observe E0639, constructor equivalence tests pass,
-STATUS strings are unchanged, and search/folder/fetch behavior passes.
+Expected: the IMAP filter runs non-zero constructor/status coverage and the
+server filter reports exactly three tests run: one folder, one fetch, and one
+search-format case. Compile contracts observe E0639, constructor equivalence
+passes, STATUS strings are unchanged, and the three server behaviors pass.
 
 - [ ] **Step 10: Commit**
 
