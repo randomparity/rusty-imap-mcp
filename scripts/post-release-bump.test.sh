@@ -49,6 +49,32 @@ expect_fail() {
     fi
 }
 
+check_contains() {
+    local desc="$1" haystack="$2" needle="$3"
+    if [[ "$haystack" == *"$needle"* ]]; then
+        echo "ok: ${desc}"
+    else
+        echo "FAIL: ${desc} — missing [${needle}]" >&2
+        failures=$((failures + 1))
+    fi
+}
+
+check_ordered() {
+    local desc="$1" log="$2"
+    shift 2
+    local needle remaining
+    remaining="$log"
+    for needle in "$@"; do
+        if [[ "$remaining" != *"$needle"* ]]; then
+            echo "FAIL: ${desc} — missing or out of order [${needle}]" >&2
+            failures=$((failures + 1))
+            return
+        fi
+        remaining="${remaining#*"$needle"}"
+    done
+    echo "ok: ${desc}"
+}
+
 # --- next_dev_version -------------------------------------------------------
 check "next_dev_version bumps the patch and adds -dev" \
     "0.2.1-dev" "$(next_dev_version v0.2.0)"
@@ -114,17 +140,23 @@ expect_fail "ensure_unreleased_heading fails on a changelog with no release sect
     ensure_unreleased_heading "${tmp}/empty-CHANGELOG.md"
 
 # --- assert_known_lockfiles -------------------------------------------------
-# The real repo layout: root workspace, both fuzz workspaces, html-oracle.
+# The real repo layout: root workspace, both fuzz workspaces, html-oracle, and
+# both committed exact-E0639 downstream fixtures.
 expect_ok "assert_known_lockfiles accepts the current repo layout" \
     assert_known_lockfiles "$(printf '%s\n' \
         Cargo.lock crates/rimap-server/fuzz/Cargo.lock fuzz/Cargo.lock \
-        html-oracle/Cargo.lock)"
+        html-oracle/Cargo.lock \
+        crates/rimap-audit/tests/fixtures/e0639-probe/Cargo.lock \
+        crates/rimap-imap/tests/fixtures/e0639-probe/Cargo.lock)"
 
 # The point of the guard: a workspace added later that nothing re-resolves
 # would otherwise stay clean, never reach the derived commit set, and pin the
 # pre-bump versions forever.
 expect_fail "assert_known_lockfiles rejects an unrecognised workspace" \
     assert_known_lockfiles "$(printf '%s\n' Cargo.lock tools/Cargo.lock)"
+expect_fail "assert_known_lockfiles rejects an unknown compiler-probe fixture" \
+    assert_known_lockfiles "$(printf '%s\n' Cargo.lock \
+        crates/demo/tests/fixtures/e0639-probe/Cargo.lock)"
 # Not a fuzz workspace — the directory merely ends in "fuzz". Mirrors the same
 # distinction check-fuzz-lock-parity.sh draws for its discovery globs.
 expect_fail "assert_known_lockfiles rejects a notfuzz/ lookalike" \
@@ -206,6 +238,115 @@ expect_fail "emit_output refuses a value containing the output delimiter" \
     'source "$1"; emit_output paths "$(printf "Cargo.toml\nPOST_RELEASE_BUMP_EOF\nnext=9.9.9\n")"' \
     _ "${here}/post-release-bump.sh"
 check "emit_output writes nothing when it refuses" "" "$(cat "$out")"
+
+# --- main orchestration (hermetic) ------------------------------------------
+release_repo="${tmp}/release-repo"
+fake_bin="${tmp}/fake-bin"
+call_log="${tmp}/calls.log"
+github_output="${tmp}/release-output"
+mkdir -p \
+    "${release_repo}/html-oracle" \
+    "${release_repo}/crates/rimap-audit/tests/fixtures/e0639-probe" \
+    "${release_repo}/crates/rimap-imap/tests/fixtures/e0639-probe" \
+    "$fake_bin"
+printf '[workspace.package]\nversion = "0.2.0"\n' >"${release_repo}/Cargo.toml"
+printf 'version = 4\n' >"${release_repo}/Cargo.lock"
+printf '[package]\nname = "oracle"\nversion = "0.0.0"\n' \
+    >"${release_repo}/html-oracle/Cargo.toml"
+printf 'version = 4\n' >"${release_repo}/html-oracle/Cargo.lock"
+for crate in rimap-audit rimap-imap; do
+    fixture="${release_repo}/crates/${crate}/tests/fixtures/e0639-probe"
+    printf '[package]\nname = "%s-e0639-probe"\nversion = "0.0.0"\n' "$crate" \
+        >"${fixture}/Cargo.toml"
+    printf 'version = 4\n' >"${fixture}/Cargo.lock"
+done
+printf '# Changelog\n\n## [0.2.0] - 2026-08-25\n' >"${release_repo}/CHANGELOG.md"
+: >"$call_log"
+: >"$github_output"
+
+cat >"${fake_bin}/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'git %s\n' "$*" >>"$CALL_LOG"
+case "$1" in
+rev-parse)
+    printf '%s\n' "$FAKE_ROOT"
+    ;;
+ls-files)
+    printf '%s\n' \
+        Cargo.lock \
+        html-oracle/Cargo.lock \
+        crates/rimap-audit/tests/fixtures/e0639-probe/Cargo.lock \
+        crates/rimap-imap/tests/fixtures/e0639-probe/Cargo.lock
+    ;;
+grep)
+    exit 1
+    ;;
+show)
+    cat "$FAKE_ROOT/${3#HEAD:}"
+    ;;
+diff)
+    exit 0
+    ;;
+-c)
+    printf '%s\n' \
+        Cargo.toml Cargo.lock html-oracle/Cargo.lock \
+        crates/rimap-audit/tests/fixtures/e0639-probe/Cargo.lock \
+        crates/rimap-imap/tests/fixtures/e0639-probe/Cargo.lock CHANGELOG.md
+    ;;
+*)
+    printf 'unexpected fake git call: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+SH
+
+cat >"${fake_bin}/cargo" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'cargo %s\n' "$*" >>"$CALL_LOG"
+case "$1" in
+set-version | update | metadata) ;;
+*)
+    printf 'unexpected fake cargo call: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+SH
+
+cat >"${fake_bin}/just" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'just %s\n' "$*" >>"$CALL_LOG"
+SH
+chmod +x "${fake_bin}/git" "${fake_bin}/cargo" "${fake_bin}/just"
+
+if (
+    cd "$release_repo"
+    PATH="${fake_bin}:$PATH" CALL_LOG="$call_log" FAKE_ROOT="$release_repo" \
+        GITHUB_OUTPUT="$github_output" bash -euo pipefail -c \
+        'source "$1"; main v0.2.0' _ "${here}/post-release-bump.sh" >/dev/null
+); then
+    echo "ok: main completes through hermetic release orchestration"
+else
+    echo "FAIL: main failed through hermetic release orchestration" >&2
+    failures=$((failures + 1))
+fi
+
+release_calls="$(cat "$call_log")"
+check_ordered "main orders compiler-probe realignment and verification" "$release_calls" \
+    "cargo set-version --workspace 0.2.1-dev" \
+    "cargo update --workspace" \
+    "just realign-fuzz-locks" \
+    "just realign-compiler-probe-locks" \
+    "cargo metadata --locked --offline --manifest-path crates/rimap-audit/tests/fixtures/e0639-probe/Cargo.toml --format-version 1" \
+    "cargo metadata --locked --offline --manifest-path crates/rimap-imap/tests/fixtures/e0639-probe/Cargo.toml --format-version 1" \
+    "just check-compiler-probe-locks"
+release_paths="$(cat "$github_output")"
+check_contains "main emits the audit fixture lock" "$release_paths" \
+    "crates/rimap-audit/tests/fixtures/e0639-probe/Cargo.lock"
+check_contains "main emits the IMAP fixture lock" "$release_paths" \
+    "crates/rimap-imap/tests/fixtures/e0639-probe/Cargo.lock"
 
 # --- version_optout_manifests (real repo, read-only) ------------------------
 # Deliberately not hermetic, and writes nothing: it reads HEAD of the real

@@ -4,7 +4,11 @@
 //! fail with E0639. These probes compile downstream crates against the local
 //! `rimap-imap` and `rimap-authz` sources and inspect Cargo's stderr.
 
-#![expect(clippy::expect_used, reason = "integration test setup")]
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration test setup reports fixture-copy paths"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

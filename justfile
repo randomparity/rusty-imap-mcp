@@ -429,6 +429,18 @@ check-fuzz-lock-parity:
 realign-fuzz-locks:
     ./scripts/check-fuzz-lock-parity.sh --fix
 
+# Unit-test the focused tracked-integration-test nested-Cargo guard.
+test-compiler-probe-locks:
+    ./scripts/check-compiler-probe-locks.test.sh
+
+# Require reviewed, reachable fixture graphs and locked/offline nested checks.
+check-compiler-probe-locks:
+    ./scripts/check-compiler-probe-locks.sh
+
+# Seed fixture locks from the root graph, prune, verify, and replace atomically.
+realign-compiler-probe-locks:
+    ./scripts/check-compiler-probe-locks.sh --fix
+
 # Restore html-oracle/Cargo.lock after a workspace dependency bump. The oracle
 # is workspace-excluded but path-depends on rimap-content/rimap-core, whose
 # requirements come from the root `[workspace.dependencies]` — so a root bump
@@ -520,7 +532,7 @@ test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-doc test-msrv deny machete check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
+ci: fmt-check lint test test-doc test-msrv deny machete check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-compiler-probe-locks check-compiler-probe-locks test-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
     typos
 
 # Re-run pre-commit hooks across all files.

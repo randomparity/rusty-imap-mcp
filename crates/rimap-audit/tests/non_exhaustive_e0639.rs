@@ -25,7 +25,11 @@
 //! minimal temp workspace so no flags or `--extern` paths need to be
 //! hand-assembled.
 
-#![expect(clippy::expect_used, reason = "integration test")]
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration test setup reports fixture-copy paths"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
