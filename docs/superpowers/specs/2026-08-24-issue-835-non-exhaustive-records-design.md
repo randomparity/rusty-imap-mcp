@@ -41,12 +41,13 @@ the next minor line.
 
 The earlier changes applied this policy to `rimap-config`, `rimap-audit`, and
 `AuthEvent`. Issue #835 identifies the remaining published-crate gap but gives
-an illustrative rather than exhaustive type list. Brace-form AST queries at
-the verified base found 58 public named-field structs with at least one
-externally public field: 57 non-generic candidates plus generic
-`CircuitBreaker<C>`. The breaker is a state holder whose public clock is a test
-seam, not a data record. The 57 qualifying records divide into 30 already
-non-exhaustive and the 27 listed below.
+an illustrative rather than exhaustive type list. The
+[frozen ADR inventory](../../ADR/0026-published-data-records-non-exhaustive.md#frozen-inventory-accounting)
+records the exact generic and non-generic brace-form AST queries, six source
+paths, public-visibility filters, pinned commit, and complete dispositions.
+They produce 58 public named-field candidates: 30 already non-exhaustive
+records, the 27 records listed below, and generic `CircuitBreaker<C>`, a state
+holder whose public clock is a test seam rather than record data.
 
 ## Decision
 
@@ -95,10 +96,12 @@ For each compiler-reported cross-crate construction site:
    required identity, host, credential-policy, or message-address fields must
    not gain invented empty defaults.
 
-`StatusItems` has one explicit migration route despite lacking `Default`:
-`StatusItems::none()` initializes all five selector flags to `false`, and
-callers enable only requested items through field assignment. Its focused test
-must preserve the empty-selector rendering before partial callers migrate.
+`StatusItems` requires no new constructor. Each external partial-selector
+caller starts from the existing `StatusItems::all()` and explicitly assigns
+all five public flags to its prior values. Focused rendering tests pin the
+resulting non-empty selector. The existing empty-selector test remains an
+in-crate literal and does not create a public path to the invalid IMAP `()`
+selector.
 
 Types produced only by their defining crate gain no speculative constructor.
 Cross-crate destructures add `..` and keep their existing behavior.

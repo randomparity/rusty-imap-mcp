@@ -21,6 +21,39 @@ candidates and generic `CircuitBreaker<C>`. The latter is a state holder whose
 public clock is a test seam, not a data record. The remaining 57 qualifying
 records divide into 30 already non-exhaustive and 27 still exhaustive.
 
+### Frozen inventory accounting
+
+The frozen inventory is reproducible from the six permitted `src` trees with
+both brace-form queries:
+
+```text
+ast-grep run -p 'pub struct $S { $$$FIELDS }' -l rust --json=compact \
+  crates/rimap-{imap,content,config,authz,smtp,core}/src
+ast-grep run -p 'pub struct $S<$T> { $$$FIELDS }' -l rust --json=compact \
+  crates/rimap-{imap,content,config,authz,smtp,core}/src
+```
+
+For both result sets, retain declarations whose text begins `pub struct ` and
+whose captured fields contain at least one entry beginning `pub `. This
+excludes restricted declarations and fields rather than treating `pub(crate)`
+as downstream API. The 58 retained candidates have these complete
+dispositions:
+
+- **30 already non-exhaustive records:** `Content`, `ContentMeta`,
+  `SelectedHeader`, `MailingListInfo`, `AttachmentMeta`, `Untrusted`,
+  `SecurityWarning`, `InvalidAccountName`, `AuthEvent`, `Config`, `ImapConfig`,
+  `CredentialsConfig`, `SmtpConfig`, `SecurityConfig`, `LookalikeConfig`,
+  `LimitsConfig`, `AuditConfig`, `AttachmentsConfig`, `MultiAccountConfig`,
+  `DefaultsConfig`, `RawAccountConfig`, `AccountLimitsOverrides`,
+  `AccountSecurityOverrides`, `AccountLookalikeOverrides`,
+  `AccountCredentialsOverrides`, `DeleteResult`, `MoveOutcome`,
+  `PreflightInfo`, `ValidatedAccountConfig`, and `ValidatedMultiConfig`.
+- **27 records retrofitted by this decision:** the complete crate-by-crate
+  inventory in the
+  [implementation design](../superpowers/specs/2026-08-24-issue-835-non-exhaustive-records-design.md#complete-inventory).
+- **One excluded state holder:** generic `CircuitBreaker<C>`, whose public
+  `clock` exists for controlled test-time advancement rather than record data.
+
 ## Decision
 
 Every public named-field record struct in the six issue #835 library crates
