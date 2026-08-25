@@ -37,19 +37,22 @@ cargo check --locked --offline --message-format=short
 
 A focused repository guard scans process-command constructors in tracked
 `crates/*/tests/**/*.rs` integration-test sources. It recognizes the canonical
-direct-probe shape used by both harnesses: one `check_probe` function owns a
-local `dir` temporary root, calls the fixed `copy_fixture_file` helper for
-`Cargo.toml` and `Cargo.lock` with destination `dir.path()`, and uses a fluent
-Cargo `check` builder whose `current_dir` is `dir.path()`. The executable may
-be a Cargo literal, `PathBuf::from(\"cargo\")`, or the repository's current
-`cargo_bin()` helper. Standard and Tokio `Command` constructors may be
-qualified, imported, or import-aliased.
+direct-probe shape used by both harnesses: a fixed `fixture_root()` helper joins
+the crate root with `COMPILER_PROBE_FIXTURE`; one `check_probe` function binds
+that result as `fixture` and owns a local `dir` temporary root; it calls the
+fixed `copy_fixture_file` helper for `Cargo.toml` and `Cargo.lock` with
+destination `dir.path()`; and it uses a fluent Cargo `check` builder whose
+`current_dir` is `dir.path()`. The executable may be a Cargo literal,
+`PathBuf::from(\"cargo\")`, or the repository's current `cargo_bin()` helper.
+Standard and Tokio `Command` constructors may be qualified, imported, or
+import-aliased; Tokio terminal futures may use `.await`.
 
 Each canonical invocation is validated independently; file-level evidence
-cannot satisfy a second builder. It must use one literal
-`COMPILER_PROBE_FIXTURE`, copy its manifest and `Cargo.lock` byte-for-byte, and
-pass both `--locked` and `--offline`. The fixture path must resolve inside the
-owning crate and contain tracked manifest, lock, and source files.
+cannot satisfy a second builder. Its ordered literal Cargo arguments must
+contain `check`, `--locked`, and `--offline`, with both flags before any `--`
+argument separator. It must copy the registered manifest and `Cargo.lock`
+byte-for-byte. The fixture path must resolve inside the owning crate and contain
+tracked manifest, lock, and source files.
 
 A recognized Cargo `check` combined with temporary `Cargo.toml` setup that
 departs from this canonical in-function form fails closed with a
@@ -66,15 +69,15 @@ fixture root. A root lock plus an injected fixture block therefore cannot pass
 as a pruned fixture graph.
 
 Its regression suite covers mixed compliant and noncompliant canonical builders
-in one file; qualified, imported, and aliased standard and Tokio constructors;
-the Cargo literal and current `cargo_bin()` helper; noncanonical split
-builder/setup rejection; excluded `src/`, `build.rs`, and Cargo commands without
-a temporary downstream manifest; exact same-root manifest and lock copying;
-each missing flag; missing registration; missing or untracked fixture files;
-malformed or unreachable lock blocks; root/fixture drift; an unpruned root copy
-with a fixture block; and empty discovery. This is a focused canonical-shape
-gate for direct nested Cargo probes, not a general Rust analyzer or universal
-executable inventory.
+in one file; qualified, imported, and aliased standard and asynchronously
+awaited Tokio constructors; the Cargo literal and current `cargo_bin()` helper;
+flags after `--`; noncanonical split builder/setup rejection; excluded `src/`,
+`build.rs`, and Cargo commands without a temporary downstream manifest; exact
+same-root manifest and lock copying; each missing flag; missing registration;
+missing or untracked fixture files; malformed or unreachable lock blocks;
+root/fixture drift; an unpruned root copy with a fixture block; and empty
+discovery. This is a focused canonical-shape gate for direct nested Cargo
+probes, not a general Rust analyzer or universal executable inventory.
 
 Realignment creates a unique untracked workspace beside each fixture, copies
 the fixture manifest and source byte-for-byte, seeds its lock from the root,

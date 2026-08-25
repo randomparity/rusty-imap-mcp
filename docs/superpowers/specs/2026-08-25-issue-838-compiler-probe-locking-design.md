@@ -107,16 +107,20 @@ set.
 
 The guard recognizes the canonical direct-probe shape used by both harnesses:
 
-- one `check_probe` function owns a local `dir` temporary root;
+- a fixed `fixture_root()` helper joins the owning crate root with
+  `COMPILER_PROBE_FIXTURE`;
+- one `check_probe` function binds that result as `fixture` and owns a local
+  `dir` temporary root;
 - that body calls the fixed `copy_fixture_file` helper for `Cargo.toml` and
-  `Cargo.lock` with source fixture and destination `dir.path()`;
+  `Cargo.lock` with source `fixture` and destination `dir.path()`;
 - one or more fluent process builders run Cargo `check` with `current_dir` set
   to `dir.path()`; and
-- every builder carries `--locked` and `--offline`.
+- every builder carries `--locked` and `--offline` before any `--` separator.
 
 It resolves `std::process::Command` and `tokio::process::Command` across
-qualified paths, ordinary imports, and import aliases. The Cargo executable may
-be a direct literal, `PathBuf::from(\"cargo\")`, or the exact repository
+qualified paths, ordinary imports, and import aliases; Tokio `.output()` and
+`.status()` futures may be followed by `.await`. The Cargo executable may be a
+direct literal, `PathBuf::from(\"cargo\")`, or the exact repository
 `cargo_bin()` helper shape: a zero-argument function returning a `CARGO`
 environment lookup with a `cargo` fallback. It does not accept arbitrary
 executable aliases or helper graphs.
@@ -124,10 +128,11 @@ executable aliases or helper graphs.
 For every canonical invocation—not merely every containing file—the guard
 requires:
 
-- one literal `COMPILER_PROBE_FIXTURE` registration referenced in that body;
+- one literal `COMPILER_PROBE_FIXTURE` registration used by `fixture_root()`;
 - exact source and destination root agreement for both fixture copies and the
   process `current_dir`;
-- `--locked` and `--offline` in that invocation's fluent argument builder;
+- ordered literal arguments containing `check`, `--locked`, and `--offline`,
+  with both flags before the first `--` separator;
 - a registered fixture path inside the owning crate with tracked `Cargo.toml`,
   `Cargo.lock`, and `src/main.rs`;
 - exactly one fixture package identity in the fixture lock matching the
@@ -157,9 +162,12 @@ covers:
 
 - the canonical good case and two canonical builders where one is
   noncompliant;
-- qualified, imported, and aliased standard and Tokio constructors;
+- qualified, imported, and aliased standard constructors;
+- qualified, imported, and aliased Tokio constructors using valid
+  `.output().await` and `.status().await` chains;
 - a Cargo literal, `PathBuf::from(\"cargo\")`, and the current `cargo_bin()`
   helper;
+- flags placed after `--`, which remain invalid;
 - noncanonical split builder and split setup rejection;
 - two temporary roots where copies and `current_dir` disagree;
 - excluded nested-Cargo-shaped files under crate `src/` and at `build.rs`;

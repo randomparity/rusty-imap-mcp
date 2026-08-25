@@ -80,7 +80,7 @@ fn cargo_bin() -> PathBuf {
 }
 
 fn fixture_root() -> PathBuf {
-    PathBuf::from("crates/demo")
+    PathBuf::from("crates/demo").join(COMPILER_PROBE_FIXTURE)
 }
 
 fn copy_fixture_file(fixture: &Path, root: &Path, name: &str) -> Result<(), String> {
@@ -98,7 +98,7 @@ fn new_probe_root(fixture: &Path) -> TempDir {
 }
 
 fn check_probe() {
-    let fixture = fixture_root().join(COMPILER_PROBE_FIXTURE);
+    let fixture = fixture_root();
     let dir = new_probe_root(&fixture);
     for name in ["Cargo.toml", "Cargo.lock"] {
         copy_fixture_file(&fixture, dir.path(), name)
@@ -116,8 +116,9 @@ The good synthetic lock must contain a unique `probe-fixture 0.0.0` root, a regi
 ```text
 good
 mixed-good-and-missing-offline / mismatched-copy-root
+flags-after-double-dash
 std-qualified / std-imported / std-import-alias
-tokio-qualified / tokio-imported / tokio-import-alias
+tokio-qualified-await / tokio-imported-await / tokio-import-alias-await
 cargo-literal / cargo-pathbuf / cargo-helper-return
 split-builder-rewrite / split-setup-rewrite / arbitrary-helper-rewrite
 excluded-crate-src / excluded-build-rs / excluded-repository-metadata
@@ -192,7 +193,11 @@ TokioCommand::new after use tokio::process::Command as TokioCommand
 ```
 
 For each recognized constructor in `check_probe`, take one fluent expression
-through `.output()`, `.status()`, or `.spawn()` and its terminating semicolon.
+through `.output()`, `.status()`, or `.spawn()`, an optional `.await` after
+Tokio `.output()`/`.status()`, and its terminating semicolon. The three Tokio
+cases must contain syntactically valid `async fn check_probe()` bodies with
+`.output().await;` or `.status().await;`, not synchronous lookalikes.
+
 Reject assignment to a command variable, a missing terminal call, or a
 constructor outside the canonical body when the same file also contains Cargo
 `check` and temporary `Cargo.toml` setup. The diagnostic must say to rewrite
@@ -202,7 +207,7 @@ tracking, method extraction, parameter substitution, or a helper-call graph.
 
 - [ ] **Step 4: Validate each canonical invocation and its exact root**
 
-Accept an executable only when it is a Cargo literal, `PathBuf::from(\"cargo\")`,
+Accept an executable only when it is a Cargo literal, `PathBuf::from("cargo")`,
 or `cargo_bin()` backed by the exact zero-argument local helper pattern already
 used in both harnesses. Arbitrary executable aliases and helper chains in a
 temporary Cargo-check file fail with the rewrite-to-canonical diagnostic.
@@ -210,20 +215,22 @@ temporary Cargo-check file fail with the rewrite-to-canonical diagnostic.
 Require the `check_probe` body to contain:
 
 ```rust
-let fixture = fixture_root().join(COMPILER_PROBE_FIXTURE);
+let fixture = fixture_root();
 let dir = new_probe_root(&fixture);
-for name in [\"Cargo.toml\", \"Cargo.lock\"] {
+for name in ["Cargo.toml", "Cargo.lock"] {
     copy_fixture_file(&fixture, dir.path(), name)
-        .unwrap_or_else(|error| panic!(\"{error}\"));
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 ```
 
-Require `copy_fixture_file` to byte-copy its named source to its named
-destination with `std::fs::copy`. For every fluent Cargo builder independently,
-require literal `check`, `--locked`, `--offline`, and
-`.current_dir(dir.path())`. A second builder missing a flag fails even when the
-first is compliant. A builder using another root, or fixture copies targeting
-another root, fails the same-root check.
+Require `fixture_root()` to join the owning crate root with
+`COMPILER_PROBE_FIXTURE`, and require `copy_fixture_file` to byte-copy its named
+source to its named destination with `std::fs::copy`. For every fluent Cargo
+builder independently, extract its literal argv in order. Require `check`,
+`--locked`, and `--offline`, with both flags before the first `--` separator,
+plus `.current_dir(dir.path())`. A second builder missing a flag fails even when
+the first is compliant. A builder using another root, or fixture copies
+targeting another root, fails the same-root check.
 
 An integration-test file with a direct `cargo metadata` command and no
 temporary `Cargo.toml` remains excluded. Files outside `crates/*/tests/` are
@@ -243,7 +250,22 @@ Parse Cargo's canonical `[[package]]` blocks without `tomllib`; require exactly 
 
 Diagnostics must include the fixture lock path and the exact missing, ambiguous, unreachable, or mismatched identity. The `root-seed-plus-fixture-block` case must fail on unreachable root packages, not merely on a missing fixture root.
 
-- [ ] **Step 6: Implement atomic realignment**
+- [ ] **Step 6: Write atomic realignment tests and observe them fail**
+
+Extend the synthetic test with fake Cargo success/failure scripts. Add cases
+asserting successful `--fix` prunes the root seed, a Cargo failure leaves the
+original bytes unchanged, and an unwritable/failed adjacent stage leaves the
+original bytes unchanged.
+
+Run:
+
+```bash
+bash scripts/check-compiler-probe-locks.test.sh
+```
+
+Expected: FAIL because the guard has no atomic `--fix` implementation.
+
+- [ ] **Step 7: Implement atomic realignment**
 
 For each unique registered fixture discovered by the source scan, `--fix` must:
 
@@ -290,9 +312,8 @@ finally:
 Never overwrite the tracked lock before metadata and verification pass. Re-run
 normal verification after all replacements.
 
-Extend the synthetic test with fake Cargo success/failure scripts. Assert successful `--fix` prunes the root seed, a Cargo failure leaves the original bytes unchanged, and an unwritable/failed adjacent stage leaves the original bytes unchanged.
 
-- [ ] **Step 7: Run the synthetic guard contract**
+- [ ] **Step 8: Run the synthetic guard contract**
 
 Run:
 
@@ -302,7 +323,7 @@ bash scripts/check-compiler-probe-locks.test.sh
 
 Expected: PASS with one line per named case and final `all check-compiler-probe-locks.sh tests passed`; no real-repository assertion exists yet.
 
-- [ ] **Step 8: Commit the focused guard**
+- [ ] **Step 9: Commit the focused guard**
 
 ```bash
 git add scripts/check-compiler-probe-locks.sh scripts/check-compiler-probe-locks.test.sh
@@ -440,6 +461,8 @@ In `check_probe`, remove the formatted manifest. Copy both registered files to
 the command root with:
 
 ```rust
+let fixture = fixture_root();
+let dir = new_probe_root(&fixture);
 for name in ["Cargo.toml", "Cargo.lock"] {
     copy_fixture_file(&fixture, dir.path(), name)
         .unwrap_or_else(|error| panic!("{error}"));
