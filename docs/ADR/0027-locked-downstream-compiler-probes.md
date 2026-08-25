@@ -12,20 +12,23 @@ Cargo may execute.
 
 The probes must remain downstream crates because E0639 is the public-crate
 boundary under test. The recurrence requirement is limited to direct nested
-Cargo launches in tracked Rust tests. It does not govern direct `rustc`, normal
-repository builds and installs, Cargo wrappers that do not create temporary
-downstream projects, or third-party compiler-harness policy.
+Cargo launches in tracked integration-test sources under `crates/*/tests/`.
+It does not govern crate `src/`, `build.rs`, direct `rustc`, normal repository
+builds and installs, Cargo wrappers that do not create temporary downstream
+projects, or third-party compiler-harness policy.
 
 ## Decision
 
 Each exact-E0639 harness owns a minimal fixture workspace at
 `tests/fixtures/e0639-probe/`, containing `Cargo.toml`, `Cargo.lock`, and a
-valid empty `src/main.rs`. The harness reads that committed manifest and
-rewrites only its relative local dependency paths to absolute paths for the
-temporary root. Package identity, edition, workspace boundary, dependency
-names, features, and default-feature policy therefore have one source.
+valid empty `src/main.rs`. For each probe it creates a unique temporary
+directory beside the fixture, where the fixture's relative dependency paths
+remain valid, and copies the committed manifest byte-for-byte. Package
+identity, edition, workspace boundary, dependency names, features, path
+spelling, and default-feature policy therefore have one source; no TOML
+rewriting or path escaping exists in the harness.
 
-Before each check, the harness copies its fixture lock into the fresh temporary
+Before each check, the harness also copies its fixture lock into that temporary
 crate and invokes:
 
 ```text
@@ -33,7 +36,7 @@ cargo check --locked --offline --message-format=short
 ```
 
 A focused repository guard scans every `std::process::Command::new` invocation
-in tracked Rust tests and resolves ordinary Cargo expressions: literal
+in tracked `crates/*/tests/**/*.rs` integration-test sources and resolves
 `\"cargo\"`, `PathBuf::from(\"cargo\")`, `CARGO` environment lookups, simple
 local aliases assigned from those forms, and zero-argument local helpers that
 return one of those forms. It builds a local helper-call graph and propagates
@@ -46,34 +49,42 @@ remain outside this decision.
 
 Each in-scope invocation is validated independently; file-level evidence cannot
 satisfy a second builder. Every such invocation must use one literal
-`COMPILER_PROBE_FIXTURE`, derive its manifest from the registered fixture, copy
-its `Cargo.lock`, and pass both `--locked` and `--offline`. The fixture path
-must resolve inside the owning crate and contain tracked manifest, lock, and
-source files.
+`COMPILER_PROBE_FIXTURE`, copy its manifest byte-for-byte, copy its
+`Cargo.lock`, and pass both `--locked` and `--offline`. The fixture path must
+resolve inside the owning crate and contain tracked manifest, lock, and source
+files.
 
 The guard compares each fixture lock against the root lock using complete
-registry package identity: name, version, source, and checksum. It also
-requires exactly one fixture package identity from the fixture manifest, which
-a verbatim root-lock seed lacks. Its regression suite covers mixed compliant
-and noncompliant builders in one file, every supported direct, aliased, and
-helper-return Cargo expression, temporary-project setup split into a separate
-local helper, an excluded Cargo command without a temporary downstream
-manifest, fixture/generated-manifest drift, each missing flag, missing
-registration, missing or untracked fixture files, malformed locks,
-root/fixture drift, an unpruned root copy, and empty discovery. This is a
-focused recurrence gate for nested Cargo in Rust tests, not a universal
+registry package identity: name, version, source, and checksum. It requires
+exactly one fixture package identity from the fixture manifest, resolves every
+lock dependency edge, and rejects any package block unreachable from that
+fixture root. A root lock plus an injected fixture block therefore cannot pass
+as a pruned fixture graph.
+
+Its regression suite covers mixed compliant and noncompliant builders in one
+file, every supported direct, aliased, and helper-return Cargo expression,
+temporary-project setup split into a separate local helper, excluded `src/`,
+`build.rs`, and Cargo commands without a temporary downstream manifest, exact
+manifest copying, each missing flag, missing registration, missing or untracked
+fixture files, malformed or unreachable lock blocks, root/fixture drift, an
+unpruned root copy with a fixture block, and empty discovery. This is a focused
+recurrence gate for nested Cargo in integration tests, not a universal
 executable or compiler inventory.
 
-Realignment occurs in a temporary workspace outside the repository. The recipe
-writes an absolute-path equivalent of the fixture manifest there, seeds its
-lock from the root, runs Cargo metadata to prune unreachable packages, verifies
-fixture identity and parity, then atomically replaces the tracked fixture lock.
-Failure or interruption before replacement leaves the original untouched.
+Realignment creates a unique untracked workspace beside each fixture, copies
+the fixture manifest and source byte-for-byte, seeds its lock from the root,
+runs Cargo metadata to prune unreachable packages, and verifies fixture
+identity, reachability, and parity. It then copies the verified candidate to an
+exclusive temporary file beside the tracked `Cargo.lock` and atomically renames
+that file over the destination. Failure or interruption before the rename
+leaves the original untouched; an interrupted staging copy leaves only a
+disposable temporary file.
 
 The post-release-bump script recognizes both fixture locks, realigns them after
 workspace versions move, verifies them locked and offline, and includes them in
-its derived commit set. The guard runs in `just ci` and the required
-`cargo-deny` CI job.
+its derived commit set. A hermetic main-path test uses fake `cargo`, `just`, and
+`git` executables to assert those calls, flags, order, and paths. The guard runs
+in `just ci` and the required `cargo-deny` CI job.
 
 ## Consequences
 
