@@ -191,12 +191,38 @@ case_missing_flags() {
     replace "$repo/crates/demo/tests/probe.rs" '"check", "--locked", "--offline"' '"check", "--", "--locked", "--offline"'
     restage "$repo"
     expect_fail "flags after --" "before Cargo argument separator" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo locked-env-decoy)"
+    replace "$repo/crates/demo/tests/probe.rs" '"check", "--locked", "--offline"' '"check", "--offline"'
+    replace "$repo/crates/demo/tests/probe.rs" '.current_dir(dir.path())' \
+        '.env("DECOY", "--locked")
+        .current_dir(dir.path())'
+    restage "$repo"
+    expect_fail "env string does not supply --locked" "missing --locked" \
+        "$guard" --repo-root "$repo"
+
+    repo="$(new_repo locked-expect-decoy)"
+    replace "$repo/crates/demo/tests/probe.rs" '"check", "--locked", "--offline"' '"check", "--offline"'
+    replace "$repo/crates/demo/tests/probe.rs" '.output();' '.output().expect("--locked");'
+    restage "$repo"
+    expect_fail "expect string does not supply --locked" "missing --locked" \
+        "$guard" --repo-root "$repo"
+
+    repo="$(new_repo check-env-decoy)"
+    replace "$repo/crates/demo/tests/probe.rs" '"check", "--locked", "--offline"' '"--locked", "--offline"'
+    replace "$repo/crates/demo/tests/probe.rs" '.current_dir(dir.path())' \
+        '.env("DECOY", "check")
+        .current_dir(dir.path())'
+    restage "$repo"
+    expect_fail "env string does not supply check" "no literal check subcommand" \
+        "$guard" --repo-root "$repo"
 }
 
 case_constructors() {
     local repo source
     repo="$(new_repo std-qualified)"
     source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' ''
     replace "$source" 'Command::new(cargo_bin())' 'std::process::Command::new(cargo_bin())'
     restage "$repo"
     expect_ok "qualified std Command" "$guard" --repo-root "$repo"
@@ -210,6 +236,7 @@ case_constructors() {
 
     repo="$(new_repo tokio-qualified)"
     source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' ''
     replace "$source" 'fn check_probe() {' 'async fn check_probe() {'
     replace "$source" 'Command::new(cargo_bin())' 'tokio::process::Command::new(cargo_bin())'
     replace "$source" '.output();' '.output().await;'

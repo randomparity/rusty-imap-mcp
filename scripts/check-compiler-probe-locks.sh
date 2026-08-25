@@ -292,8 +292,6 @@ def process_constructors(source: str) -> set[str]:
 def constructor_matches(body: FunctionBody, imported: set[str]) -> list[re.Match[str]]:
     alternatives = [r"std::process::Command", r"tokio::process::Command"]
     alternatives.extend(re.escape(name) for name in sorted(imported))
-    if len(alternatives) == 2:
-        return []
     pattern = re.compile(r"\b(?:" + "|".join(alternatives) + r")::new\s*\(")
     return list(pattern.finditer(body.masked))
 
@@ -306,6 +304,16 @@ def rust_strings(source: str) -> list[str]:
         except UnicodeDecodeError:
             strings.append(match.group(1))
     return strings
+
+def cargo_arguments(chain: str) -> list[str]:
+    stripped = strip_comments(chain)
+    masked = mask_literals(stripped)
+    arguments = []
+    for match in re.finditer(r"\.(?:arg|args)\s*\(", masked):
+        opening = match.end() - 1
+        closing = matching_delimiter(masked, opening, "(", ")")
+        arguments.extend(rust_strings(stripped[opening + 1 : closing]))
+    return arguments
 
 
 def cargo_helper_is_canonical(source: str) -> bool:
@@ -435,7 +443,7 @@ def validate_check_chain(relative_source: Path, chain: str) -> None:
             f"{relative_source}: Cargo builder must be one fluent expression through a terminal "
             "call; rewrite to canonical probe shape"
         )
-    arguments = rust_strings(chain)
+    arguments = cargo_arguments(chain)
     try:
         check_index = arguments.index("check")
     except ValueError as error:
@@ -480,7 +488,7 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
             semicolon = len(body.masked) - 1
         executable = body.source[opening + 1 : closing]
         chain = body.source[constructor.start() : semicolon + 1]
-        chain_arguments = rust_strings(body.source[closing + 1 : semicolon + 1])
+        chain_arguments = cargo_arguments(chain)
         subcommand = next(
             (argument for argument in chain_arguments if argument in COMPILER_SUBCOMMANDS | {"metadata"}),
             None,
@@ -489,12 +497,18 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
 
         if subcommand == "metadata":
             continue
+        cargo_executable = is_cargo_executable(executable, source)
         if subcommand is None:
             body_arguments = rust_strings(body.source)
             body_subcommand = next(
                 (argument for argument in body_arguments if argument in COMPILER_SUBCOMMANDS), None
             )
-            if temporary and body_subcommand is not None:
+            if temporary and (cargo_executable or body_subcommand is not None):
+                if re.search(r"\.(?:arg|args)\s*\(", chain):
+                    raise GuardError(
+                        f"{relative_source}: direct Cargo builder has no literal check "
+                        "subcommand; rewrite to canonical probe shape"
+                    )
                 raise GuardError(
                     f"{relative_source}: temporary Cargo builder is split or indirect; "
                     "rewrite to canonical probe shape"
@@ -508,7 +522,7 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
                 )
             continue
         saw_temporary_compiler = True
-        if not is_cargo_executable(executable, source):
+        if not cargo_executable:
             raise GuardError(
                 f"{relative_source}: Cargo executable is indirect; rewrite to canonical probe shape"
             )
