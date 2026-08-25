@@ -71,13 +71,7 @@ mod tests {
     }
 
     fn sample_message(u: Uid) -> FetchedMessage {
-        FetchedMessage {
-            uid: u,
-            envelope: None,
-            bodystructure: None,
-            flags: None,
-            size: None,
-        }
+        FetchedMessage::new(u)
     }
 
     #[test]

@@ -213,10 +213,8 @@ pub async fn handle_list_labels(
 
     let uid = rimap_imap::types::Uid::from(input.uid);
 
-    let spec = FetchSpec {
-        flags: true,
-        ..FetchSpec::default()
-    };
+    let mut spec = FetchSpec::default();
+    spec.flags = true;
     let (msg, uid_validity) = crate::tools::fetch_by_uid::fetch_single_by_uid(
         account,
         &input.folder,

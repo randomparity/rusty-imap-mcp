@@ -71,10 +71,8 @@ pub async fn handle(
 
     let uid = Uid::from(input.uid);
 
-    let spec = FetchSpec {
-        bodystructure: true,
-        ..FetchSpec::default()
-    };
+    let mut spec = FetchSpec::default();
+    spec.bodystructure = true;
     let (msg, _uid_validity) =
         crate::tools::fetch_by_uid::fetch_single_by_uid(account, &input.folder, uid, spec, None)
             .await?;

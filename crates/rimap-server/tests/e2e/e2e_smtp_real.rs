@@ -404,12 +404,9 @@ async fn send_email_real_socket_delivers_multipart_and_copies() {
 /// server (the fixture auto-creates `Sent`, so an absent-`Sent` approach would
 /// not fail). Exercises the fail-open path.
 fn nonexistent_sent_map() -> rimap_imap::SpecialUseMap {
-    let folder = rimap_imap::types::Folder {
-        name: "NonexistentSentFolder".into(),
-        attributes: Vec::new(),
-        delimiter: Some('/'),
-        special_use: Some(rimap_imap::SpecialUse::Sent),
-    };
+    let mut folder = rimap_imap::types::Folder::new("NonexistentSentFolder".into());
+    folder.delimiter = Some('/');
+    folder.special_use = Some(rimap_imap::SpecialUse::Sent);
     rimap_imap::SpecialUseMap::from_folders(&[folder])
 }
 

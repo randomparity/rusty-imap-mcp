@@ -130,10 +130,8 @@ pub async fn handle(
     // cargo-mutants: best-effort — deleting `bodystructure: true` skips this
     // cross-validation. The effect is only observable through an IMAP fetch
     // returning a BODYSTRUCTURE, which needs the integration harness.
-    let spec = FetchSpec {
-        bodystructure: true,
-        ..FetchSpec::default()
-    };
+    let mut spec = FetchSpec::default();
+    spec.bodystructure = true;
     if let Ok((msgs, _uid_validity)) = account.imap.fetch(&input.folder, &[uid], spec, None).await
         && let Some(bs) = msgs.into_iter().next().and_then(|m| m.bodystructure)
         && let Some(bs_type) = lookup_bodystructure_type(&bs, &input.part_id)

@@ -111,13 +111,11 @@ async fn proton_bridge_connect_and_fetch_one_envelope() {
         .unwrap()
         .uids;
     assert!(!uids.is_empty(), "expected at least one message in INBOX");
-    let spec = FetchSpec {
-        envelope: true,
-        bodystructure: false,
-        uid: true,
-        flags: true,
-        size: true,
-    };
+    let mut spec = FetchSpec::default();
+    spec.envelope = true;
+    spec.uid = true;
+    spec.flags = true;
+    spec.size = true;
     let (msgs, _) = conn.fetch("INBOX", &uids[..1], spec, None).await.unwrap();
     assert_eq!(msgs.len(), 1);
 }

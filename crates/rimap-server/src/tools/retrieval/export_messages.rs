@@ -222,17 +222,11 @@ impl ExportSource for AccountState {
         uids: &[Uid],
         expected_uidvalidity: u32,
     ) -> Result<(Vec<(u32, Option<u32>)>, Option<u32>), rimap_core::RimapError> {
+        let mut spec = FetchSpec::default();
+        spec.size = true;
         let (msgs, uid_validity) = self
             .imap
-            .fetch(
-                folder,
-                uids,
-                FetchSpec {
-                    size: true,
-                    ..FetchSpec::default()
-                },
-                Some(expected_uidvalidity),
-            )
+            .fetch(folder, uids, spec, Some(expected_uidvalidity))
             .await?;
         let sizes = msgs.iter().map(|m| (m.uid.get(), m.size)).collect();
         Ok((sizes, uid_validity))

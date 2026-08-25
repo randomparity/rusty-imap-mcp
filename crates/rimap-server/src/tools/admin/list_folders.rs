@@ -215,11 +215,11 @@ mod tests {
         // rejects. There is therefore no valid input path that addresses
         // this folder, which is exactly what the field doc must state.
         let raw = "Inbox\u{202e}gnilleS";
-        let folders = vec![Folder {
-            name: raw.to_string(),
-            attributes: vec![FolderAttribute::HasNoChildren],
-            delimiter: Some('/'),
-            special_use: None,
+        let folders = vec![{
+            let mut folder = Folder::new(raw.to_string());
+            folder.attributes = vec![FolderAttribute::HasNoChildren];
+            folder.delimiter = Some('/');
+            folder
         }];
         let (entries, _warnings) = sanitize_folder_entries(folders);
         assert_eq!(entries.len(), 1);
@@ -244,11 +244,11 @@ mod tests {
 
     #[test]
     fn sanitizes_bidi_in_folder_name_and_emits_warning() {
-        let folders = vec![Folder {
-            name: "Inbox\u{202e}gnilleS".to_string(),
-            attributes: vec![FolderAttribute::HasNoChildren],
-            delimiter: Some('/'),
-            special_use: None,
+        let folders = vec![{
+            let mut folder = Folder::new("Inbox\u{202e}gnilleS".to_string());
+            folder.attributes = vec![FolderAttribute::HasNoChildren];
+            folder.delimiter = Some('/');
+            folder
         }];
         let (entries, warnings) = sanitize_folder_entries(folders);
         assert_eq!(entries.len(), 1);
@@ -265,11 +265,11 @@ mod tests {
 
     #[test]
     fn no_warnings_for_clean_folder_name() {
-        let folders = vec![Folder {
-            name: "INBOX".to_string(),
-            attributes: vec![FolderAttribute::HasNoChildren],
-            delimiter: Some('/'),
-            special_use: None,
+        let folders = vec![{
+            let mut folder = Folder::new("INBOX".to_string());
+            folder.attributes = vec![FolderAttribute::HasNoChildren];
+            folder.delimiter = Some('/');
+            folder
         }];
         let (entries, warnings) = sanitize_folder_entries(folders);
         assert_eq!(entries.len(), 1);
@@ -302,11 +302,11 @@ mod tests {
 
     #[test]
     fn wire_name_preserved_when_sanitizer_modifies_name() {
-        let folders = vec![Folder {
-            name: "Inbox\u{202e}gnilleS".to_string(),
-            attributes: vec![FolderAttribute::HasNoChildren],
-            delimiter: Some('/'),
-            special_use: None,
+        let folders = vec![{
+            let mut folder = Folder::new("Inbox\u{202e}gnilleS".to_string());
+            folder.attributes = vec![FolderAttribute::HasNoChildren];
+            folder.delimiter = Some('/');
+            folder
         }];
         let (entries, _warnings) = sanitize_folder_entries(folders);
         assert_eq!(entries.len(), 1);
@@ -319,11 +319,11 @@ mod tests {
 
     #[test]
     fn wire_name_absent_for_clean_folder_name() {
-        let folders = vec![Folder {
-            name: "INBOX".to_string(),
-            attributes: vec![FolderAttribute::HasNoChildren],
-            delimiter: Some('/'),
-            special_use: None,
+        let folders = vec![{
+            let mut folder = Folder::new("INBOX".to_string());
+            folder.attributes = vec![FolderAttribute::HasNoChildren];
+            folder.delimiter = Some('/');
+            folder
         }];
         let (entries, _warnings) = sanitize_folder_entries(folders);
         assert_eq!(entries.len(), 1);
@@ -348,11 +348,11 @@ mod tests {
         // input, which at worst-case ~10x expansion produces a bounded
         // wire name.
         let oversized: String = "A\u{202e}".repeat(20_000); // ~80 KB
-        let folders = vec![Folder {
-            name: oversized,
-            attributes: vec![FolderAttribute::HasNoChildren],
-            delimiter: Some('/'),
-            special_use: None,
+        let folders = vec![{
+            let mut folder = Folder::new(oversized);
+            folder.attributes = vec![FolderAttribute::HasNoChildren];
+            folder.delimiter = Some('/');
+            folder
         }];
         let (entries, _warnings) = sanitize_folder_entries(folders);
         assert_eq!(entries.len(), 1);

@@ -77,17 +77,15 @@ pub async fn handle(
 mod tests {
     use rimap_imap::SpecialUseMap;
     use rimap_imap::special_use::SpecialUse;
-    use rimap_imap::types::{Folder, FolderAttribute};
+    use rimap_imap::types::Folder;
 
     use super::CreateDraftMeta;
 
     fn folder(name: &str, special: Option<SpecialUse>) -> Folder {
-        Folder {
-            name: name.to_string(),
-            attributes: Vec::<FolderAttribute>::new(),
-            delimiter: Some('/'),
-            special_use: special,
-        }
+        let mut folder = Folder::new(name.to_string());
+        folder.delimiter = Some('/');
+        folder.special_use = special;
+        folder
     }
 
     #[test]
