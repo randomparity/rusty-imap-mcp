@@ -56,13 +56,9 @@
 - Consumes: Git tracked paths, canonical Cargo lockfile v4 text, fixture `Cargo.toml` package name/version, `CARGO` environment override for realignment tests.
 - Produces: `./scripts/check-compiler-probe-locks.sh [--fix] [--repo-root PATH]`; exit 0 only when at least one in-scope probe exists and every source/fixture/lock invariant holds.
 - Produces frozen internal Python records:
-  - `Function(name, body_start, body_end, body, code, callees)`
-  - `CommandCall(path, scope, start, end, binding, executable, statements,
-    execution, project_root)`
-  - `CopyFact(member, source_fixture, destination_root)`
-  - `FunctionFacts(callees, cargo_return, temporary_roots, manifest_roots,
-    fixture_uses, copies)`
-  - `Probe(path, scope, command_start, project_root, fixture)`
+  - `FunctionBody(path, start, end, source)`
+  - `CommandCall(path, start, end, constructor, executable, chain)`
+  - `Probe(path, command_start, fixture)`
   - `Package(name, version, source, checksum, dependencies)`, hashable by all
     fields so graph traversal can return `set[Package]`.
 
@@ -73,8 +69,9 @@ Create an executable Bash test with `set -euo pipefail`, a `mktemp -d` cleanup t
 The canonical good Rust source must contain these observable markers:
 
 ```rust
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::TempDir;
 
 const COMPILER_PROBE_FIXTURE: &str = "tests/fixtures/e0639-probe";
 
@@ -82,11 +79,31 @@ fn cargo_bin() -> PathBuf {
     std::env::var("CARGO").map_or_else(|_| PathBuf::from("cargo"), PathBuf::from)
 }
 
+fn fixture_root() -> PathBuf {
+    PathBuf::from("crates/demo")
+}
+
+fn copy_fixture_file(fixture: &Path, root: &Path, name: &str) -> Result<(), String> {
+    let source = fixture.join(name);
+    let destination = root.join(name);
+    std::fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn new_probe_root(fixture: &Path) -> TempDir {
+    tempfile::Builder::new()
+        .tempdir_in(fixture.parent().expect("parent"))
+        .expect("temp")
+}
+
 fn check_probe() {
     let fixture = fixture_root().join(COMPILER_PROBE_FIXTURE);
-    let dir = tempfile::Builder::new().tempdir_in(fixture.parent().expect("parent")).expect("temp");
-    std::fs::copy(fixture.join("Cargo.toml"), dir.path().join("Cargo.toml")).expect("manifest");
-    std::fs::copy(fixture.join("Cargo.lock"), dir.path().join("Cargo.lock")).expect("lock");
+    let dir = new_probe_root(&fixture);
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        copy_fixture_file(&fixture, dir.path(), name)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
     let _ = Command::new(cargo_bin())
         .args(["check", "--locked", "--offline", "--message-format=short"])
         .current_dir(dir.path())
@@ -99,15 +116,11 @@ The good synthetic lock must contain a unique `probe-fixture 0.0.0` root, a regi
 ```text
 good
 mixed-good-and-missing-offline / mismatched-copy-root
-fluent-builder / split-builder / split-builder-missing-offline
-free-function-probe / impl-method-probe / trait-method-probe
 std-qualified / std-imported / std-import-alias
 tokio-qualified / tokio-imported / tokio-import-alias
-cargo-literal / cargo-pathbuf / cargo-env / cargo-env-os / cargo-env-macro
-cargo-local-alias / cargo-helper-return
-split-temporary-project-helper
+cargo-literal / cargo-pathbuf / cargo-helper-return
+split-builder-rewrite / split-setup-rewrite / arbitrary-helper-rewrite
 excluded-crate-src / excluded-build-rs / excluded-repository-metadata
-unresolved-cargo-helper / unresolved-temporary-project-helper
 missing-locked / missing-offline
 missing-registration / duplicate-registration
 absolute-registration / escaping-registration / untracked-registration
@@ -157,28 +170,17 @@ the default repository root with `git rev-parse --show-toplevel`, then use
 `crates/<crate>/tests/**/*.rs`. Do not select `src`, root `build.rs`, examples,
 or benches. Exit non-zero when Git fails or discovery yields no in-scope probe.
 
-- [ ] **Step 3: Implement deterministic Rust lexical boundaries and function extraction**
+- [ ] **Step 3: Implement the canonical direct-probe source check**
 
-Inside the embedded Python, implement `code_mask(source)`,
-`matching_delimiter(mask, start, opening, closing)`,
-`extract_scopes(source, mask)`, and
-`command_invocations(source, mask, scope)` with the frozen record types above.
-`extract_scopes` returns free functions plus inherent-impl and trait-impl
-methods with identities qualified by their containing type/trait and source
-offset. `command_invocations` returns a fluent expression or follows a local
-binding from `let [mut] cmd = Command::new(...)` through subsequent
-`cmd.arg`, `cmd.args`, `cmd.current_dir`, `cmd.env`, and terminal
-`cmd.output`/`status`/`spawn` statements. Reassignment, return, argument
-passing, field storage, or scope exit before a terminal call is a fail-closed
-escape for a recognized Cargo executable.
+Inside the embedded Python, implement `strip_comments(source)`,
+`extract_check_probe(source)`, `process_constructors(source)`, and
+`fluent_calls(body, constructors)` using the frozen records above.
+`strip_comments` removes line and nested block comments while preserving source
+offsets and all Rust string/raw-string contents. `extract_check_probe` requires
+exactly one `fn check_probe` when the file contains a temporary downstream Cargo
+check and brace-matches only that body. This is not a general Rust scope model.
 
-`code_mask` must preserve byte/character positions and newlines while replacing
-line comments, nested block comments, normal strings, raw strings with any hash
-count, byte strings, and character literals with spaces. Delimiter matching
-operates only on the mask. Scope extraction retains original bodies for literal
-checks and fails on an unterminated construct rather than under-reading it.
-
-Constructor resolution must recognize:
+Constructor resolution recognizes:
 
 ```text
 std::process::Command::new
@@ -189,33 +191,44 @@ StdCommand::new after use std::process::Command as StdCommand
 TokioCommand::new after use tokio::process::Command as TokioCommand
 ```
 
-An unresolved local type named `Command` is not silently classified as process execution. An imported standard or Tokio constructor whose chain cannot be delimited is a hard parse error.
+For each recognized constructor in `check_probe`, take one fluent expression
+through `.output()`, `.status()`, or `.spawn()` and its terminating semicolon.
+Reject assignment to a command variable, a missing terminal call, or a
+constructor outside the canonical body when the same file also contains Cargo
+`check` and temporary `Cargo.toml` setup. The diagnostic must say to rewrite
+the probe to the canonical single-function fluent form. This detects
+noncanonical split builders and setup helpers without implementing statement
+tracking, method extraction, parameter substitution, or a helper-call graph.
 
-- [ ] **Step 4: Implement Cargo and temporary-project fixed-point resolution**
+- [ ] **Step 4: Validate each canonical invocation and its exact root**
 
-Implement pure functions `function_facts(scopes)`,
-`resolve_fixed_point(facts)`, `classify_probe(command, facts)`, and
-`validate_probe(command, facts, source)`. The first returns
-`dict[str, FunctionFacts]`; the second resolves local helper calls with
-parameter/return substitution until stable; the classifier returns `bool`; and
-validation returns a `Probe` or raises the script's diagnostic exception.
+Accept an executable only when it is a Cargo literal, `PathBuf::from(\"cargo\")`,
+or `cargo_bin()` backed by the exact zero-argument local helper pattern already
+used in both harnesses. Arbitrary executable aliases and helper chains in a
+temporary Cargo-check file fail with the rewrite-to-canonical diagnostic.
 
-Assign every temporary-root binding a symbolic identity qualified by scope and
-binding. Record each `Cargo.toml` write and fixture copy as a relation to that
-identity. When a helper returns a root or accepts it as a parameter, substitute
-the caller's identity through the call edge. A probe is valid only when its
-command root, manifest root, manifest-copy destination, and lock-copy
-destination are the same symbolic root. Aggregate function-level booleans are
-insufficient.
+Require the `check_probe` body to contain:
 
-Classify a command only when all structural facts hold: resolved executable is
-Cargo; its collected statements contain literal `check`; it uses `current_dir`
-or `--manifest-path`; and that exact root is a temporary project whose setup
-writes `Cargo.toml`, directly or through a local helper. Inspect the individual
-command's fluent or split statements for `--locked` and `--offline`; no other
-builder can satisfy them. Require exactly one file-level literal registration
-and require both registered fixture copies to target the command root.
-A helper whose body partly resembles a recognized Cargo or temporary-root producer but cannot be resolved must fail closed with path, function, and expression. A direct `cargo metadata` command and nested-Cargo-shaped production/build-script files remain unclassified.
+```rust
+let fixture = fixture_root().join(COMPILER_PROBE_FIXTURE);
+let dir = new_probe_root(&fixture);
+for name in [\"Cargo.toml\", \"Cargo.lock\"] {
+    copy_fixture_file(&fixture, dir.path(), name)
+        .unwrap_or_else(|error| panic!(\"{error}\"));
+}
+```
+
+Require `copy_fixture_file` to byte-copy its named source to its named
+destination with `std::fs::copy`. For every fluent Cargo builder independently,
+require literal `check`, `--locked`, `--offline`, and
+`.current_dir(dir.path())`. A second builder missing a flag fails even when the
+first is compliant. A builder using another root, or fixture copies targeting
+another root, fails the same-root check.
+
+An integration-test file with a direct `cargo metadata` command and no
+temporary `Cargo.toml` remains excluded. Files outside `crates/*/tests/` are
+never scanned. Print one deterministic summary line with the exact canonical
+invocation count; the real repository must report two.
 
 - [ ] **Step 5: Implement canonical lock parsing, reachability, and root containment**
 
@@ -654,9 +667,10 @@ Append under `## [Unreleased]` / `### Changed`:
 
 ```markdown
 - Exact-E0639 downstream compiler probes now copy committed fixture lockfiles
-  and run Cargo with `--locked --offline`. A required focused guard keeps every
-  tracked integration-test nested Cargo check and both fixture graphs pinned to
-  the reviewed workspace lock. See #838 and ADR-0027.
+  and run Cargo with `--locked --offline`. A required focused guard keeps direct
+  temporary-downstream Cargo compiler probes in tracked integration tests and
+  both fixture graphs pinned to the reviewed workspace lock. See #838 and
+  ADR-0027.
 ```
 
 - [ ] **Step 6: Run focused format, lint, and behavior checks**

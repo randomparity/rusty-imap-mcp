@@ -100,34 +100,34 @@ is no online retry or lock regeneration.
 
 ## Focused recurrence and parity guard
 
-`scripts/check-compiler-probe-locks.sh` scans every process-command constructor
-invocation in tracked integration-test Rust files under `crates/*/tests/`.
-Tracked crate `src/`, `build.rs`, examples, and benchmarks are outside this
-focused source set. The guard resolves both `std::process::Command` and
-`tokio::process::Command` across qualified paths, ordinary imports, and import
-aliases. It resolves ordinary Cargo expressions independently per invocation:
+`scripts/check-compiler-probe-locks.sh` scans process-command constructors in
+tracked integration-test Rust files under `crates/*/tests/`. Tracked crate
+`src/`, `build.rs`, examples, and benchmarks are outside this focused source
+set.
 
-- direct literals and `PathBuf::from(\"cargo\")`;
-- `std::env::var(\"CARGO\")`, `std::env::var_os(\"CARGO\")`, or
-  `env!(\"CARGO\")`;
-- simple local aliases assigned from those expressions; and
-- zero-argument local helpers that return one of those expressions, including
-  the current `cargo_bin()` shape.
+The guard recognizes the canonical direct-probe shape used by both harnesses:
 
-The guard builds a local helper-call graph and propagates temporary-project
-root provenance to a fixed point. A resolved Cargo invocation is an in-scope
-nested downstream probe when it runs `check` with `current_dir` or
-`--manifest-path` rooted in a local temporary project whose setup writes
-`Cargo.toml`; setup and launch may live in separate local helpers. A direct
-Cargo command without that structure, such as a repository metadata check, is
-explicitly ignored. For every in-scope invocation—not merely every containing
-file—the guard requires:
+- one `check_probe` function owns a local `dir` temporary root;
+- that body calls the fixed `copy_fixture_file` helper for `Cargo.toml` and
+  `Cargo.lock` with source fixture and destination `dir.path()`;
+- one or more fluent process builders run Cargo `check` with `current_dir` set
+  to `dir.path()`; and
+- every builder carries `--locked` and `--offline`.
 
-- one literal `COMPILER_PROBE_FIXTURE` registration used by that invocation's
-  enclosing probe helper;
-- source evidence that the registered `Cargo.toml` and `Cargo.lock` are copied
-  byte-for-byte into the same temporary root;
-- `--locked` and `--offline` in that invocation's argument builder;
+It resolves `std::process::Command` and `tokio::process::Command` across
+qualified paths, ordinary imports, and import aliases. The Cargo executable may
+be a direct literal, `PathBuf::from(\"cargo\")`, or the exact repository
+`cargo_bin()` helper shape: a zero-argument function returning a `CARGO`
+environment lookup with a `cargo` fallback. It does not accept arbitrary
+executable aliases or helper graphs.
+
+For every canonical invocation—not merely every containing file—the guard
+requires:
+
+- one literal `COMPILER_PROBE_FIXTURE` registration referenced in that body;
+- exact source and destination root agreement for both fixture copies and the
+  process `current_dir`;
+- `--locked` and `--offline` in that invocation's fluent argument builder;
 - a registered fixture path inside the owning crate with tracked `Cargo.toml`,
   `Cargo.lock`, and `src/main.rs`;
 - exactly one fixture package identity in the fixture lock matching the
@@ -138,9 +138,14 @@ file—the guard requires:
 - every reachable registry package identity—name, version, source,
   checksum—to occur in the root lock.
 
-The script fails on unreadable Git state, a partially recognized Cargo or
-temporary-project helper that cannot be resolved, malformed lock/package
-blocks, an empty in-scope probe set, duplicate registration, or an unrecognized
+A recognized Cargo `check` in a body that creates a temporary `Cargo.toml` but
+uses a split builder, setup helper, parameter substitution, or another
+noncanonical shape fails closed with a diagnostic directing the contributor to
+the canonical form. A direct Cargo command without temporary downstream setup,
+such as a repository metadata check, is explicitly ignored.
+
+The script also fails on unreadable Git state, malformed lock/package blocks,
+an empty in-scope probe set, duplicate registration, or an unrecognized
 registered path. It never interprets documentation, workflows, Just recipes,
 shell, Python, JavaScript, direct compiler processes, crate `src/`, `build.rs`,
 examples, benchmarks, unrelated Cargo commands without a temporary downstream
@@ -150,18 +155,16 @@ than silent blind spots.
 `scripts/check-compiler-probe-locks.test.sh` builds synthetic tracked trees and
 covers:
 
-- the complete good case;
-- two in-scope Cargo builders in one file where only one is compliant;
-- qualified, imported, and aliased standard and Tokio process constructors;
-- direct, `PathBuf`, environment, compile-time environment, simple alias, and
-  zero-argument helper-return Cargo expressions;
-- temporary-project setup split into a separate local helper from the Cargo
-  launch;
+- the canonical good case and two canonical builders where one is
+  noncompliant;
+- qualified, imported, and aliased standard and Tokio constructors;
+- a Cargo literal, `PathBuf::from(\"cargo\")`, and the current `cargo_bin()`
+  helper;
+- noncanonical split builder and split setup rejection;
+- two temporary roots where copies and `current_dir` disagree;
 - excluded nested-Cargo-shaped files under crate `src/` and at `build.rs`;
-- a direct Cargo command without a temporary downstream manifest, which stays
-  excluded;
-- an unresolved Cargo or temporary-project helper, missing `--locked`, and
-  missing `--offline` independently;
+- a direct Cargo command without a temporary downstream manifest;
+- missing `--locked` and missing `--offline` independently;
 - missing, duplicate, absolute, escaping, and untracked fixture registration;
 - missing or non-byte-exact fixture manifest/lock copies;
 - missing manifest, lock, or source;
@@ -174,8 +177,8 @@ covers:
   valid; and
 - empty in-scope probe discovery.
 
-The test also runs the guard against the real repository so a source scanner
-that no longer recognizes the two current probes fails instead of greening.
+The test also runs the guard against the real repository so discovery must
+recognize exactly the two current canonical probes.
 
 ## Lock realignment and release maintenance
 
@@ -232,11 +235,11 @@ checks carry both flags, and both lock paths reach the emitted change set.
 - A missing or non-byte-exact manifest/lock copy is a hard harness failure.
 - `--locked` rejects manifest/lock disagreement; `--offline` prevents registry
   network access; no fallback exists.
-- The focused source guard resolves local Cargo and temporary-project helpers
-  to a fixed point, classifies temporary downstream Cargo probes, then validates
-  each invocation independently. It rejects missing registration, exact
-  manifest/lock copy, or flags without capturing non-test sources or unrelated
-  Cargo commands.
+- The focused source guard recognizes the canonical direct temporary-probe
+  shape and validates each invocation independently. It rejects missing
+  registration, mismatched copy/current-directory roots, exact manifest/lock
+  copy, or flags. Recognized noncanonical temporary probes fail with a rewrite
+  diagnostic; non-test sources and unrelated Cargo commands remain excluded.
 - Fixture identity, dependency reachability, and full package identity parity
   restrict fixture registry artifacts to the root lock and reject an unpruned
   root graph.
@@ -274,10 +277,10 @@ no-new-dependency rule own those paths.
 - Each direct nested Cargo integration-test invocation independently registers
   a tracked fixture, copies its manifest and lock byte-for-byte, and passes
   `--locked --offline`.
-- Missing controls, mixed builders, helper-return and split-setup resolution,
-  unreachable package blocks, an unpruned root seed with fixture identity, and
-  fixture/root lock drift fail focused regression tests; non-test sources and
-  unrelated direct Cargo commands remain excluded.
+- Missing controls, mixed canonical builders, noncanonical direct-probe shapes,
+  mismatched temporary roots, unreachable package blocks, an unpruned root seed
+  with fixture identity, and fixture/root lock drift fail focused regression
+  tests; non-test sources and unrelated direct Cargo commands remain excluded.
 - Dependency and release bumps safely realign and commit both fixture locks.
 - The required `cargo-deny` CI context and local `just ci` run the guard.
 - No production behavior, public contract, or dependency version changes.
