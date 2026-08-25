@@ -68,9 +68,11 @@ on `rimap-imap` and `rimap-authz`. No registry dependency is declared directly.
 ### Probe execution
 
 Each harness keeps its existing fresh `TempDir` per source snippet. It writes a
-manifest with the fixture's exact package identity and the same dependency names,
-using absolute paths because the temporary directory is outside the repository. It
-copies the fixture `Cargo.lock` beside that manifest and then invokes:
+manifest preserving the fixture's exact package name, version, edition,
+workspace boundary, dependency names, and enabled features. Only local
+dependency paths become absolute because the temporary directory is outside the
+repository. It copies the fixture `Cargo.lock` beside that manifest and then
+invokes:
 
 ```text
 cargo check --locked --offline --message-format=short
@@ -95,8 +97,8 @@ harness never retries online or regenerates its lock.
    install the fixture lock in its temporary root;
 4. parse the root and fixture lockfiles completely, failing on malformed or empty
    package blocks; and
-5. require every registry package/version in each fixture lock to occur in the root
-   lock.
+5. require every registry package identity—name, version, source, and checksum—in
+   each fixture lock to occur in the root lock.
 
 Discovery fails loud on an unreadable repository or an empty probe set. It is anchored
 at the repository root and uses tracked paths, so caller working directory and ignored
@@ -141,8 +143,9 @@ Its unit test expands the accepted lock inventory and expected real bump set.
   hard test failure.
 - `--locked` rejects manifest/lock disagreement; `--offline` prevents index or crate
   network access. There is no fallback or retry.
-- The parity gate restricts fixture registry package/version pairs to the reviewed
-  root lock and fails on partial parse, empty discovery, or unknown fixtures.
+- The parity gate restricts fixture registry package identities—name, version,
+  source, and checksum—to the reviewed root lock and fails on partial parse,
+  empty discovery, or unknown fixtures.
 - The required `cargo-deny` job runs the structural and parity gate before executing
   the nested probes in later test jobs.
 - Release-bump and local realignment paths regenerate fixture locks through Cargo
@@ -161,7 +164,7 @@ policies remain authoritative.
 1. Add script contract tests first. Against the current harnesses they must fail because
    neither a fixture lock nor locked/offline flags exists.
 2. Add the fixture manifests and generate their locks by seeding from the root lock and
-   running Cargo metadata. Inspect that each registry package/version is contained in
+   running Cargo metadata. Inspect that each registry package identity is contained in
    the root lock.
 3. Update both harnesses and rerun their exact integration binaries. The positive probes
    must still report E0639, and each unrelated-failure probe must still omit E0639.
@@ -177,9 +180,10 @@ policies remain authoritative.
 - Both exact-E0639 test binaries preserve all current positive and negative assertions.
 - Every nested downstream Cargo check installs a committed fixture lock and passes
   `--locked --offline`.
-- Every fixture registry package/version is present in the root `Cargo.lock`.
-- Missing locks, drift, malformed input, unlocked checks, online checks, and empty
-  discovery each fail a focused regression test.
+- Every fixture registry package identity is present in the root `Cargo.lock`.
+- Missing locks, drift, malformed input, manifest-identity drift, unlocked
+  checks, online checks, and empty discovery each fail a focused regression
+  test.
 - Ordinary dependency updates have a documented realignment recipe; post-release bumps
   re-resolve and commit both fixture locks automatically.
 - The required `cargo-deny` CI context and local `just ci` both execute the recurrence
