@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public named-field data records in `rimap-core`, `rimap-authz`, `rimap-config`,
   `rimap-content`, `rimap-imap`, and `rimap-smtp` are now non-exhaustive.
   Where available, downstream code must use a provided constructor or `Default`
-  plus field assignment. Records produced only by their defining crate are no
-  longer externally constructible; obtain those values from the producer API.
+  plus field assignment. Records that expose neither route are no longer
+  externally constructible; obtain those values from the producer API.
   Add `..` to downstream record patterns.
 
 ## [0.2.0] - 2026-08-21
