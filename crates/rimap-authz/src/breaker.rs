@@ -122,7 +122,15 @@ struct Inner {
 }
 
 /// Circuit breaker configuration (subset of `LimitsConfig` relevant here).
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_authz::BreakerConfig {
+///     error_threshold: 1,
+///     ..rimap_authz::BreakerConfig::default_spec()
+/// };
+/// ```
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct BreakerConfig {
     /// Threshold of failures within the window that trips the breaker.
     pub error_threshold: u32,

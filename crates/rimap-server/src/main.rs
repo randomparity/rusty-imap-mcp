@@ -19,7 +19,7 @@ use rimap_authz::breaker::{BreakerConfig, CircuitBreaker, SystemClock};
 use rimap_authz::matrix::EffectiveMatrix;
 use rimap_authz::rate_limit::Governor;
 use rimap_config::ConfigError;
-use rimap_config::credential::{CredentialStore, KeyringStore, Protocol};
+use rimap_config::credential::{CredentialStore, KeyringStore, Protocol, ResolutionPolicy};
 use rimap_config::loader::{load_and_validate, resolve_config_path};
 use rimap_config::login::{run_login, tty_prompt};
 use rimap_config::validate::ValidatedAccountConfig;
@@ -777,10 +777,7 @@ fn build_smtp_client(
         &acfg.id,
         &smtp_cfg.username,
         &smtp_cfg.host,
-        rimap_config::credential::ResolutionPolicy {
-            fallback_mode: acfg.fallback_mode,
-            protocol: Protocol::Smtp,
-        },
+        ResolutionPolicy::new(acfg.fallback_mode, Protocol::Smtp),
     )
     .with_context(|| format!("resolving SMTP credential for account {}", acfg.id.as_str()))?;
     let client = rimap_smtp::SmtpClient::new(smtp_cfg, smtp_password.expose_secret())
@@ -794,11 +791,9 @@ fn build_account_guard(
     acfg: &ValidatedAccountConfig,
 ) -> anyhow::Result<DispatchGuard<SystemClock>> {
     let matrix = EffectiveMatrix::build(acfg.security.posture, &acfg.tool_overrides);
-    let breaker_cfg = BreakerConfig {
-        error_threshold: acfg.limits.circuit_breaker_error_threshold,
-        window: Duration::from_secs(u64::from(acfg.limits.circuit_breaker_window_seconds)),
-        ..BreakerConfig::default_spec()
-    };
+    let mut breaker_cfg = BreakerConfig::default_spec();
+    breaker_cfg.error_threshold = acfg.limits.circuit_breaker_error_threshold;
+    breaker_cfg.window = Duration::from_secs(u64::from(acfg.limits.circuit_breaker_window_seconds));
     let breaker = CircuitBreaker::new(SystemClock::new(), breaker_cfg);
     let governor = Governor::new(
         acfg.limits.commands_per_second,

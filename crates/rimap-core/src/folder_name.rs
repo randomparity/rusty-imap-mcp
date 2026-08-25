@@ -23,6 +23,7 @@ use thiserror::Error;
 /// pattern-matching on prose.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid folder name: {reason}")]
+#[non_exhaustive]
 pub struct FolderNameError {
     /// Human-readable rejection reason. Stable enough for direct
     /// inclusion in user-facing error messages.

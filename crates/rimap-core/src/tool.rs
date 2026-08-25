@@ -236,6 +236,15 @@ impl ToolName {
 /// MCP tool annotation hints. Mirrored to `rmcp::model::ToolAnnotations`
 /// in the server crate; defined here so `ToolName` owns the
 /// classification.
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_core::tool::ToolAnnotationHints {
+///     read_only: true,
+///     destructive: false,
+///     idempotent: true,
+///     open_world: true,
+/// };
+/// ```
 // Four orthogonal annotation axes map directly to the MCP spec fields;
 // state-machine enums would add indirection without adding safety here.
 #[expect(
@@ -243,6 +252,7 @@ impl ToolName {
     reason = "four MCP spec fields, each a distinct axis"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ToolAnnotationHints {
     /// `read_only_hint`: tool does not modify mailbox or session state.
     pub read_only: bool,

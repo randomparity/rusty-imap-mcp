@@ -59,12 +59,36 @@ impl Protocol {
 /// because the pair always travels together — it is the state
 /// [`KeyringCredentialResolver`] bakes in at construction and the policy
 /// [`resolve_credential`] applies.
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_config::ResolutionPolicy {
+///     fallback_mode: rimap_config::FallbackMode::KeyringOnly,
+///     protocol: rimap_config::Protocol::Smtp,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ResolutionPolicy {
     /// Keyring-vs-env fallback mode.
     pub fallback_mode: crate::model::FallbackMode,
     /// Protocol whose scoped env var to consult on the env-fallback path.
     pub protocol: Protocol,
+}
+
+impl ResolutionPolicy {
+    /// Construct a credential resolution policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `fallback_mode` - Whether fallback credential sources are permitted.
+    /// * `protocol` - The protocol whose credential is being resolved.
+    #[must_use]
+    pub const fn new(fallback_mode: crate::model::FallbackMode, protocol: Protocol) -> Self {
+        Self {
+            fallback_mode,
+            protocol,
+        }
+    }
 }
 
 /// Abstract credential store. Production uses [`KeyringStore`]; tests
@@ -424,6 +448,14 @@ mod tests {
             Protocol::Smtp.env_var_name(),
             "RUSTY_IMAP_MCP_SMTP_PASSWORD"
         );
+    }
+
+    #[test]
+    fn resolution_policy_new_preserves_fields() {
+        let policy = ResolutionPolicy::new(FallbackMode::KeyringOnly, Protocol::Smtp);
+
+        assert_eq!(policy.fallback_mode, FallbackMode::KeyringOnly);
+        assert_eq!(policy.protocol, Protocol::Smtp);
     }
 
     #[test]
