@@ -420,19 +420,18 @@ async fn seed_plain_message(dovecot: &DovecotHarness) {
     ))
     .expect("audit open");
 
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: "127.0.0.1".into(),
-        port: dovecot.port(),
-        encryption: ImapEncryption::Tls,
-        username: "rimap-test".into(),
-        pinned_fingerprint: Some(*dovecot.fingerprint()),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(30),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        "127.0.0.1".into(),
+        dovecot.port(),
+        ImapEncryption::Tls,
+        "rimap-test".into(),
+        Duration::from_secs(10),
+        Duration::from_secs(30),
+        5_242_880,
+        10_485_760,
+    );
+    cfg.pinned_fingerprint = Some(*dovecot.fingerprint());
     let store: Arc<dyn CredentialStore> = Arc::new(StaticCreds);
     let creds: Arc<dyn rimap_core::CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
         store,

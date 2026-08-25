@@ -52,6 +52,7 @@ pub use rimap_core::ImapEncryption;
 /// Credential-fallback policy is NOT in this struct — that's a config
 /// concern baked into the [`CredentialResolver`] handed to
 /// [`Connection::new`].
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     /// Account name this connection belongs to. `None` for the legacy
@@ -80,6 +81,52 @@ pub struct ConnectionConfig {
     pub max_fetch_body_bytes: u64,
     /// Hard cap on `APPEND` message byte count.
     pub max_append_bytes: u64,
+}
+
+impl ConnectionConfig {
+    /// Construct connection settings from every required value.
+    ///
+    /// # Arguments
+    ///
+    /// * `account_id` - Account identifier used for credential lookups.
+    /// * `host` - IMAP server host.
+    /// * `port` - IMAP server port.
+    /// * `encryption` - Transport encryption mode.
+    /// * `username` - IMAP username.
+    /// * `connect_timeout` - Connection, handshake, greeting, and capability deadline.
+    /// * `command_timeout` - Per-command deadline.
+    /// * `max_fetch_body_bytes` - Maximum accepted fetched message-body size.
+    /// * `max_append_bytes` - Maximum accepted appended message size.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all required connection values must remain explicit; invalid defaults would discard operator configuration"
+    )]
+    #[must_use]
+    pub fn new(
+        account_id: rimap_core::account::AccountId,
+        host: String,
+        port: u16,
+        encryption: ImapEncryption,
+        username: String,
+        connect_timeout: Duration,
+        command_timeout: Duration,
+        max_fetch_body_bytes: u64,
+        max_append_bytes: u64,
+    ) -> Self {
+        Self {
+            account_id,
+            account: None,
+            host,
+            port,
+            encryption,
+            username,
+            pinned_fingerprint: None,
+            connect_timeout,
+            command_timeout,
+            max_fetch_body_bytes,
+            max_append_bytes,
+        }
+    }
 }
 
 /// Active IMAP session type alias. `async-imap` parameterizes over the
@@ -777,6 +824,59 @@ mod tests {
     use rimap_core::TlsFingerprint;
 
     use crate::error::{AuthFailure, ImapError};
+
+    #[test]
+    fn connection_config_new_preserves_required_fields_and_defaults_optionals() {
+        let account_id = rimap_core::account::AccountId::default_account();
+        let host = "imap.example.test".to_owned();
+        let port = 993;
+        let encryption = super::ImapEncryption::Tls;
+        let username = "alice@example.test".to_owned();
+        let connect_timeout = std::time::Duration::from_secs(11);
+        let command_timeout = std::time::Duration::from_secs(17);
+        let max_fetch_body_bytes = 1_048_576;
+        let max_append_bytes = 2_097_152;
+
+        let constructed = super::ConnectionConfig::new(
+            account_id.clone(),
+            host.clone(),
+            port,
+            encryption,
+            username.clone(),
+            connect_timeout,
+            command_timeout,
+            max_fetch_body_bytes,
+            max_append_bytes,
+        );
+        let legacy = super::ConnectionConfig {
+            account: None,
+            account_id,
+            host,
+            port,
+            encryption,
+            username,
+            pinned_fingerprint: None,
+            connect_timeout,
+            command_timeout,
+            max_fetch_body_bytes,
+            max_append_bytes,
+        };
+
+        assert_eq!(constructed.account, legacy.account);
+        assert_eq!(constructed.account_id, legacy.account_id);
+        assert_eq!(constructed.host, legacy.host);
+        assert_eq!(constructed.port, legacy.port);
+        assert_eq!(constructed.encryption, legacy.encryption);
+        assert_eq!(constructed.username, legacy.username);
+        assert_eq!(constructed.pinned_fingerprint, legacy.pinned_fingerprint);
+        assert_eq!(constructed.connect_timeout, legacy.connect_timeout);
+        assert_eq!(constructed.command_timeout, legacy.command_timeout);
+        assert_eq!(
+            constructed.max_fetch_body_bytes,
+            legacy.max_fetch_body_bytes
+        );
+        assert_eq!(constructed.max_append_bytes, legacy.max_append_bytes);
+    }
 
     fn fp_zeros() -> TlsFingerprint {
         TlsFingerprint::from_hex(&"00".repeat(32)).expect("valid 32-byte hex literal")

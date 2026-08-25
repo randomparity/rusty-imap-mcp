@@ -79,22 +79,21 @@ fn build_dispatch_guard() -> DispatchGuard<SystemClock> {
 /// opened until the first IMAP command is issued.
 fn build_test_connection(account_name: &str, audit: &AuditWriter) -> Connection {
     let id = AccountId::new(account_name).expect("valid account name");
-    let conn_cfg = ConnectionConfig {
-        account: if account_name == rimap_core::account::DEFAULT_ACCOUNT_NAME {
-            None
-        } else {
-            Some(account_name.to_string())
-        },
-        account_id: id,
-        host: "127.0.0.1".into(),
-        port: 0,
-        encryption: ImapEncryption::Tls,
-        username: format!("{account_name}@test.invalid"),
-        pinned_fingerprint: None,
-        connect_timeout: Duration::from_secs(1),
-        command_timeout: Duration::from_secs(1),
-        max_fetch_body_bytes: 1024,
-        max_append_bytes: 1024,
+    let mut conn_cfg = ConnectionConfig::new(
+        id,
+        "127.0.0.1".into(),
+        0,
+        ImapEncryption::Tls,
+        format!("{account_name}@test.invalid"),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        1024,
+        1024,
+    );
+    conn_cfg.account = if account_name == rimap_core::account::DEFAULT_ACCOUNT_NAME {
+        None
+    } else {
+        Some(account_name.to_string())
     };
     let store: Arc<dyn CredentialStore> =
         Arc::new(StaticCreds("RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2".into()));

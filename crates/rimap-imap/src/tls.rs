@@ -172,6 +172,7 @@ impl ServerCertVerifier for CapturingVerifier {
 /// fingerprint into. Construct via [`build_tls_config`]; pass the
 /// `last_observed` handle to `Connection` so it can read the value after
 /// the handshake.
+#[non_exhaustive]
 pub struct TlsConfigBundle {
     /// The `rustls::ClientConfig` ready to hand to `tokio_rustls::TlsConnector`.
     pub config: Arc<ClientConfig>,

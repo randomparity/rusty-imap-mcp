@@ -117,22 +117,21 @@ pub(crate) fn make_test_account_state_with_sink(
     sink: Arc<dyn AuthEventSink>,
 ) -> AccountState {
     let id = AccountId::new(name).expect("test account name must be valid");
-    let conn_cfg = ConnectionConfig {
-        account: if name == rimap_core::account::DEFAULT_ACCOUNT_NAME {
-            None
-        } else {
-            Some(name.to_string())
-        },
-        account_id: id.clone(),
-        host: "127.0.0.1".into(),
+    let mut conn_cfg = ConnectionConfig::new(
+        id.clone(),
+        "127.0.0.1".into(),
         port,
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: format!("{name}@test.invalid"),
-        pinned_fingerprint: None,
-        connect_timeout: imap_timeout,
-        command_timeout: imap_timeout,
-        max_fetch_body_bytes: 1024,
-        max_append_bytes: 1024,
+        rimap_imap::ImapEncryption::Tls,
+        format!("{name}@test.invalid"),
+        imap_timeout,
+        imap_timeout,
+        1024,
+        1024,
+    );
+    conn_cfg.account = if name == rimap_core::account::DEFAULT_ACCOUNT_NAME {
+        None
+    } else {
+        Some(name.to_string())
     };
     let creds: Arc<dyn CredentialResolver> = Arc::new(PanickingCreds);
     let imap = Connection::new(conn_cfg, sink, creds);

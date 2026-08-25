@@ -249,19 +249,20 @@ pub fn build_account_connection(
         .as_optional()
         .map(rimap_core::account::AccountId::as_str)
         .map(str::to_string);
-    ConnectionConfig {
-        account,
-        account_id: id.clone(),
-        host: acfg.imap.host.clone(),
-        port: acfg.imap.port,
-        encryption: acfg.imap.encryption,
-        username: acfg.imap.username.clone(),
-        pinned_fingerprint: acfg.tls_fingerprint,
-        connect_timeout: Duration::from_secs(u64::from(acfg.imap.connect_timeout_seconds)),
-        command_timeout: Duration::from_secs(u64::from(acfg.imap.command_timeout_seconds)),
-        max_fetch_body_bytes: acfg.limits.max_fetch_body_bytes,
-        max_append_bytes: acfg.limits.max_append_bytes,
-    }
+    let mut config = ConnectionConfig::new(
+        id.clone(),
+        acfg.imap.host.clone(),
+        acfg.imap.port,
+        acfg.imap.encryption,
+        acfg.imap.username.clone(),
+        Duration::from_secs(u64::from(acfg.imap.connect_timeout_seconds)),
+        Duration::from_secs(u64::from(acfg.imap.command_timeout_seconds)),
+        acfg.limits.max_fetch_body_bytes,
+        acfg.limits.max_append_bytes,
+    );
+    config.account = account;
+    config.pinned_fingerprint = acfg.tls_fingerprint;
+    config
 }
 
 #[cfg(test)]

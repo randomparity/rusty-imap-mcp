@@ -718,19 +718,18 @@ impl ConnectedHarness {
             rimap_imap::ImapEncryption::Starttls => harness.starttls_port(),
         };
 
-        let cfg = ConnectionConfig {
-            account: None,
-            account_id: rimap_core::account::AccountId::default_account(),
-            host: DovecotHarness::host().to_string(),
+        let mut cfg = ConnectionConfig::new(
+            rimap_core::account::AccountId::default_account(),
+            DovecotHarness::host().to_string(),
             port,
             encryption,
-            username: DovecotHarness::username().to_string(),
-            pinned_fingerprint: pinned,
-            connect_timeout: std::time::Duration::from_secs(10),
-            command_timeout: std::time::Duration::from_secs(10),
-            max_fetch_body_bytes: 5_242_880,
-            max_append_bytes: 10_485_760,
-        };
+            DovecotHarness::username().to_string(),
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
+            5_242_880,
+            10_485_760,
+        );
+        cfg.pinned_fingerprint = pinned;
         let store: Arc<dyn CredentialStore> =
             Arc::new(StaticCreds(DovecotHarness::password().to_string()));
         let creds: Arc<dyn CredentialResolver> = Arc::new(KeyringCredentialResolver::new(

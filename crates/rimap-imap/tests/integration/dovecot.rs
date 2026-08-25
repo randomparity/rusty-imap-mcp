@@ -129,19 +129,18 @@ async fn case_04_login_rejected_emits_audit() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: Some(h.harness.pinned_fingerprint()),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        5_242_880,
+        10_485_760,
+    );
+    cfg.pinned_fingerprint = Some(h.harness.pinned_fingerprint());
     let store: Arc<dyn CredentialStore> = Arc::new(WrongPass);
     let creds: Arc<dyn rimap_core::CredentialResolver> =
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
@@ -291,19 +290,18 @@ async fn case_10_fetch_body_over_limit_drops_connection() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: Some(h.harness.pinned_fingerprint()),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 10,
-        max_append_bytes: 10_485_760,
-    };
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        10,
+        10_485_760,
+    );
+    cfg.pinned_fingerprint = Some(h.harness.pinned_fingerprint());
     let store: Arc<dyn CredentialStore> = Arc::new(support::container::StaticCreds(
         DovecotHarness::password().to_string(),
     ));
@@ -1142,19 +1140,17 @@ async fn case_21_probe_preflight_returns_observed_fingerprint() {
     let Some(h) = boot(PinChoice::None) else {
         return;
     };
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: None,
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        5_242_880,
+        10_485_760,
+    );
     let info = rimap_imap::preflight::probe_preflight(&cfg)
         .await
         .expect("preflight should succeed against the live harness");
@@ -1168,19 +1164,18 @@ async fn case_22_probe_preflight_mismatch_returns_typed_tls_error() {
         return;
     };
     let wrong = rimap_core::TlsFingerprint::from_cert_der(b"deliberately-wrong");
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: Some(wrong),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        5_242_880,
+        10_485_760,
+    );
+    cfg.pinned_fingerprint = Some(wrong);
     let err = rimap_imap::preflight::probe_preflight(&cfg)
         .await
         .expect_err("mismatched pin must produce an error");
