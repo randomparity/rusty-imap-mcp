@@ -57,10 +57,12 @@
 - Produces: `./scripts/check-compiler-probe-locks.sh [--fix] [--repo-root PATH]`; exit 0 only when at least one in-scope probe exists and every source/fixture/lock invariant holds.
 - Produces frozen internal Python records:
   - `Function(name, body_start, body_end, body, code, callees)`
-  - `CommandCall(path, function, start, end, executable, chain)`
-  - `FunctionFacts(callees, cargo_return, temporary_root, writes_manifest,
-    uses_fixture, copies_manifest, copies_lock)`
-  - `Probe(path, function, command_start, fixture)`
+  - `CommandCall(path, scope, start, end, binding, executable, statements,
+    execution, project_root)`
+  - `CopyFact(member, source_fixture, destination_root)`
+  - `FunctionFacts(callees, cargo_return, temporary_roots, manifest_roots,
+    fixture_uses, copies)`
+  - `Probe(path, scope, command_start, project_root, fixture)`
   - `Package(name, version, source, checksum, dependencies)`, hashable by all
     fields so graph traversal can return `set[Package]`.
 
@@ -96,7 +98,9 @@ The good synthetic lock must contain a unique `probe-fixture 0.0.0` root, a regi
 
 ```text
 good
-mixed-good-and-missing-offline
+mixed-good-and-missing-offline / mismatched-copy-root
+fluent-builder / split-builder / split-builder-missing-offline
+free-function-probe / impl-method-probe / trait-method-probe
 std-qualified / std-imported / std-import-alias
 tokio-qualified / tokio-imported / tokio-import-alias
 cargo-literal / cargo-pathbuf / cargo-env / cargo-env-os / cargo-env-macro
@@ -157,12 +161,22 @@ or benches. Exit non-zero when Git fails or discovery yields no in-scope probe.
 
 Inside the embedded Python, implement `code_mask(source)`,
 `matching_delimiter(mask, start, opening, closing)`,
-`extract_functions(source, mask)`, and
-`command_constructors(source, mask, function)` with the frozen record types
-above. `command_constructors` returns every constructor's start/end offsets and
-original builder-chain text; it never returns an undelimited partial chain.
+`extract_scopes(source, mask)`, and
+`command_invocations(source, mask, scope)` with the frozen record types above.
+`extract_scopes` returns free functions plus inherent-impl and trait-impl
+methods with identities qualified by their containing type/trait and source
+offset. `command_invocations` returns a fluent expression or follows a local
+binding from `let [mut] cmd = Command::new(...)` through subsequent
+`cmd.arg`, `cmd.args`, `cmd.current_dir`, `cmd.env`, and terminal
+`cmd.output`/`status`/`spawn` statements. Reassignment, return, argument
+passing, field storage, or scope exit before a terminal call is a fail-closed
+escape for a recognized Cargo executable.
 
-`code_mask` must preserve byte/character positions and newlines while replacing line comments, nested block comments, normal strings, raw strings with any hash count, byte strings, and character literals with spaces. Delimiter matching operates only on the mask. Function extraction recognizes local free functions, retains the original body for literal checks, and fails on an unterminated construct rather than under-reading it.
+`code_mask` must preserve byte/character positions and newlines while replacing
+line comments, nested block comments, normal strings, raw strings with any hash
+count, byte strings, and character literals with spaces. Delimiter matching
+operates only on the mask. Scope extraction retains original bodies for literal
+checks and fails on an unterminated construct rather than under-reading it.
 
 Constructor resolution must recognize:
 
@@ -179,17 +193,28 @@ An unresolved local type named `Command` is not silently classified as process e
 
 - [ ] **Step 4: Implement Cargo and temporary-project fixed-point resolution**
 
-Implement pure functions `function_facts(functions)`,
+Implement pure functions `function_facts(scopes)`,
 `resolve_fixed_point(facts)`, `classify_probe(command, facts)`, and
 `validate_probe(command, facts, source)`. The first returns
-`dict[str, FunctionFacts]`; the second mutates those facts until stable; the
-classifier returns `bool`; and validation returns the literal registered
-fixture path or raises the script's diagnostic exception.
+`dict[str, FunctionFacts]`; the second resolves local helper calls with
+parameter/return substitution until stable; the classifier returns `bool`; and
+validation returns a `Probe` or raises the script's diagnostic exception.
 
-Each `FunctionFacts` records direct callees, whether it returns a recognized Cargo expression, creates a temporary directory, writes `Cargo.toml`, references `COMPILER_PROBE_FIXTURE`, copies the registered `Cargo.toml`, copies the registered `Cargo.lock`, and returns/uses the temporary root. Propagate Cargo-return and temporary-project provenance through local calls until no fact changes.
+Assign every temporary-root binding a symbolic identity qualified by scope and
+binding. Record each `Cargo.toml` write and fixture copy as a relation to that
+identity. When a helper returns a root or accepts it as a parameter, substitute
+the caller's identity through the call edge. A probe is valid only when its
+command root, manifest root, manifest-copy destination, and lock-copy
+destination are the same symbolic root. Aggregate function-level booleans are
+insufficient.
 
-Classify a command only when all structural facts hold: resolved executable is Cargo; the command contains literal `check`; it uses `current_dir` or `--manifest-path`; and that root is a temporary project whose setup writes `Cargo.toml`, directly or through a local helper. For each classified command, inspect that command's own builder chain for `--locked` and `--offline`; do not let another command chain satisfy them. Require exactly one file-level literal registration and require the enclosing/helper closure to reference it and copy both registered files.
-
+Classify a command only when all structural facts hold: resolved executable is
+Cargo; its collected statements contain literal `check`; it uses `current_dir`
+or `--manifest-path`; and that exact root is a temporary project whose setup
+writes `Cargo.toml`, directly or through a local helper. Inspect the individual
+command's fluent or split statements for `--locked` and `--offline`; no other
+builder can satisfy them. Require exactly one file-level literal registration
+and require both registered fixture copies to target the command root.
 A helper whose body partly resembles a recognized Cargo or temporary-root producer but cannot be resolved must fail closed with path, function, and expression. A direct `cargo metadata` command and nested-Cargo-shaped production/build-script files remain unclassified.
 
 - [ ] **Step 5: Implement canonical lock parsing, reachability, and root containment**
@@ -287,16 +312,22 @@ git commit -m "test: guard nested Cargo probe locks"
 - Modify: `scripts/check-compiler-probe-locks.test.sh`
 
 **Interfaces:**
-- Consumes: Task 1's literal `COMPILER_PROBE_FIXTURE` registration and byte-copy/flag checks.
-- Produces: `fn fixture_root() -> PathBuf`, `fn new_probe_root(fixture: &Path) -> TempDir`, and unchanged `fn check_probe(&str) -> (bool, String)` in each integration test.
-- Produces: two fixture packages named `rimap-audit-e0639-probe` and `rimap-imap-e0639-probe`, version `0.0.0`.
+- Consumes: Task 1's literal `COMPILER_PROBE_FIXTURE` registration,
+  byte-copy/root-identity checks, and per-command flag checks.
+- Produces: `fn fixture_root() -> PathBuf`,
+  `fn new_probe_root(fixture: &Path) -> TempDir`,
+  `fn copy_fixture_file(fixture: &Path, root: &Path, name: &str) -> Result<(), String>`,
+  and unchanged `fn check_probe(&str) -> (bool, String)` in each integration
+  test.
+- Produces: two fixture packages named `rimap-audit-e0639-probe` and
+  `rimap-imap-e0639-probe`, version `0.0.0`.
 
 - [ ] **Step 1: Add the real-repository regression and observe the current harnesses fail**
 
-Append a final test case that invokes:
+Append the final assertion in its permanent green form:
 
 ```bash
-expect_fail "real repository rejects unlocked probes" \
+expect_ok "real repository recognizes both locked probes" \
   "$guard" --repo-root "$repo_root"
 ```
 
@@ -306,7 +337,10 @@ Run:
 bash scripts/check-compiler-probe-locks.test.sh
 ```
 
-Expected: FAIL because both current `check_probe` functions create a temporary `Cargo.toml` but lack `COMPILER_PROBE_FIXTURE`, copied fixture locks, `--locked`, and `--offline`.
+Expected: FAIL because the guard rejects both current `check_probe` functions:
+they create a temporary `Cargo.toml` but lack `COMPILER_PROBE_FIXTURE`, copied
+fixture locks, `--locked`, and `--offline`. Leave the `expect_ok` unchanged for
+the later green run.
 
 - [ ] **Step 2: Create the two fixture manifests and empty sources**
 
@@ -373,9 +407,33 @@ fn new_probe_root(fixture: &Path) -> TempDir {
         .tempdir_in(fixture.parent().expect("probe fixture parent exists"))
         .expect("create sibling probe tempdir")
 }
+
+fn copy_fixture_file(fixture: &Path, root: &Path, name: &str) -> Result<(), String> {
+    let source = fixture.join(name);
+    let destination = root.join(name);
+    std::fs::copy(&source, &destination)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "copy probe fixture {} -> {}: {error}",
+                source.display(),
+                destination.display(),
+            )
+        })
+}
 ```
 
-In `check_probe`, remove the formatted manifest. Copy `Cargo.toml` and `Cargo.lock` from `fixture_root()` to `dir.path()`, create `src`, write only the supplied `main.rs`, and invoke:
+In `check_probe`, remove the formatted manifest. Copy both registered files to
+the command root with:
+
+```rust
+for name in ["Cargo.toml", "Cargo.lock"] {
+    copy_fixture_file(&fixture, dir.path(), name)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+```
+
+Create `src`, write only the supplied `main.rs`, and invoke:
 
 ```rust
 let output = Command::new(cargo_bin())
@@ -391,11 +449,20 @@ let output = Command::new(cargo_bin())
     .expect("spawn locked offline cargo check");
 ```
 
-Keep `audit_crate_root` because it anchors the fixture. Remove `core_crate_root` because the fixture manifest owns the path. Preserve every source snippet and assertion below `check_probe` byte-for-byte.
+Add `fixture_copy_error_names_source_and_destination`, call
+`copy_fixture_file` with a missing `Cargo.lock`, and assert its `Err` contains
+the operation, source path, destination path, and OS error. Keep
+`audit_crate_root` because it anchors the fixture. Remove `core_crate_root`
+because the fixture manifest owns the path. Preserve every existing probe
+source and assertion byte-for-byte.
 
 - [ ] **Step 4: Apply the same fixture-copy path to IMAP**
 
-Add the same registration and helpers, anchored by `imap_crate_root()`. Remove `authz_crate_root` and the formatted manifest. Copy both fixture files byte-for-byte, overwrite only `src/main.rs`, retain the existing per-temp `CARGO_TARGET_DIR`, and use the same four Cargo arguments. Preserve all three probe snippets and all assertions.
+Add the same registration, helpers, path-bearing error test, and copy loop,
+anchored by `imap_crate_root()`. Remove `authz_crate_root` and the formatted
+manifest. Overwrite only `src/main.rs`, retain the per-temp
+`CARGO_TARGET_DIR`, and use the same four Cargo arguments. Preserve all three
+existing probe snippets and assertions.
 
 - [ ] **Step 5: Generate and verify the committed fixture locks**
 
@@ -417,18 +484,15 @@ cargo nextest run -p rimap-audit -E 'binary(non_exhaustive_e0639)'
 cargo nextest run -p rimap-imap -E 'binary(non_exhaustive_e0639)'
 ```
 
-Expected: 3 audit tests and 3 IMAP tests pass. Positive probes still contain `error[E0639]`; unrelated failures still do not.
+Expected: 4 audit tests and 4 IMAP tests pass. Positive probes still contain
+`error[E0639]`; unrelated failures still do not; copy diagnostics name both
+paths.
 
-- [ ] **Step 7: Make the real-repository guard assertion green**
+- [ ] **Step 7: Confirm the permanent real-repository assertion is green**
 
-Change the temporary `expect_fail` from Step 1 to:
+Do not edit the `expect_ok` assertion added in Step 1. Add an assertion that
+the guard's summary says exactly two in-scope invocations, then run:
 
-```bash
-expect_ok "real repository recognizes both locked probes" \
-  "$guard" --repo-root "$repo_root"
-```
-
-The test must also assert the guard's summary says exactly two in-scope invocations. Run:
 
 ```bash
 bash scripts/check-compiler-probe-locks.test.sh
@@ -610,7 +674,8 @@ cargo nextest run -p rimap-audit -E 'binary(non_exhaustive_e0639)'
 cargo nextest run -p rimap-imap -E 'binary(non_exhaustive_e0639)'
 ```
 
-Expected: every command exits 0, with exactly six E0639-binary tests passing across the two packages.
+Expected: every command exits 0, with exactly eight tests passing across the two
+E0639 binaries.
 
 - [ ] **Step 7: Commit maintenance and CI wiring**
 
@@ -643,7 +708,8 @@ cargo nextest run -p rimap-audit -E 'binary(non_exhaustive_e0639)'
 cargo nextest run -p rimap-imap -E 'binary(non_exhaustive_e0639)'
 ```
 
-Expected: guard tests pass, exactly two real in-scope invocations are reported, post-release orchestration passes, and all six compiler-error tests pass.
+Expected: guard tests pass, exactly two real in-scope invocations are reported,
+post-release orchestration passes, and all eight compiler-probe tests pass.
 
 - [ ] **Step 2: Verify workflow-specific gates**
 
