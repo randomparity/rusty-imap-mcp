@@ -116,6 +116,13 @@ def source_candidates(paths: set[Path]) -> list[Path]:
     return sorted(candidates)
 
 
+def char_literal_match(source: str, index: int) -> re.Match[str] | None:
+    return re.match(
+        r"'(?:\\(?:u\{[0-9A-Fa-f_]+\}|x[0-9A-Fa-f]{2}|.)|[^'\\\n])'",
+        source[index:],
+    )
+
+
 def strip_comments(source: str) -> str:
     output = list(source)
     index = 0
@@ -191,7 +198,7 @@ def strip_comments(source: str) -> str:
             elif source[index] == '"':
                 state = "string"
                 index += 1
-            elif source[index] == "'":
+            elif char_literal_match(source, index) is not None:
                 state = "char"
                 index += 1
             else:
@@ -215,13 +222,12 @@ def mask_literals(source: str) -> str:
                 if source[offset] != "\n":
                     output[offset] = " "
             index = end + len(end_marker)
-        elif source[index] in {'"', "'"}:
-            quote = source[index]
+        elif source[index] == '"':
             end = index + 1
             while end < len(source):
                 if source[end] == "\\":
                     end += 2
-                elif source[end] == quote:
+                elif source[end] == '"':
                     end += 1
                     break
                 else:
@@ -231,7 +237,14 @@ def mask_literals(source: str) -> str:
                     output[offset] = " "
             index = end
         else:
-            index += 1
+            char_match = char_literal_match(source, index)
+            if char_match is None:
+                index += 1
+                continue
+            end = index + char_match.end()
+            for offset in range(index, end):
+                output[offset] = " "
+            index = end
     return "".join(output)
 
 
@@ -413,7 +426,9 @@ def validate_check_body(relative_source: Path, body: FunctionBody) -> None:
 
 def validate_check_chain(relative_source: Path, chain: str) -> None:
     terminal = re.search(
-        r"\.(?:output|status|spawn)\s*\(\s*\)(?:\s*\.await)?\s*;\s*$", chain
+        r"\.(?:output|status|spawn)\s*\(\s*\)(?:\s*\.await)?"
+        r'(?:\s*\.expect\(\s*"[^"]*"\s*\))?\s*;\s*$',
+        chain,
     )
     if terminal is None:
         raise GuardError(
@@ -447,13 +462,13 @@ def validate_check_chain(relative_source: Path, chain: str) -> None:
 def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Probe | None:
     source = (repo / relative_source).read_text()
     imported = process_constructors(source)
-    function_bodies = extract_function_bodies(source)
+    try:
+        function_bodies = extract_function_bodies(source)
+    except GuardError as error:
+        raise GuardError(f"{relative_source}: {error}") from error
     candidates: list[tuple[FunctionBody, re.Match[str]]] = []
     for body in function_bodies:
         candidates.extend((body, match) for match in constructor_matches(body, imported))
-    source_has_temporary_project = any(
-        body_has_temporary_project(body) for body in function_bodies
-    )
 
     checks: list[tuple[FunctionBody, str]] = []
     saw_temporary_compiler = False
@@ -486,7 +501,7 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
                 )
             continue
         if not temporary:
-            if subcommand in COMPILER_SUBCOMMANDS and source_has_temporary_project:
+            if subcommand in COMPILER_SUBCOMMANDS and "COMPILER_PROBE_FIXTURE" in source:
                 raise GuardError(
                     f"{relative_source}: temporary Cargo setup is outside the builder body; "
                     "rewrite to canonical probe shape"

@@ -32,51 +32,56 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+const COMPILER_PROBE_FIXTURE: &str = "tests/fixtures/e0639-probe";
+
 /// Absolute path to the `rimap-audit` crate root, resolved at compile time.
 fn audit_crate_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
-/// Absolute path to the `rimap-core` crate root (sibling of rimap-audit).
-fn core_crate_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/ dir exists")
-        .join("rimap-core")
-}
-
-/// The `cargo` binary to use — cargo sets `CARGO` when running tests.
+/// The `cargo` binary to use — Cargo sets `CARGO` when running tests.
 fn cargo_bin() -> PathBuf {
     std::env::var("CARGO").map_or_else(|_| PathBuf::from("cargo"), PathBuf::from)
 }
 
-/// Create a minimal two-file temp workspace (`Cargo.toml` + `src/main.rs`)
-/// that depends on the local `rimap-audit` and `rimap-core` via path, then
-/// run `cargo check` on it and return the full stderr output.
+fn fixture_root() -> PathBuf {
+    audit_crate_root().join(COMPILER_PROBE_FIXTURE)
+}
+
+fn copy_fixture_file(fixture: &Path, root: &Path, name: &str) -> Result<(), String> {
+    let source = fixture.join(name);
+    let destination = root.join(name);
+    std::fs::copy(&source, &destination)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "copy {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })
+}
+
+fn new_probe_root(fixture: &Path) -> TempDir {
+    tempfile::Builder::new()
+        .tempdir_in(fixture.parent().expect("fixture parent exists"))
+        .expect("create probe tempdir")
+}
+
+/// Copy the locked downstream fixture, replace its source with a probe, and
+/// return the `cargo check` result.
 fn check_probe(probe_src: &str) -> (bool, String) {
-    let dir = TempDir::new().expect("tempdir");
-
-    let cargo_toml = format!(
-        r#"[package]
-name = "probe"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-rimap-audit = {{ path = "{audit}" }}
-rimap-core = {{ path = "{core}" }}
-"#,
-        audit = audit_crate_root().display(),
-        core = core_crate_root().display(),
-    );
-
-    std::fs::write(dir.path().join("Cargo.toml"), cargo_toml).expect("write probe Cargo.toml");
+    let fixture = fixture_root();
+    let dir = new_probe_root(&fixture);
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        copy_fixture_file(&fixture, dir.path(), name).unwrap_or_else(|error| panic!("{error}"));
+    }
     std::fs::create_dir_all(dir.path().join("src")).expect("create src/");
-    std::fs::write(dir.path().join("src").join("main.rs"), probe_src)
-        .expect("write probe src/main.rs");
+    std::fs::write(dir.path().join("src/main.rs"), probe_src).expect("write probe src/main.rs");
 
     let output = Command::new(cargo_bin())
-        .args(["check", "--message-format=short"])
+        .args(["check", "--locked", "--offline", "--message-format=short"])
+        .env("CARGO_TARGET_DIR", dir.path().join("target"))
         .current_dir(dir.path())
         .output()
         .expect("spawn cargo check");
@@ -180,4 +185,15 @@ fn unrelated_compile_failure_does_not_yield_e0639() {
         !stderr.contains("error[E0639]"),
         "an unrelated compile failure must not produce E0639; got:\n{stderr}",
     );
+}
+
+#[test]
+fn fixture_copy_error_names_source_and_destination() {
+    let fixture = fixture_root();
+    let dir = new_probe_root(&fixture);
+    let name = "missing.lock";
+    let error = copy_fixture_file(&fixture, dir.path(), name).expect_err("copy must fail");
+
+    assert!(error.contains(&fixture.join(name).display().to_string()));
+    assert!(error.contains(&dir.path().join(name).display().to_string()));
 }

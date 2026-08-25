@@ -1,0 +1,11 @@
+[package]
+name = "rimap-audit-e0639-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rimap-audit = { path = "../../.." }
+rimap-core = { path = "../../../../rimap-core" }
+
+[workspace]

@@ -1,0 +1,11 @@
+[package]
+name = "rimap-imap-e0639-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rimap-imap = { path = "../../.." }
+rimap-authz = { path = "../../../../rimap-authz" }
+
+[workspace]

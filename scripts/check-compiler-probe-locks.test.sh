@@ -598,6 +598,21 @@ case_empty_discovery() {
     expect_fail "empty discovery" "no direct temporary-downstream Cargo probes" "$guard" --repo-root "$repo"
 }
 
+case_real_repository() {
+    local repo output
+    repo="$(cd "$here/.." && pwd)"
+    if ! output="$("$guard" --repo-root "$repo" 2>&1)"; then
+        printf 'not ok - real repository\n%s\n' "$output" >&2
+        return 1
+    fi
+    if [[ "$output" != *"2 canonical invocation(s), 2 fixture(s)"* ]]; then
+        printf 'not ok - real repository reported unexpected summary\n%s\n' "$output" >&2
+        return 1
+    fi
+    printf 'ok - real repository reports exactly two canonical probes\n'
+    passed=$((passed + 1))
+}
+
 case_good
 case_missing_flags
 case_constructors
@@ -608,4 +623,5 @@ case_registration_and_files
 case_lock_graphs
 case_atomic_fix
 case_empty_discovery
+case_real_repository
 printf 'all check-compiler-probe-locks.sh tests passed (%d cases)\n' "$passed"
