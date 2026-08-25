@@ -124,7 +124,8 @@ non-check-build-rewrite / non-check-test-rewrite / non-check-bench-rewrite
 non-check-run-rewrite / non-check-rustc-rewrite / non-check-clippy-rewrite
 non-check-fix-rewrite
 split-builder-rewrite / split-setup-rewrite / arbitrary-helper-rewrite
-excluded-crate-src / excluded-build-rs / excluded-repository-metadata
+excluded-crate-src / excluded-build-rs
+excluded-metadata-same-body / excluded-metadata-other-body
 missing-locked / missing-offline
 missing-registration / duplicate-registration
 absolute-registration / escaping-registration / untracked-registration
@@ -205,9 +206,10 @@ must contain syntactically valid `async fn check_probe()` bodies with
 Discover recognized process constructors first and associate each with its
 enclosing function body. Within that body, resolve the Cargo executable,
 temporary `Cargo.toml` setup, and literal subcommand independently from every
-other body in the file. A noncompiling `metadata` call remains excluded even
-when another function in the same file creates a temporary manifest.
-
+other body in the file. The `excluded-metadata-same-body` case places temporary
+manifest setup beside a direct metadata builder and must pass. The
+`excluded-metadata-other-body` case puts setup in another function and must
+also pass, proving evidence cannot cross-capture the metadata constructor.
 When a Cargo constructor's body creates a temporary manifest but its fluent
 chain has no literal subcommand, assigns the command to a variable, lacks a
 terminal call, or uses setup outside the body, fail with the canonical rewrite
@@ -244,8 +246,9 @@ diagnostic. A second `check` builder missing a flag fails even when the first is
 compliant. A builder using another root, or fixture copies targeting another
 root, fails the same-root check.
 
-An integration-test file with a direct noncompiling `cargo metadata` command
-remains excluded. Files outside `crates/*/tests/` are never scanned. Print one
+An integration-test file with direct noncompiling `cargo metadata` remains
+excluded whether temporary manifest setup occurs in the same body or only
+another body. Files outside `crates/*/tests/` are never scanned. Print one
 deterministic summary line with the exact canonical invocation count; the real
 repository must report two.
 

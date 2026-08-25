@@ -76,9 +76,10 @@ Its regression suite covers mixed compliant and noncompliant canonical builders
 in one file; qualified, imported, and aliased standard and asynchronously
 awaited Tokio constructors; the Cargo literal and current `cargo_bin()` helper;
 flags after `--`; noncanonical split builder/setup rejection; non-`check`
-compiler-driving subcommand rejection; excluded `src/`, `build.rs`, and
-noncompiling Cargo commands; exact same-root manifest and lock copying; each
-missing flag; missing registration; missing or untracked fixture files;
+compiler-driving subcommand rejection; excluded `src/` and `build.rs`;
+noncompiling Cargo metadata with temporary setup in its own body and in another
+body; exact same-root manifest and lock copying; each missing flag; missing
+registration; missing or untracked fixture files;
 malformed or unreachable lock blocks;
 root/fixture drift; an unpruned root copy with a fixture block; and empty
 discovery. This is a focused canonical-shape gate for direct nested Cargo

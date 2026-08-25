@@ -176,7 +176,10 @@ covers:
 - non-`check` compiler-driving subcommand rejection;
 - two temporary roots where copies and `current_dir` disagree;
 - excluded nested-Cargo-shaped files under crate `src/` and at `build.rs`;
-- a direct Cargo command without a temporary downstream manifest;
+- direct noncompiling Cargo metadata with temporary manifest setup in the same
+  body, which remains excluded;
+- direct noncompiling Cargo metadata whose file has temporary setup only in
+  another body, which also remains excluded;
 - missing `--locked` and missing `--offline` independently;
 - missing, duplicate, absolute, escaping, and untracked fixture registration;
 - missing or non-byte-exact fixture manifest/lock copies;
