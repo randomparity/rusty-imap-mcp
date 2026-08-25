@@ -36,10 +36,13 @@ A focused repository guard scans every `std::process::Command::new` invocation
 in tracked Rust tests and resolves ordinary Cargo expressions: literal
 `\"cargo\"`, `PathBuf::from(\"cargo\")`, `CARGO` environment lookups, simple
 local aliases assigned from those forms, and zero-argument local helpers that
-return one of those forms. A Cargo invocation is an in-scope nested downstream
-probe only when its enclosing helper writes a temporary `Cargo.toml` and sets
-the Cargo process current directory to that manifest's root. Other direct Cargo
-commands, such as repository metadata checks, remain outside this decision.
+return one of those forms. It builds a local helper-call graph and propagates
+temporary-project roots to a fixed point, so setup may create and return the
+root from a helper separate from the Cargo launch. A Cargo invocation is an
+in-scope nested downstream probe when it runs `check` with `current_dir` or
+`--manifest-path` rooted in a local temporary project whose setup writes
+`Cargo.toml`. Other direct Cargo commands, such as repository metadata checks,
+remain outside this decision.
 
 Each in-scope invocation is validated independently; file-level evidence cannot
 satisfy a second builder. Every such invocation must use one literal
@@ -53,9 +56,10 @@ registry package identity: name, version, source, and checksum. It also
 requires exactly one fixture package identity from the fixture manifest, which
 a verbatim root-lock seed lacks. Its regression suite covers mixed compliant
 and noncompliant builders in one file, every supported direct, aliased, and
-helper-return Cargo expression, an excluded Cargo command without a temporary
-downstream manifest, fixture/generated-manifest drift, each missing flag,
-missing registration, missing or untracked fixture files, malformed locks,
+helper-return Cargo expression, temporary-project setup split into a separate
+local helper, an excluded Cargo command without a temporary downstream
+manifest, fixture/generated-manifest drift, each missing flag, missing
+registration, missing or untracked fixture files, malformed locks,
 root/fixture drift, an unpruned root copy, and empty discovery. This is a
 focused recurrence gate for nested Cargo in Rust tests, not a universal
 executable or compiler inventory.
