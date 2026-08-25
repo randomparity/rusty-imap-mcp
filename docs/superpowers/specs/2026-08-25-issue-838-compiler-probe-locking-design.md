@@ -122,18 +122,22 @@ versions.
    command position, Python `subprocess`, JavaScript/TypeScript process APIs,
    and command-container strings, with environment-based or literal Cargo
    resolution and any subcommand;
-5. strip any `+toolchain` selector, recognize a closed set of non-compiling
-   Cargo built-ins, and classify unknown subcommands, aliases, external
-   plugins, and wrappers as compiler-producing unless a parsed nested operation
-   proves otherwise; an exact fingerprint cannot downgrade that class;
+5. recognize Cargo plus direct Cargo-driving executables such as `cargo-*` and
+   `cross`; strip any `+toolchain` selector, recognize a closed set of
+   non-compiling Cargo built-ins, and classify unknown subcommands, aliases,
+   external plugins, and wrappers as compiler-producing unless a parsed nested
+   operation proves otherwise; an exact fingerprint cannot downgrade that
+   class;
 6. reject compiler-producing launches outside
    `crates/rimap-compiler-probe/src/lib.rs` unless they match one fixed exact
-   root-build fingerprint already used by repository documentation, packaging,
-   or test runners;
+   non-probe fingerprint already used by repository documentation, packaging,
+   release, fuzz, or test runners;
 7. include path, normalized executable and arguments, environment overrides,
-   effective working directory, and manifest-path selection in every
-   root-build fingerprint; require both working directory and manifest to
-   resolve to the repository workspace;
+   effective working directory, manifest selection, and execution kind in each
+   fingerprint; mechanically require either a persistent-workspace build bound
+   to an exact tracked root, HTML-oracle, or fuzz manifest, or a manifestless
+   install bound to exact package/source/version arguments and no working
+   directory manifest; temporary and dynamic manifests have no exception;
 8. require every other launch to match one checked-in exact fingerprint, with
    every fingerprint matching exactly once;
 9. require the helper fingerprint to contain `check`, `--locked`, and
@@ -159,10 +163,12 @@ Just and Make recipes, workflow `run:` blocks, package scripts, Dockerfile
 instructions, unknown non-document command containers, environment and literal
 resolution, in-source tests, arbitrarily named support scripts, built-in
 compiler subcommands, `+toolchain` selectors, aliases, unknown subcommands,
-and `nextest`, `llvm-cov`, `auditable`, and `fuzz` plugin/wrapper forms. It
-also covers a second wrapper carrying a false non-probe label, changed working
-directory or manifest selection on a root-build fingerprint, stale or
-path-wide fingerprints, missing helper use, manifest drift, an orphan fixture,
+direct `cargo-*` and `cross` executables, and `nextest`, `llvm-cov`,
+`auditable`, and `fuzz` forms. It also covers a second wrapper carrying a false
+non-probe label; changed executable, arguments, environment, working directory,
+manifest, or execution kind on a fingerprint; a temporary manifest disguised
+as persistent; a manifestless install that sees a workspace; stale or
+path-wide fingerprints; missing helper use; manifest drift; an orphan fixture;
 and empty discovery. It asserts that the
 existing embedded Cargo metadata launch in
 `scripts/check-fuzz-lock-parity.sh` has exactly one inventory entry. Static
@@ -202,11 +208,11 @@ Its unit test expands the accepted lock inventory and expected real bump set.
 ### Controls
 
 - The private helper is the sole supported nested Cargo process boundary. The
-  structural gate inventories direct Cargo launches in every tracked executable
-  surface, including embedded-language command containers, and fails unknown
-  non-document forms. It classifies subcommands mechanically, reserves the
-  compiler-probe exception structurally, and binds root-build exceptions to
-  repository working-directory and manifest semantics.
+  structural gate inventories Cargo and direct wrapper launches in every
+  tracked executable surface and fails unknown non-document forms. It
+  classifies wrappers fail closed, reserves the compiler-probe exception
+  structurally, and binds non-probe compiler fingerprints to exact persistent
+  workspaces or manifestless-install semantics.
 - The fixture lock is copied byte-for-byte before Cargo starts; a missing copy
   is a hard test failure.
 - `--locked` rejects manifest/lock disagreement; `--offline` prevents index or
@@ -245,10 +251,12 @@ policies remain authoritative.
    files, embedded Python in shell, Just and Make recipes, a workflow `run:`
    block, a package script, a Dockerfile, and an unknown non-document command
    container. Cover built-in compiler subcommands, `+toolchain` selectors,
-   aliases, unknown subcommands, `nextest`, `llvm-cov`, `auditable`, and
-   `fuzz`; also cover a second wrapper with a false non-probe label and a
-   root-build fingerprint changed only by working directory or manifest path.
-   Observe the inventory test reject every unclassified compiler launch.
+   aliases, unknown subcommands, direct `cargo-*` and `cross`, `nextest`,
+   `llvm-cov`, `auditable`, and `fuzz`; also cover a second wrapper with a false
+   non-probe label, each single-field fingerprint mutation, a temporary
+   manifest disguised as persistent, and a manifestless install that sees a
+   workspace. Observe the inventory test reject every unclassified compiler
+   launch.
 6. Run `just test-compiler-probe-locks`, `just
    check-compiler-probe-locks`, and the focused post-release-bump tests.
 7. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
@@ -261,17 +269,18 @@ policies remain authoritative.
   boundary; both harnesses use it.
 - Every direct Cargo launch in a tracked executable surface matches one exact
   reviewed fingerprint; compiler-producing exceptions are structurally fixed,
-  unknown, alias, plugin, and wrapper subcommands fail closed, root-build
-  exceptions bind repository cwd and manifest semantics, and any new, changed,
-  or unclassified launch fails the recurrence guard.
+  Cargo and direct wrappers fail closed, non-probe compiler fingerprints bind
+  exact persistent-workspace or manifestless-install semantics, and any new,
+  changed, or unclassified launch fails the recurrence guard.
 - Every nested downstream Cargo check installs a committed fixture lock and passes
   `--locked --offline`.
 - Every fixture registry package identity is present in the root `Cargo.lock`.
 - Missing locks, drift, malformed input, manifest-identity drift, direct
   compiler processes in each supported language or command container, an
-  embedded-language launch, a falsely labeled second wrapper, a changed root
-  cwd or manifest, online checks, and empty discovery each fail a focused
-  regression test.
+  embedded-language launch, a falsely labeled second wrapper, a direct
+  Cargo-driving executable, a changed fingerprint field, a temporary manifest,
+  a manifestless install that sees a workspace, online checks, and empty
+  discovery each fail a focused regression test.
 - Ordinary dependency updates have a documented realignment recipe; post-release bumps
   re-resolve and commit both fixture locks automatically.
 - The required `cargo-deny` CI context and local `just ci` both execute the recurrence
