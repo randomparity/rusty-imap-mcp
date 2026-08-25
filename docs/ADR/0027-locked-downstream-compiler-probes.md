@@ -41,22 +41,30 @@ the same focused contract before an E0639 assertion can pass.
 
 A repository guard inventories every direct Cargo process launch in every
 tracked Rust, shell, Python, JavaScript, and TypeScript source file, regardless
-of directory or Cargo subcommand. Each recognized launch must match a checked-in
-allowlist entry containing its path, normalized invocation fingerprint, and
-non-probe purpose. Any new launch or changed invocation fails until reviewed.
-The only allowlisted downstream-compiler purpose is
-`rimap-compiler-probe`; every exact-E0639 harness must depend on that crate and
-own a tracked fixture manifest and lock.
+of directory or Cargo subcommand. It derives the subcommand class from the
+invocation instead of trusting an author-supplied purpose. Compiler-producing
+launches are rejected outside `rimap-compiler-probe` except for the repository's
+fixed, exact root-build fingerprints already used for documentation, packaging,
+and test runners. Every other recognized launch must match a checked-in path and
+normalized invocation fingerprint. A new second wrapper therefore fails even
+when its author adds a descriptive label.
 
-The parser recognizes Rust `Command`, shell command position, Python
-`subprocess`, and JavaScript/TypeScript process APIs with environment-based or
-literal Cargo resolution. Synthetic negative tests cover in-source Rust tests,
-arbitrarily named support scripts, each supported language form, every common
-compiler-producing subcommand, a second wrapper, missing helper use, and
-missing locked/offline semantics in the helper. An inventory test also requires
-every allowlist entry to match exactly once, so stale or path-wide exemptions
-cannot hide a new launch. Deliberate source obfuscation remains subject to
-review like any other attempt to evade a repository guard.
+Every exact-E0639 harness must depend on `rimap-compiler-probe` and own a tracked
+fixture manifest and lock. The helper's exact fingerprint must contain
+`check`, `--locked`, and `--offline`; no allowlist entry can override those
+requirements.
+
+The inventory runs every language recognizer over every source file rather than
+selecting one parser from the file extension. It therefore detects embedded
+Python subprocesses in shell heredocs, including the existing Cargo metadata
+launch in `scripts/check-fuzz-lock-parity.sh`. Synthetic negative tests cover
+that mixed-language case, in-source Rust tests, arbitrarily named support
+scripts, every standalone language form, common compiler-producing subcommands,
+a second wrapper with a false non-probe label, missing helper use, and missing
+locked/offline helper flags. Every fixed allowlist fingerprint must match
+exactly once, so stale or path-wide exemptions cannot hide a new launch.
+Deliberate source obfuscation remains subject to review like any other attempt
+to evade a repository guard.
 
 The same guard verifies that every registry package identity in each fixture
 lock—name, version, source, and checksum—occurs in the root `Cargo.lock`. Its

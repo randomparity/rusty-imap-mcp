@@ -112,37 +112,47 @@ versions.
 
 1. enumerate every tracked Rust, shell, Python, JavaScript, and TypeScript
    source file, regardless of directory;
-2. recognize direct Cargo process launches through Rust `Command`, shell
+2. run every language recognizer over every file so embedded Python or
+   JavaScript in shell heredocs is inventoried alongside the host language;
+3. recognize direct Cargo process launches through Rust `Command`, shell
    command position, Python `subprocess`, and JavaScript/TypeScript process
    APIs, with environment-based or literal Cargo resolution and any
    subcommand;
-3. require each launch to match one checked-in allowlist entry containing its
-   path, normalized invocation fingerprint, and non-probe purpose; require each
-   allowlist entry to match exactly once;
-4. reserve the downstream-compiler purpose for
-   `crates/rimap-compiler-probe/src/lib.rs`;
-5. require every tracked exact-E0639 integration harness to use
+4. derive compiler-producing versus non-compiling behavior from the parsed
+   subcommand instead of an author-supplied purpose label;
+5. reject compiler-producing launches outside
+   `crates/rimap-compiler-probe/src/lib.rs` unless they match one fixed exact
+   root-build fingerprint already used by repository documentation, packaging,
+   or test runners;
+6. require every other launch to match one checked-in path and normalized
+   invocation fingerprint, with every fingerprint matching exactly once;
+7. require the helper fingerprint to contain `check`, `--locked`, and
+   `--offline`, with no allowlist override;
+8. require every tracked exact-E0639 integration harness to use
    `rimap-compiler-probe` and own no direct process construction;
-6. require each harness crate to own a matching tracked
+9. require each harness crate to own a matching tracked
    `tests/fixtures/e0639-probe/Cargo.toml` and `Cargo.lock`;
-7. compare fixture and helper-declared package identity, workspace boundary,
-   dependency names, and enabled features;
-8. parse the root and fixture lockfiles completely, failing on malformed or
-   empty package blocks; and
-9. require every registry package identity—name, version, source, and
-   checksum—in each fixture lock to occur in the root lock.
+10. compare fixture and helper-declared package identity, workspace boundary,
+    dependency names, and enabled features;
+11. parse the root and fixture lockfiles completely, failing on malformed or
+    empty package blocks; and
+12. require every registry package identity—name, version, source, and
+    checksum—in each fixture lock to occur in the root lock.
 
 Discovery fails loud on an unreadable repository, an empty probe set, or an
 empty Cargo-launch inventory. It is anchored at the repository root and uses
 tracked paths, so caller working directory and ignored scratch files cannot
 change the answer. The companion shell test uses synthetic repositories and
 lockfiles to cover good fixtures, version drift in either direction, missing
-or malformed locks, Rust, shell, Python, and JavaScript/TypeScript Cargo forms,
-environment and literal resolution, in-source tests, arbitrarily named support
-scripts, common compiler-producing subcommands, a second wrapper, stale or
-path-wide allowlist entries, missing helper use, manifest drift, an orphan
-fixture, and empty discovery. Static inventory cannot defeat deliberate source
-obfuscation; review owns intentional attempts to bypass a repository guard.
+or malformed locks, every standalone language form, embedded Python heredocs
+inside shell sources, environment and literal resolution, in-source tests,
+arbitrarily named support scripts, common compiler-producing subcommands, a
+second wrapper carrying a false non-probe label, stale or path-wide
+fingerprints, missing helper use, manifest drift, an orphan fixture, and empty
+discovery. It also asserts that the existing embedded Cargo metadata launch in
+`scripts/check-fuzz-lock-parity.sh` has exactly one inventory entry. Static
+inventory cannot defeat deliberate source obfuscation; review owns intentional
+attempts to bypass a repository guard.
 
 `just check-compiler-probe-locks` runs the policy. `just
 realign-compiler-probe-locks` seeds each fixture lock from the root lock, runs Cargo
@@ -177,10 +187,11 @@ Its unit test expands the accepted lock inventory and expected real bump set.
 ### Controls
 
 - The private helper is the sole supported nested Cargo process boundary. The
-  structural gate inventories every direct Cargo launch in tracked Rust,
-  shell, Python, JavaScript, and TypeScript sources. Exact fingerprint
-  allowlisting separates existing non-probe maintenance commands from the one
-  downstream-compiler boundary without path-wide exemptions.
+  structural gate inventories every direct Cargo launch in tracked code,
+  including embedded-language heredocs. It classifies subcommands
+  mechanically, reserves the compiler-probe exception structurally, and uses
+  exact fingerprints only for existing root-build and non-compiling
+  maintenance commands.
 - The fixture lock is copied byte-for-byte before Cargo starts; a missing copy
   is a hard test failure.
 - `--locked` rejects manifest/lock disagreement; `--offline` prevents index or
@@ -216,9 +227,10 @@ policies remain authoritative.
    each unrelated-failure probe must still omit E0639, and copied locks must
    remain byte-identical.
 5. Add synthetic Cargo launches in an in-source Rust test and arbitrarily named
-   shell, Python, JavaScript, and TypeScript support files. Cover `build`,
-   `check`, `clippy`, `doc`, `fix`, `run`, `rustc`, and `test`, then observe the
-   inventory test reject every unclassified launch.
+   shell, Python, JavaScript, and TypeScript support files. Cover embedded
+   Python in a shell heredoc, `build`, `check`, `clippy`, `doc`, `fix`, `run`,
+   `rustc`, and `test`, plus a second wrapper with a false non-probe label.
+   Observe the inventory test reject every unclassified compiler launch.
 6. Run `just test-compiler-probe-locks`, `just
    check-compiler-probe-locks`, and the focused post-release-bump tests.
 7. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
@@ -229,14 +241,17 @@ policies remain authoritative.
 - Both exact-E0639 test binaries preserve all current positive and negative assertions.
 - `rimap-compiler-probe` is the sole supported nested Cargo compiler-probe
   boundary; both harnesses use it.
-- Every direct Cargo launch in tracked code matches one exact reviewed inventory
-  entry, and any new or changed launch fails the recurrence guard.
+- Every direct Cargo launch in tracked code matches one exact reviewed
+  fingerprint; compiler-producing exceptions are structurally fixed rather
+  than author-labeled, and any new or changed launch fails the recurrence
+  guard.
 - Every nested downstream Cargo check installs a committed fixture lock and passes
   `--locked --offline`.
 - Every fixture registry package identity is present in the root `Cargo.lock`.
-- Missing locks, drift, malformed input, manifest-identity drift, direct Cargo
-  compiler processes in each supported test/support language, a second wrapper,
-  online checks, and empty discovery each fail a focused regression test.
+- Missing locks, drift, malformed input, manifest-identity drift,
+  direct compiler processes in each supported language, an embedded-language
+  launch, a falsely labeled second wrapper, online checks, and empty discovery
+  each fail a focused regression test.
 - Ordinary dependency updates have a documented realignment recipe; post-release bumps
   re-resolve and commit both fixture locks automatically.
 - The required `cargo-deny` CI context and local `just ci` both execute the recurrence
