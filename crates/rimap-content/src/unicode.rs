@@ -110,6 +110,7 @@ pub fn filter_codepoints(input: &str) -> FilterResult {
 /// many codepoints of each class were stripped from the input; the
 /// [`sanitize`] composer converts non-zero counts into
 /// [`SecurityWarning`] entries.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct FilterResult {
     /// Filtered text with disallowed codepoints removed.

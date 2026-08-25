@@ -65,6 +65,14 @@ pub fn extract_subject(raw: &[u8]) -> Option<String> {
 }
 
 /// Sanitized outbound HTML plus the warnings raised while stripping it.
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_content::OutboundHtml {
+///     body_html: String::new(),
+///     warnings: Vec::new(),
+/// };
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct OutboundHtml {
     /// Ammonia-sanitized HTML: tag-allowlisted, scripts/styles/iframes and

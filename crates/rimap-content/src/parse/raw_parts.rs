@@ -4,6 +4,7 @@
 use crate::error::ContentError;
 
 /// A single decoded MIME part, identified by RFC 3501 part number.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct RawPart {
     /// IMAP-style part ID (e.g. "1", "1.2", "2").

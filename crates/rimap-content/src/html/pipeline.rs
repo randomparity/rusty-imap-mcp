@@ -23,6 +23,7 @@ use super::sanitize::sanitize_body;
 // this unreachable outside the crate; production callers reach this type
 // through [`crate::output::Content`] populated by [`crate::parse::parse_message`].
 /// Result of processing a single HTML body part.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct HtmlResult {
     /// Plain text extracted from the HTML, already run through
