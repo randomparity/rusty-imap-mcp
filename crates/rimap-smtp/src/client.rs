@@ -12,12 +12,33 @@ use crate::error::SmtpError;
 /// plain string addresses so callers do not need to depend on
 /// `lettre`'s address types. Addresses are parsed here at the crate
 /// boundary and surface as `SmtpError::Rejected` on malformed input.
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_smtp::SendEnvelope {
+///     from: "sender@example.test".to_owned(),
+///     to: vec!["recipient@example.test".to_owned()],
+/// };
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct SendEnvelope {
     /// Sender address (`MAIL FROM`).
     pub from: String,
     /// Recipient addresses (`RCPT TO`). All of To/Cc/Bcc collapsed.
     pub to: Vec<String>,
+}
+
+impl SendEnvelope {
+    /// Construct an SMTP envelope.
+    ///
+    /// # Arguments
+    ///
+    /// * `from` - Envelope sender address.
+    /// * `to` - Envelope recipient addresses.
+    #[must_use]
+    pub fn new(from: String, to: Vec<String>) -> Self {
+        Self { from, to }
+    }
 }
 
 /// SMTP client built from config. Each `send_raw` call opens a fresh
@@ -287,6 +308,17 @@ mod tests {
     fn client_builds_with_no_encryption() {
         let client = SmtpClient::new(&test_config(), "password");
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn send_envelope_new_preserves_fields() {
+        let from = "sender@example.test".to_owned();
+        let to = vec!["recipient@example.test".to_owned()];
+
+        let envelope = SendEnvelope::new(from.clone(), to.clone());
+
+        assert_eq!(envelope.from, from);
+        assert_eq!(envelope.to, to);
     }
 
     #[tokio::test]

@@ -262,19 +262,18 @@ async fn seed_body_through_proxy(chaos: &ChaosHarness, port: u16, encryption: &s
     ))
     .expect("seed audit open");
 
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: "127.0.0.1".into(),
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        "127.0.0.1".into(),
         port,
-        encryption: parse_encryption(encryption),
-        username: "rimap-test".into(),
-        pinned_fingerprint: Some(*chaos.fingerprint()),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(30),
-        max_fetch_body_bytes: ROOMY_FETCH,
-        max_append_bytes: ROOMY_APPEND,
-    };
+        parse_encryption(encryption),
+        "rimap-test".into(),
+        Duration::from_secs(10),
+        Duration::from_secs(30),
+        ROOMY_FETCH,
+        ROOMY_APPEND,
+    );
+    cfg.pinned_fingerprint = Some(*chaos.fingerprint());
     let store: Arc<dyn CredentialStore> = Arc::new(StaticCreds);
     let creds: Arc<dyn rimap_core::CredentialResolver> = Arc::new(KeyringCredentialResolver::new(
         store,

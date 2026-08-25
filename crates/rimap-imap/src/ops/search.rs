@@ -7,6 +7,14 @@ use crate::error::ImapError;
 use crate::types::{SearchQuery, StructuredQuery, Uid};
 
 /// Outcome of a `SEARCH`: the matched UIDs plus the observed UIDVALIDITY.
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_imap::ops::search::SearchOutcome {
+///     uids: Vec::new(),
+///     uidvalidity: None,
+/// };
+/// ```
+#[non_exhaustive]
 #[derive(Debug)]
 #[must_use = "check uidvalidity to pin the session"]
 pub struct SearchOutcome {

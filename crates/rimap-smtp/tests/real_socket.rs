@@ -30,10 +30,7 @@ fn config(port: u16, encryption: SmtpEncryption) -> SmtpConfig {
 }
 
 fn envelope() -> SendEnvelope {
-    SendEnvelope {
-        from: "a@example.com".into(),
-        to: vec!["b@example.com".into()],
-    }
+    SendEnvelope::new("a@example.com".into(), vec!["b@example.com".into()])
 }
 
 async fn send(port: u16, enc: SmtpEncryption) -> SmtpError {

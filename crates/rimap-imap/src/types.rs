@@ -61,6 +61,7 @@ impl MessageId {
 }
 
 /// IMAP `LIST` response entry.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
     /// Mailbox path reported by the server (Modified UTF-7, not decoded).
@@ -75,6 +76,17 @@ pub struct Folder {
 }
 
 impl Folder {
+    /// Construct a folder entry with the given mailbox name and no metadata.
+    #[must_use]
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            attributes: Vec::new(),
+            delimiter: None,
+            special_use: None,
+        }
+    }
+
     /// Whether this mailbox can be `SELECT`ed. Derived from the attribute
     /// list — `\Noselect` and `\NonExistent` are non-selectable.
     #[must_use]
@@ -87,6 +99,7 @@ impl Folder {
 }
 
 /// Bitflags-style selection for `STATUS` items.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -120,6 +133,7 @@ impl StatusItems {
 }
 
 /// Result of a `STATUS` command. Fields are populated only when requested.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FolderStatus {
     /// `MESSAGES`.
@@ -135,6 +149,7 @@ pub struct FolderStatus {
 }
 
 /// Result of a `SELECT` or `EXAMINE` command.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedFolder {
     /// Mailbox name.
@@ -182,6 +197,7 @@ pub enum FlagAction {
 
 /// Result of moving a single message. `new_uid` is `None` when the
 /// server lacks UIDPLUS or when using the COPY+DELETE fallback.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveResult {
     /// UID in the source folder (before the move).
@@ -200,6 +216,7 @@ pub struct MoveResult {
 }
 
 /// Result of appending a message to a mailbox.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendResult {
     /// UID assigned by the server. `None` if the server lacks UIDPLUS.
@@ -210,6 +227,7 @@ pub struct AppendResult {
 
 /// IMAP `ENVELOPE` response. Header values stay raw bytes — RFC 2047 decoding
 /// is Sprint 4's responsibility.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     /// `Date` header, raw.
@@ -234,7 +252,27 @@ pub struct Envelope {
     pub message_id: Option<MessageId>,
 }
 
+impl Envelope {
+    /// Construct an envelope with no header values or addresses.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            date: None,
+            subject_raw: None,
+            from: Vec::new(),
+            sender: Vec::new(),
+            reply_to: Vec::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            in_reply_to: None,
+            message_id: None,
+        }
+    }
+}
+
 /// IMAP envelope address. Raw bytes; no charset decoding.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
     /// Personal name (`name`), raw.
@@ -245,6 +283,19 @@ pub struct Address {
     pub mailbox: Option<Vec<u8>>,
     /// Host part, raw.
     pub host: Option<Vec<u8>>,
+}
+
+impl Address {
+    /// Construct an address with every component absent.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            name: None,
+            adl: None,
+            mailbox: None,
+            host: None,
+        }
+    }
 }
 
 /// IMAP `BODYSTRUCTURE` recursive type.
@@ -318,6 +369,7 @@ pub enum SearchQuery {
 /// and CR/LF/NUL bytes are rejected. Both are enforced when the
 /// query is compiled to an IMAP search key — see
 /// `crates/rimap-imap/src/ops/search.rs`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderSearch {
     /// RFC 5322 field name (e.g. `"List-Id"`, `"X-Spam-Score"`).
@@ -326,7 +378,16 @@ pub struct HeaderSearch {
     pub value: String,
 }
 
+impl HeaderSearch {
+    /// Construct a header-search clause from its field name and value.
+    #[must_use]
+    pub fn new(name: String, value: String) -> Self {
+        Self { name, value }
+    }
+}
+
 /// Structured SEARCH builder. Empty builder = `ALL`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StructuredQuery {
     /// Match `FROM` substring.
@@ -378,6 +439,14 @@ pub struct StructuredQuery {
 
 /// FETCH item selection. `ENVELOPE`, `BODYSTRUCTURE`, `UID`, `FLAGS`, `SIZE`.
 /// `BODY[]` has its own dedicated method (`Connection::fetch_body`).
+///
+/// ```compile_fail,E0639
+/// let _ = rimap_imap::types::FetchSpec {
+///     bodystructure: true,
+///     ..rimap_imap::types::FetchSpec::default()
+/// };
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -398,6 +467,7 @@ pub struct FetchSpec {
 
 /// One message returned by a `fetch` call. Only the fields requested in the
 /// `FetchSpec` are populated; the rest are `None`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedMessage {
     /// Message UID (always present — IMAP servers always return UID for UID FETCH).
@@ -410,6 +480,20 @@ pub struct FetchedMessage {
     pub flags: Option<Vec<Flag>>,
     /// `RFC822.SIZE` if requested.
     pub size: Option<u32>,
+}
+
+impl FetchedMessage {
+    /// Construct a fetched message with only its UID populated.
+    #[must_use]
+    pub fn new(uid: Uid) -> Self {
+        Self {
+            uid,
+            envelope: None,
+            bodystructure: None,
+            flags: None,
+            size: None,
+        }
+    }
 }
 
 /// RFC 3501 / RFC 5258 mailbox name attribute reported by LIST.
@@ -607,6 +691,105 @@ pub(crate) mod tests {
             special_use: None,
         };
         assert!(f.selectable());
+    }
+
+    #[test]
+    fn record_constructor_folder_new_matches_legacy_literal() {
+        let name = "Archive".to_string();
+        let expected = super::Folder {
+            name: name.clone(),
+            attributes: vec![],
+            delimiter: None,
+            special_use: None,
+        };
+
+        let actual = super::Folder::new(name);
+
+        assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.attributes, expected.attributes);
+        assert_eq!(actual.delimiter, expected.delimiter);
+        assert_eq!(actual.special_use, expected.special_use);
+    }
+
+    #[test]
+    fn record_constructor_envelope_empty_matches_legacy_literal() {
+        let expected = super::Envelope {
+            date: None,
+            subject_raw: None,
+            from: vec![],
+            sender: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            in_reply_to: None,
+            message_id: None,
+        };
+
+        let actual = super::Envelope::empty();
+
+        assert_eq!(actual.date, expected.date);
+        assert_eq!(actual.subject_raw, expected.subject_raw);
+        assert_eq!(actual.from, expected.from);
+        assert_eq!(actual.sender, expected.sender);
+        assert_eq!(actual.reply_to, expected.reply_to);
+        assert_eq!(actual.to, expected.to);
+        assert_eq!(actual.cc, expected.cc);
+        assert_eq!(actual.bcc, expected.bcc);
+        assert_eq!(actual.in_reply_to, expected.in_reply_to);
+        assert_eq!(actual.message_id, expected.message_id);
+    }
+
+    #[test]
+    fn record_constructor_address_empty_matches_legacy_literal() {
+        let expected = super::Address {
+            name: None,
+            adl: None,
+            mailbox: None,
+            host: None,
+        };
+
+        let actual = super::Address::empty();
+
+        assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.adl, expected.adl);
+        assert_eq!(actual.mailbox, expected.mailbox);
+        assert_eq!(actual.host, expected.host);
+    }
+
+    #[test]
+    fn record_constructor_header_search_new_matches_legacy_literal() {
+        let name = "X-Case-Sensitive".to_string();
+        let value = "MiXeD value".to_string();
+        let expected = super::HeaderSearch {
+            name: name.clone(),
+            value: value.clone(),
+        };
+
+        let actual = super::HeaderSearch::new(name, value);
+
+        assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.value, expected.value);
+    }
+
+    #[test]
+    fn record_constructor_fetched_message_new_matches_legacy_literal() {
+        let uid = uid(42);
+        let expected = super::FetchedMessage {
+            uid,
+            envelope: None,
+            bodystructure: None,
+            flags: None,
+            size: None,
+        };
+
+        let actual = super::FetchedMessage::new(uid);
+
+        assert_eq!(actual.uid, expected.uid);
+        assert_eq!(actual.envelope, expected.envelope);
+        assert_eq!(actual.bodystructure, expected.bodystructure);
+        assert_eq!(actual.flags, expected.flags);
+        assert_eq!(actual.size, expected.size);
     }
 
     /// Test-only UID constructor shared by the crate's unit tests. Panics

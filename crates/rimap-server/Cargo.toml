@@ -381,4 +381,3 @@ path = "tests/meta/canary_sweep_meta.rs"
 [[test]]
 name = "transcript_normalize"
 path = "tests/meta/transcript_normalize.rs"
-

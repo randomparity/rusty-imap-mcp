@@ -158,19 +158,18 @@ fn test_account_config(harness: &DovecotHarness) -> ValidatedAccountConfig {
 }
 
 fn test_connection(harness: &DovecotHarness, audit: &AuditWriter) -> Connection {
-    let conn_cfg = ConnectionConfig {
-        account: None,
-        account_id: AccountId::default_account(),
-        host: "127.0.0.1".into(),
-        port: harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: ACCOUNT_USERNAME.into(),
-        pinned_fingerprint: Some(*harness.fingerprint()),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(30),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let mut conn_cfg = ConnectionConfig::new(
+        AccountId::default_account(),
+        "127.0.0.1".into(),
+        harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        ACCOUNT_USERNAME.into(),
+        Duration::from_secs(10),
+        Duration::from_secs(30),
+        5_242_880,
+        10_485_760,
+    );
+    conn_cfg.pinned_fingerprint = Some(*harness.fingerprint());
     let store: Arc<dyn CredentialStore> =
         Arc::new(StaticCreds("RIMAP-CANARY-DVC-9f83b1a7c0d6e4f2".into()));
     let creds: Arc<dyn rimap_core::CredentialResolver> =
@@ -405,12 +404,9 @@ async fn send_email_real_socket_delivers_multipart_and_copies() {
 /// server (the fixture auto-creates `Sent`, so an absent-`Sent` approach would
 /// not fail). Exercises the fail-open path.
 fn nonexistent_sent_map() -> rimap_imap::SpecialUseMap {
-    let folder = rimap_imap::types::Folder {
-        name: "NonexistentSentFolder".into(),
-        attributes: Vec::new(),
-        delimiter: Some('/'),
-        special_use: Some(rimap_imap::SpecialUse::Sent),
-    };
+    let mut folder = rimap_imap::types::Folder::new("NonexistentSentFolder".into());
+    folder.delimiter = Some('/');
+    folder.special_use = Some(rimap_imap::SpecialUse::Sent);
     rimap_imap::SpecialUseMap::from_folders(&[folder])
 }
 

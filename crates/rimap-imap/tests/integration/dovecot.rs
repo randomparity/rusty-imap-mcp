@@ -129,19 +129,18 @@ async fn case_04_login_rejected_emits_audit() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: Some(h.harness.pinned_fingerprint()),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        5_242_880,
+        10_485_760,
+    );
+    cfg.pinned_fingerprint = Some(h.harness.pinned_fingerprint());
     let store: Arc<dyn CredentialStore> = Arc::new(WrongPass);
     let creds: Arc<dyn rimap_core::CredentialResolver> =
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
@@ -190,9 +189,10 @@ async fn case_06_search_structured_subject_match() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    let q = SearchQuery::Structured(StructuredQuery {
-        subject: Some("Sprint 3 plain text fixture".to_string()),
-        ..StructuredQuery::default()
+    let q = SearchQuery::Structured({
+        let mut query = StructuredQuery::default();
+        query.subject = Some("Sprint 3 plain text fixture".to_string());
+        query
     });
     let uids = Box::pin(h.connection.search("INBOX", q))
         .await
@@ -229,22 +229,20 @@ async fn case_08_fetch_envelope_and_bodystructure() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    let q = SearchQuery::Structured(StructuredQuery {
-        subject: Some("Sprint 3 multipart fixture".to_string()),
-        ..StructuredQuery::default()
+    let q = SearchQuery::Structured({
+        let mut query = StructuredQuery::default();
+        query.subject = Some("Sprint 3 multipart fixture".to_string());
+        query
     });
     let uids = Box::pin(h.connection.search("INBOX", q))
         .await
         .unwrap()
         .uids;
     assert!(!uids.is_empty());
-    let spec = FetchSpec {
-        envelope: true,
-        bodystructure: true,
-        uid: true,
-        flags: false,
-        size: false,
-    };
+    let mut spec = FetchSpec::default();
+    spec.envelope = true;
+    spec.bodystructure = true;
+    spec.uid = true;
     let (msgs, _) = h
         .connection
         .fetch("INBOX", &uids, spec, None)
@@ -264,9 +262,10 @@ async fn case_09_fetch_body_under_limit() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    let q = SearchQuery::Structured(StructuredQuery {
-        subject: Some("Sprint 3 plain text fixture".to_string()),
-        ..StructuredQuery::default()
+    let q = SearchQuery::Structured({
+        let mut query = StructuredQuery::default();
+        query.subject = Some("Sprint 3 plain text fixture".to_string());
+        query
     });
     let uids = Box::pin(h.connection.search("INBOX", q))
         .await
@@ -291,19 +290,18 @@ async fn case_10_fetch_body_over_limit_drops_connection() {
     let Some(h) = boot(PinChoice::Correct) else {
         return;
     };
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: Some(h.harness.pinned_fingerprint()),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 10,
-        max_append_bytes: 10_485_760,
-    };
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        10,
+        10_485_760,
+    );
+    cfg.pinned_fingerprint = Some(h.harness.pinned_fingerprint());
     let store: Arc<dyn CredentialStore> = Arc::new(support::container::StaticCreds(
         DovecotHarness::password().to_string(),
     ));
@@ -319,9 +317,10 @@ async fn case_10_fetch_body_over_limit_drops_connection() {
     // is `max_fetch_body_bytes`, not the audit writer.
     let conn = Connection::new(cfg, sink, creds);
 
-    let q = SearchQuery::Structured(StructuredQuery {
-        subject: Some("Sprint 3 multipart fixture".to_string()),
-        ..StructuredQuery::default()
+    let q = SearchQuery::Structured({
+        let mut query = StructuredQuery::default();
+        query.subject = Some("Sprint 3 multipart fixture".to_string());
+        query
     });
     let uids = Box::pin(conn.search("INBOX", q)).await.unwrap().uids;
     let result = conn.fetch_body("INBOX", uids[0], None).await;
@@ -397,9 +396,10 @@ async fn case_12_store_add_seen_flag() {
     // Search for it.
     let uids = Box::pin(h.connection.search(
         "INBOX",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("store-seen".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("store-seen".to_string());
+            query
         }),
     ))
     .await
@@ -428,9 +428,10 @@ async fn case_12_store_add_seen_flag() {
         .fetch(
             "INBOX",
             &[uid],
-            rimap_imap::types::FetchSpec {
-                flags: true,
-                ..Default::default()
+            {
+                let mut spec = rimap_imap::types::FetchSpec::default();
+                spec.flags = true;
+                spec
             },
             None,
         )
@@ -455,9 +456,10 @@ async fn case_13_store_remove_seen_flag() {
 
     let uids = Box::pin(h.connection.search(
         "INBOX",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("store-unseen".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("store-unseen".to_string());
+            query
         }),
     ))
     .await
@@ -486,9 +488,10 @@ async fn case_13_store_remove_seen_flag() {
         .fetch(
             "INBOX",
             &[uid],
-            rimap_imap::types::FetchSpec {
-                flags: true,
-                ..Default::default()
+            {
+                let mut spec = rimap_imap::types::FetchSpec::default();
+                spec.flags = true;
+                spec
             },
             None,
         )
@@ -553,9 +556,10 @@ async fn case_15_append_message_to_inbox() {
     // Verify the message is in INBOX by searching for it.
     let uids = Box::pin(h.connection.search(
         "INBOX",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("append-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("append-test".to_string());
+            query
         }),
     ))
     .await
@@ -569,9 +573,10 @@ async fn case_15_append_message_to_inbox() {
         .fetch(
             "INBOX",
             &[uids[0]],
-            rimap_imap::types::FetchSpec {
-                flags: true,
-                ..Default::default()
+            {
+                let mut spec = rimap_imap::types::FetchSpec::default();
+                spec.flags = true;
+                spec
             },
             None,
         )
@@ -596,9 +601,10 @@ async fn case_16_move_message_between_folders() {
 
     let uids = Box::pin(h.connection.search(
         "INBOX",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("move-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("move-test".to_string());
+            query
         }),
     ))
     .await
@@ -619,9 +625,10 @@ async fn case_16_move_message_between_folders() {
     // Verify the message is gone from INBOX.
     let after_uids = Box::pin(h.connection.search(
         "INBOX",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("move-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("move-test".to_string());
+            query
         }),
     ))
     .await
@@ -635,9 +642,10 @@ async fn case_16_move_message_between_folders() {
     // Verify the message is in Archive.
     let archive_uids = Box::pin(h.connection.search(
         "Archive",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("move-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("move-test".to_string());
+            query
         }),
     ))
     .await
@@ -665,9 +673,10 @@ async fn case_25_move_message_uidvalidity_guard() {
 
     let msg = support::fixtures::minimal_rfc5322("move-guard-test");
     let subject_query = || {
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("move-guard-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("move-guard-test".to_string());
+            query
         })
     };
     h.connection
@@ -763,9 +772,10 @@ async fn case_17_delete_message() {
     // Find the appended message
     let uids = Box::pin(h.connection.search(
         "INBOX",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("delete-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("delete-test".to_string());
+            query
         }),
     ))
     .await
@@ -788,9 +798,10 @@ async fn case_17_delete_message() {
     // Verify it's gone from INBOX
     let after = Box::pin(h.connection.search(
         "INBOX",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("delete-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("delete-test".to_string());
+            query
         }),
     ))
     .await
@@ -822,9 +833,10 @@ async fn case_23_delete_message_uidvalidity_guard() {
         .unwrap();
     let outcome = Box::pin(h.connection.search(
         folder,
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("delete-guard-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("delete-guard-test".to_string());
+            query
         }),
     ))
     .await
@@ -861,9 +873,10 @@ async fn case_23_delete_message_uidvalidity_guard() {
         .unwrap();
     let outcome = Box::pin(h.connection.search(
         folder,
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("delete-guard-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("delete-guard-test".to_string());
+            query
         }),
     ))
     .await
@@ -893,9 +906,10 @@ async fn case_23_delete_message_uidvalidity_guard() {
     // The message must still be present — the guard aborted before delete.
     let after = Box::pin(h.connection.search(
         folder,
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("delete-guard-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("delete-guard-test".to_string());
+            query
         }),
     ))
     .await
@@ -925,9 +939,10 @@ async fn case_18_expunge() {
     // Find it
     let uids = Box::pin(h.connection.search(
         "Trash",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("expunge-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("expunge-test".to_string());
+            query
         }),
     ))
     .await
@@ -959,9 +974,10 @@ async fn case_18_expunge() {
     // Verify it's gone
     let after = Box::pin(h.connection.search(
         "Trash",
-        rimap_imap::types::SearchQuery::Structured(rimap_imap::types::StructuredQuery {
-            subject: Some("expunge-test".to_string()),
-            ..Default::default()
+        rimap_imap::types::SearchQuery::Structured({
+            let mut query = rimap_imap::types::StructuredQuery::default();
+            query.subject = Some("expunge-test".to_string());
+            query
         }),
     ))
     .await
@@ -1142,19 +1158,17 @@ async fn case_21_probe_preflight_returns_observed_fingerprint() {
     let Some(h) = boot(PinChoice::None) else {
         return;
     };
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: None,
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        5_242_880,
+        10_485_760,
+    );
     let info = rimap_imap::preflight::probe_preflight(&cfg)
         .await
         .expect("preflight should succeed against the live harness");
@@ -1168,19 +1182,18 @@ async fn case_22_probe_preflight_mismatch_returns_typed_tls_error() {
         return;
     };
     let wrong = rimap_core::TlsFingerprint::from_cert_der(b"deliberately-wrong");
-    let cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: DovecotHarness::host().to_string(),
-        port: h.harness.port(),
-        encryption: rimap_imap::ImapEncryption::Tls,
-        username: DovecotHarness::username().to_string(),
-        pinned_fingerprint: Some(wrong),
-        connect_timeout: Duration::from_secs(10),
-        command_timeout: Duration::from_secs(10),
-        max_fetch_body_bytes: 5_242_880,
-        max_append_bytes: 10_485_760,
-    };
+    let mut cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        DovecotHarness::host().to_string(),
+        h.harness.port(),
+        rimap_imap::ImapEncryption::Tls,
+        DovecotHarness::username().to_string(),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        5_242_880,
+        10_485_760,
+    );
+    cfg.pinned_fingerprint = Some(wrong);
     let err = rimap_imap::preflight::probe_preflight(&cfg)
         .await
         .expect_err("mismatched pin must produce an error");
@@ -1248,9 +1261,10 @@ async fn case_24_thread_related_chain_walk_finds_reply_and_parent() {
         .fetch(
             "INBOX",
             &descendants,
-            rimap_imap::types::FetchSpec {
-                envelope: true,
-                ..Default::default()
+            {
+                let mut spec = rimap_imap::types::FetchSpec::default();
+                spec.envelope = true;
+                spec
             },
             None,
         )

@@ -529,20 +529,11 @@ async fn fetch_and_format_page(
     // fields changes what this page fetch requests from the server. The effect
     // is only observable through a real IMAP fetch (the integration harness);
     // `format_search_result`, which consumes the fields, is unit-tested.
-    let fetched = account
-        .imap
-        .fetch(
-            folder,
-            page_uids,
-            FetchSpec {
-                envelope: true,
-                flags: true,
-                size: true,
-                ..FetchSpec::default()
-            },
-            None,
-        )
-        .await?;
+    let mut spec = FetchSpec::default();
+    spec.envelope = true;
+    spec.flags = true;
+    spec.size = true;
+    let fetched = account.imap.fetch(folder, page_uids, spec, None).await?;
     let (fetched, _uid_validity) = fetched;
     // `fetch` streams FETCH responses back in the server's own
     // (ascending) order regardless of the order `page_uids` was passed
@@ -747,10 +738,10 @@ fn build_query(input: &SearchInput) -> Result<SearchQuery, rimap_core::RimapErro
                         "headers[].value must not be empty or whitespace-only",
                     ));
                 }
-                converted.push(rimap_imap::types::HeaderSearch {
-                    name: h.name.clone(),
-                    value: h.value.clone(),
-                });
+                converted.push(rimap_imap::types::HeaderSearch::new(
+                    h.name.clone(),
+                    h.value.clone(),
+                ));
             }
             Some(converted)
         }
@@ -770,27 +761,32 @@ fn build_query(input: &SearchInput) -> Result<SearchQuery, rimap_core::RimapErro
         .map(parse_iso_date)
         .transpose()?;
 
-    Ok(SearchQuery::Structured(StructuredQuery {
-        from: input.from.clone(),
-        to: input.to.clone(),
-        subject: input.subject.clone(),
-        since,
-        before,
-        seen: input.seen,
-        has_attachment: input.has_attachment.unwrap_or(false),
-        cc,
-        bcc,
-        body,
-        text,
-        headers,
-        larger: input.larger,
-        smaller: input.smaller,
-        sent_since,
-        sent_before,
-        answered: input.answered,
-        flagged: input.flagged,
-        draft: input.draft,
-    }))
+    let from = input.from.clone();
+    let to = input.to.clone();
+    let subject = input.subject.clone();
+
+    let mut query = StructuredQuery::default();
+    query.from = from;
+    query.to = to;
+    query.subject = subject;
+    query.since = since;
+    query.before = before;
+    query.seen = input.seen;
+    query.has_attachment = input.has_attachment.unwrap_or(false);
+    query.cc = cc;
+    query.bcc = bcc;
+    query.body = body;
+    query.text = text;
+    query.headers = headers;
+    query.larger = input.larger;
+    query.smaller = input.smaller;
+    query.sent_since = sent_since;
+    query.sent_before = sent_before;
+    query.answered = input.answered;
+    query.flagged = input.flagged;
+    query.draft = input.draft;
+
+    Ok(SearchQuery::Structured(query))
 }
 
 /// Reject empty/whitespace-only string filters. Returns `Ok(None)` for
@@ -1322,16 +1318,15 @@ mod tests {
     }
 
     fn addr(name: &str, mailbox: &str, host: &str) -> Address {
-        Address {
-            name: if name.is_empty() {
-                None
-            } else {
-                Some(name.as_bytes().to_vec())
-            },
-            adl: None,
-            mailbox: Some(mailbox.as_bytes().to_vec()),
-            host: Some(host.as_bytes().to_vec()),
-        }
+        let mut address = Address::empty();
+        address.name = if name.is_empty() {
+            None
+        } else {
+            Some(name.as_bytes().to_vec())
+        };
+        address.mailbox = Some(mailbox.as_bytes().to_vec());
+        address.host = Some(host.as_bytes().to_vec());
+        address
     }
 
     fn uid(n: u32) -> rimap_imap::types::Uid {
@@ -1340,47 +1335,22 @@ mod tests {
     }
 
     fn fetched_with_envelope(env: Envelope) -> FetchedMessage {
-        FetchedMessage {
-            uid: uid(42),
-            envelope: Some(env),
-            bodystructure: None,
-            flags: None,
-            size: None,
-        }
+        let mut message = FetchedMessage::new(uid(42));
+        message.envelope = Some(env);
+        message
     }
 
     #[test]
     fn format_search_result_populates_cc_from_envelope() {
-        let env = Envelope {
-            date: None,
-            subject_raw: None,
-            from: vec![],
-            sender: vec![],
-            reply_to: vec![],
-            to: vec![],
-            cc: vec![addr("Carol", "carol", "example.com")],
-            bcc: vec![],
-            in_reply_to: None,
-            message_id: None,
-        };
+        let mut env = Envelope::empty();
+        env.cc = vec![addr("Carol", "carol", "example.com")];
         let entry = format_search_result(&fetched_with_envelope(env));
         assert_eq!(entry.cc, vec!["Carol <carol@example.com>"]);
     }
 
     #[test]
     fn format_search_result_returns_empty_cc_when_envelope_omits_it() {
-        let env = Envelope {
-            date: None,
-            subject_raw: None,
-            from: vec![],
-            sender: vec![],
-            reply_to: vec![],
-            to: vec![],
-            cc: vec![],
-            bcc: vec![],
-            in_reply_to: None,
-            message_id: None,
-        };
+        let env = Envelope::empty();
         let entry = format_search_result(&fetched_with_envelope(env));
         assert!(entry.cc.is_empty());
 
@@ -1395,18 +1365,8 @@ mod tests {
     fn format_search_result_never_emits_bcc_even_when_envelope_has_it() {
         // Privacy boundary: bcc must NOT appear in SearchResultEntry in
         // any posture. format_search_result must ignore env.bcc.
-        let env = Envelope {
-            date: None,
-            subject_raw: None,
-            from: vec![],
-            sender: vec![],
-            reply_to: vec![],
-            to: vec![],
-            cc: vec![],
-            bcc: vec![addr("Blind", "blind", "example.com")],
-            in_reply_to: None,
-            message_id: None,
-        };
+        let mut env = Envelope::empty();
+        env.bcc = vec![addr("Blind", "blind", "example.com")];
         let entry = format_search_result(&fetched_with_envelope(env));
         let json = serde_json::to_string(&entry).expect("serialize");
         assert!(
@@ -1450,10 +1410,7 @@ mod tests {
         assert_eq!(hs.len(), 1);
         assert_eq!(
             hs[0],
-            HeaderSearch {
-                name: "List-Id".to_string(),
-                value: "rust".to_string()
-            }
+            HeaderSearch::new("List-Id".to_string(), "rust".to_string())
         );
         assert_eq!(s.larger, Some(1024));
         assert_eq!(s.smaller, Some(2_048_000));

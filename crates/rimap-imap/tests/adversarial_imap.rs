@@ -134,13 +134,9 @@ async fn missing_and_zero_uid_fetch_items_are_skipped_with_one_warn() {
     let server = FakeImapServer::start(steps).await;
 
     let conn = server.connection("user@example.com");
-    let spec = FetchSpec {
-        envelope: false,
-        bodystructure: false,
-        uid: true,
-        flags: true,
-        size: false,
-    };
+    let mut spec = FetchSpec::default();
+    spec.uid = true;
+    spec.flags = true;
     let (messages, _uidv) = conn
         .fetch(
             "INBOX",
@@ -196,13 +192,8 @@ async fn truncated_literal_yields_typed_error_not_timeout() {
     // LOGIN succeeds here, so use the static-resolver constructor with a
     // generous 5s backstop so the near-instant loopback EOF wins the race.
     let conn = server.connection_timeout("user@example.com", Duration::from_secs(5));
-    let spec = FetchSpec {
-        envelope: false,
-        bodystructure: false,
-        uid: true,
-        flags: false,
-        size: false,
-    };
+    let mut spec = FetchSpec::default();
+    spec.uid = true;
     let result = conn
         .fetch(
             "INBOX",

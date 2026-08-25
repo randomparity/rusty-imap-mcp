@@ -226,12 +226,10 @@ mod tests {
     }
 
     fn folder(name: &str, special: Option<SpecialUse>) -> Folder {
-        Folder {
-            name: name.to_string(),
-            attributes: Vec::new(),
-            delimiter: Some('/'),
-            special_use: special,
-        }
+        let mut folder = Folder::new(name.to_string());
+        folder.delimiter = Some('/');
+        folder.special_use = special;
+        folder
     }
 
     #[test]

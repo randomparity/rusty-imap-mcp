@@ -15,6 +15,7 @@ use crate::unicode;
 /// emitted by the sanitizer are dropped — callers that care about
 /// unicode-level warnings on raw-bytes input should use
 /// `parse_message` instead.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ThreadingHeaders {
     /// `Message-ID` of the referenced message, if present.

@@ -7,6 +7,7 @@ use crate::types::{Flag, FlagAction, Uid};
 
 /// Outcome of a `delete_message` dispatch: the operation result plus the
 /// observed UIDVALIDITY of the folder it ran against.
+#[non_exhaustive]
 #[derive(Debug)]
 #[must_use = "check used_fallback for security warnings"]
 pub struct DeleteOutcome {

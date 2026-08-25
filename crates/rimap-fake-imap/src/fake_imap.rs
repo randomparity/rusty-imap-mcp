@@ -272,19 +272,19 @@ impl FakeImapServer {
         pinned_fingerprint: Option<TlsFingerprint>,
         command_timeout: Duration,
     ) -> ConnectionConfig {
-        ConnectionConfig {
-            account: None,
-            account_id: AccountId::default_account(),
-            host: "127.0.0.1".to_string(),
-            port: self.port,
-            encryption: ImapEncryption::Tls,
-            username: username.to_string(),
-            pinned_fingerprint,
-            connect_timeout: Duration::from_secs(5),
+        let mut config = ConnectionConfig::new(
+            AccountId::default_account(),
+            "127.0.0.1".to_string(),
+            self.port,
+            ImapEncryption::Tls,
+            username.to_string(),
+            Duration::from_secs(5),
             command_timeout,
-            max_fetch_body_bytes: 1024 * 1024,
-            max_append_bytes: 1024 * 1024,
-        }
+            1024 * 1024,
+            1024 * 1024,
+        );
+        config.pinned_fingerprint = pinned_fingerprint;
+        config
     }
 }
 

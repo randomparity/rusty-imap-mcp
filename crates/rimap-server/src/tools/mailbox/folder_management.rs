@@ -155,19 +155,14 @@ pub async fn handle_delete_folder(
 
     account.folder_guard.check_expunge(&input.folder)?;
 
-    let status = account
-        .imap
-        .status(
-            &input.folder,
-            rimap_imap::types::StatusItems {
-                messages: true,
-                recent: false,
-                uid_next: false,
-                uid_validity: false,
-                unseen: false,
-            },
-        )
-        .await?;
+    let mut status_items = rimap_imap::types::StatusItems::all();
+    status_items.messages = true;
+    status_items.recent = false;
+    status_items.uid_next = false;
+    status_items.uid_validity = false;
+    status_items.unseen = false;
+
+    let status = account.imap.status(&input.folder, status_items).await?;
     let message_count = status.messages.unwrap_or(0);
 
     account.imap.delete_folder(&input.folder).await?;

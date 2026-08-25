@@ -66,19 +66,18 @@ fn build_connection(cfg: &ProtonConfig) -> Connection {
         Seq::FIRST,
     ))
     .unwrap();
-    let conn_cfg = ConnectionConfig {
-        account: None,
-        account_id: rimap_core::account::AccountId::default_account(),
-        host: cfg.host.clone(),
-        port: cfg.port,
-        encryption: rimap_imap::ImapEncryption::Starttls,
-        username: cfg.user.clone(),
-        pinned_fingerprint: Some(cfg.fingerprint),
-        connect_timeout: Duration::from_secs(15),
-        command_timeout: Duration::from_secs(60),
-        max_fetch_body_bytes: 26_214_400,
-        max_append_bytes: 10_485_760,
-    };
+    let mut conn_cfg = ConnectionConfig::new(
+        rimap_core::account::AccountId::default_account(),
+        cfg.host.clone(),
+        cfg.port,
+        rimap_imap::ImapEncryption::Starttls,
+        cfg.user.clone(),
+        Duration::from_secs(15),
+        Duration::from_secs(60),
+        26_214_400,
+        10_485_760,
+    );
+    conn_cfg.pinned_fingerprint = Some(cfg.fingerprint);
     let store: Arc<dyn CredentialStore> = Arc::new(EnvCreds(cfg.pass.clone()));
     let creds: Arc<dyn rimap_core::CredentialResolver> =
         Arc::new(rimap_config::credential::KeyringCredentialResolver::new(
@@ -112,13 +111,11 @@ async fn proton_bridge_connect_and_fetch_one_envelope() {
         .unwrap()
         .uids;
     assert!(!uids.is_empty(), "expected at least one message in INBOX");
-    let spec = FetchSpec {
-        envelope: true,
-        bodystructure: false,
-        uid: true,
-        flags: true,
-        size: true,
-    };
+    let mut spec = FetchSpec::default();
+    spec.envelope = true;
+    spec.uid = true;
+    spec.flags = true;
+    spec.size = true;
     let (msgs, _) = conn.fetch("INBOX", &uids[..1], spec, None).await.unwrap();
     assert_eq!(msgs.len(), 1);
 }

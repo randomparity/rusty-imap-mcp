@@ -245,23 +245,19 @@ pub fn build_account_connection(
     id: &rimap_core::account::AccountId,
     acfg: &ValidatedAccountConfig,
 ) -> ConnectionConfig {
-    let account = id
-        .as_optional()
-        .map(rimap_core::account::AccountId::as_str)
-        .map(str::to_string);
-    ConnectionConfig {
-        account,
-        account_id: id.clone(),
-        host: acfg.imap.host.clone(),
-        port: acfg.imap.port,
-        encryption: acfg.imap.encryption,
-        username: acfg.imap.username.clone(),
-        pinned_fingerprint: acfg.tls_fingerprint,
-        connect_timeout: Duration::from_secs(u64::from(acfg.imap.connect_timeout_seconds)),
-        command_timeout: Duration::from_secs(u64::from(acfg.imap.command_timeout_seconds)),
-        max_fetch_body_bytes: acfg.limits.max_fetch_body_bytes,
-        max_append_bytes: acfg.limits.max_append_bytes,
-    }
+    let mut config = ConnectionConfig::new(
+        id.clone(),
+        acfg.imap.host.clone(),
+        acfg.imap.port,
+        acfg.imap.encryption,
+        acfg.imap.username.clone(),
+        Duration::from_secs(u64::from(acfg.imap.connect_timeout_seconds)),
+        Duration::from_secs(u64::from(acfg.imap.command_timeout_seconds)),
+        acfg.limits.max_fetch_body_bytes,
+        acfg.limits.max_append_bytes,
+    );
+    config.pinned_fingerprint = acfg.tls_fingerprint;
+    config
 }
 
 #[cfg(test)]
@@ -540,10 +536,7 @@ mod tests {
         let mut state = make_test_account_state("sender-seam");
         state.smtp = Some(Box::new(fake));
 
-        let envelope = SendEnvelope {
-            from: "me@test.invalid".into(),
-            to: vec!["you@test.invalid".into()],
-        };
+        let envelope = SendEnvelope::new("me@test.invalid".into(), vec!["you@test.invalid".into()]);
         let smtp = state.smtp.as_ref().unwrap();
         let response = smtp
             .send_raw(&envelope, b"From: me\r\n\r\nbody")

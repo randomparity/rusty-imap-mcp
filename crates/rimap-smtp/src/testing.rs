@@ -12,6 +12,7 @@ use crate::error::SmtpError;
 use crate::sender::{SendRawFuture, SmtpSender};
 
 /// One captured send: the envelope and raw RFC 5322 bytes submitted.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct CapturedSend {
     /// The envelope (`MAIL FROM` / `RCPT TO`) passed to `send_raw`.
