@@ -122,8 +122,10 @@ versions.
    command position, Python `subprocess`, JavaScript/TypeScript process APIs,
    and command-container strings, with environment-based or literal Cargo
    resolution and any subcommand;
-5. derive compiler-producing versus non-compiling behavior from the parsed
-   subcommand instead of an author-supplied purpose label;
+5. strip any `+toolchain` selector, recognize a closed set of non-compiling
+   Cargo built-ins, and classify unknown subcommands, aliases, external
+   plugins, and wrappers as compiler-producing unless a parsed nested operation
+   proves otherwise; an exact fingerprint cannot downgrade that class;
 6. reject compiler-producing launches outside
    `crates/rimap-compiler-probe/src/lib.rs` unless they match one fixed exact
    root-build fingerprint already used by repository documentation, packaging,
@@ -155,11 +157,13 @@ lockfiles to cover good fixtures, version drift in either direction, missing
 or malformed locks, every standalone language form, embedded Python heredocs,
 Just and Make recipes, workflow `run:` blocks, package scripts, Dockerfile
 instructions, unknown non-document command containers, environment and literal
-resolution, in-source tests, arbitrarily named support scripts, common
-compiler-producing subcommands, a second wrapper carrying a false non-probe
-label, changed working directory or manifest selection on a root-build
-fingerprint, stale or path-wide fingerprints, missing helper use, manifest
-drift, an orphan fixture, and empty discovery. It also asserts that the
+resolution, in-source tests, arbitrarily named support scripts, built-in
+compiler subcommands, `+toolchain` selectors, aliases, unknown subcommands,
+and `nextest`, `llvm-cov`, `auditable`, and `fuzz` plugin/wrapper forms. It
+also covers a second wrapper carrying a false non-probe label, changed working
+directory or manifest selection on a root-build fingerprint, stale or
+path-wide fingerprints, missing helper use, manifest drift, an orphan fixture,
+and empty discovery. It asserts that the
 existing embedded Cargo metadata launch in
 `scripts/check-fuzz-lock-parity.sh` has exactly one inventory entry. Static
 inventory cannot defeat deliberate source obfuscation; review owns intentional
@@ -240,10 +244,11 @@ policies remain authoritative.
 5. Add synthetic Cargo launches in an in-source Rust test, standalone support
    files, embedded Python in shell, Just and Make recipes, a workflow `run:`
    block, a package script, a Dockerfile, and an unknown non-document command
-   container. Cover `build`, `check`, `clippy`, `doc`, `fix`, `run`, `rustc`,
-   and `test`, a second wrapper with a false non-probe label, and a root-build
-   fingerprint changed only by working directory or manifest path. Observe the
-   inventory test reject every unclassified compiler launch.
+   container. Cover built-in compiler subcommands, `+toolchain` selectors,
+   aliases, unknown subcommands, `nextest`, `llvm-cov`, `auditable`, and
+   `fuzz`; also cover a second wrapper with a false non-probe label and a
+   root-build fingerprint changed only by working directory or manifest path.
+   Observe the inventory test reject every unclassified compiler launch.
 6. Run `just test-compiler-probe-locks`, `just
    check-compiler-probe-locks`, and the focused post-release-bump tests.
 7. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
@@ -256,8 +261,9 @@ policies remain authoritative.
   boundary; both harnesses use it.
 - Every direct Cargo launch in a tracked executable surface matches one exact
   reviewed fingerprint; compiler-producing exceptions are structurally fixed,
-  root-build exceptions bind repository cwd and manifest semantics, and any
-  new, changed, or unclassified launch fails the recurrence guard.
+  unknown, alias, plugin, and wrapper subcommands fail closed, root-build
+  exceptions bind repository cwd and manifest semantics, and any new, changed,
+  or unclassified launch fails the recurrence guard.
 - Every nested downstream Cargo check installs a committed fixture lock and passes
   `--locked --offline`.
 - Every fixture registry package identity is present in the root `Cargo.lock`.
