@@ -22,28 +22,38 @@ Each exact-E0639 harness owns a minimal fixture workspace under its
 name, version, edition, workspace boundary, dependency names, enabled features,
 and relative local dependency paths for that harness.
 
-At runtime, the harness copies its fixture `Cargo.lock` into each fresh temporary
-crate before invoking:
+A private workspace crate, `rimap-compiler-probe`, is the only supported
+invocation boundary for downstream Rust compiler probes. It creates the fresh
+temporary crate, preserves the fixture manifest's package name, version,
+edition, workspace boundary, dependency names, and enabled features, rewrites
+only local dependency paths to absolute paths, copies the fixture lock, and
+invokes:
 
 ```text
 cargo check --locked --offline --message-format=short
 ```
 
-The generated temporary manifest preserves every fixture manifest field except
-that local dependency paths become absolute so the isolated root can live
-anywhere. The recurrence guard compares those fields. A fixture proof under
-Cargo 1.94.0 on macOS arm64 copied a lock generated with relative local paths
-beside the equivalent absolute-path manifest; `cargo check --locked --offline`
-completed without changing the lock.
+The audit and IMAP harnesses supply fixture identity, local dependency paths,
+and probe source through this API; they do not resolve or spawn Cargo directly.
+Their existing positive and negative tests exercise the copied lock under both
+the development and MSRV test suites. A manifest/lock mismatch therefore fails
+the same focused contract before an E0639 assertion can pass.
 
-A repository guard discovers downstream Rust compiler probes, requires each one to
-have a matching tracked fixture lock, and requires locked plus offline Cargo
-semantics. The same guard verifies that every registry package identity in each
-fixture lock—name, version, source, and checksum—occurs in the root
-`Cargo.lock`. Its test suite covers drift in both directions, malformed or
-missing lockfiles, manifest-identity drift, missing flags, and discovery
-failures.
-The guard runs in `just ci` and as steps in the required `cargo-deny` CI job.
+A repository guard enforces the boundary over tracked Rust test sources. Direct
+Cargo binary resolution through the `CARGO` environment or a literal `cargo`
+process is permitted only inside `rimap-compiler-probe`; every exact-E0639
+harness must depend on that crate and own a tracked fixture manifest and lock.
+Synthetic negative tests cover direct `Command` invocation, a second wrapper,
+missing helper use, and missing locked/offline semantics in the helper. This
+prevents ordinary alternate spellings from creating a second invocation path;
+deliberate source obfuscation remains subject to review like any other attempt
+to evade a repository guard.
+
+The same guard verifies that every registry package identity in each fixture
+lock—name, version, source, and checksum—occurs in the root `Cargo.lock`. Its
+test suite covers drift in both directions, malformed or missing lockfiles,
+manifest-identity drift, and discovery failures. The guard runs in `just ci`
+and as steps in the required `cargo-deny` CI job.
 
 The post-release bump script recognizes both fixture locks, re-resolves them after
 workspace package versions move, checks them with `--locked --offline`, and includes
@@ -58,9 +68,9 @@ dependency update.
 - Offline mode turns a missing local crate cache entry into a loud test failure rather
   than a network fallback. Normal workspace tests build the path dependency graphs
   before executing the integration probes.
-- Two fixture locks are committed because the audit and IMAP probes have different
-  dependency graphs. Each remains a minimal subgraph instead of compiling unrelated
-  crates.
+- Two fixture locks are committed because the audit and IMAP dependency graphs
+  have separate owners and update independently. Each lock is the minimal graph
+  for its harness.
 - Dependency and release-version updates must realign the fixture locks. The parity
   and post-release guards name the repair command when they fail.
 - Production crates, published APIs, wire schemas, and runtime behavior do not change.
@@ -77,9 +87,11 @@ dependency update.
   library artifacts and reproduce Cargo's `--extern`, dependency-search, and
   feature selection. Keeping Cargo as the graph authority is smaller and uses
   its supported lock validation directly.
-- **Use one shared fixture lock for both harnesses.** judgment: the union graph would
-  make each probe compile unrelated crates and couple otherwise independent test
-  packages. Two discovered locks keep isolation without duplicating guard logic.
+- **Use one shared fixture workspace and lock for both harnesses.** judgment:
+  selecting one workspace member avoids unrelated compilation, but every
+  temporary probe root and every lock update would still depend on both fixture
+  packages. Separate locks preserve crate ownership and failure isolation; the
+  shared helper and parity gate already remove duplicated behavior.
 - **Keep generated temporary locks but pass `--locked`.** verified: Cargo rejects
   `--locked` when the temporary root has no lockfile, so this does not provide a
   reviewed graph.

@@ -65,47 +65,73 @@ verify, and maintain the lock.
 The audit fixture depends on `rimap-audit` and `rimap-core`; the IMAP fixture depends
 on `rimap-imap` and `rimap-authz`. No registry dependency is declared directly.
 
+### Single invocation boundary
+
+A new private workspace crate, `rimap-compiler-probe`, owns all nested Cargo
+process construction. Its public test-support API accepts a fixture directory,
+the corresponding absolute local dependency paths, and one source snippet. It
+creates the temporary package, writes the equivalent manifest, copies the lock,
+and returns Cargo's success status and stderr. Filesystem or process-spawn
+failures remain explicit `std::io::Error` values for each harness to fail with
+operation context.
+
+The crate is `publish = false`, depends only on existing workspace dependency
+`tempfile`, and is a dev-dependency of `rimap-audit` and `rimap-imap`. No
+production dependency edge changes. Keeping process construction in one crate
+eliminates the duplicated security-sensitive flags that allowed the second
+harness to repeat the first one's unlocked behavior.
+
 ### Probe execution
 
-Each harness keeps its existing fresh `TempDir` per source snippet. It writes a
+Each harness calls `rimap-compiler-probe` once per source snippet and preserves
+its existing fresh `TempDir` isolation through that API. The helper writes a
 manifest preserving the fixture's exact package name, version, edition,
 workspace boundary, dependency names, and enabled features. Only local
 dependency paths become absolute because the temporary directory is outside the
-repository. It copies the fixture `Cargo.lock` beside that manifest and then
-invokes:
+repository. It copies the fixture `Cargo.lock` beside that manifest and invokes:
 
 ```text
 cargo check --locked --offline --message-format=short
 ```
 
-The IMAP harness continues to place `CARGO_TARGET_DIR` inside the temporary directory;
-the audit harness keeps its current default target placement there. Probe source,
+The helper places `CARGO_TARGET_DIR` inside the temporary root for every probe,
+removing the audit harness's current implicit equivalent. Probe source,
 exit-status handling, E0639 assertions, and negative controls do not change.
 
 A fixture read or copy failure fails immediately with the path and operation. An
-unavailable cached registry package makes Cargo fail loudly under `--offline`; the
-harness never retries online or regenerates its lock.
+unavailable cached registry package makes Cargo fail loudly under `--offline`;
+the harness never retries online or regenerates its lock. The exact E0639
+integration binaries run under both the development and MSRV test suites, so
+they are the committed proof that relative-path fixture locks remain valid
+beside equivalent absolute-path temporary manifests on both supported Cargo
+versions.
 
 ### Parity, recurrence, and repair
 
 `scripts/check-compiler-probe-locks.sh` owns one bounded policy:
 
-1. discover every tracked Rust test that invokes Cargo as a downstream compiler probe;
-2. require a matching tracked `tests/fixtures/e0639-probe/Cargo.toml` and
-   `Cargo.lock`;
-3. require the invocation to include `--locked` and `--offline` and the harness to
-   install the fixture lock in its temporary root;
-4. parse the root and fixture lockfiles completely, failing on malformed or empty
-   package blocks; and
-5. require every registry package identity—name, version, source, and checksum—in
-   each fixture lock to occur in the root lock.
+1. permit direct Cargo binary resolution through the `CARGO` environment or a
+   literal `cargo` process only in `crates/rimap-compiler-probe/src/lib.rs`;
+2. require every tracked exact-E0639 integration harness to use
+   `rimap-compiler-probe` and forbid direct process construction there;
+3. require each harness crate to own a matching tracked
+   `tests/fixtures/e0639-probe/Cargo.toml` and `Cargo.lock`;
+4. compare fixture and helper-declared package identity, workspace boundary,
+   dependency names, and enabled features;
+5. parse the root and fixture lockfiles completely, failing on malformed or
+   empty package blocks; and
+6. require every registry package identity—name, version, source, and
+   checksum—in each fixture lock to occur in the root lock.
 
-Discovery fails loud on an unreadable repository or an empty probe set. It is anchored
-at the repository root and uses tracked paths, so caller working directory and ignored
-scratch files cannot change the answer. The companion shell test uses synthetic
-repositories and lockfiles to cover good fixtures, version drift in either direction,
-missing or malformed locks, an unlocked or online invocation, an orphan fixture, and
-empty discovery.
+Discovery fails loud on an unreadable repository or an empty probe set. It is
+anchored at the repository root and uses tracked paths, so caller working
+directory and ignored scratch files cannot change the answer. The companion
+shell test uses synthetic repositories and lockfiles to cover good fixtures,
+version drift in either direction, missing or malformed locks, direct Cargo
+invocation, a second wrapper path, missing helper use, manifest drift, an
+orphan fixture, and empty discovery. This is a guard against accidental
+recurrence, not a claim that static source checks defeat deliberate
+obfuscation during review.
 
 `just check-compiler-probe-locks` runs the policy. `just
 realign-compiler-probe-locks` seeds each fixture lock from the root lock, runs Cargo
@@ -139,15 +165,18 @@ Its unit test expands the accepted lock inventory and expected real bump set.
 
 ### Controls
 
-- The fixture lock is copied byte-for-byte before Cargo starts; a missing copy is a
-  hard test failure.
-- `--locked` rejects manifest/lock disagreement; `--offline` prevents index or crate
-  network access. There is no fallback or retry.
+- The private helper is the sole supported nested Cargo process boundary. The
+  structural gate rejects direct Cargo resolution in tracked Rust test sources
+  and requires exact-E0639 harnesses to use the helper.
+- The fixture lock is copied byte-for-byte before Cargo starts; a missing copy
+  is a hard test failure.
+- `--locked` rejects manifest/lock disagreement; `--offline` prevents index or
+  crate network access. There is no fallback or retry.
 - The parity gate restricts fixture registry package identities—name, version,
   source, and checksum—to the reviewed root lock and fails on partial parse,
   empty discovery, or unknown fixtures.
-- The required `cargo-deny` job runs the structural and parity gate before executing
-  the nested probes in later test jobs.
+- The required `cargo-deny` job runs the structural and parity gate before
+  executing the nested probes in later test jobs.
 - Release-bump and local realignment paths regenerate fixture locks through Cargo
   metadata, never by accepting an arbitrary independently resolved graph.
 
@@ -161,29 +190,37 @@ policies remain authoritative.
 
 ## Testing and verification
 
-1. Add script contract tests first. Against the current harnesses they must fail because
-   neither a fixture lock nor locked/offline flags exists.
-2. Add the fixture manifests and generate their locks by seeding from the root lock and
-   running Cargo metadata. Inspect that each registry package identity is contained in
-   the root lock.
-3. Update both harnesses and rerun their exact integration binaries. The positive probes
-   must still report E0639, and each unrelated-failure probe must still omit E0639.
-4. Temporarily remove `--offline` in a synthetic harness fixture and observe the
-   recurrence test fail, then restore it.
-5. Run `just test-compiler-probe-locks`, `just check-compiler-probe-locks`, and the
-   focused post-release-bump tests.
-6. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
-7. Run `just ci` in the background to completion.
+1. Add script contract tests first. Against the current harnesses they must fail
+   because direct Cargo invocation remains and no fixture lock exists.
+2. Add focused `rimap-compiler-probe` tests for manifest identity, lock copying,
+   fixed locked/offline arguments, and error propagation; observe compile
+   failure before the helper API exists.
+3. Add the private helper crate and fixture manifests, then generate the locks
+   by seeding from the root lock and running Cargo metadata. Inspect that each
+   registry package identity is contained in the root lock.
+4. Update both harnesses and rerun their exact integration binaries under the
+   development and MSRV toolchains. Positive probes must still report E0639,
+   each unrelated-failure probe must still omit E0639, and copied locks must
+   remain byte-identical.
+5. Add a synthetic direct Cargo caller and a second wrapper path to the script
+   fixtures; observe the recurrence test fail, then restore the guarded forms.
+6. Run `just test-compiler-probe-locks`, `just
+   check-compiler-probe-locks`, and the focused post-release-bump tests.
+7. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
+8. Run `just ci` in the background to completion.
 
 ## Acceptance criteria
 
 - Both exact-E0639 test binaries preserve all current positive and negative assertions.
+- `rimap-compiler-probe` is the sole supported nested Cargo process boundary;
+  both harnesses use it and direct test-source invocations fail the recurrence
+  guard.
 - Every nested downstream Cargo check installs a committed fixture lock and passes
   `--locked --offline`.
 - Every fixture registry package identity is present in the root `Cargo.lock`.
-- Missing locks, drift, malformed input, manifest-identity drift, unlocked
-  checks, online checks, and empty discovery each fail a focused regression
-  test.
+- Missing locks, drift, malformed input, manifest-identity drift, direct Cargo
+  invocation, a second wrapper, online checks, and empty discovery each fail a
+  focused regression test.
 - Ordinary dependency updates have a documented realignment recipe; post-release bumps
   re-resolve and commit both fixture locks automatically.
 - The required `cargo-deny` CI context and local `just ci` both execute the recurrence
