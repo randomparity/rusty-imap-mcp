@@ -7,16 +7,17 @@ Decision: [ADR-0026](../../ADR/0026-published-data-records-non-exhaustive.md).
 ## Frozen scope
 
 - **Scope identity:** issue #835, annotation token `q835-d8f3faa3`.
-- **Outcome:** before v0.2.0, field additions stop being silent breaking
-  changes for every remaining public data-record struct in published library
-  crates.
+- **Outcome:** before v0.3.0, field additions stop being silent breaking
+  changes for every remaining public data-record struct in the six named
+  published library crates.
 - **Sources:** issue #835; completed precedents #665, #706, #707, #715, and
-  #716; the operator's interactive decisions to exclude unpublished
-  `rimap-server` tool records and to repair two EOF-normalization findings
-  emitted by the current `just hooks` artifact.
-- **Exclusions:** `rimap-server` tool `*Meta` and `*Input` records; opaque
-  structs whose externally visible API does not expose data fields; runtime,
-  serialization, wire-format, dependency, persistence, concurrency,
+  #716; the operator's interactive decisions to retarget the released v0.2.0
+  deadline to the current 0.3.0-dev window, to exclude the published
+  `rimap-server` tool-record surface, and to repair two EOF-normalization
+  findings emitted by the current `just hooks` artifact.
+- **Exclusions:** published `rimap-server` tool `*Meta` and `*Input` records;
+  opaque structs whose externally visible API does not expose data fields;
+  runtime, serialization, wire-format, dependency, persistence, concurrency,
   authentication, and migration changes.
 - **Permitted surface:** qualifying definitions in `rimap-imap`,
   `rimap-content`, `rimap-config`, `rimap-authz`, `rimap-smtp`, and
@@ -32,11 +33,11 @@ Decision: [ADR-0026](../../ADR/0026-published-data-records-non-exhaustive.md).
 A public Rust struct with public fields is exhaustive unless marked
 `#[non_exhaustive]`. Adding a field to such a struct breaks downstream struct
 literals and exhaustive destructures. The workspace's `cargo semver-checks`
-baseline is v0.1.0 while the manifests are already 0.2.0-dev, so the current
+baseline is v0.1.0 while the manifests are already 0.3.0-dev, so the current
 major-version transition permits and therefore does not diagnose these breaks.
-The attribute is itself breaking, making the unreleased v0.2.0 window the only
-point where the policy can be completed without consuming another major
-version.
+The attribute is itself breaking, making the unreleased v0.3.0 window the
+current point where the policy can be completed without consuming another
+major version.
 
 The earlier changes applied this policy to `rimap-config`, `rimap-audit`, and
 `AuthEvent`. Issue #835 identifies the remaining published-crate gap but gives
@@ -142,7 +143,7 @@ doctest failures.
    for every crate that gained a constructor or caller rewrite.
 4. Run `just regen-tool-schemas` and inspect whether any generated file moved.
 5. Run `just semver-checks`; expected result is green but vacuous for the
-   already-declared 0.2.0-dev major transition, so it is a gate rather than
+   already-declared 0.3.0-dev major transition, so it is a gate rather than
    evidence that the API did not break.
 6. Run `just ci` in the background to completion.
 

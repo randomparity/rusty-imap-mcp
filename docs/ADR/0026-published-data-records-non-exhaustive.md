@@ -6,9 +6,10 @@
 
 Public Rust structs with public fields permit downstream struct literals and
 exhaustive destructuring. Adding a field is therefore a source-breaking change
-unless the struct is marked `#[non_exhaustive]`. The workspace is already on the
-unreleased 0.2.0-dev major transition, so applying the attribute now consumes no
-additional version break; after v0.2.0 it would require another major version.
+unless the struct is marked `#[non_exhaustive]`. v0.2.0 is already released
+and the workspace is on the unreleased 0.3.0-dev major transition, so applying
+the attribute before v0.3.0 consumes no additional version break; after that
+release it would require another major version.
 
 Issues #665, #706, #707, #715, and #716 established the repository convention
 for config and audit records. Issue #835 found the remaining gap across six
@@ -21,9 +22,10 @@ exhaustive.
 
 Every public struct in a published library crate that exposes at least one
 public data field is `#[non_exhaustive]`. The rule includes configuration,
-input, output, captured-test data, and structured error records. It excludes
-opaque structs whose fields are private or restricted and the unpublished
-`rimap-server` tool-record surface.
+input, output, captured-test data, and structured error records. This decision
+governs the six library crates named by issue #835. It excludes opaque structs
+whose fields are private or restricted and, by explicit operator decision, the
+separate public tool-record surface in the published `rimap-server` crate.
 
 Retrofits use the existing construction path first. A new constructor is added
 only when a current cross-crate caller has neither a suitable constructor nor a
@@ -37,8 +39,10 @@ with representative integration coverage checking rustc E0639 specifically.
 - Existing downstream struct expressions and exhaustive destructures break at
   compile time and must move to constructors or `Default` plus assignment, and
   to rest patterns respectively.
-- Future field additions to covered structs are source-compatible for
-  downstream consumers.
+- An otherwise-compatible public field addition no longer breaks downstream
+  code solely because struct literals or exhaustive destructures omit it.
+  Auto-trait, derive, serde, schema, and runtime compatibility remain separate
+  review obligations.
 - Types produced only inside their defining crate may intentionally become
   externally non-constructible; no speculative constructor is added.
 - The attribute does not change serde output, MCP schemas, runtime behavior, or
@@ -67,10 +71,16 @@ with representative integration coverage checking rustc E0639 specifically.
   functional-update syntax too, and that constructors are added only for
   actual callers. Blanket defaults would invent invalid values for required
   fields, while blanket builders would add API with no consumer.
-- **Wait until after v0.2.0.** verified: `crates/rimap-audit/tests/non_exhaustive_e0639.rs`
-  compiles downstream probes and observes rustc E0639 for the attribute itself;
-  applying the policy after the current unreleased major transition would
-  consume another breaking release.
-- **Include unpublished `rimap-server` tool records.** judgment: the operator
+- **Leave the remaining records exhaustive permanently.** judgment: this would
+  avoid certain downstream migration in 0.3.0 but preserve the exact
+  field-addition break that the frozen issue outcome requires this sweep to
+  remove; partial adoption would also leave the published API policy
+  inconsistent across equivalent records.
+- **Wait until after v0.3.0.** verified:
+  `crates/rimap-audit/tests/non_exhaustive_e0639.rs` compiles downstream probes
+  and observes rustc E0639 for the attribute itself; applying the policy after
+  the current unreleased major transition would consume another breaking
+  release.
+- **Include published `rimap-server` tool records.** judgment: the operator
   explicitly excluded that separate internal/schema surface; compiler-forced
   server callsites remain in scope, but schema-facing tool records do not.
