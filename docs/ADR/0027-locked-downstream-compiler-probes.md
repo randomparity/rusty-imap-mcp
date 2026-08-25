@@ -39,18 +39,24 @@ Their existing positive and negative tests exercise the copied lock under both
 the development and MSRV test suites. A manifest/lock mismatch therefore fails
 the same focused contract before an E0639 assertion can pass.
 
-A repository guard enforces the boundary over every tracked test/support source:
-files below a `tests/` directory and `scripts/*.test.{sh,py,js,ts}`. It rejects
-direct Cargo `check` or `rustc` process construction in Rust `Command`, shell
-command position, Python `subprocess`, and JavaScript/TypeScript process APIs.
-Only `rimap-compiler-probe` may resolve and spawn Cargo; every exact-E0639
-harness must depend on that crate and own a tracked fixture manifest and lock.
+A repository guard inventories every direct Cargo process launch in every
+tracked Rust, shell, Python, JavaScript, and TypeScript source file, regardless
+of directory or Cargo subcommand. Each recognized launch must match a checked-in
+allowlist entry containing its path, normalized invocation fingerprint, and
+non-probe purpose. Any new launch or changed invocation fails until reviewed.
+The only allowlisted downstream-compiler purpose is
+`rimap-compiler-probe`; every exact-E0639 harness must depend on that crate and
+own a tracked fixture manifest and lock.
 
-Synthetic negative tests cover each supported language form, environment-based
-and literal Cargo resolution, a second wrapper, missing helper use, and missing
-locked/offline semantics in the helper. This covers the repository's ordinary
-test and support harness shapes. Deliberate source obfuscation remains subject
-to review like any other attempt to evade a repository guard.
+The parser recognizes Rust `Command`, shell command position, Python
+`subprocess`, and JavaScript/TypeScript process APIs with environment-based or
+literal Cargo resolution. Synthetic negative tests cover in-source Rust tests,
+arbitrarily named support scripts, each supported language form, every common
+compiler-producing subcommand, a second wrapper, missing helper use, and
+missing locked/offline semantics in the helper. An inventory test also requires
+every allowlist entry to match exactly once, so stale or path-wide exemptions
+cannot hide a new launch. Deliberate source obfuscation remains subject to
+review like any other attempt to evade a repository guard.
 
 The same guard verifies that every registry package identity in each fixture
 lock—name, version, source, and checksum—occurs in the root `Cargo.lock`. Its
