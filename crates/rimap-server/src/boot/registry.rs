@@ -540,10 +540,7 @@ mod tests {
         let mut state = make_test_account_state("sender-seam");
         state.smtp = Some(Box::new(fake));
 
-        let envelope = SendEnvelope {
-            from: "me@test.invalid".into(),
-            to: vec!["you@test.invalid".into()],
-        };
+        let envelope = SendEnvelope::new("me@test.invalid".into(), vec!["you@test.invalid".into()]);
         let smtp = state.smtp.as_ref().unwrap();
         let response = smtp
             .send_raw(&envelope, b"From: me\r\n\r\nbody")

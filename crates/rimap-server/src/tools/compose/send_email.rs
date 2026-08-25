@@ -206,10 +206,7 @@ fn build_envelope(from_addr: &str, input: &ComposeInput) -> rimap_smtp::SendEnve
     if let Some(bcc) = &input.bcc {
         recipients.extend(bcc.iter().map(|a| a.address.clone()));
     }
-    rimap_smtp::SendEnvelope {
-        from: from_addr.to_string(),
-        to: recipients,
-    }
+    rimap_smtp::SendEnvelope::new(from_addr.to_string(), recipients)
 }
 
 #[cfg(test)]
