@@ -66,16 +66,18 @@ manifest contains an empty `[workspace]` table. The audit fixture depends on
 package directly.
 
 The fixture source is an empty valid program used only for lock generation and
-maintenance. The temporary manifest preserves package identity and dependency
-names but rewrites local paths to absolute paths because its root is outside the
-repository. Cargo lock identity depends on package identity, not the spelling
-of a path dependency.
+maintenance. At runtime the harness reads the committed fixture manifest and
+rewrites only its relative local dependency paths to absolute paths. Package
+name, version, edition, workspace boundary, dependency names, features, and
+default-feature policy therefore have one source. Cargo lock identity depends
+on package identity, not the spelling of a path dependency.
 
 ## Probe execution
 
 Each existing `check_probe` keeps one fresh `TempDir` per source snippet. It:
 
-1. writes the temporary manifest and source;
+1. reads the fixture manifest and writes its absolute-path equivalent plus the
+   probe source;
 2. copies `tests/fixtures/e0639-probe/Cargo.lock` into the temporary root;
 3. runs `cargo check --locked --offline --message-format=short`; and
 4. returns success plus stderr exactly as today.
@@ -94,43 +96,55 @@ is no online retry or lock regeneration.
 
 ## Focused recurrence and parity guard
 
-`scripts/check-compiler-probe-locks.sh` scans tracked Rust files under `crates/`
-for direct nested Cargo construction through these supported forms:
+`scripts/check-compiler-probe-locks.sh` scans every
+`std::process::Command::new` invocation in tracked Rust files under `crates/`.
+It resolves ordinary Cargo expressions independently per invocation:
 
-- `std::env::var("CARGO")` or `std::env::var_os("CARGO")`;
-- `env!("CARGO")`; or
-- `Command::new("cargo")` / `Command::new(PathBuf::from("cargo"))`.
+- direct literals and `PathBuf::from(\"cargo\")`;
+- `std::env::var(\"CARGO\")`, `std::env::var_os(\"CARGO\")`, or
+  `env!(\"CARGO\")`; and
+- simple local aliases assigned from those expressions.
 
-For every candidate it requires:
+For every discovered Cargo invocation—not merely every containing file—it
+requires:
 
-- one literal `COMPILER_PROBE_FIXTURE` registration;
-- source evidence that the registered `Cargo.lock` is copied or written into
-  the temporary root;
-- `--locked` and `--offline` in the Cargo argument list;
+- one literal `COMPILER_PROBE_FIXTURE` registration used by that invocation's
+  enclosing probe helper;
+- source evidence that the registered `Cargo.toml` is read and only dependency
+  paths are rewritten;
+- source evidence that the registered `Cargo.lock` is copied into the same
+  temporary root;
+- `--locked` and `--offline` in that invocation's argument builder;
 - a registered fixture path inside the owning crate with tracked `Cargo.toml`,
   `Cargo.lock`, and `src/main.rs`;
-- a fixture manifest whose package identity, workspace boundary, and local
-  dependency names match the harness contract; and
+- exactly one fixture package identity in the fixture lock matching the
+  fixture manifest; and
 - every fixture registry package identity—name, version, source, checksum—to
   occur in the root lock.
 
-The script fails on unreadable Git state, malformed lock/package blocks, an
-empty candidate set, duplicate registration, or an unrecognized registered
-path. It never interprets documentation, workflows, Just recipes, shell,
-Python, JavaScript, direct compiler processes, or third-party compiler APIs.
-Those are explicit exclusions rather than silent blind spots.
+The script fails on unreadable Git state, an unresolved `Command::new`
+expression, malformed lock/package blocks, an empty candidate set, duplicate
+registration, or an unrecognized registered path. It never interprets
+documentation, workflows, Just recipes, shell, Python, JavaScript, direct
+compiler processes, or third-party compiler APIs. Those are explicit
+exclusions rather than silent blind spots.
 
 `scripts/check-compiler-probe-locks.test.sh` builds synthetic tracked trees and
 covers:
 
 - the complete good case;
-- missing `--locked` and missing `--offline` independently;
+- two Cargo builders in one file where only one is compliant;
+- direct, `PathBuf`, environment, compile-time environment, and simple alias
+  Cargo expressions;
+- an unresolved alias, missing `--locked`, and missing `--offline`
+  independently;
 - missing, duplicate, absolute, escaping, and untracked fixture registration;
+- fixture/generated-manifest drift or a second raw manifest authority;
 - missing manifest, lock, or source;
 - malformed and empty lock package blocks;
+- missing or duplicate fixture package identity and a verbatim root-lock seed;
 - fixture registry identity absent or different in the root lock;
-- a root package absent from a smaller fixture lock, which remains valid;
-- each supported direct Cargo construction form; and
+- a root package absent from a smaller fixture lock, which remains valid; and
 - empty candidate discovery.
 
 The test also runs the guard against the real repository so a source scanner
@@ -138,15 +152,22 @@ that no longer recognizes the two current probes fails instead of greening.
 
 ## Lock realignment and release maintenance
 
-`--fix` on the guard performs the existing fuzz-lock realignment pattern for
-each discovered fixture:
+`--fix` on the guard realigns every discovered fixture atomically:
 
-1. retain the original fixture lock bytes;
-2. copy the root lock over the fixture lock;
-3. run `cargo metadata --manifest-path <fixture>/Cargo.toml --format-version 1`
-   so Cargo prunes unreachable packages;
-4. restore the original bytes on any failure; and
-5. rerun the parity check.
+1. create a temporary workspace outside the repository;
+2. write an absolute-path equivalent of the fixture manifest and copy its
+   source;
+3. seed the temporary lock from the root lock;
+4. run `cargo metadata --manifest-path <temporary>/Cargo.toml --format-version
+   1` so Cargo prunes unreachable packages and adds the fixture identity;
+5. verify fixture identity and full root-lock parity in the temporary result;
+   and
+6. atomically replace the tracked fixture lock only after every prior step
+   succeeds.
+
+Failure or interruption before replacement leaves the original fixture lock
+unchanged. A verbatim root-lock seed cannot pass because it lacks the fixture
+package identity.
 
 `just realign-compiler-probe-locks` invokes `--fix`; `just
 check-compiler-probe-locks` checks parity; and `just
@@ -178,10 +199,11 @@ bump set and unknown-lock cases.
 - A missing lock copy is a hard harness failure.
 - `--locked` rejects manifest/lock disagreement; `--offline` prevents registry
   network access; no fallback exists.
-- The focused source guard rejects direct nested Cargo Rust tests missing the
-  registration, lock operation, or flags.
-- Full package identity parity restricts fixture registry artifacts to the root
-  lock rather than comparing versions alone.
+- The focused source guard validates each direct nested Cargo invocation
+  independently, including simple aliases, and rejects missing registration,
+  derived-manifest evidence, lock operation, or flags.
+- Fixture identity plus full package identity parity restricts fixture registry
+  artifacts to the root lock and rejects an unpruned root copy.
 - The required `cargo-deny` job runs the focused and parity checks.
 
 ### Explicitly out of scope
@@ -194,24 +216,29 @@ Repository review and the no-new-dependency rule own those paths.
 
 ## Verification
 
-1. Add the focused script tests first and observe them fail against the current
-   harnesses because registration, fixture locks, and flags are absent.
-2. Add fixture manifests, sources, and generated locks; verify full identity
-   parity with the root lock.
+1. Add focused script tests first and observe them fail against the current
+   harnesses because registration, fixture locks, derived manifests, and flags
+   are absent.
+2. Add fixture manifests, sources, and generated locks; verify fixture identity
+   and full root-lock parity.
 3. Update both harnesses and run their exact integration binaries. Positive
    probes must still emit E0639; unrelated-failure probes must still omit it.
-4. Run `just test-compiler-probe-locks`, `just
+4. Exercise atomic realignment failure and confirm the original lock remains
+   byte-identical.
+5. Run `just test-compiler-probe-locks`, `just
    check-compiler-probe-locks`, and focused post-release-bump tests.
-5. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
-6. Run `just ci` in the background to completion.
+6. Run `actionlint` and `zizmor .github/workflows/` after editing CI.
+7. Run `just ci` in the background to completion.
 
 ## Acceptance criteria
 
 - Both E0639 binaries retain every current positive and negative assertion.
-- Each direct nested Cargo Rust test registers a tracked fixture lock, installs
-  it in the temporary root, and passes `--locked --offline`.
-- Missing controls and fixture/root lock drift fail focused regression tests.
-- Dependency and release bumps realign and commit both fixture locks.
+- Each direct nested Cargo Rust invocation independently registers a tracked
+  fixture, derives its manifest from that fixture, installs its lock, and
+  passes `--locked --offline`.
+- Missing controls, mixed builders, manifest drift, an unpruned root seed, and
+  fixture/root lock drift fail focused regression tests.
+- Dependency and release bumps atomically realign and commit both fixture locks.
 - The required `cargo-deny` CI context and local `just ci` run the guard.
 - No production behavior, public contract, or dependency version changes.
 - `just ci` passes.
