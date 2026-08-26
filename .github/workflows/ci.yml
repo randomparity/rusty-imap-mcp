@@ -404,6 +404,10 @@ jobs:
         run: just test-fuzz-lock-parity
       - name: Check fuzz lockfile parity with the workspace
         run: just check-fuzz-lock-parity
+      - name: Unit-test locked compiler probes
+        run: just test-compiler-probe-locks
+      - name: Check locked compiler probes
+        run: just check-compiler-probe-locks
       # ...and conversely, a parity failure must not hide an advisory, so this
       # still runs when an earlier step failed.
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1

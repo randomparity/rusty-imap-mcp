@@ -40,7 +40,9 @@ set -euo pipefail
 # them from git, so a new fuzz workspace is covered without editing anything.
 # `assert_known_lockfiles` fails on any tracked lockfile covered by neither
 # mechanism, so a future workspace cannot be forgotten in silence.
-KNOWN_EXTRA_LOCKS="html-oracle/Cargo.lock"
+KNOWN_EXTRA_LOCKS="html-oracle/Cargo.lock \
+crates/rimap-audit/tests/fixtures/e0639-probe/Cargo.lock \
+crates/rimap-imap/tests/fixtures/e0639-probe/Cargo.lock"
 
 # The next patch `-dev` version for a released `vX.Y.Z` tag. bzr's default and
 # ADR-0003's: patch is the conservative placeholder, edited on the bump PR when
@@ -260,6 +262,17 @@ restore_version_optouts() {
     done <<<"$optouts"
 }
 
+# Verify both committed downstream fixtures after version and dependency bumps.
+verify_compiler_probe_locks() {
+    local manifest
+    for manifest in \
+        crates/rimap-audit/tests/fixtures/e0639-probe/Cargo.toml \
+        crates/rimap-imap/tests/fixtures/e0639-probe/Cargo.toml; do
+        cargo metadata --locked --offline --manifest-path "$manifest" \
+            --format-version 1 >/dev/null
+    done
+}
+
 main() {
     if [ $# -ne 1 ]; then
         echo "usage: $0 <released-tag>   # e.g. v0.2.0" >&2
@@ -287,6 +300,7 @@ main() {
     # Every rimap-* path dep a fuzz workspace resolves just moved, so both fuzz
     # lockfiles now violate ADR-0011 parity. Realign discovers them from git.
     just realign-fuzz-locks
+    just realign-compiler-probe-locks
     ensure_unreleased_heading CHANGELOG.md
 
     # Gates, run against the state that is about to be committed rather than
@@ -295,6 +309,8 @@ main() {
     cargo metadata --locked --format-version 1 >/dev/null
     cargo metadata --locked --manifest-path html-oracle/Cargo.toml --format-version 1 >/dev/null
     just check-fuzz-lock-parity
+    verify_compiler_probe_locks
+    just check-compiler-probe-locks
 
     # --name-only HEAD, not bare: staged changes count too, so a step added
     # later that stages its work cannot drop a file from the set silently.

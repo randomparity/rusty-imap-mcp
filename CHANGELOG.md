@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus field assignment. Records that expose neither route are no longer
   externally constructible; obtain those values from the producer API.
   Add `..` to downstream record patterns.
+- Exact-E0639 downstream compiler probes now copy committed fixture lockfiles
+  and run Cargo with `--locked --offline`. A required focused guard keeps direct
+  temporary-downstream Cargo compiler probes in tracked integration tests and
+  both fixture graphs pinned to the reviewed workspace lock. See #838 and
+  ADR-0027.
 
 ## [0.2.0] - 2026-08-21
 
