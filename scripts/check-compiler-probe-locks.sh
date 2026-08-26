@@ -308,6 +308,11 @@ def process_constructors(source: str) -> set[str]:
             )
             if command is not None:
                 names.add(command.group(1) or "Command")
+            process_module = re.fullmatch(
+                r"\s*process(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*", item
+            )
+            if process_module is not None:
+                names.add(f"{process_module.group(1) or 'process'}::Command")
     for match in re.finditer(
         r"\buse\s+(?:std|tokio)::\{(?:(?!;).)*?"
         r"process::\{([^{}]*)\}(?:(?!;).)*?\}\s*;",
@@ -320,6 +325,11 @@ def process_constructors(source: str) -> set[str]:
             )
             if command is not None:
                 names.add(command.group(1) or "Command")
+            process_self = re.fullmatch(
+                r"\s*self(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*", item
+            )
+            if process_self is not None:
+                names.add(f"{process_self.group(1) or 'process'}::Command")
     return names
 
 
@@ -676,9 +686,15 @@ def load_lock(path: Path) -> list[Package]:
         text = path.read_text()
     except OSError as error:
         raise GuardError(f"{path}: cannot read lockfile: {error}") from error
-    if re.search(r"^version\s*=\s*4\s*$", text, re.MULTILINE) is None:
-        raise GuardError(f"{path}: cannot parse canonical Cargo.lock version 4")
-    raw_blocks = re.split(r"(?m)^\[\[package\]\]\s*$", text)[1:]
+    sections = re.split(r"(?m)^\[\[package\]\]\s*$", text)
+    preamble_lines = [
+        line
+        for line in sections[0].splitlines()
+        if line != "" and not line.startswith("#")
+    ]
+    if preamble_lines != ["version = 4"]:
+        raise GuardError(f"{path}: noncanonical Cargo.lock preamble")
+    raw_blocks = sections[1:]
     if not raw_blocks:
         raise GuardError(f"{path}: no [[package]] blocks")
     packages = []

@@ -273,6 +273,21 @@ case_constructors() {
     restage "$repo"
     expect_ok "imported std process module" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo std-root-grouped-process-module)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' 'use std::{process};'
+    replace "$source" 'Command::new(cargo_bin())' 'process::Command::new(cargo_bin())'
+    restage "$repo"
+    expect_ok "root-grouped std process module" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo std-nested-grouped-process-self)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use std::{process::{self, Stdio}};'
+    replace "$source" 'Command::new(cargo_bin())' 'process::Command::new(cargo_bin())'
+    restage "$repo"
+    expect_ok "nested grouped std process self" "$guard" --repo-root "$repo"
+
     repo="$(new_repo tokio-qualified)"
     source="$repo/crates/demo/tests/probe.rs"
     replace "$source" 'use std::process::Command;' ''
@@ -318,6 +333,28 @@ case_constructors() {
     replace "$source" '.output();' '.output().await;'
     restage "$repo"
     expect_ok "aliased awaited Tokio process module" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo tokio-root-grouped-process-alias)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use tokio::{process as tokio_process};'
+    replace "$source" 'fn check_probe() {' 'async fn check_probe() {'
+    replace "$source" 'Command::new(cargo_bin())' \
+        'tokio_process::Command::new(cargo_bin())'
+    replace "$source" '.output();' '.output().await;'
+    restage "$repo"
+    expect_ok "root-grouped Tokio process alias" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo tokio-nested-grouped-process-self-alias)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use tokio::{process::{self as tokio_process, Child}};'
+    replace "$source" 'fn check_probe() {' 'async fn check_probe() {'
+    replace "$source" 'Command::new(cargo_bin())' \
+        'tokio_process::Command::new(cargo_bin())'
+    replace "$source" '.output();' '.output().await;'
+    restage "$repo"
+    expect_ok "nested grouped Tokio process self alias" "$guard" --repo-root "$repo"
 
     repo="$(new_repo tokio-nested-use-tree-alias)"
     source="$repo/crates/demo/tests/probe.rs"
@@ -465,6 +502,18 @@ RS
     expect_fail "nested argument does not hide build" \
         "temporary cargo build" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo mixed-hidden-process-module)"
+    source="$repo/crates/demo/tests/hidden.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" 'use std::process::Command;' \
+        'use std::{process as hidden_process};'
+    replace "$source" 'Command::new(cargo_bin())' \
+        'hidden_process::Command::new(cargo_bin())'
+    replace "$source" '"check", "--locked", "--offline"' \
+        '"check", "--locked"'
+    restage "$repo"
+    expect_fail "one grouped module probe cannot hide behind canonical probe" \
+        "missing --offline" "$guard" --repo-root "$repo"
     repo="$(new_repo manifest-path-override)"
     source="$repo/crates/demo/tests/override.rs"
     cp "$repo/crates/demo/tests/probe.rs" "$source"
@@ -662,6 +711,22 @@ case_lock_graphs() {
     printf 'version = 4\n' >"$lock"
     restage "$repo"
     expect_fail "empty lock" "no [[package]]" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo duplicate-lock-version)"
+    lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"
+    replace "$lock" 'version = 4' 'version = 3
+version = 4'
+    restage "$repo"
+    expect_fail "duplicate lock version is noncanonical" \
+        "noncanonical Cargo.lock preamble" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo unknown-lock-preamble)"
+    lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"
+    replace "$lock" 'version = 4' 'version = 4
+metadata = true'
+    restage "$repo"
+    expect_fail "unknown lock preamble field is rejected" \
+        "noncanonical Cargo.lock preamble" "$guard" --repo-root "$repo"
 
     repo="$(new_repo missing-fixture-root)"
     lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"
