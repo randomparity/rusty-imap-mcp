@@ -287,6 +287,11 @@ def process_constructors(source: str) -> set[str]:
     ):
         names.add(match.group(1) or "Command")
     for match in re.finditer(
+        r"\buse\s+(?:std|tokio)::process(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;",
+        stripped,
+    ):
+        names.add(f"{match.group(1) or 'process'}::Command")
+    for match in re.finditer(
         r"\buse\s+(?:std|tokio)::process::\{([^{}]*)\}\s*;", stripped
     ):
         for item in match.group(1).split(","):
@@ -484,14 +489,12 @@ def validate_check_chain(relative_source: Path, chain: str) -> None:
             f"{relative_source}: Cargo builder requires direct literal Cargo arguments; "
             "rewrite to canonical probe shape"
         )
-    try:
-        check_index = arguments.index("check")
-    except ValueError as error:
+    if not arguments or arguments[0] != "check":
         raise GuardError(
             f"{relative_source}: direct Cargo builder has no literal check subcommand; "
-            "rewrite to canonical probe shape"
-        ) from error
-    argv = arguments[check_index:]
+            "the first Cargo argument must be a literal subcommand"
+        )
+    argv = arguments
     separator = argv.index("--") if "--" in argv else len(argv)
     prefix = argv[:separator]
     for flag in ("--locked", "--offline"):
@@ -538,11 +541,15 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
                     "arguments; rewrite to canonical probe shape"
                 )
             continue
-        subcommand = next(
-            (argument for argument in chain_arguments if argument in COMPILER_SUBCOMMANDS | {"metadata"}),
-            None,
-        )
+        subcommand = chain_arguments[0] if chain_arguments else None
         if subcommand == "metadata":
+            continue
+        if subcommand is not None and subcommand not in COMPILER_SUBCOMMANDS:
+            if temporary and cargo_executable:
+                raise GuardError(
+                    f"{relative_source}: direct Cargo builder has no literal check "
+                    "subcommand; the first Cargo argument must be a literal subcommand"
+                )
             continue
         if subcommand is None:
             body_arguments = rust_strings(body.source)

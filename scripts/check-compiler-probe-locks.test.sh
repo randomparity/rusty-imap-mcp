@@ -251,6 +251,13 @@ case_constructors() {
     restage "$repo"
     expect_ok "grouped std Command import" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo std-process-module)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' 'use std::process;'
+    replace "$source" 'Command::new(cargo_bin())' 'process::Command::new(cargo_bin())'
+    restage "$repo"
+    expect_ok "imported std process module" "$guard" --repo-root "$repo"
+
     repo="$(new_repo tokio-qualified)"
     source="$repo/crates/demo/tests/probe.rs"
     replace "$source" 'use std::process::Command;' ''
@@ -285,6 +292,17 @@ case_constructors() {
     replace "$source" '.output();' '.output().await;'
     restage "$repo"
     expect_ok "grouped awaited Tokio Command import" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo tokio-process-module-alias)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use tokio::process as tokio_process;'
+    replace "$source" 'fn check_probe() {' 'async fn check_probe() {'
+    replace "$source" 'Command::new(cargo_bin())' \
+        'tokio_process::Command::new(cargo_bin())'
+    replace "$source" '.output();' '.output().await;'
+    restage "$repo"
+    expect_ok "aliased awaited Tokio process module" "$guard" --repo-root "$repo"
 
     repo="$(new_repo cargo-literal)"
     source="$repo/crates/demo/tests/probe.rs"
@@ -340,6 +358,24 @@ case_noncanonical() {
     replace "$source" 'let dir = new_probe_root(&fixture);' 'let dir = prepared_root();'
     restage "$repo"
     expect_fail "split setup" "rewrite to canonical" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo metadata-option-decoy)"
+    source="$repo/crates/demo/tests/option_decoy.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" '"check", "--locked", "--offline"' \
+        '"--config", "metadata", "check", "--locked", "--offline"'
+    restage "$repo"
+    expect_fail "metadata option value does not hide check" \
+        "first Cargo argument must be a literal subcommand" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo check-option-decoy)"
+    source="$repo/crates/demo/tests/option_decoy.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" '"check", "--locked", "--offline"' \
+        '"--config", "check", "build", "--locked", "--offline"'
+    restage "$repo"
+    expect_fail "check option value does not hide build" \
+        "first Cargo argument must be a literal subcommand" "$guard" --repo-root "$repo"
 
     for subcommand in build test bench run rustc clippy fix; do
         repo="$(new_repo "non-check-$subcommand")"
