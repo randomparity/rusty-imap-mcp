@@ -421,6 +421,33 @@ RS
     expect_fail "check option value does not hide build" \
         "first Cargo argument must be a literal subcommand" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo nested-locked-decoy)"
+    source="$repo/crates/demo/tests/option_decoy.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" \
+        '.args(["check", "--locked", "--offline", "--message-format=short"])' \
+        '.arg("check")
+        .env("DECOY", Decoy.arg("--locked"))
+        .arg("--offline")
+        .arg("--message-format=short")'
+    restage "$repo"
+    expect_fail "nested argument does not supply locked" "missing --locked" \
+        "$guard" --repo-root "$repo"
+
+    repo="$(new_repo nested-check-decoy)"
+    source="$repo/crates/demo/tests/option_decoy.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" \
+        '.args(["check", "--locked", "--offline", "--message-format=short"])' \
+        '.env("DECOY", Decoy.arg("check"))
+        .arg("build")
+        .arg("--locked")
+        .arg("--offline")
+        .arg("--message-format=short")'
+    restage "$repo"
+    expect_fail "nested argument does not hide build" \
+        "temporary cargo build" "$guard" --repo-root "$repo"
+
     repo="$(new_repo manifest-path-override)"
     source="$repo/crates/demo/tests/override.rs"
     cp "$repo/crates/demo/tests/probe.rs" "$source"
@@ -641,6 +668,15 @@ LOCK
     replace "$lock" '"dep",' '"missing",'
     restage "$repo"
     expect_fail "unresolved dependency edge" "unresolved dependency" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo missing-dependency-separator)"
+    lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"
+    replace "$lock" ' "dep",' ' "dep"
+ "dep",'
+    restage "$repo"
+    expect_fail "dependency strings require separators" \
+        "dependency array must contain only comma-separated strings" \
+        "$guard" --repo-root "$repo"
 
     repo="$(new_repo unreachable-package)"
     lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"

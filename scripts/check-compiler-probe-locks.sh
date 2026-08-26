@@ -332,7 +332,17 @@ def cargo_arguments(chain: str) -> list[str] | None:
     masked = mask_literals(stripped)
     arguments = []
     string_literal = r'"(?:\\.|[^"\\])*"'
+    depths = []
+    depth = 0
+    for character in masked:
+        depths.append(depth)
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
     for match in re.finditer(r"\.(arg|args)\s*\(", masked):
+        if depths[match.start()] != 0:
+            continue
         opening = match.end() - 1
         closing = matching_delimiter(masked, opening, "(", ")")
         operand = stripped[opening + 1 : closing].strip()
@@ -682,9 +692,13 @@ def load_lock(path: Path) -> list[Package]:
             dependencies: tuple[str, ...] = ()
             if dependency_sections:
                 raw_dependencies = dependency_sections[0]
-                without_strings = re.sub(r'"(?:\\.|[^"\\])*"\s*,?', "", raw_dependencies)
+                without_strings = re.sub(
+                    r'"(?:\\.|[^"\\])*"\s*,', "", raw_dependencies
+                )
                 if without_strings.strip():
-                    raise GuardError("dependency array must contain only strings")
+                    raise GuardError(
+                        "dependency array must contain only comma-separated strings"
+                    )
                 dependencies = tuple(rust_strings(raw_dependencies))
             assert name is not None and version is not None
             packages.append(Package(name, version, source, checksum, dependencies))
