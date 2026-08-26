@@ -520,6 +520,9 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
     candidates: list[tuple[FunctionBody, re.Match[str]]] = []
     for body in function_bodies:
         candidates.extend((body, match) for match in constructor_matches(body, imported))
+    source_has_temporary_project = any(
+        body_has_temporary_project(body) for body in function_bodies
+    )
 
     checks: list[tuple[FunctionBody, str]] = []
     saw_temporary_compiler = False
@@ -568,7 +571,11 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
                 )
             continue
         if not temporary:
-            if subcommand in COMPILER_SUBCOMMANDS and "COMPILER_PROBE_FIXTURE" in source:
+            if (
+                cargo_executable
+                and subcommand in COMPILER_SUBCOMMANDS
+                and source_has_temporary_project
+            ):
                 raise GuardError(
                     f"{relative_source}: temporary Cargo setup is outside the builder body; "
                     "rewrite to canonical probe shape"

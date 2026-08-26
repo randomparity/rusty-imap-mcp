@@ -359,6 +359,31 @@ case_noncanonical() {
     restage "$repo"
     expect_fail "split setup" "rewrite to canonical" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo unregistered-split-setup)"
+    source="$repo/crates/demo/tests/unregistered_split.rs"
+    cat >"$source" <<'RS'
+use std::path::PathBuf;
+use std::process::Command;
+
+fn cargo_bin() -> PathBuf {
+    std::env::var("CARGO").map_or_else(|_| PathBuf::from("cargo"), PathBuf::from)
+}
+
+fn prepare_probe() {
+    let dir = tempfile::TempDir::new().expect("temp");
+    std::fs::write(dir.path().join("Cargo.toml"), "[workspace]").expect("manifest");
+}
+
+fn run_probe() {
+    let _ = Command::new(cargo_bin())
+        .args(["check"])
+        .output();
+}
+RS
+    restage "$repo"
+    expect_fail "unregistered split setup" "setup is outside the builder body" \
+        "$guard" --repo-root "$repo"
+
     repo="$(new_repo metadata-option-decoy)"
     source="$repo/crates/demo/tests/option_decoy.rs"
     cp "$repo/crates/demo/tests/probe.rs" "$source"
