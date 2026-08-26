@@ -502,17 +502,16 @@ def validate_check_chain(relative_source: Path, chain: str) -> None:
             f"{relative_source}: direct Cargo builder has no literal check subcommand; "
             "the first Cargo argument must be a literal subcommand"
         )
-    argv = arguments
-    separator = argv.index("--") if "--" in argv else len(argv)
-    prefix = argv[:separator]
+    separator = arguments.index("--") if "--" in arguments else len(arguments)
+    prefix = arguments[:separator]
     for flag in ("--locked", "--offline"):
-        if flag not in argv:
+        if flag not in arguments:
             raise GuardError(f"{relative_source}: Cargo check is missing {flag}")
         if flag not in prefix:
             raise GuardError(
                 f"{relative_source}: {flag} must appear before Cargo argument separator --"
             )
-    for argument in argv:
+    for argument in arguments:
         if argument in ("--manifest-path", "--lockfile-path") or argument.startswith(
             ("--manifest-path=", "--lockfile-path=")
         ):
@@ -552,7 +551,6 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
     )
 
     checks: list[tuple[FunctionBody, str]] = []
-    saw_temporary_compiler = False
     for body, constructor in candidates:
         opening = constructor.end() - 1
         closing = matching_delimiter(body.masked, opening, "(", ")")
@@ -608,7 +606,6 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
                     "rewrite to canonical probe shape"
                 )
             continue
-        saw_temporary_compiler = True
         if not cargo_executable:
             raise GuardError(
                 f"{relative_source}: Cargo executable is indirect; rewrite to canonical probe shape"
@@ -621,8 +618,6 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
         checks.append((body, chain))
 
     if not checks:
-        if saw_temporary_compiler:
-            raise GuardError(f"{relative_source}: no canonical temporary Cargo check found")
         return None
 
     fixture = validate_registration(repo, relative_source, source, tracked)
