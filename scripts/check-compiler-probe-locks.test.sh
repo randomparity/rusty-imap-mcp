@@ -216,6 +216,17 @@ case_missing_flags() {
     restage "$repo"
     expect_fail "env string does not supply check" "no literal check subcommand" \
         "$guard" --repo-root "$repo"
+
+    repo="$(new_repo computed-locked-argument)"
+    replace "$repo/crates/demo/tests/probe.rs" \
+        '.args(["check", "--locked", "--offline", "--message-format=short"])' \
+        '.arg("check")
+        .arg(if use_lock { "--locked" } else { "--color=never" })
+        .arg("--offline")
+        .arg("--message-format=short")'
+    restage "$repo"
+    expect_fail "computed expression does not supply --locked" "direct literal Cargo arguments" \
+        "$guard" --repo-root "$repo"
 }
 
 case_constructors() {
@@ -233,6 +244,12 @@ case_constructors() {
     replace "$source" 'Command::new(cargo_bin())' 'StdCommand::new(cargo_bin())'
     restage "$repo"
     expect_ok "aliased std Command" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo std-grouped)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' 'use std::process::{Command, Stdio};'
+    restage "$repo"
+    expect_ok "grouped std Command import" "$guard" --repo-root "$repo"
 
     repo="$(new_repo tokio-qualified)"
     source="$repo/crates/demo/tests/probe.rs"
@@ -259,6 +276,15 @@ case_constructors() {
     replace "$source" '.output();' '.output().await;'
     restage "$repo"
     expect_ok "aliased awaited Tokio Command" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo tokio-grouped)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use tokio::process::{Command, Child};'
+    replace "$source" 'fn check_probe() {' 'async fn check_probe() {'
+    replace "$source" '.output();' '.output().await;'
+    restage "$repo"
+    expect_ok "grouped awaited Tokio Command import" "$guard" --repo-root "$repo"
 
     repo="$(new_repo cargo-literal)"
     source="$repo/crates/demo/tests/probe.rs"
@@ -435,6 +461,23 @@ case_registration_and_files() {
     replace "$source" '["Cargo.toml", "Cargo.lock"]' '["Cargo.toml"]'
     restage "$repo"
     expect_fail "missing lock copy" "copy Cargo.toml and Cargo.lock" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo wrong-copy-operands)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'std::fs::copy(&source, &destination)' \
+        'std::fs::copy(&source, fixture.join("other"))'
+    restage "$repo"
+    expect_fail "copy helper binds derived operands" "canonical source and destination" \
+        "$guard" --repo-root "$repo"
+
+    repo="$(new_repo rewritten-copy-destination)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'let destination = root.join(name);' \
+        'let mut destination = root.join(name);
+    destination = root.join("other");'
+    restage "$repo"
+    expect_fail "copy destination cannot be rewritten" "canonical source and destination" \
+        "$guard" --repo-root "$repo"
 }
 
 case_lock_graphs() {

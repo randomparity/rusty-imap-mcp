@@ -286,6 +286,15 @@ def process_constructors(source: str) -> set[str]:
         stripped,
     ):
         names.add(match.group(1) or "Command")
+    for match in re.finditer(
+        r"\buse\s+(?:std|tokio)::process::\{([^{}]*)\}\s*;", stripped
+    ):
+        for item in match.group(1).split(","):
+            command = re.fullmatch(
+                r"\s*Command(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*", item
+            )
+            if command is not None:
+                names.add(command.group(1) or "Command")
     return names
 
 
@@ -305,14 +314,29 @@ def rust_strings(source: str) -> list[str]:
             strings.append(match.group(1))
     return strings
 
-def cargo_arguments(chain: str) -> list[str]:
+def cargo_arguments(chain: str) -> list[str] | None:
     stripped = strip_comments(chain)
     masked = mask_literals(stripped)
     arguments = []
-    for match in re.finditer(r"\.(?:arg|args)\s*\(", masked):
+    string_literal = r'"(?:\\.|[^"\\])*"'
+    for match in re.finditer(r"\.(arg|args)\s*\(", masked):
         opening = match.end() - 1
         closing = matching_delimiter(masked, opening, "(", ")")
-        arguments.extend(rust_strings(stripped[opening + 1 : closing]))
+        operand = stripped[opening + 1 : closing].strip()
+        if match.group(1) == "arg":
+            if re.fullmatch(string_literal, operand) is None:
+                return None
+            arguments.extend(rust_strings(operand))
+            continue
+        if operand.startswith("&"):
+            operand = operand[1:].strip()
+        if not operand.startswith("[") or not operand.endswith("]"):
+            return None
+        elements = operand[1:-1]
+        remainder = re.sub(string_literal, "", elements)
+        if re.fullmatch(r"[\s,]*", remainder) is None:
+            return None
+        arguments.extend(rust_strings(elements))
     return arguments
 
 
@@ -392,13 +416,24 @@ def validate_canonical_helpers(relative_source: Path, source: str) -> None:
             f"{relative_source}: fixture_root() must join the crate root with "
             "COMPILER_PROBE_FIXTURE"
         )
-    if not re.search(
-        r"fn copy_fixture_file\s*\([^)]*\)[^{]*\{[^}]*fixture\.join\(name\)"
-        r"[^}]*root\.join\(name\)[^}]*std::fs::copy\(",
-        compact,
-    ):
+    copy_helpers = [
+        body for body in extract_function_bodies(source) if body.name == "copy_fixture_file"
+    ]
+    if len(copy_helpers) != 1:
         raise GuardError(
-            f"{relative_source}: copy_fixture_file must byte-copy each named fixture file"
+            f"{relative_source}: expected exactly one copy_fixture_file helper"
+        )
+    copy_body = re.sub(r"\s+", " ", copy_helpers[0].source)
+    canonical_copy = re.search(
+        r"let source = fixture\.join\(name\); "
+        r"let destination = root\.join\(name\); "
+        r"std::fs::copy\(&source, &destination\)",
+        copy_body,
+    )
+    if canonical_copy is None or copy_body.count("std::fs::copy(") != 1:
+        raise GuardError(
+            f"{relative_source}: copy_fixture_file must byte-copy its canonical source "
+            "and destination"
         )
 
 
@@ -444,6 +479,11 @@ def validate_check_chain(relative_source: Path, chain: str) -> None:
             "call; rewrite to canonical probe shape"
         )
     arguments = cargo_arguments(chain)
+    if arguments is None:
+        raise GuardError(
+            f"{relative_source}: Cargo builder requires direct literal Cargo arguments; "
+            "rewrite to canonical probe shape"
+        )
     try:
         check_index = arguments.index("check")
     except ValueError as error:
@@ -489,15 +529,21 @@ def inspect_source(repo: Path, relative_source: Path, tracked: set[Path]) -> Pro
         executable = body.source[opening + 1 : closing]
         chain = body.source[constructor.start() : semicolon + 1]
         chain_arguments = cargo_arguments(chain)
+        temporary = body_has_temporary_project(body)
+        cargo_executable = is_cargo_executable(executable, source)
+        if chain_arguments is None:
+            if temporary and cargo_executable:
+                raise GuardError(
+                    f"{relative_source}: Cargo builder requires direct literal Cargo "
+                    "arguments; rewrite to canonical probe shape"
+                )
+            continue
         subcommand = next(
             (argument for argument in chain_arguments if argument in COMPILER_SUBCOMMANDS | {"metadata"}),
             None,
         )
-        temporary = body_has_temporary_project(body)
-
         if subcommand == "metadata":
             continue
-        cargo_executable = is_cargo_executable(executable, source)
         if subcommand is None:
             body_arguments = rust_strings(body.source)
             body_subcommand = next(
