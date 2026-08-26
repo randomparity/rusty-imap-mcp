@@ -308,6 +308,18 @@ def process_constructors(source: str) -> set[str]:
             )
             if command is not None:
                 names.add(command.group(1) or "Command")
+    for match in re.finditer(
+        r"\buse\s+(?:std|tokio)::\{(?:(?!;).)*?"
+        r"process::\{([^{}]*)\}(?:(?!;).)*?\}\s*;",
+        stripped,
+        re.DOTALL,
+    ):
+        for item in match.group(1).split(","):
+            command = re.fullmatch(
+                r"\s*Command(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*", item
+            )
+            if command is not None:
+                names.add(command.group(1) or "Command")
     return names
 
 

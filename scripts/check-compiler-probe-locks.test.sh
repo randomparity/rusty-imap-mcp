@@ -259,6 +259,13 @@ case_constructors() {
     restage "$repo"
     expect_ok "nested std use-tree Command import" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo std-nested-grouped-use-tree)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use std::{process::{Command, Stdio}};'
+    restage "$repo"
+    expect_ok "nested grouped std Command import" "$guard" --repo-root "$repo"
+
     repo="$(new_repo std-process-module)"
     source="$repo/crates/demo/tests/probe.rs"
     replace "$source" 'use std::process::Command;' 'use std::process;'
@@ -321,6 +328,16 @@ case_constructors() {
     replace "$source" '.output();' '.output().await;'
     restage "$repo"
     expect_ok "nested Tokio use-tree Command alias" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo tokio-nested-grouped-use-tree-alias)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use tokio::{process::{Command as TokioCommand, Child}};'
+    replace "$source" 'fn check_probe() {' 'async fn check_probe() {'
+    replace "$source" 'Command::new(cargo_bin())' 'TokioCommand::new(cargo_bin())'
+    replace "$source" '.output();' '.output().await;'
+    restage "$repo"
+    expect_ok "nested grouped Tokio Command alias" "$guard" --repo-root "$repo"
 
     repo="$(new_repo cargo-literal)"
     source="$repo/crates/demo/tests/probe.rs"
