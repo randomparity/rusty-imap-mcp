@@ -300,6 +300,14 @@ def process_constructors(source: str) -> set[str]:
             )
             if command is not None:
                 names.add(command.group(1) or "Command")
+    for match in re.finditer(r"\buse\s+(?:std|tokio)::\{([^{}]*)\}\s*;", stripped):
+        for item in match.group(1).split(","):
+            command = re.fullmatch(
+                r"\s*process::Command(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*",
+                item,
+            )
+            if command is not None:
+                names.add(command.group(1) or "Command")
     return names
 
 
@@ -504,6 +512,25 @@ def validate_check_chain(relative_source: Path, chain: str) -> None:
             raise GuardError(
                 f"{relative_source}: {flag} must appear before Cargo argument separator --"
             )
+    for argument in argv:
+        if argument in ("--manifest-path", "--lockfile-path") or argument.startswith(
+            ("--manifest-path=", "--lockfile-path=")
+        ):
+            raise GuardError(
+                f"{relative_source}: Cargo check has a graph-selection override"
+            )
+        if argument == "--target-dir" or argument.startswith("--target-dir="):
+            raise GuardError(
+                f"{relative_source}: Cargo check has a target-directory override"
+            )
+    target_env = re.compile(
+        r'\.env\(\s*"CARGO_TARGET_DIR"\s*,\s*'
+        r'dir\.path\(\)\.join\(\s*"target"\s*\)\s*\)'
+    )
+    if chain.count('"CARGO_TARGET_DIR"') != 1 or target_env.search(chain) is None:
+        raise GuardError(
+            f"{relative_source}: Cargo check must use the canonical temporary target directory"
+        )
     if re.search(r"\.current_dir\(\s*dir\.path\(\)\s*\)", chain) is None:
         raise GuardError(
             f"{relative_source}: Cargo check and fixture copies must use the same temporary root"

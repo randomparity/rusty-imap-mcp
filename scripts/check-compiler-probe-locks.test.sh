@@ -97,6 +97,7 @@ fn check_probe() {
     }
     let _ = Command::new(cargo_bin())
         .args(["check", "--locked", "--offline", "--message-format=short"])
+        .env("CARGO_TARGET_DIR", dir.path().join("target"))
         .current_dir(dir.path())
         .output();
 }
@@ -251,6 +252,13 @@ case_constructors() {
     restage "$repo"
     expect_ok "grouped std Command import" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo std-nested-use-tree)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use std::{process::Command};'
+    restage "$repo"
+    expect_ok "nested std use-tree Command import" "$guard" --repo-root "$repo"
+
     repo="$(new_repo std-process-module)"
     source="$repo/crates/demo/tests/probe.rs"
     replace "$source" 'use std::process::Command;' 'use std::process;'
@@ -304,6 +312,16 @@ case_constructors() {
     restage "$repo"
     expect_ok "aliased awaited Tokio process module" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo tokio-nested-use-tree-alias)"
+    source="$repo/crates/demo/tests/probe.rs"
+    replace "$source" 'use std::process::Command;' \
+        'use tokio::{process::Command as TokioCommand};'
+    replace "$source" 'fn check_probe() {' 'async fn check_probe() {'
+    replace "$source" 'Command::new(cargo_bin())' 'TokioCommand::new(cargo_bin())'
+    replace "$source" '.output();' '.output().await;'
+    restage "$repo"
+    expect_ok "nested Tokio use-tree Command alias" "$guard" --repo-root "$repo"
+
     repo="$(new_repo cargo-literal)"
     source="$repo/crates/demo/tests/probe.rs"
     replace "$source" 'Command::new(cargo_bin())' 'Command::new("cargo")'
@@ -323,6 +341,7 @@ case_noncanonical() {
     source="$repo/crates/demo/tests/probe.rs"
     replace "$source" 'let _ = Command::new(cargo_bin())
         .args(["check", "--locked", "--offline", "--message-format=short"])
+        .env("CARGO_TARGET_DIR", dir.path().join("target"))
         .current_dir(dir.path())
         .output();' 'let mut command = Command::new(cargo_bin());
     command.args(["check", "--locked", "--offline"]);
@@ -401,6 +420,51 @@ RS
     restage "$repo"
     expect_fail "check option value does not hide build" \
         "first Cargo argument must be a literal subcommand" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo manifest-path-override)"
+    source="$repo/crates/demo/tests/override.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" '"check", "--locked", "--offline"' \
+        '"check", "--locked", "--offline", "--manifest-path", "../other/Cargo.toml"'
+    restage "$repo"
+    expect_fail "manifest-path cannot escape copied fixture" "graph-selection override" \
+        "$guard" --repo-root "$repo"
+
+    repo="$(new_repo manifest-path-equals-override)"
+    source="$repo/crates/demo/tests/override.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" '"check", "--locked", "--offline"' \
+        '"check", "--locked", "--offline", "--manifest-path=../other/Cargo.toml"'
+    restage "$repo"
+    expect_fail "manifest-path equals form cannot escape fixture" "graph-selection override" \
+        "$guard" --repo-root "$repo"
+
+    repo="$(new_repo lockfile-path-override)"
+    source="$repo/crates/demo/tests/override.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" '"check", "--locked", "--offline"' \
+        '"check", "--locked", "--offline", "--lockfile-path", "../other/Cargo.lock"'
+    restage "$repo"
+    expect_fail "lockfile-path cannot escape copied fixture" "graph-selection override" \
+        "$guard" --repo-root "$repo"
+
+    repo="$(new_repo target-dir-argument-override)"
+    source="$repo/crates/demo/tests/override.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" '"check", "--locked", "--offline"' \
+        '"check", "--locked", "--offline", "--target-dir", "../target"'
+    restage "$repo"
+    expect_fail "target-dir argument stays inside temporary root" \
+        "target-directory override" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo target-dir-env-override)"
+    source="$repo/crates/demo/tests/override.rs"
+    cp "$repo/crates/demo/tests/probe.rs" "$source"
+    replace "$source" '.env("CARGO_TARGET_DIR", dir.path().join("target"))' \
+        '.env("CARGO_TARGET_DIR", "/tmp/outside")'
+    restage "$repo"
+    expect_fail "target env stays inside temporary root" \
+        "canonical temporary target directory" "$guard" --repo-root "$repo"
 
     for subcommand in build test bench run rustc clippy fix; do
         repo="$(new_repo "non-check-$subcommand")"
