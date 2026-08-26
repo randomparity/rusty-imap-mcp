@@ -685,7 +685,18 @@ LOCK
     replace "$root" 'name = "dep"' 'name = "different"'
     restage "$repo"
     expect_fail "noncanonical source cannot bypass root parity" \
-        "noncanonical source field" "$guard" --repo-root "$repo"
+        "noncanonical package field" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo escaped-registry-source-key)"
+    lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"
+    root="$repo/Cargo.lock"
+    replace "$lock" \
+        'source = "registry+https://github.com/rust-lang/crates.io-index"' \
+        '"sou\u0072ce" = "registry+https://github.com/rust-lang/crates.io-index"'
+    replace "$root" 'name = "dep"' 'name = "different"'
+    restage "$repo"
+    expect_fail "escaped source key cannot bypass root parity" \
+        "noncanonical package field" "$guard" --repo-root "$repo"
 
     repo="$(new_repo unsupported-git-source)"
     lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"

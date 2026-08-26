@@ -646,14 +646,6 @@ def one_field(block: str, field: str, required: bool) -> str | None:
     expected = "exactly one" if required else "at most one"
     if (required and len(values) != 1) or (not required and len(values) > 1):
         raise GuardError(f"package block must contain {expected} {field}")
-    if not required:
-        assignments = re.findall(
-            rf"""^[ \t]*(?:{field}|"{field}"|'{field}')\s*=""",
-            block,
-            re.MULTILINE,
-        )
-        if len(assignments) != len(values):
-            raise GuardError(f"package block contains a noncanonical {field} field")
     return values[0] if values else None
 
 
@@ -670,15 +662,23 @@ def load_lock(path: Path) -> list[Package]:
     packages = []
     for number, block in enumerate(raw_blocks, start=1):
         try:
+            dependency_pattern = r"(?ms)^dependencies\s*=\s*\[(.*?)\]\s*$"
+            dependency_sections = re.findall(dependency_pattern, block)
+            if len(dependency_sections) > 1:
+                raise GuardError("package block has multiple dependency arrays")
+            remainder = re.sub(dependency_pattern, "", block)
+            remainder = re.sub(
+                r'(?m)^(?:name|version|source|checksum)\s*='
+                r'\s*"(?:\\.|[^"\\])*"\s*$',
+                "",
+                remainder,
+            )
+            if remainder.strip():
+                raise GuardError("package block contains a noncanonical package field")
             name = one_field(block, "name", True)
             version = one_field(block, "version", True)
             source = one_field(block, "source", False)
             checksum = one_field(block, "checksum", False)
-            dependency_sections = re.findall(
-                r"(?ms)^dependencies\s*=\s*\[(.*?)\]\s*$", block
-            )
-            if len(dependency_sections) > 1:
-                raise GuardError("package block has multiple dependency arrays")
             dependencies: tuple[str, ...] = ()
             if dependency_sections:
                 raw_dependencies = dependency_sections[0]
