@@ -676,6 +676,26 @@ LOCK
     restage "$repo"
     expect_fail "registry identity absent" "absent from root Cargo.lock" "$guard" --repo-root "$repo"
 
+    repo="$(new_repo indented-registry-source)"
+    lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"
+    root="$repo/Cargo.lock"
+    replace "$lock" \
+        'source = "registry+https://github.com/rust-lang/crates.io-index"' \
+        ' source = "registry+https://github.com/rust-lang/crates.io-index"'
+    replace "$root" 'name = "dep"' 'name = "different"'
+    restage "$repo"
+    expect_fail "noncanonical source cannot bypass root parity" \
+        "noncanonical source field" "$guard" --repo-root "$repo"
+
+    repo="$(new_repo unsupported-git-source)"
+    lock="$repo/crates/demo/tests/fixtures/e0639-probe/Cargo.lock"
+    replace "$lock" \
+        'source = "registry+https://github.com/rust-lang/crates.io-index"' \
+        'source = "git+https://example.invalid/dep?rev=deadbeef#deadbeef"'
+    restage "$repo"
+    expect_fail "external non-registry source is rejected" \
+        "unsupported package source" "$guard" --repo-root "$repo"
+
     repo="$(new_repo registry-checksum)"
     root="$repo/Cargo.lock"
     replace "$root" 'checksum = "abc"' 'checksum = "changed"'

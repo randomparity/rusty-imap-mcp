@@ -646,6 +646,14 @@ def one_field(block: str, field: str, required: bool) -> str | None:
     expected = "exactly one" if required else "at most one"
     if (required and len(values) != 1) or (not required and len(values) > 1):
         raise GuardError(f"package block must contain {expected} {field}")
+    if not required:
+        assignments = re.findall(
+            rf"""^[ \t]*(?:{field}|"{field}"|'{field}')\s*=""",
+            block,
+            re.MULTILINE,
+        )
+        if len(assignments) != len(values):
+            raise GuardError(f"package block contains a noncanonical {field} field")
     return values[0] if values else None
 
 
@@ -750,8 +758,13 @@ def verify_fixture_lock(root_lock: Path, fixture_manifest: Path, fixture_lock: P
         if package.source is not None and package.source.startswith("registry+")
     }
     for package in sorted(reachable, key=lambda item: (item.name, item.version)):
-        if package.source is None or not package.source.startswith("registry+"):
+        if package.source is None:
             continue
+        if not package.source.startswith("registry+"):
+            raise GuardError(
+                f"{fixture_lock}: unsupported package source {package.source!r} "
+                f"for {package.identity()}"
+            )
         identity = (package.name, package.version, package.source, package.checksum)
         if identity not in registry_identities:
             raise GuardError(
