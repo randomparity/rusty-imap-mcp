@@ -49,3 +49,4 @@ compile it.
 | [0025](0025-pre-init-single-envelope-validator-interception.md) | Pre-init validator interception restores the deterministic single-envelope contract | Accepted |
 | [0026](0026-published-data-records-non-exhaustive.md) | Published public-field data records are non-exhaustive | Accepted |
 | [0027](0027-locked-downstream-compiler-probes.md) | Downstream compiler probes use fixture lockfiles | Accepted |
+| [0028](0028-advisory-codeowners-cover-ci-control-plane.md) | Advisory CODEOWNERS covers the CI control plane | Accepted |

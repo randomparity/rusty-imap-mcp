@@ -26,6 +26,13 @@
 # Under a binding configuration, Dependabot pull requests from the
 # `github-actions` ecosystem touch `.github/workflows/` and would need an
 # approval; `cargo` bumps touch `Cargo.toml` / `Cargo.lock` only and would not.
+#
+# OWNED PATH SET: repository-level files and external-automation directories
+# whose primary purpose is to select, configure, or implement required checks
+# and automated fuzz builds, plus supply-chain policy files wherever they live.
+# Multipurpose build inputs (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`),
+# ordinary source, generated artifacts, component-local harness configuration,
+# and optional developer tooling stay outside this advisory boundary.
 
 # CI/CD configuration. Holds the workflow `permissions:` blocks, the
 # `pull_request_target` fuzz-lock realign job and its GitHub App credential
@@ -39,3 +46,21 @@
 # Supply-chain policy: RUSTSEC advisory bans, license allowlist, and the
 # duplicate-version deny list.
 /deny.toml @randomparity
+
+# Guardrail orchestration and commit/push hook configuration.
+/justfile @randomparity
+/.pre-commit-config.yaml @randomparity
+
+# Required test, lint, formatting, typo, and analysis configuration.
+/.config/nextest.toml @randomparity
+/clippy.toml @randomparity
+/rustfmt.toml @randomparity
+/typos.toml @randomparity
+/sonar-project.properties @randomparity
+
+# Automated fuzz build definition and its build-context boundary.
+/.clusterfuzzlite/ @randomparity
+/.dockerignore @randomparity
+
+# Supply-chain policy for the workspace-excluded differential HTML oracle.
+/html-oracle/deny.toml @randomparity
