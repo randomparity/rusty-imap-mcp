@@ -8,6 +8,15 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/rimap-nextest-leak-policy.XXXXXX")"
 background_pids=()
 known_child_pid=""
 
+stop_process_tree() {
+    local pid="$1"
+    local child
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+        stop_process_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
 stop_known_child() {
     [ -n "$known_child_pid" ] || return 0
     kill "$known_child_pid" 2>/dev/null || true
@@ -24,12 +33,35 @@ cleanup() {
     stop_known_child || true
     for pid in "${background_pids[@]-}"; do
         [ -n "$pid" ] || continue
-        kill "$pid" 2>/dev/null || true
+        stop_process_tree "$pid"
         wait "$pid" 2>/dev/null || true
     done
     rm -rf "$tmp_dir"
 }
 trap cleanup EXIT INT TERM
+
+# Prove trap-owned cleanup reaches a coordinator's descendant, not only the
+# background PID recorded by this shell.
+bash -c 'sleep 10 & wait' &
+cleanup_control_pid=$!
+background_pids=("$cleanup_control_pid")
+cleanup_control_child=""
+for _ in $(seq 1 100); do
+    cleanup_control_child="$(pgrep -P "$cleanup_control_pid" 2>/dev/null || true)"
+    [ -z "$cleanup_control_child" ] || break
+    sleep 0.01
+done
+if [ -z "$cleanup_control_child" ]; then
+    echo "cleanup control did not create a descendant" >&2
+    exit 1
+fi
+stop_process_tree "$cleanup_control_pid"
+wait "$cleanup_control_pid" 2>/dev/null || true
+background_pids=()
+if kill -0 "$cleanup_control_pid" 2>/dev/null || kill -0 "$cleanup_control_child" 2>/dev/null; then
+    echo "process-tree cleanup left the control process alive" >&2
+    exit 1
+fi
 
 write_config() {
     local path="$1"
