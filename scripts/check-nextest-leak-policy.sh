@@ -38,6 +38,7 @@ if ! awk '
     /^\[\[/ {
         finish_override()
         in_default = 0
+        in_profile = 0
         in_override = ($0 == "[[profile.default.overrides]]")
         mac_host = 0
         leak = ""
@@ -50,6 +51,7 @@ if ! awk '
         finish_override()
         in_override = 0
         in_default = ($0 == "[profile.default]")
+        in_profile = ($0 ~ /^\[profile\./)
         next
     }
 
@@ -60,6 +62,9 @@ if ! awk '
             if (line == "leak-timeout = { period = \"5s\", result = \"fail\" }") {
                 valid_default++
             }
+        }
+        if (in_profile && !in_default && line ~ /^leak-timeout[[:space:]]*=/) {
+            other_profile_leaks++
         }
         if (in_override && line == "platform = { host = '\''cfg(target_os = \"macos\")'\'' }") {
             mac_host = 1
@@ -92,6 +97,10 @@ if ! awk '
         }
         if (other_leak_blocks != 0) {
             print "nextest leak policy: leak-timeout overrides are forbidden outside the exact macOS host policy" > "/dev/stderr"
+            failed = 1
+        }
+        if (other_profile_leaks != 0) {
+            print "nextest leak policy: leak-timeout is forbidden in profiles other than profile.default" > "/dev/stderr"
             failed = 1
         }
         exit failed

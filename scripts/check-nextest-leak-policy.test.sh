@@ -97,6 +97,11 @@ write_config "$generic_advisory" 'platform = { host = '\''cfg(target_os = "macos
 printf '\n[[profile.default.overrides]]\nfilter = '\''all()'\''\nleak-timeout = { period = "1s", result = "pass" }\n' >>"$generic_advisory"
 expect_rejected generic-advisory "$generic_advisory"
 
+ci_advisory="$tmp_dir/ci-advisory.toml"
+write_config "$ci_advisory" 'platform = { host = '\''cfg(target_os = "macos")'\'' }'
+printf '\n[profile.ci]\nleak-timeout = { period = "5s", result = "pass" }\n' >>"$ci_advisory"
+expect_rejected ci-advisory "$ci_advisory"
+
 fixture="$tmp_dir/fixture"
 mkdir -p "$fixture/src" "$fixture/.config" "$fixture/pids"
 write_config "$fixture/.config/nextest.toml" \
