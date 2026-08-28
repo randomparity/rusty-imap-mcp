@@ -166,3 +166,16 @@ fail-fast = { max-fail = 20 }
 # the end of a run — a missing file means the run did not complete.
 [profile.default.junit]
 path = "junit.xml"
+
+# A full macOS arm64 `just ci` reported LEAK-FAIL at 5.014 s for a pure string
+# test that has no descendant or inherited handle (#846). The isolated test and
+# a repeated follow-up suite were green, so the marker establishes delayed EOF
+# observation under whole-suite contention rather than a genuine leak. Keep
+# fatal detection, but give macOS hosts a provisional 30 s observation window.
+# This is host-scoped: cross-compiling for macOS must retain the executing
+# host's policy. A future false positive at 30 s requires contemporaneous
+# process-tree evidence before this bound changes again. This override follows
+# every default-profile table so later keys cannot accidentally join it.
+[[profile.default.overrides]]
+platform = { host = 'cfg(target_os = "macos")' }
+leak-timeout = { period = "30s", result = "fail" }

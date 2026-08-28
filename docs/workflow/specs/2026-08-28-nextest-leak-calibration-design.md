@@ -40,7 +40,9 @@ snapshot rather than increasing the window from another un-attributed marker.
 Use nextest's existing host-platform override rather than a wrapper, retry, or production-code
 change. The selector is exactly `platform = { host = 'cfg(target_os = "macos")' }`; nextest's
 string selector is target-scoped and is forbidden because it would also relax cross-compiled
-macOS tests on a non-macOS host. The override belongs in `.config/nextest.toml` beside the default
+macOS tests on a non-macOS host. The override belongs in `.config/nextest.toml` after the complete
+default-profile tables; placing an array-of-tables override mid-profile would make later keys part
+of that override. It remains conceptually paired with the default
 policy and applies to arm64 and x86_64 macOS hosts. Linux hosts retain five seconds.
 
 ## Verification
@@ -54,8 +56,9 @@ workspace and asserts the two normative policy records structurally:
 The harness must reject a missing host selector, a target-only macOS selector, a non-fatal result,
 or a changed duration. It
 also compiles a tiny dependency-free fixture with 32 no-descendant tests and one test that spawns
-a longer-lived child with inherited stdout/stderr. On macOS the clean tests run for ten stress
-iterations at 18-way concurrency, constructing 320 concurrent process-exit/pipe-drain observations;
+a longer-lived child with inherited stdout/stderr. On macOS the clean tests run for ten batches at
+18-way concurrency, constructing 320 concurrent process-exit/pipe-drain observations without the
+`--stress-count` flag that cargo-nextest 0.9.95 predates;
 each clean test stays alive for 50 ms so a sampler can record its process identity and verify it has
 no descendants. A positive-control test keeps a known child alive while its parent remains
 observable; the same sampler must record that exact relationship before the clean phase can count
