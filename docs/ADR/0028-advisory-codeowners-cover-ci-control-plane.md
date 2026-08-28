@@ -5,12 +5,14 @@
 ## Context
 
 The advisory CODEOWNERS policy owns `.github/`, `scripts/`, and `deny.toml`, but
-not four configuration surfaces that decide what CI and local guardrails run:
-`justfile`, `.pre-commit-config.yaml`, `.config/nextest.toml`,
-`.clusterfuzzlite/`, `.dockerignore`, `clippy.toml`, `rustfmt.toml`,
-`typos.toml`, and `sonar-project.properties`. A small edit to one of those files
-can remove a check, exclude inputs, alter test execution, or change the fuzz
-build without requesting the repository owner as a reviewer.
+not the four configuration surfaces issue #768 identified: `justfile`,
+`.pre-commit-config.yaml`, `.config/nextest.toml`, and `.clusterfuzzlite/`. A
+bounded repository audit applying the same rationale found five more dedicated
+control-plane surfaces: `.dockerignore`, `clippy.toml`, `rustfmt.toml`,
+`typos.toml`, and `sonar-project.properties`. Together these nine paths decide
+what checks run or what they inspect. A small edit can remove a check, exclude
+inputs, alter test execution, or change the fuzz build without requesting the
+repository owner as a reviewer.
 
 The file remains advisory because the solo-maintainer constraint recorded by
 issue #744 and PR #764 has not changed. This decision selects reviewer-assignment
@@ -53,8 +55,9 @@ remains outside because mutation testing is not a required CI check.
 ## Considered & rejected
 
 - **Keep the current three entries.** verified: issue #768 identifies four
-  unowned files or directories that configure checks or fuzz execution, so the
-  existing set does not satisfy the stated control-plane rationale.
+  unowned files or directories, and the bounded repository audit recorded in
+  Context identifies five more matching the same dedicated-control-plane rule;
+  the existing set therefore does not satisfy its stated rationale.
 - **Own every file that can influence a build or lint.** judgment: multipurpose
   manifests, lockfiles, toolchain pins, and source can all influence results,
   but including them would erase the dedicated-control-plane boundary and
