@@ -50,3 +50,4 @@ compile it.
 | [0026](0026-published-data-records-non-exhaustive.md) | Published public-field data records are non-exhaustive | Accepted |
 | [0027](0027-locked-downstream-compiler-probes.md) | Downstream compiler probes use fixture lockfiles | Accepted |
 | [0028](0028-advisory-codeowners-cover-ci-control-plane.md) | Advisory CODEOWNERS covers the CI control plane | Accepted |
+| [0030](0030-readme-is-the-pages-source.md) | README is the GitHub Pages source | Accepted |

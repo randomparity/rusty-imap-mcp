@@ -1,0 +1,119 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - docs/assets/rusty-imap-mcp-logo.svg
+      - docs/site/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Pages site
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+
+      - name: Install Pandoc 3.10.2
+        env:
+          PANDOC_SHA256: 6c06b69b49ae95087573631a6fcafb233ab7ab51e5cfa73f7539d6c964a2640d
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/pandoc.deb" \
+            https://github.com/jgm/pandoc/releases/download/3.10.2/pandoc-3.10.2-1-amd64.deb
+          echo "$PANDOC_SHA256  $RUNNER_TEMP/pandoc.deb" | sha256sum --check --strict
+          sudo dpkg --install "$RUNNER_TEMP/pandoc.deb"
+
+      - name: Build site
+        run: |
+          mkdir -p _site/docs/assets
+          cp docs/assets/rusty-imap-mcp-logo.svg _site/docs/assets/
+          cp docs/site/site.css _site/
+          pandoc README.md \
+            --from=gfm \
+            --to=html5 \
+            --standalone \
+            --template=docs/site/template.html \
+            --lua-filter=docs/site/rewrite-links.lua \
+            --metadata title="rusty-imap-mcp" \
+            --metadata description="Security-first MCP server for IMAP email" \
+            --output=_site/index.html
+
+      - name: Verify generated site
+        run: |
+          test -s _site/index.html
+          test -s _site/site.css
+          test -s _site/docs/assets/rusty-imap-mcp-logo.svg
+          grep -F 'docs/assets/rusty-imap-mcp-logo.svg' _site/index.html
+          grep -F 'github.com/randomparity/rusty-imap-mcp/blob/main/docs/quickstart-gmail.md' \
+            _site/index.html
+          grep -F 'href="#installation-options"' _site/index.html
+          grep -F 'id="installation-options"' _site/index.html
+          grep -F 'blob/main/docs/troubleshooting.md#unsupported-protocol-version-during-initialize' \
+            _site/index.html
+          grep -F 'tree/main/docs/superpowers/specs/' _site/index.html
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+
+          class LocalTargetParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.targets = []
+
+              def handle_starttag(self, tag, attrs):
+                  for name, value in attrs:
+                      if name in {"href", "src"} and value:
+                          self.targets.append(value)
+
+          site = Path("_site")
+          parser = LocalTargetParser()
+          parser.feed((site / "index.html").read_text())
+          missing = []
+          for target in parser.targets:
+              parsed = urlsplit(target)
+              if parsed.scheme or parsed.netloc or not parsed.path:
+                  continue
+              path = site / unquote(parsed.path).lstrip("/")
+              if not path.exists():
+                  missing.append(target)
+          if missing:
+              raise SystemExit("unresolved local targets: " + ", ".join(missing))
+          PY
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy Pages site
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

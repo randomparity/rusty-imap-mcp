@@ -1,166 +1,239 @@
+<p align="center">
+  <img src="docs/assets/rusty-imap-mcp-logo.svg" width="320" alt="rusty-imap-mcp">
+</p>
+
 # rusty-imap-mcp
 
-[![CI](https://github.com/randomparity/rusty-imap-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/randomparity/rusty-imap-mcp/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/randomparity/rusty-imap-mcp)](https://github.com/randomparity/rusty-imap-mcp/releases)
-[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](LICENSE-MIT)
-[![MSRV](https://img.shields.io/badge/MSRV-1.88.0-orange)](rust-toolchain.toml)
+<p align="center">
+  A security-first MCP server that gives coding agents controlled access to IMAP email.
+</p>
 
-A security-first [Model Context Protocol](https://modelcontextprotocol.io/)
-server for IMAP email, written in Rust.
+<p align="center">
+  <a href="https://github.com/randomparity/rusty-imap-mcp/actions/workflows/ci.yml"><img src="https://github.com/randomparity/rusty-imap-mcp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/randomparity/rusty-imap-mcp/releases"><img src="https://img.shields.io/github/v/release/randomparity/rusty-imap-mcp" alt="Latest release"></a>
+  <a href="https://github.com/randomparity/rusty-imap-mcp/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue" alt="MIT or Apache-2.0 license"></a>
+  <a href="https://github.com/randomparity/rusty-imap-mcp/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/MSRV-1.88.0-orange" alt="MSRV 1.88.0"></a>
+</p>
 
-## Why this exists
+## Email is untrusted input
 
-LLM agents with email access are targets for prompt injection. A single
-crafted message can contain hidden instructions that cause an agent to
-send mail, leak data, or pivot to other tools. Most MCP email servers
-pass raw message content straight to the model.
+An email-connected agent can search a mailbox, summarize a thread, prepare a reply, or organize
+messages without leaving the coding workflow. It can also encounter a crafted message that tries
+to redirect the agent, exfiltrate data, or trigger a more powerful tool.
 
-rusty-imap-mcp treats every byte of email content as untrusted input.
-Messages are parsed, sanitized, normalized, and structurally tagged
-before reaching the agent — so the model sees clean content with
-security metadata, not raw attack surface.
+`rusty-imap-mcp` treats every byte of email content as adversarial. It parses, sanitizes,
+normalizes, and labels content before an agent sees it. Trusted metadata stays structurally
+separate from untrusted message text and explicit security warnings. Authorization postures then
+limit what the agent can do with that content.
+
+It is written in Rust and ships as one binary. Proton Mail through Proton Bridge is the primary
+target, with support for standard IMAP servers such as Gmail, Fastmail, Dovecot, and Cyrus.
 
 ## Features
 
-### Content defense
+- **Layered content defense** — strips hidden HTML, invisible Unicode controls, bidi tricks, and
+  look-alike identifiers; normalizes text; and reports what it found in `security_warnings`.
+- **Four authorization postures** — `readonly`, `draft-safe` (default), `full`, and `destructive`,
+  plus per-tool overrides. Denied tools are not advertised to the agent.
+- **24 MCP tools** — search and fetch mail, manage flags and folders, download attachments, create
+  drafts, and—with an explicit posture—send, forward, move, or delete messages.
+- **Human-reviewed drafts** — new drafts receive the `$PendingReview` flag so an agent can prepare
+  mail without silently bypassing review.
+- **Multi-account isolation** — each account has its own posture, limits, circuit breaker, and
+  credential lookup.
+- **Audit and containment** — append-only JSONL audit records, rate limiting, a circuit breaker,
+  TLS certificate pinning, bounded attachment paths, and OS-keychain credential storage.
+- **Portable deployment** — Homebrew, `.deb` and `.rpm` packages, a verified installer path, and
+  release binaries for five Linux and macOS targets.
 
-- HTML sanitization with hidden-element stripping (CSS `display:none`,
-  `visibility:hidden`, `opacity:0`, white-on-white text)
-- Unicode NFKC normalization and invisible character stripping
-  (zero-width, bidi overrides, C0/C1 controls)
-- Look-alike detection: mixed-script domains, confusable skeletons,
-  display-name spoofing, reply-to mismatch, filename bidi tricks
-- Structured response envelope separating trusted `meta` from
-  `untrusted` content and `security_warnings`
-- Mailing list detection and content provenance tagging
+See the [security model](docs/security-model.md), [posture matrix](docs/postures.md), and
+[complete tool reference](docs/tools.md) for the exact guarantees and capabilities.
 
-### Authorization
+## Quick start
 
-- Four security postures: `readonly`, `draft-safe` (default), `full`,
-  `destructive`
-- Per-tool `"allow"` / `"deny"` overrides
-- Denied tools hidden from `list_tools` and rejected at dispatch
-- `$PendingReview` flag on drafts — human-in-the-loop gate
+### 1. Install the binary
 
-### Audit and limits
+Homebrew is the shortest path on macOS and supported Linux hosts:
 
-- Append-only JSONL audit log with tamper detection
-- Token-bucket rate limiting (per-tool, per-account)
-- Circuit breaker with sliding-window error counting
-- TLS certificate fingerprint pinning
+```bash
+brew install randomparity/tap/rusty-imap-mcp
+rusty-imap-mcp --version
+```
 
-### Email operations
+Packages, release tarballs, checksums, and provenance attestations are available on the
+[releases page](https://github.com/randomparity/rusty-imap-mcp/releases). To build from source:
 
-- 22 posture-gated tools: list, search, fetch, export, flag, label,
-  move, draft, send, forward, folder management, attachment download
-- 2 infrastructure tools: `list_accounts`, `use_account`
-- 24 dispatchable tools total
-- Multi-account support with per-account posture, rate limits, and
-  circuit breaker
-- SMTP sending with automatic Sent-folder copy via IMAP APPEND
+```bash
+cargo install rimap-server --locked --bin rusty-imap-mcp
+```
 
-### Operations
+Rust 1.88.0 or newer is required for a source build. Linux source builds also need the system
+D-Bus development package. See [Installation options](#installation-options) for package and
+verification details.
 
-- Single static binary — no runtime dependencies
-- Pre-built binaries for 5 platforms (x86_64/aarch64 Linux, aarch64
-  macOS, ppc64le, s390x)
-- TOML configuration with strict validation
-- OS keychain credential storage (no passwords in config files)
-- `--dry-run` mode for connection testing
+### 2. Connect an email account
 
-## How it compares
+Choose the provider guide that matches your mailbox:
 
-| Feature | rusty-imap-mcp | [mcp-email-server](https://github.com/ai-zerolab/mcp-email-server) | [email-mcp](https://github.com/codefuturist/email-mcp) | [read-no-evil-mcp](https://github.com/thekie/read-no-evil-mcp) |
-|---------|:-:|:-:|:-:|:-:|
-| **Security** | | | | |
-| Content sanitization | yes | no | no | no |
-| Prompt injection defense | structural | no | no | ML (72% detection) |
-| Unicode normalization | yes | no | no | no |
-| Invisible char stripping | yes | no | no | partial |
-| Look-alike detection | yes | no | no | no |
-| Security postures | 4 tiers + per-tool | no | no | per-account perms |
-| Audit log | append-only JSONL | no | audit trail | no |
-| TLS fingerprint pinning | yes | no | no | no |
-| Rate limiting | token-bucket | no | token-bucket | no |
-| Circuit breaker | yes | no | no | no |
-| **Capabilities** | | | | |
-| Tool count | 24 | ~10 | 47 | 7 |
-| Multi-account | yes | yes | yes | yes |
-| SMTP send | yes | yes | yes | yes |
-| Credential storage | OS keychain | env vars | config file | env vars |
-| IMAP IDLE / watcher | no | no | yes | no |
-| Email scheduling | no | no | yes | no |
-| **Runtime** | | | | |
-| Language | Rust | Python | TypeScript | Python |
-| Install | single binary | `pip` / `uvx` | `npx` / `pnpm` | `pip` + PyTorch (~500 MB) |
-| Docker | no | yes | yes | yes |
+- [Gmail quick start](docs/quickstart-gmail.md) — about 10 minutes with a Google App Password.
+- [Proton Bridge quick start](docs/quickstart-proton-bridge.md) — about 15 minutes, including the
+  self-signed TLS certificate pin.
 
-Based on public documentation as of April 2026. Corrections welcome
-via issue or PR.
+For Fastmail or another standards-compliant server, start with the Gmail guide and substitute the
+provider's IMAP host, port, encryption mode, and app-password instructions. The server reads its
+configuration from the platform config directory and resolves passwords from the OS keychain;
+credentials do not belong in the TOML file.
 
-## Get started
+Before connecting an agent, verify configuration and TLS without starting the MCP transport:
 
-Pick your email provider:
+```bash
+rusty-imap-mcp --dry-run
+```
 
-- **[Quick start: Gmail](docs/quickstart-gmail.md)** — ~10 minutes,
-  requires an App Password
-- **[Quick start: Proton Bridge](docs/quickstart-proton-bridge.md)** —
-  ~15 minutes, includes TLS fingerprint setup
+### 3. Connect your coding agent
 
-For other IMAP servers (Fastmail, Dovecot, Cyrus, etc.), follow the
-Gmail guide and adjust the `host`, `port`, and `encryption` fields for
-your provider.
+Choose one client below. Each example registers the installed binary as a local stdio MCP server;
+`rusty-imap-mcp` continues to read the account configuration created in step 2.
 
-Prefer to start from a full annotated config? Copy
-[`config.example.toml`](config.example.toml) (single account) or
-[`config.multi-account.example.toml`](config.multi-account.example.toml)
-(several mailboxes) and edit the values.
+#### Claude Code
 
-## MCP tools
+```bash
+claude mcp add --scope user rusty-imap-mcp -- rusty-imap-mcp
+claude mcp get rusty-imap-mcp
+```
 
-**22 posture-gated tools:**
+See [Claude Code MCP configuration](https://docs.anthropic.com/en/docs/claude-code/mcp).
 
-- **Read:** `list_folders`, `search`, `fetch_message`,
-  `list_attachments`, `download_attachment`, `list_labels`
-- **Export:** `export_messages` — denied in every posture by default;
-  enable with `export_messages = "allow"` under `[security.tools]`
-  (see [The `export_messages` tool](docs/configuration.md#the-export_messages-tool))
-- **Mutate:** `mark_read`, `mark_unread`, `flag`, `unflag`,
-  `add_label`, `remove_label`, `move_message`, `create_draft`
-- **Manage:** `send_email`, `forward`, `delete_message`, `create_folder`,
-  `rename_folder`, `expunge`, `delete_folder`
+#### Codex
 
-`create_draft` and `send_email` accept optional sandbox-sourced `attachments`
-(read only from the download root; see
-[Compose attachments and HTML](docs/postures.md#compose-attachments-and-html))
-and a sanitized `body_html` alternative (gated at `full`).
+```bash
+codex mcp add rusty-imap-mcp -- rusty-imap-mcp
+codex mcp list
+```
 
-`search`'s content-search arguments (`advanced_query`, `body`, `text`,
-`bcc`, `headers`), `fetch_message`'s `include_html` argument, and
-`create_draft`'s `body_html` argument are gated sub-capabilities
-(`search.advanced_query`, `fetch_message.include_html`,
-`create_draft.include_html`) requiring `full` posture or above — they
-are not separate MCP tools.
+The Codex CLI and IDE extension share `~/.codex/config.toml`. See the
+[official OpenAI MCP documentation](https://developers.openai.com/codex/mcp/).
 
-**2 infrastructure tools** (always available):
-`use_account`, `list_accounts`
+#### Cursor
 
-24 dispatchable tools total. See [docs/postures.md](docs/postures.md)
-for the full 25-capability x 4-posture matrix (the three gated
-sub-capabilities above are counted as separate rows there).
+Add this server to the `mcpServers` object in `~/.cursor/mcp.json`, or use
+`.cursor/mcp.json` in one project:
 
-## Compatibility
+```json
+{
+  "mcpServers": {
+    "rusty-imap-mcp": {
+      "command": "rusty-imap-mcp"
+    }
+  }
+}
+```
 
-rusty-imap-mcp accepts MCP protocol version `2025-11-25` only — it
-does not negotiate down to older versions a client requests. Every
-mainstream MCP host (Claude Desktop, Claude Code, Claude.ai, Cursor,
-VS Code, etc.) has negotiated `2025-11-25` by default since that
-revision became the MCP spec's latest; an older host will fail the
-handshake instead of connecting with reduced capabilities. See
-[Unsupported protocol version during initialize](docs/troubleshooting.md#unsupported-protocol-version-during-initialize)
-for the exact error text and why there's no fallback.
+See [Cursor MCP configuration](https://docs.cursor.com/context/model-context-protocol).
 
-## Build from source
+#### VS Code with GitHub Copilot
+
+Create `.vscode/mcp.json` in a project, or run **MCP: Open User Configuration** for a user-level
+server:
+
+```json
+{
+  "servers": {
+    "rusty-imap-mcp": {
+      "type": "stdio",
+      "command": "rusty-imap-mcp"
+    }
+  }
+}
+```
+
+Start the server from the editor and approve its tools when prompted. See
+[MCP servers in VS Code](https://code.visualstudio.com/docs/agent-customization/mcp-servers).
+
+#### IBM Bob
+
+Create `.bob/mcp.json` in the project, or edit the global MCP file from Bob's MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "rusty-imap-mcp": {
+      "command": "rusty-imap-mcp",
+      "alwaysAllow": [],
+      "disabled": false
+    }
+  }
+}
+```
+
+Keep `alwaysAllow` empty until you have reviewed the advertised tools, then restart the server in
+Bob. See [Using MCP in IBM Bob](https://bob.ibm.com/docs/ide/configuration/mcp/mcp-in-bob).
+
+> **Running more than one client:** each client starts a separate server process, and the audit
+> log permits one writer. Give concurrent clients separate `--config` files with distinct audit
+> paths; see [Running multiple MCP clients](docs/audit-log.md#running-multiple-mcp-clients).
+
+Try a read-only first prompt after the tools appear: “List my inbox folders, then show the five
+newest message subjects.” Keep the default `draft-safe` posture until you intentionally need
+sending or destructive operations.
+
+## How the security boundary works
+
+Every tool response separates three kinds of information:
+
+- `meta` contains server-derived identifiers and operation facts.
+- `untrusted` contains sanitized mailbox content that an email sender could influence.
+- `security_warnings` names suspicious transformations or identity signals.
+
+The active posture controls both tool advertisement and dispatch. `draft-safe` permits reading,
+organization, and draft creation but denies sending and destructive operations. Content-search
+queries, raw sanitized HTML, and HTML draft bodies are independently gated at `full` posture.
+`export_messages` is denied in every posture until explicitly allowed.
+
+The server supports MCP protocol version `2025-11-25`. An older client fails the handshake instead
+of connecting with reduced behavior. See [protocol troubleshooting](docs/troubleshooting.md#unsupported-protocol-version-during-initialize)
+if initialization reports an unsupported version.
+
+## Installation options
+
+### Homebrew
+
+```bash
+brew install randomparity/tap/rusty-imap-mcp
+```
+
+Prebuilt bottles support Apple Silicon macOS and x86_64/aarch64 Linux. Intel Macs build from
+source. See the [Homebrew notes](homebrew/README.md).
+
+### Debian and RPM packages
+
+Download the matching `.deb` or `.rpm` from the
+[latest release](https://github.com/randomparity/rusty-imap-mcp/releases), then install it with
+the platform package manager:
+
+```bash
+sudo apt install ./rusty-imap-mcp_X.Y.Z-1_amd64.deb
+# or
+sudo dnf install ./rusty-imap-mcp-X.Y.Z-1.x86_64.rpm
+```
+
+Packages are available for amd64 and arm64 and include manpages. They target glibc 2.36 or newer.
+
+### Release tarballs and installer
+
+Releases include five target tarballs, `SHA256SUMS.txt`, and build provenance attestations. The
+convenience installer downloads the latest stable binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/randomparity/rusty-imap-mcp/main/install.sh | sh
+```
+
+The piped script trusts GitHub over TLS; it is not independently authenticated. For a verifiable
+path, download a pinned release's `install.sh` and `SHA256SUMS.txt`, verify the script before
+running it, and verify the selected artifact with
+[`gh attestation verify`](https://cli.github.com/manual/gh_attestation_verify).
+
+### Build from a checkout
 
 ```bash
 git clone https://github.com/randomparity/rusty-imap-mcp.git
@@ -168,177 +241,46 @@ cd rusty-imap-mcp
 cargo build --release
 ```
 
-Requires Rust 1.88.0+ and `libdbus-1-dev` (Linux) or equivalent.
-
-### Development
-
-```bash
-just setup    # install required tooling and pre-commit hooks
-just ci       # run the full local-CI equivalent
-```
-
-## Homebrew
-
-On macOS (Apple Silicon) and Linux (x86_64 / aarch64):
-
-```bash
-brew install randomparity/tap/rusty-imap-mcp
-```
-
-or, as two steps:
-
-```bash
-brew tap randomparity/tap
-brew install rusty-imap-mcp
-```
-
-Intel Macs build from source via a build-time `rust` dependency (no prebuilt
-Intel-macOS binary). See [`homebrew/README.md`](homebrew/README.md).
-
-## Pre-built binaries
-
-Tarballs are published for five targets on each
-[release](https://github.com/randomparity/rusty-imap-mcp/releases):
-`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-`aarch64-apple-darwin`, `powerpc64le-unknown-linux-gnu`,
-`s390x-unknown-linux-gnu`. Each release also attaches `SHA256SUMS.txt`
-and a [build provenance
-attestation](https://github.com/randomparity/rusty-imap-mcp/attestations)
-over every tarball.
-
-The `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and
-`aarch64-apple-darwin` tarballs are self-contained. The
-`powerpc64le-unknown-linux-gnu` and `s390x-unknown-linux-gnu` tarballs link
-libdbus dynamically and require a system `libdbus-1-3` at runtime.
-
-Each release also attaches native `.deb`/`.rpm` packages (amd64/arm64), an
-`install.sh` one-line installer, and manpages inside every tarball
-(`share/man/man1/`).
-
-### One-line installer
-
-Two paths, depending on how much you want to verify:
-
-- **Convenience** — resolves and installs the latest stable release:
-
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/randomparity/rusty-imap-mcp/main/install.sh | sh
-  ```
-
-  This trusts GitHub's origin over TLS and the script it fetches; the piped
-  script is **not** independently checksum-verified. If the unauthenticated
-  GitHub API is rate-limited (common behind shared NAT/CI), pin a version:
-  `RUSTY_IMAP_MCP_VERSION=vX.Y.Z`. Override the target dir with
-  `RUSTY_IMAP_MCP_INSTALL_DIR` (default `$HOME/.local/bin`).
-
-- **Verifiable** — download the release-asset `install.sh`, check it against
-  `SHA256SUMS.txt`, then run it (pinned version, no API call — the file you
-  verify is the file you run).
-
-The installer's SHA-256 check is **integrity, not authenticity**:
-`SHA256SUMS.txt` comes from the same unsigned release origin, so it catches a
-corrupted download, not a tampered release. For authenticity, verify the
-[build provenance attestation](https://github.com/randomparity/rusty-imap-mcp/attestations)
-on the downloaded tarball or package with `gh attestation verify`.
-
-### Distribution packages (.deb / .rpm)
-
-Download the `.deb` (Debian/Ubuntu) or `.rpm` (Fedora/RHEL) for amd64 or arm64
-from the [releases page](https://github.com/randomparity/rusty-imap-mcp/releases)
-and install it:
-
-```bash
-sudo apt install ./rusty-imap-mcp_X.Y.Z-1_amd64.deb   # or: sudo dnf install ./rusty-imap-mcp-X.Y.Z-1.x86_64.rpm
-man rusty-imap-mcp
-```
-
-The packaged amd64/arm64 binary static-links libdbus, so **no** `libdbus-1-3` /
-`dbus-libs` runtime package is needed. Both packages are built against
-**glibc 2.36** (Debian 12+, Ubuntu 24.04+, Fedora 37+) and declare that floor,
-so `apt`/`dnf` refuse cleanly on older systems; there, use `cargo install
-rusty-imap-mcp --locked` or build from source instead. The `curl … | sh`
-installer places only the binary — its manpage ships inside the tarball under
-`share/man/man1/`, or run `rusty-imap-mcp --help`.
-
-### Installing a prebuilt binary
-
-1. Download the tarball for your platform and `SHA256SUMS.txt` from the
-   [releases page](https://github.com/randomparity/rusty-imap-mcp/releases).
-2. Verify the checksum before running anything you downloaded:
-
-   ```bash
-   sha256sum --ignore-missing -c SHA256SUMS.txt
-   ```
-
-3. Extract it and put the binary on your `$PATH`:
-
-   ```bash
-   tar xzf rusty-imap-mcp-vX.Y.Z-<target-triple>.tar.gz
-   mv rusty-imap-mcp-vX.Y.Z-<target-triple>/rusty-imap-mcp ~/.local/bin/rusty-imap-mcp
-   ```
-
-4. **macOS only:** Gatekeeper quarantines binaries downloaded via a
-   browser and refuses to run them ("cannot be opened because the
-   developer cannot be verified"). The `aarch64-apple-darwin` binary is
-   not yet codesigned or notarized, so remove the quarantine attribute
-   before running it:
-
-   ```bash
-   xattr -d com.apple.quarantine ~/.local/bin/rusty-imap-mcp
-   ```
-
-   Alternatively, right-click the binary in Finder, choose **Open**,
-   and confirm the warning once.
-
-   Codesigning and notarization (and an MCPB bundle for one-click
-   Claude Desktop install) are tracked for a future release; until
-   then, always verify the SHA256 checksum first.
+The binary is written to `target/release/rusty-imap-mcp`.
 
 ## Documentation
 
+- [Gmail quick start](docs/quickstart-gmail.md)
+- [Proton Bridge quick start](docs/quickstart-proton-bridge.md)
 - [Configuration reference](docs/configuration.md)
-- [Security model and posture matrix](docs/security-model.md)
-- [Multi-account support](docs/multi-account.md)
-- [Audit log format](docs/audit-log.md)
+- [Security model](docs/security-model.md) and [posture matrix](docs/postures.md)
+- [Multi-account setup](docs/multi-account.md)
+- [Audit log](docs/audit-log.md)
+- [Tool reference](docs/tools.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Full documentation index](docs/INDEX.md)
 
+## Development
+
+The workspace uses Rust 1.94.0 for development and verifies Rust 1.88.0 as its MSRV. Repository
+checks are wrapped in `just` so local and CI commands stay aligned:
+
+```bash
+just setup
+just check
+just test-fast
+just ci
+```
+
+See [AGENTS.md](AGENTS.md) for contributor guardrails and the design specifications under
+[`docs/superpowers/specs/`](docs/superpowers/specs/).
+
 ## Troubleshooting
 
-- **MCP client reports `Connection closed` / `MCP error -32000` at
-  startup** — the server exited before completing the handshake; the
-  real error went to stderr. See
-  [docs/troubleshooting.md](docs/troubleshooting.md) for the
-  `--dry-run` and stderr-capture workflow.
-- **`rusty-imap-mcp` exits at startup with `audit file ... is already locked`** —
-  another `rusty-imap-mcp` process holds the audit lock. Each MCP
-  client must use a distinct `[audit].path`; see
-  [Running multiple MCP clients](docs/audit-log.md#running-multiple-mcp-clients)
-  for the configuration pattern.
-- **MCP client rejects the server at startup with `Unsupported
-  protocol version: '<version>'. Server supports: 2025-11-25.`** —
-  your MCP host is negotiating an older protocol version;
-  rusty-imap-mcp requires an exact match and does not fall back. See
-  [Compatibility](#compatibility) and
-  [Unsupported protocol version during initialize](docs/troubleshooting.md#unsupported-protocol-version-during-initialize)
-  for why, and update your MCP host.
+- **`Connection closed` or `MCP error -32000` at startup:** run `rusty-imap-mcp --dry-run`, then
+  inspect the client's MCP stderr log. See the [startup workflow](docs/troubleshooting.md).
+- **`audit file ... is already locked`:** another server process owns that audit file. Use a
+  distinct configuration and audit path for each concurrent client.
+- **Unsupported protocol version:** update the MCP client to one that negotiates `2025-11-25`.
 
-## License
+## License and security
 
-Dual-licensed under MIT OR Apache-2.0. See `LICENSE-MIT` and
-`LICENSE-APACHE`.
+Dual-licensed under MIT or Apache-2.0. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
 
-## Security
-
-See [`SECURITY.md`](SECURITY.md) for responsible disclosure and the
-threat model summary.
-
-## Code quality
-
-![Desloppify scorecard: overall 91.1 / 100](scorecard.png)
-
-Generated by [`desloppify`](https://github.com/peteromallet/desloppify)
-against the current `main` branch. The 19 sub-scores cover file
-health, API coherence, test strategy, security posture, dependency
-hygiene, and more. Regenerate locally with `/desloppify` from Claude
-Code.
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
