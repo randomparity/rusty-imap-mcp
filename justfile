@@ -531,8 +531,19 @@ semver-checks:
 test-semver-baseline:
     ./scripts/semver-baseline.test.sh
 
+# Keep inherited stdout/stderr handle detection fatal while allowing the
+# calibrated macOS host window from #846. The structural check is cheap enough
+# for publish-checks, which intentionally does not install cargo-nextest.
+check-nextest-leak-policy:
+    ./scripts/check-nextest-leak-policy.sh .config/nextest.toml
+
+# Exercise the policy with no-descendant concurrency and a known inherited
+# pipe child. NEXTEST_BIN may select the supported floor for compatibility CI.
+test-nextest-leak-policy:
+    ./scripts/check-nextest-leak-policy.test.sh
+
 # Full local-CI equivalent. If this passes, CI will pass.
-ci: fmt-check lint test test-doc test-msrv deny machete check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline test-fuzz-lock-parity check-fuzz-lock-parity test-compiler-probe-locks check-compiler-probe-locks test-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
+ci: fmt-check lint test test-doc test-msrv deny machete check-no-openssl mcp-conformance-node check-tools-doc check-metadata test-publish-script test-post-release-bump test-semver-baseline check-nextest-leak-policy test-nextest-leak-policy test-fuzz-lock-parity check-fuzz-lock-parity test-compiler-probe-locks check-compiler-probe-locks test-env-deployment-policies test-installer test-prune-containers semver-checks oracle-checks oracle-deny
     typos
 
 # Re-run pre-commit hooks across all files.

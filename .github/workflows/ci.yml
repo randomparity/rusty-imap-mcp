@@ -109,7 +109,14 @@ jobs:
         with:
           key: macos
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Prove the host selector and table-form fatal policy on the supported
+      # cargo-nextest floor, not only the newer developer installation (#846).
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+        with:
+          tool: just,cargo-nextest@0.9.95
       - run: cargo check --workspace --locked --all-targets
+      - name: Exercise nextest leak policy
+        run: NEXTEST_BIN="$(command -v cargo-nextest)" just test-nextest-leak-policy
 
   test:
     name: test (stable)
@@ -317,6 +324,10 @@ jobs:
       # network — so it runs here alongside the other pure-bash script tests.
       - name: Unit-test prune-containers.sh
         run: just test-prune-containers
+      # Pure structural policy check: this job deliberately does not install
+      # cargo-nextest. The behavioral proof runs in required check (macOS).
+      - name: Validate nextest leak policy
+        run: just check-nextest-leak-policy
 
   # Public-API SemVer gate (issue #633). Until this job existed,
   # `cargo semver-checks` ran only in release.yml's `publish` job, so a PR that
