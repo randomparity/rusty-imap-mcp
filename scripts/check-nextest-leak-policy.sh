@@ -23,7 +23,7 @@ if ! awk '
         if (!in_override) {
             return
         }
-        if (mac_host) {
+        if (default_override && mac_host) {
             mac_blocks++
             if (filter_count == 0 && leak_count == 1 && leak == "leak-timeout = { period = \"30s\", result = \"fail\" }") {
                 valid_mac++
@@ -39,7 +39,8 @@ if ! awk '
         finish_override()
         in_default = 0
         in_profile = 0
-        in_override = ($0 == "[[profile.default.overrides]]")
+        in_override = ($0 ~ /^\[\[profile\.[^.]+\.overrides\]\]$/)
+        default_override = ($0 == "[[profile.default.overrides]]")
         mac_host = 0
         leak = ""
         leak_count = 0
