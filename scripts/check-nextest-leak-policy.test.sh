@@ -155,11 +155,10 @@ EOF
 
 {
     cat <<'EOF'
-use std::fs;
-use std::process::Command;
-use std::thread;
-use std::time::Duration;
+#[cfg(test)]
+use std::{fs, process::Command, thread, time::Duration};
 
+#[cfg(test)]
 fn clean() {
     let directory = std::env::var("LEAK_POLICY_PID_DIR").expect("PID directory");
     fs::write(format!("{directory}/{}", std::process::id()), b"clean\n").expect("write PID");
@@ -219,7 +218,10 @@ if [ "$(uname -s)" = "Darwin" ]; then
     clean_args+=(--test-threads 18)
     clean_runs=10
 fi
-cargo test --manifest-path "$fixture/Cargo.toml" --no-run >"$tmp_dir/build.out" 2>&1
+if ! cargo test --manifest-path "$fixture/Cargo.toml" --no-run >"$tmp_dir/build.out" 2>&1; then
+    sed -n '1,160p' "$tmp_dir/build.out" >&2
+    exit 1
+fi
 (
     set +e
     status=0
