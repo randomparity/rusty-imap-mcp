@@ -113,7 +113,7 @@ jobs:
       # cargo-nextest floor, not only the newer developer installation (#846).
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
         with:
-          tool: cargo-nextest@0.9.95
+          tool: just,cargo-nextest@0.9.95
       - run: cargo check --workspace --locked --all-targets
       - name: Exercise nextest leak policy
         run: NEXTEST_BIN="$(command -v cargo-nextest)" just test-nextest-leak-policy
