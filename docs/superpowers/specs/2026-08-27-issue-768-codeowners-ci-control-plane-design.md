@@ -51,10 +51,10 @@ posture and solo-maintainer explanation remain unchanged.
 
 ## Implementation and verification
 
-Add exact root-anchored patterns for the eight files and two directories. Keep
-one owner per line and the existing `@randomparity` identity. A focused
-pre-change assertion must demonstrate that the ten patterns are absent; the
-same assertion must pass after the edit. Run repository hooks, then validate
+Add exact root-anchored patterns for the nine files and one directory. Keep one
+owner per line and the existing `@randomparity` identity. Run one focused
+presence assertion against all ten patterns: require a nonzero exit before the
+edit and exit zero after the edit. Run repository hooks, then validate
 the pushed branch with GitHub's `codeowners/errors` endpoint and require an
 empty `errors` array.
 
