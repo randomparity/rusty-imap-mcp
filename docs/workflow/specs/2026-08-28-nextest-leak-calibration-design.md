@@ -37,9 +37,11 @@ does not make any leak advisory or exempt any test. A future macOS false positiv
 reopens calibration and must preserve the nextest run recording and a contemporaneous process
 snapshot rather than increasing the window from another un-attributed marker.
 
-Use nextest's existing platform override rather than a wrapper, retry, or production-code change.
-The override belongs in `.config/nextest.toml` beside the default policy and applies to all macOS
-test binaries, including arm64 and x86_64 hosts. Linux release and CI targets retain five seconds.
+Use nextest's existing host-platform override rather than a wrapper, retry, or production-code
+change. The selector is exactly `platform = { host = 'cfg(target_os = "macos")' }`; nextest's
+string selector is target-scoped and is forbidden because it would also relax cross-compiled
+macOS tests on a non-macOS host. The override belongs in `.config/nextest.toml` beside the default
+policy and applies to arm64 and x86_64 macOS hosts. Linux hosts retain five seconds.
 
 ## Verification
 
@@ -49,7 +51,8 @@ workspace and asserts the two normative policy records structurally:
 - default: five seconds and fatal;
 - macOS host override: thirty seconds and fatal.
 
-The harness must reject a missing platform selector, a non-fatal result, or a changed duration. It
+The harness must reject a missing host selector, a target-only macOS selector, a non-fatal result,
+or a changed duration. It
 also compiles a tiny dependency-free fixture with 32 no-descendant tests and one test that spawns
 a longer-lived child with inherited stdout/stderr. On macOS the clean tests run for ten stress
 iterations at 18-way concurrency, constructing 320 concurrent process-exit/pipe-drain observations;
@@ -66,8 +69,8 @@ schedule is deterministic.
 Run the copied configuration with cargo-nextest 0.9.95 in the required `check (macOS)` job. The
 floor binary must load the configuration and complete the concurrent clean fixture run on macOS,
 proving that the host-platform override syntax and selection remain compatible at the documented
-floor. The Ubuntu `publish checks` job runs the structural check and current-binary behavioral
-fixture, proving the default policy independently. The local harness accepts an explicit
+floor. The Ubuntu `publish checks` job runs the structural check only, proving the default and
+override records remain exact without adding a nextest prerequisite. The local harness accepts an explicit
 `NEXTEST_BIN`; its default remains `cargo-nextest`, invoked directly as
 `$NEXTEST_BIN nextest run ...`.
 

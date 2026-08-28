@@ -24,6 +24,8 @@ exercise concurrent process exit and pipe draining while a live sampler—with a
 positive control—proves those test processes have no descendants; exercise a deliberate inherited-pipe descendant that must produce
 `LEAK-FAIL`; and load the copied policy with cargo-nextest 0.9.95 in the required macOS check job.
 Gate the platform-neutral checks in local CI and the required Ubuntu `publish checks` job.
+The override is host-scoped (`platform = { host = 'cfg(target_os = "macos")' }`), never the
+string form that nextest interprets as a target selector.
 
 ## Consequences
 
