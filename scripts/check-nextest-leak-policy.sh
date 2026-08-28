@@ -25,9 +25,11 @@ if ! awk '
         }
         if (mac_host) {
             mac_blocks++
-            if (leak_count == 1 && leak == "leak-timeout = { period = \"30s\", result = \"fail\" }") {
+            if (filter_count == 0 && leak_count == 1 && leak == "leak-timeout = { period = \"30s\", result = \"fail\" }") {
                 valid_mac++
             }
+        } else if (leak_count != 0) {
+            other_leak_blocks++
         }
     }
 
@@ -40,6 +42,7 @@ if ! awk '
         mac_host = 0
         leak = ""
         leak_count = 0
+        filter_count = 0
         next
     }
 
@@ -68,6 +71,9 @@ if ! awk '
             leak = line
             leak_count++
         }
+        if (in_override && line ~ /^filter[[:space:]]*=/) {
+            filter_count++
+        }
     }
 
     END {
@@ -82,6 +88,10 @@ if ! awk '
         }
         if (target_only != 0) {
             print "nextest leak policy: macOS selector must use platform.host, not target-only syntax" > "/dev/stderr"
+            failed = 1
+        }
+        if (other_leak_blocks != 0) {
+            print "nextest leak policy: leak-timeout overrides are forbidden outside the exact macOS host policy" > "/dev/stderr"
             failed = 1
         }
         exit failed

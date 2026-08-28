@@ -6,11 +6,26 @@ checker="$repo_root/scripts/check-nextest-leak-policy.sh"
 nextest_bin="${NEXTEST_BIN:-cargo-nextest}"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/rimap-nextest-leak-policy.XXXXXX")"
 background_pids=()
+known_child_pid=""
+
+stop_known_child() {
+    [ -n "$known_child_pid" ] || return 0
+    kill "$known_child_pid" 2>/dev/null || true
+    for _ in $(seq 1 100); do
+        kill -0 "$known_child_pid" 2>/dev/null || return 0
+        sleep 0.01
+    done
+    echo "positive-control child $known_child_pid did not terminate" >&2
+    return 1
+}
 
 cleanup() {
     local pid
+    stop_known_child || true
     for pid in "${background_pids[@]-}"; do
+        [ -n "$pid" ] || continue
         kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     done
     rm -rf "$tmp_dir"
 }
@@ -76,6 +91,11 @@ duplicate_key="$tmp_dir/duplicate-key.toml"
 write_config "$duplicate_key" 'platform = { host = '\''cfg(target_os = "macos")'\'' }'
 printf 'leak-timeout = { period = "30s", result = "fail" }\n' >>"$duplicate_key"
 expect_rejected duplicate-key "$duplicate_key"
+
+generic_advisory="$tmp_dir/generic-advisory.toml"
+write_config "$generic_advisory" 'platform = { host = '\''cfg(target_os = "macos")'\'' }'
+printf '\n[[profile.default.overrides]]\nfilter = '\''all()'\''\nleak-timeout = { period = "1s", result = "pass" }\n' >>"$generic_advisory"
+expect_rejected generic-advisory "$generic_advisory"
 
 fixture="$tmp_dir/fixture"
 mkdir -p "$fixture/src" "$fixture/.config" "$fixture/pids"
@@ -194,6 +214,13 @@ if [ ! -s "$fixture/pids/edge" ]; then
     exit 1
 fi
 read -r parent_pid child_pid <"$fixture/pids/edge"
+case "$parent_pid $child_pid" in
+*[!0-9\ ]*)
+    echo "positive-control edge contained non-numeric PIDs" >&2
+    exit 1
+    ;;
+esac
+known_child_pid="$child_pid"
 observed_parent="$(ps -o ppid= -p "$child_pid" | tr -d ' ')"
 if [ "$observed_parent" != "$parent_pid" ]; then
     echo "sampler did not observe expected edge $parent_pid -> $child_pid" >&2
@@ -207,6 +234,11 @@ fi
 background_pids=()
 if ! grep -q 'LEAK-FAIL' "$tmp_dir/leak.out"; then
     echo "fatal leak run did not report LEAK-FAIL" >&2
+    exit 1
+fi
+stop_known_child
+if kill -0 "$child_pid" 2>/dev/null; then
+    echo "positive-control child remained alive after the leak run" >&2
     exit 1
 fi
 
