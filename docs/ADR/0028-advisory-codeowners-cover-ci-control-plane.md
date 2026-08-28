@@ -6,10 +6,11 @@
 
 The advisory CODEOWNERS policy owns `.github/`, `scripts/`, and `deny.toml`, but
 not four configuration surfaces that decide what CI and local guardrails run:
-`justfile`, `.pre-commit-config.yaml`, `.config/nextest.toml`, and
-`.clusterfuzzlite/`. A small edit to one of those files can remove a check,
-exclude inputs, alter test execution, or change the fuzz build without requesting
-the repository owner as a reviewer.
+`justfile`, `.pre-commit-config.yaml`, `.config/nextest.toml`,
+`.clusterfuzzlite/`, `.dockerignore`, `clippy.toml`, `rustfmt.toml`,
+`typos.toml`, and `sonar-project.properties`. A small edit to one of those files
+can remove a check, exclude inputs, alter test execution, or change the fuzz
+build without requesting the repository owner as a reviewer.
 
 The file remains advisory because the solo-maintainer constraint recorded by
 issue #744 and PR #764 has not changed. This decision selects reviewer-assignment
@@ -17,23 +18,31 @@ coverage; it does not change branch protection.
 
 ## Decision
 
-CODEOWNERS owns the repository's CI control plane: files that select, configure,
-or implement required checks and automated fuzz builds. In addition to the
+CODEOWNERS owns the repository's dedicated CI control-plane files: standalone
+files and directories whose primary purpose is to select, configure, or
+implement required checks and automated fuzz builds. In addition to the
 existing entries, that set includes:
 
 - `/justfile`;
 - `/.pre-commit-config.yaml`;
 - `/.config/nextest.toml`; and
-- `/.clusterfuzzlite/`.
+- `/.clusterfuzzlite/`;
+- `/.dockerignore`;
+- `/clippy.toml`;
+- `/rustfmt.toml`;
+- `/typos.toml`; and
+- `/sonar-project.properties`.
 
-The header records both this inclusion rule and its boundary. General Rust build
-inputs (`Cargo.toml`, `Cargo.lock`, and `rust-toolchain.toml`) remain outside the
-owned set: they affect what is built, but do not define which review and CI gates
-run. Generated artifacts and ordinary source remain outside for the same reason.
+The header records both this inclusion rule and its boundary. Multipurpose Rust
+build inputs (`Cargo.toml`, `Cargo.lock`, and `rust-toolchain.toml`) remain
+outside the owned set: they affect compilation and may contain lint settings,
+but gate configuration is not their primary purpose. Generated artifacts and
+ordinary source remain outside for the same reason. `.cargo/mutants.toml` also
+remains outside because mutation testing is not a required CI check.
 
 ## Consequences
 
-- Pull requests touching the four added surfaces request `@randomparity` and
+- Pull requests touching the nine added surfaces request `@randomparity` and
   show owner attribution.
 - The policy remains advisory and does not block self-authored pull requests.
 - A future binding-policy decision can evaluate one explicit control-plane set
@@ -46,9 +55,10 @@ run. Generated artifacts and ordinary source remain outside for the same reason.
 - **Keep the current three entries.** verified: issue #768 identifies four
   unowned files or directories that configure checks or fuzz execution, so the
   existing set does not satisfy the stated control-plane rationale.
-- **Own every root build input.** judgment: `Cargo.toml`, `Cargo.lock`, and the
-  toolchain pin are build inputs rather than gate-selection policy; including
-  them would broaden reviewer assignment beyond the problem being settled.
+- **Own every file that can influence a build or lint.** judgment: multipurpose
+  manifests, lockfiles, toolchain pins, and source can all influence results,
+  but including them would erase the dedicated-control-plane boundary and
+  broaden reviewer assignment beyond the problem being settled.
 - **Make code-owner review binding now.** verified: PR #764 records that GitHub
   does not let the solo maintainer approve their own pull request, so binding
   review needs a second reviewer or documented bypass that issue #768 excludes.

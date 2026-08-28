@@ -4,7 +4,7 @@
 control-plane boundary selected for issue #768.
 
 **Architecture:** `.github/CODEOWNERS` remains the sole executable policy. Its
-header explains the boundary, and four exact root-anchored patterns add the
+header explains the boundary, and nine exact root-anchored patterns add the
 previously omitted control-plane surfaces without owning general build inputs.
 
 **Tech Stack:** GitHub CODEOWNERS syntax, Markdown comments, shell assertions,
@@ -19,7 +19,9 @@ GitHub REST API.
 - Add no dependency, script, generated artifact, runtime behavior, public
   contract, or new guardrail.
 - Own exactly `/justfile`, `/.pre-commit-config.yaml`,
-  `/.config/nextest.toml`, and `/.clusterfuzzlite/` in this change.
+  `/.config/nextest.toml`, `/.clusterfuzzlite/`, `/.dockerignore`,
+  `/clippy.toml`, `/rustfmt.toml`, `/typos.toml`, and
+  `/sonar-project.properties` in this change.
 - Preserve existing `.github/`, `scripts/`, and `deny.toml` coverage.
 - Run `just ci` before delivery and require GitHub's CODEOWNERS error list to
   be empty for the pushed branch.
@@ -32,12 +34,12 @@ GitHub REST API.
 **Interfaces:**
 - Consumes: GitHub's root-anchored CODEOWNERS pattern syntax and existing
   `@randomparity` owner identity.
-- Produces: automatic reviewer assignment and owner attribution for the four
+- Produces: automatic reviewer assignment and owner attribution for the nine
   selected control-plane surfaces.
 
-- [ ] Run a shell assertion that requires all four exact patterns and confirm
+- [ ] Run a shell assertion that requires all nine exact patterns and confirm
   it fails because none is currently present:
-  `for p in '/justfile' '/.pre-commit-config.yaml' '/.config/nextest.toml' '/.clusterfuzzlite/'; do rg -Fxq "$p @randomparity" .github/CODEOWNERS || exit 1; done`.
+  `for p in '/justfile' '/.pre-commit-config.yaml' '/.config/nextest.toml' '/.clusterfuzzlite/' '/.dockerignore' '/clippy.toml' '/rustfmt.toml' '/typos.toml' '/sonar-project.properties'; do rg -Fxq "$p @randomparity" .github/CODEOWNERS || exit 1; done`.
 - [ ] Update the header to state the control-plane inclusion rule and the
   general-build-input exclusion. Add the four exact patterns, grouped with
   short comments describing the protection each provides.
