@@ -4,7 +4,7 @@
 control-plane boundary selected for issue #768.
 
 **Architecture:** `.github/CODEOWNERS` remains the sole executable policy. Its
-header explains the boundary, and nine exact root-anchored patterns add the
+header explains the boundary, and ten exact root-anchored patterns add the
 previously omitted control-plane surfaces without owning general build inputs.
 
 **Tech Stack:** GitHub CODEOWNERS syntax, Markdown comments, shell assertions,
@@ -21,7 +21,7 @@ GitHub REST API.
 - Own exactly `/justfile`, `/.pre-commit-config.yaml`,
   `/.config/nextest.toml`, `/.clusterfuzzlite/`, `/.dockerignore`,
   `/clippy.toml`, `/rustfmt.toml`, `/typos.toml`, and
-  `/sonar-project.properties` in this change.
+  `/sonar-project.properties`, plus `/html-oracle/deny.toml` in this change.
 - Preserve existing `.github/`, `scripts/`, and `deny.toml` coverage.
 - Run `just ci` before delivery and require GitHub's CODEOWNERS error list to
   be empty for the pushed branch.
@@ -34,14 +34,14 @@ GitHub REST API.
 **Interfaces:**
 - Consumes: GitHub's root-anchored CODEOWNERS pattern syntax and existing
   `@randomparity` owner identity.
-- Produces: automatic reviewer assignment and owner attribution for the nine
+- Produces: automatic reviewer assignment and owner attribution for the ten
   selected control-plane surfaces.
 
-- [ ] Run a shell assertion that requires all nine exact patterns and confirm
+- [ ] Run a shell assertion that requires all ten exact patterns and confirm
   it fails because none is currently present:
-  `for p in '/justfile' '/.pre-commit-config.yaml' '/.config/nextest.toml' '/.clusterfuzzlite/' '/.dockerignore' '/clippy.toml' '/rustfmt.toml' '/typos.toml' '/sonar-project.properties'; do rg -Fxq "$p @randomparity" .github/CODEOWNERS || exit 1; done`.
+  `for p in '/justfile' '/.pre-commit-config.yaml' '/.config/nextest.toml' '/.clusterfuzzlite/' '/.dockerignore' '/clippy.toml' '/rustfmt.toml' '/typos.toml' '/sonar-project.properties' '/html-oracle/deny.toml'; do rg -Fxq "$p @randomparity" .github/CODEOWNERS || exit 1; done`.
 - [ ] Update the header to state the control-plane inclusion rule and the
-  general-build-input exclusion. Add the four exact patterns, grouped with
+  general-build-input exclusion. Add the ten exact patterns, grouped with
   short comments describing the protection each provides.
 - [ ] Re-run the exact-pattern assertion and expect exit 0.
 - [ ] Run `just hooks` and expect every hook to pass.

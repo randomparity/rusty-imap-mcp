@@ -9,10 +9,11 @@ not the four configuration surfaces issue #768 identified: `justfile`,
 `.pre-commit-config.yaml`, `.config/nextest.toml`, and `.clusterfuzzlite/`. A
 bounded repository audit applying the same rationale found five more dedicated
 control-plane surfaces: `.dockerignore`, `clippy.toml`, `rustfmt.toml`,
-`typos.toml`, and `sonar-project.properties`. Together these nine paths decide
-what checks run or what they inspect. A small edit can remove a check, exclude
-inputs, alter test execution, or change the fuzz build without requesting the
-repository owner as a reviewer.
+`typos.toml`, and `sonar-project.properties`. The audit also found the nested
+`html-oracle/deny.toml` supply-chain policy, which the root `/deny.toml` pattern
+does not match. Together these ten paths decide what checks run or what they
+inspect. A small edit can remove a check, exclude inputs, alter test execution,
+or change the fuzz build without requesting the repository owner as a reviewer.
 
 The file remains advisory because the solo-maintainer constraint recorded by
 issue #744 and PR #764 has not changed. This decision selects reviewer-assignment
@@ -20,10 +21,11 @@ coverage; it does not change branch protection.
 
 ## Decision
 
-CODEOWNERS owns the repository's dedicated CI control-plane files: standalone
-files and directories whose primary purpose is to select, configure, or
-implement required checks and automated fuzz builds. In addition to the
-existing entries, that set includes:
+CODEOWNERS owns the repository's dedicated CI control-plane files: repository-
+level standalone files and external-automation directories whose primary
+purpose is to select, configure, or implement required checks and automated
+fuzz builds, plus supply-chain policy files wherever they live. In addition to
+the existing entries, that set includes:
 
 - `/justfile`;
 - `/.pre-commit-config.yaml`;
@@ -33,18 +35,20 @@ existing entries, that set includes:
 - `/clippy.toml`;
 - `/rustfmt.toml`;
 - `/typos.toml`; and
-- `/sonar-project.properties`.
+- `/sonar-project.properties`; and
+- `/html-oracle/deny.toml`.
 
 The header records both this inclusion rule and its boundary. Multipurpose Rust
 build inputs (`Cargo.toml`, `Cargo.lock`, and `rust-toolchain.toml`) remain
 outside the owned set: they affect compilation and may contain lint settings,
 but gate configuration is not their primary purpose. Generated artifacts and
-ordinary source remain outside for the same reason. `.cargo/mutants.toml` also
-remains outside because mutation testing is not a required CI check.
+ordinary source, including component-local harness configuration and fixtures,
+remain outside for the same reason. `.cargo/mutants.toml` also remains outside
+because mutation testing is not a required CI check.
 
 ## Consequences
 
-- Pull requests touching the nine added surfaces request `@randomparity` and
+- Pull requests touching the ten added surfaces request `@randomparity` and
   show owner attribution.
 - The policy remains advisory and does not block self-authored pull requests.
 - A future binding-policy decision can evaluate one explicit control-plane set

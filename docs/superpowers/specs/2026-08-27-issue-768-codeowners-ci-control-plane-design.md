@@ -22,24 +22,28 @@ Decision: [ADR-0028](../../ADR/0028-advisory-codeowners-cover-ci-control-plane.m
 
 ## Decision boundary
 
-CODEOWNERS will cover dedicated CI control-plane files: standalone repository
-files and directories whose primary purpose is to select, configure, or
-implement required checks and automated fuzz builds. Existing coverage of
+CODEOWNERS will cover dedicated CI control-plane files: repository-level
+standalone files and external-automation directories whose primary purpose is
+to select, configure, or implement required checks and automated fuzz builds,
+plus supply-chain policy files wherever they live. Existing coverage of
 `.github/`, `scripts/`, and `deny.toml` remains. Coverage expands to `justfile`,
 `.pre-commit-config.yaml`, `.config/nextest.toml`, `.clusterfuzzlite/`,
 `.dockerignore`, `clippy.toml`, `rustfmt.toml`, `typos.toml`, and
-`sonar-project.properties`. Those surfaces respectively select guardrail
-recipes; configure commit and push hooks, test execution, compiler lints,
-formatting, typo exclusions, and Sonar analysis; or define and bound the fuzz
-container build context.
+`sonar-project.properties`, plus `html-oracle/deny.toml`. Those surfaces
+respectively select guardrail recipes; configure commit and push hooks, test
+execution, compiler lints, formatting, typo exclusions, and Sonar analysis;
+define and bound the fuzz container build context; or govern the nested
+oracle's required supply-chain audit.
 
 Multipurpose build inputs such as `Cargo.toml`, `Cargo.lock`, and
 `rust-toolchain.toml` are outside the selected boundary. They affect compiled
 inputs and may carry lint settings, but configuring gates is not their primary
-purpose. `.cargo/mutants.toml` is also outside because mutation testing is not a
-required CI check. This keeps the policy tied to dedicated control-plane files
-and avoids assigning the owner on routine dependency updates if the policy
-later becomes binding.
+purpose. Component-local harness configuration and fixtures remain ordinary
+source rather than recursively expanding this ownership policy.
+`.cargo/mutants.toml` is also outside because mutation testing is not a required
+CI check. This keeps the policy tied to dedicated control-plane files and
+avoids assigning the owner on routine dependency updates if the policy later
+becomes binding.
 
 The CODEOWNERS header will state the inclusion rule, enumerate the covered
 groups, and name the general-build-input exclusion. The existing advisory
@@ -47,9 +51,9 @@ posture and solo-maintainer explanation remain unchanged.
 
 ## Implementation and verification
 
-Add exact root-anchored patterns for the seven files and two directories. Keep
+Add exact root-anchored patterns for the eight files and two directories. Keep
 one owner per line and the existing `@randomparity` identity. A focused
-pre-change assertion must demonstrate that the nine patterns are absent; the
+pre-change assertion must demonstrate that the ten patterns are absent; the
 same assertion must pass after the edit. Run repository hooks, then validate
 the pushed branch with GitHub's `codeowners/errors` endpoint and require an
 empty `errors` array.
