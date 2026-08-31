@@ -67,7 +67,7 @@ jobs:
       # "Package 'dbus-1' was not found". Mirrors every compiling job in the repo.
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
       - name: Generate manpages
@@ -232,7 +232,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
       - name: Install cargo-auditable
@@ -483,7 +483,7 @@ jobs:
       # The publish verify build compiles rimap-config -> keyring (Linux libdbus).
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
       - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
@@ -728,7 +728,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
       # `just` drives the fuzz-lockfile realign and the parity gate the bump
