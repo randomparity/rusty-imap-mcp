@@ -111,7 +111,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Prove the host selector and table-form fatal policy on the supported
       # cargo-nextest floor, not only the newer developer installation (#846).
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: just,cargo-nextest@0.9.95
       - run: cargo check --workspace --locked --all-targets
@@ -139,7 +139,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: cargo-nextest
       # --profile ci selects the bounded max-fail policy in
@@ -216,7 +216,7 @@ jobs:
           key: msrv
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --workspace --all-targets --all-features --locked
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --no-tests=pass --profile ci
@@ -238,7 +238,7 @@ jobs:
         with:
           key: tool-schema-drift
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: just
       - name: Regenerate tool schemas
@@ -268,7 +268,7 @@ jobs:
         with:
           key: tools-doc-drift
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: just
       - name: Regenerate docs/tools.md
@@ -296,7 +296,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: just
       - name: Validate publish metadata
@@ -377,7 +377,7 @@ jobs:
         with:
           key: semver-checks
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: just,cargo-semver-checks@0.48.0
       - name: Check public API against the last release tag
@@ -405,7 +405,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: just
       # Ahead of cargo-deny: the parity result must not be masked by an
@@ -488,7 +488,7 @@ jobs:
       # `allow-wildcard-paths` note in html-oracle/deny.toml). Kept ahead of the
       # build steps on purpose: the audit step below runs on failure, so its tool
       # must already be installed by then.
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: just,cargo-deny@0.19.0
       # Both steps run recipes rather than re-typed command strings, so `just ci`
@@ -546,7 +546,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: zizmor
       - run: zizmor .github/workflows/
@@ -639,7 +639,7 @@ jobs:
         with:
           key: sonarqube
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026  # v2.85.11
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc  # v2.86.7
         with:
           tool: cargo-llvm-cov,cargo-nextest
       # Driven through `nextest`, not the bare `cargo llvm-cov` that runs
