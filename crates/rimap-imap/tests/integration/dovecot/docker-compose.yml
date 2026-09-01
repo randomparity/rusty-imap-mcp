@@ -6,7 +6,7 @@ services:
     # /etc/dovecot, /var/mail, /var/run/dovecot and binds 143/993).
     # tag@digest — Dependabot tracks the version line; the digest guards
     # against a re-pushed tag silently changing the pulled image.
-    image: docker.io/dovecot/dovecot:2.4.4-root@sha256:d6b2f80db2e656a9250583712a82397e2752b35ad7e4e2e71c85fdc0d510137d
+    image: docker.io/dovecot/dovecot:2.4.5-root@sha256:e6bae0e8f0ce8fe1941d93138ff7235f6dc6bcc397b9a171c31cb6a5a610b23b
     container_name: ${COMPOSE_PROJECT_NAME:-rimap-it}-dovecot
     ports:
       # Loopback-only. The host port is pre-allocated by the Rust harness
