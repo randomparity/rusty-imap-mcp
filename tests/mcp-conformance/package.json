@@ -15,11 +15,11 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
-    "@types/node": "26.2.0",
-    "oxfmt": "0.63.0",
-    "oxlint": "1.78.0",
+    "@types/node": "26.3.0",
+    "oxfmt": "0.65.0",
+    "oxlint": "1.80.0",
     "typescript": "7.0.2",
-    "vitest": "4.1.10",
+    "vitest": "4.1.11",
     "zod": "4.4.3"
   }
 }
