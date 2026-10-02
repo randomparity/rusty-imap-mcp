@@ -26,6 +26,8 @@
 #   corpus-oracle      custom policies: branch main. The nightly html-oracle
 #                      job (schedule + dispatch, both from main) scopes
 #                      CORPUS_READ_TOKEN here instead of repository level.
+#   github-pages       custom policies: branch main. The Pages workflow deploys
+#                      only after a push to main or a dispatch from main.
 #
 #   sonarcloud         NO deployment branch policy — deliberate carve-out. The
 #                      sonarqube job runs on plain pull_request, whose ref
@@ -82,6 +84,7 @@ MATRIX = {
     "homebrew-tap": ("custom", frozenset({("tag", "v*"), ("branch", "main")})),
     "crates-io": ("custom", frozenset({("tag", "v*")})),
     "corpus-oracle": ("custom", frozenset({("branch", "main")})),
+    "github-pages": ("custom", frozenset({("branch", "main")})),
     "sonarcloud": ("none", frozenset()),
 }
 

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img"
+  aria-labelledby="logo-title logo-description">
+  <title id="logo-title">rusty-imap-mcp</title>
+  <desc id="logo-description">A rust-orange shield nested inside a charcoal envelope.</desc>
+  <path fill="#20242b" d="M48 214a24 24 0 0 1 38-19l139 111a48 48 0 0 0 62 0l139-111a24 24 0 0 1 38 19v202a24 24 0 0 1-24 24H72a24 24 0 0 1-24-24Z"/>
+  <path fill="#c75b39" d="M256 72c45 41 94 65 152 72v72c0 89-59 150-152 200-93-50-152-111-152-200v-72c58-7 107-31 152-72Z"/>
+  <circle cx="256" cy="307" r="20" fill="#20242b"/>
+</svg>

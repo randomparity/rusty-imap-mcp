@@ -40,30 +40,31 @@ cat "${FIXTURE_DIR}/${key}.json"
 STUB
 chmod +x "${tmp}/gh"
 
-# The all-green matrix. `environments` lists exactly the five names the issue
+# The all-green matrix. `environments` lists exactly the names the guard
 # covers; per-environment files carry the shape GET /environments/{name}
 # returns; deployment-branch-policies listings carry {name, type} pairs.
 
 write_green_fixtures() {
     local d="${1}"
     cat >"${d}/repos_ownerr_repo_environments.json" <<'JSON'
-{"total_count": 6, "environments": [
+{"total_count": 7, "environments": [
   {"name": "fuzz-lock-realign", "deployment_branch_policy": {"protected_branches": true, "custom_branch_policies": false}, "protection_rules": []},
   {"name": "release", "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}, "protection_rules": []},
   {"name": "homebrew-tap", "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}, "protection_rules": []},
   {"name": "crates-io", "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}, "protection_rules": []},
   {"name": "corpus-oracle", "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}, "protection_rules": []},
+  {"name": "github-pages", "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}, "protection_rules": []},
   {"name": "sonarcloud", "deployment_branch_policy": null, "protection_rules": []}
 ]}
 JSON
-    for env in release homebrew-tap crates-io corpus-oracle sonarcloud fuzz-lock-realign; do
+    for env in release homebrew-tap crates-io corpus-oracle github-pages sonarcloud fuzz-lock-realign; do
         printf '{"name": "%s", "deployment_branch_policy": null, "protection_rules": [{"type": "branch_policy"}]}\n' "$env" \
             >"${d}/repos_ownerr_repo_environments_${env}.json"
     done
     # Per-environment detail is only consulted for the policy-bearing set; the
     # live GET surfaces the branch policy itself as a protection_rules entry,
     # which the checker must not mistake for a reviewer gate.
-    for env in release homebrew-tap crates-io corpus-oracle; do
+    for env in release homebrew-tap crates-io corpus-oracle github-pages; do
         printf '{"name": "%s", "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}, "protection_rules": [{"type": "branch_policy"}]}\n' "$env" \
             >"${d}/repos_ownerr_repo_environments_${env}.json"
     done
@@ -82,6 +83,8 @@ JSON
   {"name": "main", "type": "branch"}
 ]}
 JSON
+    cp "${d}/repos_ownerr_repo_environments_corpus-oracle_deployment-branch-policies.json" \
+        "${d}/repos_ownerr_repo_environments_github-pages_deployment-branch-policies.json"
     cat >"${d}/repos_ownerr_repo_environments_crates-io_deployment-branch-policies.json" <<'JSON'
 {"total_count": 1, "branch_policies": [
   {"name": "v*", "type": "tag"}
