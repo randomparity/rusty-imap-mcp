@@ -179,7 +179,7 @@ compose file at runtime, so a Dependabot digest bump needs no Rust change.
 `scripts/prune-containers.sh` is exempt: it never pulls or runs the fixture
 image.
 
-The fixture image is `docker.io/dovecot/dovecot:2.4.4-root` (rootful
+The fixture image is `docker.io/dovecot/dovecot:2.4.5-root` (rootful
 flavor, multi-arch `linux/amd64` + `linux/arm64`). It listens on
 container ports 143 (IMAP+STARTTLS) and 993 (IMAPS); the Rust harness
 maps host ports dynamically. The harnesses run an arch gate (ADR-0023):
@@ -252,7 +252,7 @@ the audit record, and post-fault recovery.
 - **Run locally:**
   `RIMAP_CHAOS=1 RIMAP_REQUIRE_DOCKER=1 cargo nextest run -p rimap-server -E 'binary(e2e_wire_chaos)' --no-capture`
 - **Multi-arch.** Toxiproxy `ghcr.io/shopify/toxiproxy:2.12.0` and
-  Dovecot `2.4.4-root` both ship `linux/amd64` + `linux/arm64`; the
+  Dovecot `2.4.5-root` both ship `linux/amd64` + `linux/arm64`; the
   harness-level arch gate (ADR-0023) covers both images on any host that
   runs the suite.
 - Runs serially (nextest `chaos-backed` group) — two containers per test with

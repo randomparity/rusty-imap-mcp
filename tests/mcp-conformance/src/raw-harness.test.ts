@@ -151,7 +151,7 @@ describe("raw-harness (live)", () => {
     // A valid offset cursor ("0") returns the same first page.
     const zero = await harness.request("tools/list", { cursor: "0" });
     expect(zero.error).toBeUndefined();
-    expect((zero.result?.["tools"] as unknown[]).length).toBe(tools.length);
+    expect(zero.result?.["tools"]).toEqual(tools);
 
     // A non-numeric cursor is a client error (JSON-RPC invalid params).
     const bad = await harness.request("tools/list", { cursor: "not-a-number" });
