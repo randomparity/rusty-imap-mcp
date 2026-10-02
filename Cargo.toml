@@ -141,7 +141,7 @@ rand = "0.10"
 # model? The Sprint 4a adversarial corpus and insta snapshots are
 # the regression-detection mechanism — any snapshot diff on upgrade
 # requires a re-audit, not a cargo insta accept. (SC-DEP-09)
-mail-builder = "0.4"
+mail-builder = "0.5"
 mail-parser = "0.11"
 encoding_rs = "0.8"
 unicode-normalization = "0.1"
