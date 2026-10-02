@@ -237,8 +237,13 @@ fi
 clean_run_pid=$!
 background_pids+=("$clean_run_pid")
 sample_clean_processes
-wait "$clean_run_pid"
-background_pids=()
+if wait "$clean_run_pid"; then
+    background_pids=()
+else
+    status=$?
+    cat "$tmp_dir/clean.out" >&2
+    exit "$status"
+fi
 
 rm -f "$fixture/pids/edge"
 set +e
