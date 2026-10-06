@@ -141,8 +141,19 @@ rand = "0.10"
 # model? The Sprint 4a adversarial corpus and insta snapshots are
 # the regression-detection mechanism — any snapshot diff on upgrade
 # requires a re-audit, not a cargo insta accept. (SC-DEP-09)
+# Re-audited 0.11.5 -> 0.11.9 on 2026-10-06: no build.rs, no new default
+# features (the new memchr dep is behind the off-by-default
+# `base64_slice`), unsafe count unchanged, hashify still 0.2. Semantic
+# changes are fixes: a panic on a folded trailing Received line (#155),
+# fabricated addresses from commented display names (#153), and quoted
+# name / encoded-word whitespace (#150).
 mail-builder = "0.5"
 mail-parser = "0.11"
+# encoding_rs 0.8.42 pulls multiversion_no_op 1.0.0 (proc-macro; Henri
+# Sivonen, the encoding_rs author; Apache-2.0 OR MIT). Reviewed 2026-10-06
+# (SC-PROC-01): a 43-line #![no_std] attribute that returns its input
+# unchanged, no build.rs, no dependencies. The same bump adds simdutf8
+# 0.1.5 (SIMD UTF-8 validation, MIT OR Apache-2.0, no build.rs).
 encoding_rs = "0.8"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.13"
