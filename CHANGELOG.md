@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temporary-downstream Cargo compiler probes in tracked integration tests and
   both fixture graphs pinned to the reviewed workspace lock. See #838 and
   ADR-0027.
+- rmcp 3.5.1. The server pins MCP protocol `2025-11-25` explicitly instead of
+  following rmcp's `ProtocolVersion::LATEST`, which rmcp 3.5 moved to
+  `2026-07-28`; accepted and advertised versions are unchanged.
+
+### Fixed
+
+- An `initialize` line rejected by the wire validator (for example one with a
+  stray `result` member) no longer lifts the pre-initialize interception
+  (ADR-0025). Previously the next request carrying complete inline `_meta` was
+  dispatched without a handshake, bypassing the protocol-version gate.
 
 ## [0.2.0] - 2026-08-21
 
