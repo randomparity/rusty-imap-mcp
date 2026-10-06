@@ -871,6 +871,50 @@ async fn inline_meta_request_before_initialize_returns_minus_32002() {
     }
 }
 
+/// An `initialize` line that parses as an InitializeRequest but fails
+/// envelope validation (here: a stray `result` member) is rejected with
+/// -32600 and never reaches rmcp. It must not count as initialization:
+/// the next request, carrying complete inline `_meta` that rmcp would
+/// otherwise dispatch without a handshake, still gets -32002.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_initialize_line_does_not_lift_pre_init_interception() {
+    let mut harness = Harness::spawn().await;
+    let audit_path = harness.audit_path();
+
+    harness
+        .send_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","result":null,"params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"x","version":"0"}}}"#,
+        )
+        .await;
+    let rejected = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected -32600 for the malformed initialize, got {other:?}"),
+    };
+    assert_eq!(rejected["error"]["code"], json!(-32600), "got {rejected}");
+
+    harness
+        .send_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_accounts","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"x","version":"0"}}}}"#,
+        )
+        .await;
+    let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected -32002 for the pre-init tools/call, got {other:?}"),
+    };
+    assert_eq!(env["id"], json!(2), "got {env}");
+    assert_eq!(env["error"]["code"], json!(-32002), "got {env}");
+
+    match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::CleanClose => {}
+        other => panic!("expected clean close, got {other:?}"),
+    }
+    let audit = std::fs::read_to_string(&audit_path).unwrap_or_default();
+    assert!(
+        !audit.contains("\"tool_start\""),
+        "no tool may run before a successful initialize; audit: {audit}",
+    );
+}
+
 /// Edge case: `protocolVersion: ""` is valid JSON but a degenerate
 /// version string. Must be rejected with -32602. Pins the boundary
 /// against any future code that might special-case empty strings.

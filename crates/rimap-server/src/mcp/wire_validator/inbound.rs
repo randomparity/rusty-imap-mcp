@@ -105,6 +105,10 @@ where
             continue;
         };
 
+        // Set when this line is an initialize request seen before
+        // initialization; it only counts once `validate` forwards it.
+        let mut initialize_line = false;
+
         // ADR-0025: Pre-init interception. While !initialized, intercept
         // non-ping/non-initialize requests to prevent rmcp from emitting
         // its own -32602 envelope. This restores the single-envelope contract.
@@ -167,15 +171,20 @@ where
                     return Ok(());
                 }
 
-                // This is an initialize request. Set the flag.
-                if is_initialize {
-                    initialized.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
+                initialize_line = is_initialize;
             }
         }
 
         match validate(line_for_validation) {
             ValidationOutcome::Forward => {
+                // Lift the interception only for an initialize that rmcp
+                // actually receives. An initialize line `validate` rejects
+                // never reaches rmcp, and rmcp 3.x dispatches pre-init
+                // requests carrying inline `_meta` without a handshake, so
+                // counting a rejected line would skip the version gate.
+                if initialize_line {
+                    initialized.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 // Valid envelope: forward to rmcp.
                 to_rmcp.write_all(&buf).await?;
                 to_rmcp.flush().await?;
