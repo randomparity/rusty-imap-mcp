@@ -270,7 +270,10 @@ struct DuplicateKeys {
    envelope.rs cargo-mutants comments and the two `envelope.rs` rows of
    `docs/superpowers/specs/test-strategy/mutation-baseline.md`. Check with
    `rg -n 'DupCheckOneLevel|has_duplicate_keys|unwrap_or\(false\)' crates/rimap-server/src/mcp
-   docs/superpowers/specs/test-strategy/mutation-baseline.md`; it must print nothing.
+   docs/superpowers/specs/test-strategy/mutation-baseline.md`; it must print nothing. In the
+   same file, update the `envelope.rs:<line>` annotation-site anchors in the two `envelope.rs`
+   rows, and anywhere else that cites them, to the moved line numbers of the cargo-mutants
+   comments.
 10. Re-run both focused commands from steps 3 and 5. Expect all four tests to pass. Then run
     `cargo nextest run -p rimap-server --lib -E 'test(wire_validator)'` and
     `cargo nextest run -p rimap-server --test mcp_wire_negative`. Expect all to pass, including
@@ -298,4 +301,8 @@ struct DuplicateKeys {
   removes only the ignored files. Then check that `git status --short --ignored` lists nothing
   under that path.
 - `just test` in the background; expect exit 0. Its result goes in the PR.
+- Record in the PR body (issue #867 criterion 5): the replay exit codes for both seeds, before
+  and after the fix; the smoke-run and parity results; the observed pre-fix wire outcome; and
+  the remaining limits. Unobserved rmcp gaps are surfaced only by fuzzing (ADR-0031), and #837
+  is excluded.
 - Rollback: revert the commit. There is no persisted state.
