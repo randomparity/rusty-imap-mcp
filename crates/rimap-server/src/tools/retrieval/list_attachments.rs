@@ -29,7 +29,8 @@ pub struct AttachmentInfo {
     pub mime_type: String,
     /// Size of the part in bytes as reported by `BODYSTRUCTURE`.
     pub size_bytes: u32,
-    /// Filename from MIME content-type `name` or `filename` parameter.
+    /// Filename from the MIME content-type `name` (or `filename`)
+    /// parameter, RFC 2231 / RFC 2047 decoded and sanitized.
     pub filename: Option<String>,
 }
 
@@ -82,18 +83,24 @@ pub async fn handle(
     })?;
 
     let mut attachments = Vec::new();
-    collect_attachments(&bodystructure, &mut attachments);
+    let mut warnings = Vec::new();
+    collect_attachments(&bodystructure, &mut attachments, &mut warnings);
 
     Ok(ToolResponse::meta_only(ListAttachmentsMeta {
         folder: input.folder,
         uid: input.uid.get(),
         attachment_count: attachments.len(),
     })
-    .with_untrusted(ListAttachmentsUntrusted { attachments }))
+    .with_untrusted(ListAttachmentsUntrusted { attachments })
+    .with_warnings(warnings))
 }
 
 /// Walk the `BodyStructure` tree and collect non-inline-text parts.
-fn collect_attachments(bs: &BodyStructure, out: &mut Vec<AttachmentInfo>) {
+fn collect_attachments(
+    bs: &BodyStructure,
+    out: &mut Vec<AttachmentInfo>,
+    warnings: &mut Vec<rimap_content::SecurityWarning>,
+) {
     walk_body_structure(bs, |part_id: &str, node: &BodyStructure| {
         if let BodyStructure::Single {
             mime_type,
@@ -106,7 +113,8 @@ fn collect_attachments(bs: &BodyStructure, out: &mut Vec<AttachmentInfo>) {
             if is_inline_text(mime_type, mime_subtype) {
                 return;
             }
-            let filename = extract_filename(params);
+            let filename =
+                rimap_content::attachment_filename_from_params(params, out.len(), warnings);
             let full_type = format!(
                 "{}/{}",
                 mime_type.to_lowercase(),
@@ -127,19 +135,6 @@ fn collect_attachments(bs: &BodyStructure, out: &mut Vec<AttachmentInfo>) {
 fn is_inline_text(mime_type: &str, mime_subtype: &str) -> bool {
     mime_type.eq_ignore_ascii_case("text")
         && (mime_subtype.eq_ignore_ascii_case("plain") || mime_subtype.eq_ignore_ascii_case("html"))
-}
-
-/// Extract a filename from MIME content-type parameters.
-/// Looks for `name` or `filename` (case-insensitive).
-fn extract_filename(params: &[(String, String)]) -> Option<String> {
-    for (key, value) in params {
-        if (key.eq_ignore_ascii_case("name") || key.eq_ignore_ascii_case("filename"))
-            && !value.is_empty()
-        {
-            return Some(value.clone());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -170,7 +165,7 @@ mod tests {
     fn single_text_plain_is_not_attachment() {
         let bs = single("text", "plain", 100);
         let mut out = Vec::new();
-        collect_attachments(&bs, &mut out);
+        collect_attachments(&bs, &mut out, &mut Vec::new());
         assert!(out.is_empty());
     }
 
@@ -178,7 +173,7 @@ mod tests {
     fn single_text_html_is_not_attachment() {
         let bs = single("text", "html", 200);
         let mut out = Vec::new();
-        collect_attachments(&bs, &mut out);
+        collect_attachments(&bs, &mut out, &mut Vec::new());
         assert!(out.is_empty());
     }
 
@@ -186,7 +181,7 @@ mod tests {
     fn single_image_is_attachment() {
         let bs = single_with_name("image", "png", 5000, "photo.png");
         let mut out = Vec::new();
-        collect_attachments(&bs, &mut out);
+        collect_attachments(&bs, &mut out, &mut Vec::new());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].part_id, "1");
         assert_eq!(out[0].mime_type, "image/png");
@@ -205,7 +200,7 @@ mod tests {
             ],
         };
         let mut out = Vec::new();
-        collect_attachments(&bs, &mut out);
+        collect_attachments(&bs, &mut out, &mut Vec::new());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].part_id, "2");
         assert_eq!(out[0].mime_type, "application/pdf");
@@ -230,7 +225,7 @@ mod tests {
             ],
         };
         let mut out = Vec::new();
-        collect_attachments(&bs, &mut out);
+        collect_attachments(&bs, &mut out, &mut Vec::new());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].part_id, "1.2");
         assert_eq!(out[0].filename.as_deref(), Some("anim.gif"));
@@ -246,19 +241,58 @@ mod tests {
         assert!(!is_inline_text("image", "plain"));
     }
 
-    #[test]
-    fn extract_filename_finds_name_param() {
-        let params = vec![
-            ("charset".to_string(), "utf-8".to_string()),
-            ("name".to_string(), "doc.pdf".to_string()),
-        ];
-        assert_eq!(extract_filename(&params), Some("doc.pdf".to_string()));
+    fn single_with_params(params: &[(&str, &str)]) -> BodyStructure {
+        BodyStructure::Single {
+            mime_type: "application".to_string(),
+            mime_subtype: "pdf".to_string(),
+            params: params
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            encoding: "base64".to_string(),
+            size: 10,
+        }
     }
 
     #[test]
-    fn extract_filename_returns_none_when_absent() {
-        let params = vec![("charset".to_string(), "utf-8".to_string())];
-        assert_eq!(extract_filename(&params), None);
+    fn rfc2231_name_from_bodystructure_is_decoded() {
+        // Dovecot reports RFC 2231 sections verbatim in BODYSTRUCTURE.
+        let bs = single_with_params(&[
+            ("name*0*", "UTF-8''%C3%9Cbersicht%20der"),
+            ("name*1*", "%20Fassung.pdf"),
+        ]);
+        let mut out = Vec::new();
+        collect_attachments(&bs, &mut out, &mut Vec::new());
+        assert_eq!(
+            out[0].filename.as_deref(),
+            Some("Übersicht der Fassung.pdf")
+        );
+    }
+
+    #[test]
+    fn filename_warnings_are_tagged_with_the_attachment_index() {
+        let bs = BodyStructure::Multipart {
+            subtype: "mixed".to_string(),
+            parts: vec![
+                single_with_name("image", "png", 10, "ok.png"),
+                single_with_params(&[("name", "=?utf-8?Q?invoice=E2=80=AEfdp.exe?=")]),
+            ],
+        };
+        let mut out = Vec::new();
+        let mut warnings = Vec::new();
+        collect_attachments(&bs, &mut out, &mut warnings);
+        assert!(
+            out[1]
+                .filename
+                .as_deref()
+                .is_some_and(|name| !name.contains('\u{202e}')),
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.location.as_deref() == Some("attachment[1]:filename")),
+            "{warnings:?}",
+        );
     }
 
     #[test]
@@ -271,7 +305,7 @@ mod tests {
             };
         }
         let mut out = Vec::new();
-        collect_attachments(&bs, &mut out);
+        collect_attachments(&bs, &mut out, &mut Vec::new());
         assert!(out.is_empty());
     }
 }

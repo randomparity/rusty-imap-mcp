@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both fixture graphs pinned to the reviewed workspace lock. See #838 and
   ADR-0027.
 
+### Fixed
+
+- `list_attachments` now decodes RFC 2231 (`name*0*=UTF-8''...`) and RFC 2047
+  (`=?utf-8?Q?...?=`) attachment names from `BODYSTRUCTURE`, which IMAP
+  servers report undecoded. Non-ASCII names from most mail clients previously
+  listed as `null` or as the raw encoded word. Names now pass through the same
+  filename sanitizer and `security_warnings` as `fetch_message` attachments.
+  New public helper: `rimap_content::attachment_filename_from_params`.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added
