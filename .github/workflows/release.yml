@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -208,7 +208,7 @@ jobs:
       # Packages are built host-side (x86_64 runner) via --target; cargo-deb maps
       # the triple to the arm64 Debian/RPM Architecture. No emulated install-test
       # for arm64 (structural + content assertion only — ADR-0006).
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -486,7 +486,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
         with:
           tool: just,cargo-semver-checks@0.48.0
       # Last gate before an irreversible action: a crates.io version cannot be
@@ -733,7 +733,7 @@ jobs:
           toolchain: stable
       # `just` drives the fuzz-lockfile realign and the parity gate the bump
       # would otherwise leave red (ADR-0011); cargo-edit provides set-version.
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172  # v2.87.20
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
         with:
           tool: just@1.58.0
       - name: Install cargo-edit
