@@ -399,6 +399,7 @@ fn convert_bs_inner(
             mime_type: "application".to_string(),
             mime_subtype: "octet-stream".to_string(),
             params: Vec::new(),
+            disposition_params: Vec::new(),
             encoding: "7bit".to_string(),
             size: 0,
         };
@@ -441,6 +442,16 @@ fn convert_bs_inner(
                         .collect()
                 })
                 .unwrap_or_default();
+            let disposition_params = common
+                .disposition
+                .as_ref()
+                .and_then(|d| d.params.as_ref())
+                .map(|p| {
+                    p.iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
             let encoding = match &other.transfer_encoding {
                 async_imap::imap_proto::ContentEncoding::SevenBit => "7bit".to_string(),
                 async_imap::imap_proto::ContentEncoding::EightBit => "8bit".to_string(),
@@ -456,6 +467,7 @@ fn convert_bs_inner(
                 mime_type,
                 mime_subtype,
                 params,
+                disposition_params,
                 encoding,
                 size,
             }
@@ -586,6 +598,33 @@ mod tests {
                 }
             }
             other => panic!("expected Message variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "test")]
+    fn convert_bs_inner_keeps_disposition_params() {
+        let mut leaf = make_basic_leaf();
+        if let ImapProtoBodyStructure::Basic { common, .. } = &mut leaf {
+            common.disposition = Some(async_imap::imap_proto::ContentDisposition {
+                ty: Cow::Borrowed("attachment"),
+                params: Some(vec![(
+                    Cow::Borrowed("filename*"),
+                    Cow::Borrowed("utf-8''r%C3%A9sum%C3%A9.pdf"),
+                )]),
+            });
+        }
+        match convert_bs_inner(&leaf, 0) {
+            crate::types::BodyStructure::Single {
+                disposition_params, ..
+            } => assert_eq!(
+                disposition_params,
+                [(
+                    "filename*".to_string(),
+                    "utf-8''r%C3%A9sum%C3%A9.pdf".to_string()
+                )],
+            ),
+            other => panic!("expected Single, got {other:?}"),
         }
     }
 

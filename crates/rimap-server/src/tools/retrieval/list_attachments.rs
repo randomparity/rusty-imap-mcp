@@ -106,6 +106,7 @@ fn collect_attachments(
             mime_type,
             mime_subtype,
             params,
+            disposition_params,
             size,
             ..
         } = node
@@ -113,8 +114,12 @@ fn collect_attachments(
             if is_inline_text(mime_type, mime_subtype) {
                 return;
             }
-            let filename =
-                rimap_content::attachment_filename_from_params(params, out.len(), warnings);
+            let filename = rimap_content::attachment_filename_from_params(
+                params,
+                disposition_params,
+                out.len(),
+                warnings,
+            );
             let full_type = format!(
                 "{}/{}",
                 mime_type.to_lowercase(),
@@ -146,6 +151,7 @@ mod tests {
             mime_type: mime_type.to_string(),
             mime_subtype: sub.to_string(),
             params: Vec::new(),
+            disposition_params: Vec::new(),
             encoding: "7bit".to_string(),
             size,
         }
@@ -156,6 +162,7 @@ mod tests {
             mime_type: mime_type.to_string(),
             mime_subtype: sub.to_string(),
             params: vec![("name".to_string(), name.to_string())],
+            disposition_params: Vec::new(),
             encoding: "base64".to_string(),
             size,
         }
@@ -249,6 +256,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
+            disposition_params: Vec::new(),
             encoding: "base64".to_string(),
             size: 10,
         }
