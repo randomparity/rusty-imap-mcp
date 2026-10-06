@@ -4,8 +4,11 @@
 //! `attachments::build_attachment_meta` and reused by the crate's
 //! filename-hardening tests.
 
+use mail_parser::MimeHeaders;
+
 use crate::output::{SecurityWarning, WarningCode};
 use crate::parse::MAX_HEADER_BYTES;
+use crate::parse::safe_parser::safe_parse;
 use crate::unicode;
 
 /// File extensions that look legitimate to humans and that attackers
@@ -171,6 +174,282 @@ pub(super) fn detect_double_extension(name: &str) -> Option<(String, String)> {
 )]
 pub(super) fn last_extension(filename: &str) -> Option<&str> {
     filename.rsplit_once('.').map(|(_, ext)| ext)
+}
+
+/// Decode and sanitize an attachment filename from the `Content-Type` and
+/// `Content-Disposition` parameters an IMAP server reports in
+/// `BODYSTRUCTURE`.
+///
+/// Servers return parameters undecoded, so a non-ASCII name arrives as
+/// RFC 2231 sections (`filename*0*=UTF-8''...`) or as an RFC 2047 encoded
+/// word. The `name` / `filename` parameters are re-serialized into the two
+/// headers and decoded by the same parser, and the same
+/// `attachment_name()` precedence (disposition `filename`, then type
+/// `name`), that the full-message path uses, so `list_attachments` and
+/// `fetch_message` report the same name for a part. The decoded value then
+/// goes through [`sanitize_attachment_filename`]; warnings are tagged with
+/// `idx`.
+///
+/// A parameter whose name is not an RFC 2045 token, or whose value holds
+/// CR, LF, or NUL, is dropped with a `ParseHeaderSmugglingBlocked` warning
+/// rather than re-serialized. When the kept parameters exceed
+/// [`MAX_HEADER_BYTES`] the name is withheld (`None`) with a
+/// `ParseAttachmentFilenameRewritten` warning, which also bounds the
+/// parser's continuation merging on hostile input.
+pub fn attachment_filename_from_params(
+    content_type_params: &[(String, String)],
+    disposition_params: &[(String, String)],
+    idx: usize,
+    warnings: &mut Vec<SecurityWarning>,
+) -> Option<String> {
+    let location = format!("attachment[{idx}]:filename");
+    let mut dropped = false;
+    let mut header = String::from("Content-Type: application/octet-stream");
+    append_name_params(&mut header, content_type_params, &mut dropped);
+    header.push_str("\r\nContent-Disposition: attachment");
+    append_name_params(&mut header, disposition_params, &mut dropped);
+    header.push_str("\r\n\r\n");
+
+    if dropped {
+        warnings.push(SecurityWarning::at(
+            WarningCode::ParseHeaderSmugglingBlocked,
+            "reason=bodystructure_param_dropped".to_string(),
+            location.clone(),
+        ));
+    }
+    if header.len() > MAX_HEADER_BYTES {
+        warnings.push(SecurityWarning::at(
+            WarningCode::ParseAttachmentFilenameRewritten,
+            format!(
+                "reason=params_exceed_limit,bytes={},limit={MAX_HEADER_BYTES}",
+                header.len()
+            ),
+            location,
+        ));
+        return None;
+    }
+
+    let message = safe_parse(header.as_bytes()).ok().flatten()?;
+    let name = message.attachment_name().filter(|name| !name.is_empty())?;
+    Some(sanitize_attachment_filename(name, idx, warnings))
+}
+
+/// Append the `name` / `filename` parameter family (plain and RFC 2231
+/// `*` forms) from `params` to `header`. Other parameters cannot affect
+/// the filename and are skipped. Sets `dropped` for a parameter that
+/// cannot be re-serialized safely.
+fn append_name_params(header: &mut String, params: &[(String, String)], dropped: &mut bool) {
+    for (key, value) in params {
+        let base = key.split('*').next().unwrap_or_default();
+        if !(base.eq_ignore_ascii_case("name") || base.eq_ignore_ascii_case("filename")) {
+            continue;
+        }
+        if !key.bytes().all(is_token_byte) || value.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0))
+        {
+            *dropped = true;
+            continue;
+        }
+        header.push_str(";\r\n ");
+        header.push_str(key);
+        header.push('=');
+        if key.ends_with('*') && !value.is_empty() && value.bytes().all(is_token_byte) {
+            // RFC 2231 extended value: a token, never a quoted string.
+            header.push_str(value);
+        } else {
+            header.push('"');
+            for c in value.chars() {
+                if matches!(c, '"' | '\\') {
+                    header.push('\\');
+                }
+                header.push(c);
+            }
+            header.push('"');
+        }
+    }
+}
+
+/// RFC 2045 `token` byte: printable US-ASCII except space and tspecials.
+fn is_token_byte(b: u8) -> bool {
+    b.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?=".contains(&b)
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+mod params_tests {
+    use super::attachment_filename_from_params;
+    use crate::output::{SecurityWarning, WarningCode};
+
+    fn owned(params: &[(&str, &str)]) -> Vec<(String, String)> {
+        params
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// Content-Type parameters only.
+    fn decode(params: &[(&str, &str)]) -> (Option<String>, Vec<SecurityWarning>) {
+        decode_both(params, &[])
+    }
+
+    fn decode_both(
+        content_type: &[(&str, &str)],
+        disposition: &[(&str, &str)],
+    ) -> (Option<String>, Vec<SecurityWarning>) {
+        let mut warnings = Vec::new();
+        let name = attachment_filename_from_params(
+            &owned(content_type),
+            &owned(disposition),
+            3,
+            &mut warnings,
+        );
+        (name, warnings)
+    }
+
+    fn has(warnings: &[SecurityWarning], code: WarningCode) -> bool {
+        warnings.iter().any(|w| w.code == code)
+    }
+
+    #[test]
+    fn plain_name() {
+        assert_eq!(decode(&[("name", "doc.pdf")]).0.as_deref(), Some("doc.pdf"));
+    }
+
+    #[test]
+    fn disposition_filename_wins_over_type_name() {
+        // Same precedence as mail-parser's attachment_name() on the full
+        // message, so the listed name matches the fetched/downloaded one.
+        let (name, warnings) = decode_both(
+            &[("name", "Q3-invoice.pdf")],
+            &[("filename", "Q3-invoice.pdf.lnk")],
+        );
+        assert_eq!(name.as_deref(), Some("Q3-invoice.pdf.lnk"));
+        assert!(
+            has(&warnings, WarningCode::LookalikeFilenameExtensionSpoof),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn disposition_only_rfc2231_filename_is_decoded() {
+        let (name, _) = decode_both(&[], &[("filename*", "utf-8''r%C3%A9sum%C3%A9.pdf")]);
+        assert_eq!(name.as_deref(), Some("résumé.pdf"));
+    }
+
+    #[test]
+    fn content_type_filename_param_is_ignored_like_the_full_path() {
+        assert_eq!(decode(&[("filename", "evil.exe")]).0, None);
+    }
+
+    #[test]
+    fn rfc2047_encoded_word_name_is_decoded() {
+        let params = [("name", "=?utf-8?Q?=C3=9Cbersicht_f=C3=BCr.pdf?=")];
+        assert_eq!(decode(&params).0.as_deref(), Some("Übersicht für.pdf"));
+    }
+
+    #[test]
+    fn rfc2231_sections_are_joined_and_decoded() {
+        let params = [
+            ("name*1*", "%20Fassung.pdf"),
+            ("name*0*", "UTF-8''%C3%9Cbersicht%20der"),
+        ];
+        assert_eq!(
+            decode(&params).0.as_deref(),
+            Some("Übersicht der Fassung.pdf")
+        );
+    }
+
+    #[test]
+    fn rfc2231_single_extended_value_is_decoded() {
+        let params = [("name*", "utf-8''caf%C3%A9.txt")];
+        assert_eq!(decode(&params).0.as_deref(), Some("café.txt"));
+    }
+
+    #[test]
+    fn rfc2231_plain_sections_are_joined() {
+        let params = [("name*0", "quarterly-"), ("name*1", "report.pdf")];
+        assert_eq!(decode(&params).0.as_deref(), Some("quarterly-report.pdf"));
+    }
+
+    #[test]
+    fn quotes_and_backslashes_survive_requoting() {
+        let params = [("name", r#"a"b\c.txt"#)];
+        let (name, _) = decode(&params);
+        // The quote survives re-quoting; the sanitizer then rewrites the
+        // backslash path separator.
+        assert_eq!(name.as_deref(), Some("a\"b_c.txt"));
+    }
+
+    #[test]
+    fn line_breaks_cannot_shape_the_synthesized_header() {
+        let params = [("name", "a.txt\r\nContent-Type: text/html; name=evil.html")];
+        let (name, warnings) = decode(&params);
+        assert_eq!(name, None);
+        assert!(
+            has(&warnings, WarningCode::ParseHeaderSmugglingBlocked),
+            "{warnings:?}"
+        );
+        let key = [("name\r\nX", "a.txt")];
+        assert_eq!(decode(&key).0, None);
+    }
+
+    #[test]
+    fn unrelated_params_are_not_reserialized() {
+        // A stray CR in an unrelated parameter neither blocks the name nor
+        // warns: only the name/filename family is synthesized.
+        let params = [("charset", "x\ry"), ("name", "a.pdf")];
+        let (name, warnings) = decode(&params);
+        assert_eq!(name.as_deref(), Some("a.pdf"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn oversized_params_withhold_the_name() {
+        let sections: Vec<(String, String)> = (0..100_000)
+            .map(|i| (format!("name*{i}"), "aaaaaaaaaa".to_string()))
+            .collect();
+        let mut warnings = Vec::new();
+        let start = std::time::Instant::now();
+        let name = attachment_filename_from_params(&sections, &[], 0, &mut warnings);
+        assert_eq!(name, None);
+        assert!(
+            has(&warnings, WarningCode::ParseAttachmentFilenameRewritten),
+            "{warnings:?}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn percent_decoded_controls_and_separators_are_sanitized() {
+        let (name, warnings) = decode(&[("name*", "utf-8''a%00b%2F..%2Fetc.txt")]);
+        let name = name.unwrap();
+        assert!(!name.contains('\0') && !name.contains('/'), "{name:?}");
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn absent_or_empty_name_is_none() {
+        assert_eq!(decode(&[]).0, None);
+        assert_eq!(decode(&[("charset", "utf-8")]).0, None);
+        assert_eq!(decode(&[("name", "")]).0, None);
+    }
+
+    #[test]
+    fn decoded_name_is_sanitized() {
+        // An encoded RLO override must be decoded and then flagged.
+        let params = [("name", "=?utf-8?Q?invoice=E2=80=AEfdp.exe?=")];
+        let (name, warnings) = decode(&params);
+        assert!(!name.unwrap().contains('\u{202e}'));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code == WarningCode::LookalikeFilenameExtensionSpoof),
+            "{warnings:?}",
+        );
+    }
 }
 
 #[cfg(test)]

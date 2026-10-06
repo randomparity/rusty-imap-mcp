@@ -78,6 +78,7 @@ mod tests {
             mime_type: mt.to_string(),
             mime_subtype: sub.to_string(),
             params: Vec::new(),
+            disposition_params: Vec::new(),
             encoding: "7bit".to_string(),
             size: 10,
         }
