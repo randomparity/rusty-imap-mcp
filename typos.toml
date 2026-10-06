@@ -54,4 +54,7 @@ extend-exclude = [
     # Vendored Unicode 16 TR39 confusables table. CJK codepoint names and
     # hex codepoint columns trip the typos auto-fixer.
     "crates/rimap-content/data/confusables.txt",
+    # Byte-level snapshots of outbound messages carry base64 and
+    # quoted-printable bodies; encoded fragments read as misspellings.
+    "crates/rimap-server/src/tools/compose/snapshots/",
 ]

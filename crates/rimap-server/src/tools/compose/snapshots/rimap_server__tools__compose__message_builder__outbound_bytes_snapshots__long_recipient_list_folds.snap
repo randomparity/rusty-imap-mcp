@@ -1,0 +1,19 @@
+---
+source: crates/rimap-server/src/tools/compose/message_builder.rs
+expression: "normalize(&raw, false)"
+---
+From: <alice@example.com>
+To: "Recipient With A Long Name" <r0@example.com>,
+ "Recipient With A Long Name" <r1@example.com>, "Recipient With A Long Name"
+ <r2@example.com>, "Recipient With A Long Name" <r3@example.com>,
+ "Recipient With A Long Name" <r4@example.com>, "Recipient With A Long Name"
+ <r5@example.com>, "Recipient With A Long Name" <r6@example.com>,
+ "Recipient With A Long Name" <r7@example.com>
+Subject: Fan-out
+Message-ID: <MESSAGE-ID>
+Date: Tue, 14 Nov 2023 22:13:20 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Body.
