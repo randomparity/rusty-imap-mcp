@@ -61,25 +61,25 @@ async fn wire_initialize_advertises_tools_capability() {
 async fn wire_protocol_version_negotiation_matches_vendored_schema() {
     // Three-way drift check (Codex adversarial review finding #1):
     //
-    //   1. rmcp::ProtocolVersion::LATEST.as_str()
+    //   1. the protocolVersion the server advertises on the wire
     //   2. PINNED_PROTOCOL_VERSION (constant in tests/support/wire/harness.rs)
     //   3. crates/rimap-server/tests/fixtures/mcp-spec/<version>/
     //
-    // All three MUST agree. If any one drifts (rmcp bumps LATEST, the
-    // pinned constant goes stale, or someone deletes the fixture
+    // All three MUST agree. If any one drifts (the server's pin moves,
+    // the test constant goes stale, or someone deletes the fixture
     // directory) this test fails first with a precise diagnostic
     // before any fragment-validation test validates against an
-    // outdated schema.
+    // outdated schema. rmcp's own `LATEST` is deliberately not a leg:
+    // rmcp 3.5 moved it to 2026-07-28 while the server stays pinned,
+    // so the remaining rmcp check is only that rmcp still knows the
+    // pinned revision.
 
-    let rmcp_latest = ProtocolVersion::LATEST.as_str();
-    assert_eq!(
-        rmcp_latest, PINNED_PROTOCOL_VERSION,
-        "rmcp::ProtocolVersion::LATEST ({rmcp_latest}) drifted from \
-         PINNED_PROTOCOL_VERSION ({PINNED_PROTOCOL_VERSION}). Run \
-         `scripts/refresh-mcp-spec.sh {rmcp_latest}` to vendor the new \
-         schema, update PINNED_PROTOCOL_VERSION + MCP_SCHEMA_JSON in \
-         tests/support/wire/harness.rs, and update the README under \
-         tests/fixtures/mcp-spec/.",
+    assert!(
+        ProtocolVersion::KNOWN_VERSIONS
+            .iter()
+            .any(|v| v.as_str() == PINNED_PROTOCOL_VERSION),
+        "rmcp no longer lists PINNED_PROTOCOL_VERSION ({PINNED_PROTOCOL_VERSION}) \
+         in ProtocolVersion::KNOWN_VERSIONS; the pin needs a protocol migration",
     );
 
     // The fixture directory must exist on disk under the pinned name.
@@ -93,15 +93,13 @@ async fn wire_protocol_version_negotiation_matches_vendored_schema() {
         fixture_dir.display(),
     );
 
-    // And rmcp must echo whatever the harness sends as the negotiated
-    // version, which the harness now derives from LATEST.
+    // And the server must advertise the pinned version on the wire.
     let mut harness = Harness::spawn().await;
     let response = harness.initialize_handshake().await;
     assert_eq!(
         response["result"]["protocolVersion"],
-        json!(rmcp_latest),
-        "server must echo the rmcp LATEST version sent by the harness; \
-         got {response}",
+        json!(PINNED_PROTOCOL_VERSION),
+        "server must advertise PINNED_PROTOCOL_VERSION; got {response}",
     );
 }
 

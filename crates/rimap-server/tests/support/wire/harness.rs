@@ -14,7 +14,6 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
-use rmcp::model::ProtocolVersion;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -22,8 +21,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 
 /// MCP protocol version pinned by this harness. Matches the
-/// directory under `tests/fixtures/mcp-spec/` and the `LATEST` value
-/// in `rmcp 1.5`. Update both when bumping.
+/// directory under `tests/fixtures/mcp-spec/` and the server's
+/// `SUPPORTED_PROTOCOL_VERSION`. Update all three together.
 pub const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Vendored MCP spec schema, compiled in at build time so tests run
@@ -1040,7 +1039,7 @@ allowed_base_dir = "{}"
         self.request(
             "initialize",
             json!({
-                "protocolVersion": ProtocolVersion::LATEST.as_str(),
+                "protocolVersion": PINNED_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "rusty-imap-mcp-conformance-harness",

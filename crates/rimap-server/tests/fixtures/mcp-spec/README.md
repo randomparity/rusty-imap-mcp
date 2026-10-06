@@ -11,9 +11,12 @@ They are consumed exclusively by the wire-conformance test
 
     https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/schema/2025-11-25/schema.json
 
-This matches `rmcp::model::ProtocolVersion::LATEST` for `rmcp 1.5`,
-which is what `rusty-imap-mcp` advertises by default during the
-`initialize` handshake.
+This matches `SUPPORTED_PROTOCOL_VERSION` in
+`crates/rimap-server/src/mcp/server.rs`, the one version
+`rusty-imap-mcp` accepts and advertises during the `initialize`
+handshake. It is pinned explicitly rather than taken from
+`rmcp::model::ProtocolVersion::LATEST`, which rmcp 3.5 moved to
+2026-07-28.
 
 ## Refresh / drift workflow
 
