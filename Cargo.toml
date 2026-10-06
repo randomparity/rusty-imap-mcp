@@ -237,9 +237,11 @@ lettre = { version = "0.11.21", default-features = false, features = ["tokio1-ru
 # `SUPPORTED_PROTOCOL_VERSION = V_2025_11_25` for the initialize gate, the
 # advertised `protocolVersion`, and `supported_protocol_versions()`. rmcp 3.5's
 # serve loop also dispatches pre-initialize requests that carry complete
-# 2026-07-28 inline `_meta`; the ADR-0025 pre-init interception in the wire
-# validator answers those with -32002 before rmcp sees them. Re-verify both on
-# every bump. Reviewed 3.5.1 on 2026-10-06 (SC-PROC-01): rmcp-macros
+# inline `_meta` without a handshake; the ADR-0025 pre-init interception in the
+# wire validator answers those with -32002 before rmcp sees them, and lifts
+# only once rmcp has been forwarded an initialize. After initialize, rmcp
+# rejects a request whose inline `_meta` names another version with -32022.
+# Re-verify all three on every bump. Reviewed 3.5.1 on 2026-10-06 (SC-PROC-01): rmcp-macros
 # unchanged in role, no new crate names in the graph.
 rmcp = { version = "3.5", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"

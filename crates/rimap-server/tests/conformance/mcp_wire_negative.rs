@@ -915,6 +915,35 @@ async fn rejected_initialize_line_does_not_lift_pre_init_interception() {
     );
 }
 
+/// After a successful 2025-11-25 initialize, rmcp 3.5 validates a
+/// request's inline `_meta` protocolVersion against
+/// `supported_protocol_versions()`. A request claiming 2026-07-28 is
+/// refused by rmcp with -32022 before any tool handler runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_init_request_with_other_inline_version_is_rejected() {
+    let mut harness = Harness::spawn().await;
+    let _ = harness.initialize_handshake().await;
+    harness.send_initialized().await;
+
+    harness
+        .send_line(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_accounts","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"x","version":"0"}}}}"#,
+        )
+        .await;
+    let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected an error envelope, got {other:?}"),
+    };
+    assert_eq!(env["id"], json!(7), "got {env}");
+    assert_eq!(env["error"]["code"], json!(-32022), "got {env}");
+    assert_eq!(
+        env["error"]["data"]["supported"],
+        json!([PINNED_PROTOCOL_VERSION]),
+        "got {env}",
+    );
+    assert_envelope_valid(&env);
+}
+
 /// Edge case: `protocolVersion: ""` is valid JSON but a degenerate
 /// version string. Must be rejected with -32602. Pins the boundary
 /// against any future code that might special-case empty strings.
