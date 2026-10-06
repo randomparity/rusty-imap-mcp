@@ -28,7 +28,9 @@ commit 32cb997, using one `serde_json::from_str::<ClientJsonRpcMessage>` call pe
 Duplicate keys elsewhere in the unit and its large numeric literal are not causal.
 **Minimized unit:** `{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":"x"}}`.
 
-When the validator forwards such a line, rmcp drops it and the client gets no response. Before
+When the validator forwards such a line, rmcp answers with its own id-less
+`{"error":{"code":-32600,"message":"Invalid request"},"jsonrpc":"2.0"}`, so the client cannot correlate it with its request. (This was observed by the
+wire tests before the fix; the design originally assumed a silent drop.) Before
 `initialize`, the ADR-0025 interception parse also fails on this line, so the line skips
 interception and still reaches `validate`. Initialization handling therefore does not mask the
 mismatch; it reaches the same forward/drop path.
@@ -89,6 +91,6 @@ moves.
 ## Validation
 
 - Success 1–2: unit tests in `wire_validator/mod.rs`; red before the change on Forward.
-- Success 3: `mcp_wire_negative` tests; red before the change on Hung.
+- Success 3: `mcp_wire_negative` tests; red before the change on the missing id.
 - Success 4: `cargo +nightly fuzz run validate <unit>` (single-input replay).
 - Guardrails: `just fmt-check`, `just lint`, `just test`, `just check-fuzz-lock-parity`.

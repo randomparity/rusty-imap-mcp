@@ -49,7 +49,8 @@ tests ~80, two corpus files, one ADR index row.
 - Contract: client-visible wire response, before and after `initialize`. Mode: focused-test.
   Tests: `params_meta_string_returns_minus_32600` and
   `params_meta_string_before_initialize_returns_minus_32600` in `mcp_wire_negative.rs`. Red: a
-  panic with `expected one -32600 envelope ... got Hung`. Green:
+  panic with `id must be echoed, got {"error":{"code":-32600,"message":"Invalid request"},...}`
+  (rmcp's own id-less envelope). Green:
   `cargo nextest run -p rimap-server --test mcp_wire_negative -E 'test(params_meta)'`.
 - Contract: the corpus files are the regression inputs. Mode: focused-test, covered by the first
   test, which `include_str!`s both files.
@@ -129,7 +130,7 @@ tests ~80, two corpus files, one ADR index row.
 
 ```rust
 /// Issue #867: rmcp rejects a non-object `params._meta`, so the validator must answer -32600
-/// itself; forwarding the line used to leave the client with no response.
+/// itself; forwarding the line used to get rmcp's own id-less -32600.
 const META_STRING_REQUEST: &str = r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":"x"}}"#;
 
 fn expect_meta_string_rejection(outcome: CloseOrResponse) {
@@ -170,9 +171,9 @@ async fn params_meta_string_before_initialize_returns_minus_32600() {
 ```
 
 5. Run `cargo nextest run -p rimap-server --test mcp_wire_negative -E 'test(params_meta)'`.
-   Expect both to FAIL with `expected one -32600 envelope ... got Hung(...)`. If the pre-init
-   test produces anything else (for example `CleanClose`), record the observed outcome in the
-   PR. It is still red, and the fix must turn it green.
+   Expect both to FAIL with `id must be echoed, got {"error":{"code":-32600,"message":"Invalid
+   request"},"jsonrpc":"2.0"}`. That is rmcp's own id-less envelope, observed on 2026-10-06; the
+   design originally assumed `Hung`. Record the observed outcome in the PR.
 6. In `envelope.rs`, replace `is_valid_params`'s body and append to its doc comment:
 
 ```rust
