@@ -108,7 +108,6 @@ pub(crate) fn invalid_request(id: Value) -> ErrorEnvelope {
 /// duplicates are a map-level concept. Module-private helper for
 /// [`scan_duplicate_keys`], used as a seed so one visitor serves both
 /// the `error` body (every key) and `params` (only `_meta`).
-#[derive(Clone, Copy)]
 struct OneLevelDupCheck {
     /// `None` counts every duplicate; `Some(k)` counts only duplicates of `k`.
     only: Option<&'static str>,
@@ -193,7 +192,7 @@ impl<'de> serde::de::Visitor<'de> for OneLevelDupCheck {
 }
 
 /// Duplicate-key findings from one streaming pass over the raw line.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 struct DuplicateKeys {
     /// Duplicate at the top level or inside `error` — rmcp rejects any line.
     envelope: bool,
