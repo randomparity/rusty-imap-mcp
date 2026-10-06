@@ -201,11 +201,11 @@ pub(crate) fn validate_recipient_set(
 /// Prefix a fetched (untrusted) subject with `Fwd: ` for a forward.
 ///
 /// The subject comes from `rimap_content::extract_subject`, which RFC
-/// 2047-decodes it. A decoded encoded-word can contain bare CR/LF that
-/// `mail_builder` does NOT neutralize in a `Subject` value, so every
-/// control character is stripped here before the value reaches the
-/// builder — otherwise it would enable header injection into the outgoing
-/// message. The result is capped at `MAX_SUBJECT_LEN` on a char boundary.
+/// 2047-decodes it, so it can contain bare CR/LF and other controls.
+/// `mail_builder` 1.0 drops bare CR/LF from header values, but every control
+/// character is still stripped here before the value reaches the builder, so
+/// header-injection safety does not depend on the builder version. The
+/// result is capped at `MAX_SUBJECT_LEN` on a char boundary.
 #[must_use]
 pub(crate) fn forwarded_subject(original: Option<&str>) -> String {
     let cleaned: String = original
@@ -573,9 +573,10 @@ async fn read_attachments(
 /// HTML and attachments are added to the same builder [`build_message_headers`]
 /// returned, so the `include_bcc` handling (#432) is untouched. Attachment
 /// bytes are added as `BodyPart::Binary`, which `mail_builder` base64-encodes
-/// for any non-`text/*` content type; a `text/*` attachment uses a safe CTE
-/// (bare-LF normalized to CRLF, QP for 8-bit). Framing is further protected by
-/// `mail_builder`'s unguessable random boundary.
+/// for any non-`text/*` content type; a `text/*` attachment is
+/// quoted-printable encoded, bare LF included (`=0A`), so no attachment line
+/// can end the part early. `mail_builder`'s boundary is pseudo-unique
+/// (timestamp, counter, thread seed), not secret; framing must not rely on it.
 fn assemble_message(
     mut builder: MessageBuilder<'_>,
     input: &ComposeInput,
@@ -1678,6 +1679,8 @@ mod tests {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod outbound_bytes_snapshots {
+    use mail_parser::{MessageParser, MimeHeaders};
+
     use super::{
         AddressInput, AttachmentRead, ComposeInput, assemble_message, build_forward_message,
         build_message_headers,
@@ -1776,7 +1779,17 @@ mod outbound_bytes_snapshots {
              with a deliberately long tail so the encoded words must fold 東京",
             "Body.\n",
         );
-        insta::assert_snapshot!(normalize(&build(&msg, Vec::new()), false));
+        let raw = build(&msg, Vec::new());
+        let parsed = MessageParser::new().parse(&raw).unwrap();
+        assert_eq!(parsed.subject(), Some(msg.subject.as_str()));
+        let names: Vec<_> = parsed
+            .to()
+            .unwrap()
+            .iter()
+            .map(|a| a.name().unwrap())
+            .collect();
+        assert_eq!(names, ["Zoë Ångström", "田中 太郎"]);
+        insta::assert_snapshot!(normalize(&raw, false));
     }
 
     #[test]
@@ -1790,7 +1803,15 @@ mod outbound_bytes_snapshots {
             })
             .collect();
         let msg = input(to, "Fan-out", "Body.\n");
-        insta::assert_snapshot!(normalize(&build(&msg, Vec::new()), false));
+        let raw = build(&msg, Vec::new());
+        let parsed = MessageParser::new().parse(&raw).unwrap();
+        let to = parsed.to().unwrap();
+        assert_eq!(to.iter().count(), 8);
+        for (i, a) in to.iter().enumerate() {
+            assert_eq!(a.name(), Some("Recipient With A Long Name"));
+            assert_eq!(a.address(), Some(format!("r{i}@example.com").as_str()));
+        }
+        insta::assert_snapshot!(normalize(&raw, false));
     }
 
     #[test]
@@ -1815,7 +1836,22 @@ mod outbound_bytes_snapshots {
                 bytes: b"line one\nline two with caf\xc3\xa9\n".to_vec(),
             },
         ];
-        insta::assert_snapshot!(normalize(&build(&msg, reads), false));
+        let names: Vec<String> = reads.iter().map(|r| r.filename.clone()).collect();
+        let raw = build(&msg, reads);
+        // Both the disposition filename and the Content-Type `name` (which
+        // list_attachments reads via BODYSTRUCTURE) must decode back.
+        let parsed = MessageParser::new().parse(&raw).unwrap();
+        let decoded: Vec<&str> = parsed
+            .attachments()
+            .map(|part| part.attachment_name().unwrap())
+            .collect();
+        assert_eq!(decoded, names);
+        let ct_names: Vec<&str> = parsed
+            .attachments()
+            .map(|part| part.content_type().unwrap().attribute("name").unwrap())
+            .collect();
+        assert_eq!(ct_names, names);
+        insta::assert_snapshot!(normalize(&raw, false));
     }
 
     #[test]

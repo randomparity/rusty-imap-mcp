@@ -141,7 +141,15 @@ rand = "0.10"
 # model? The Sprint 4a adversarial corpus and insta snapshots are
 # the regression-detection mechanism — any snapshot diff on upgrade
 # requires a re-audit, not a cargo insta accept. (SC-DEP-09)
-mail-builder = "0.5"
+# mail-builder 0.5 -> 1.0 re-audited 2026-10-06: same single optional
+# dependency (gethostname), no build.rs, no proc-macros, unsafe now forbidden
+# crate-wide; bare CR/LF can no longer reach header output. Serialization
+# changes are pinned by the outbound byte snapshots in
+# rimap-server/src/tools/compose/message_builder.rs: RFC 5322 folding (CRLF +
+# single space, no trailing whitespace), RFC 2047 words <= 75 chars split on
+# UTF-8 boundaries, and RFC 2231 continuations for non-ASCII parameter values
+# (decoded by list_attachments since #879). Requires Rust 1.88 = workspace MSRV.
+mail-builder = "1.0"
 mail-parser = "0.11"
 encoding_rs = "0.8"
 unicode-normalization = "0.1"

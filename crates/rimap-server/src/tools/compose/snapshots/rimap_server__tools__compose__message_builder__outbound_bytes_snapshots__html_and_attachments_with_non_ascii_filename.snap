@@ -1,6 +1,6 @@
 ---
 source: crates/rimap-server/src/tools/compose/message_builder.rs
-expression: "normalize(&build(&msg, reads), false)"
+expression: "normalize(&raw, false)"
 ---
 From: <alice@example.com>
 To: <bob@example.com>
@@ -8,13 +8,13 @@ Subject: Files
 Message-ID: <MESSAGE-ID>
 Date: Tue, 14 Nov 2023 22:13:20 +0000
 MIME-Version: 1.0
-Content-Type: multipart/mixed;␠
-	boundary="BOUNDARY-0"
+Content-Type: multipart/mixed;
+ boundary="BOUNDARY-0"
 
 
 --BOUNDARY-0
-Content-Type: multipart/alternative;␠
-	boundary="BOUNDARY-1"
+Content-Type: multipart/alternative;
+ boundary="BOUNDARY-1"
 
 
 --BOUNDARY-1
@@ -31,10 +31,14 @@ Content-Transfer-Encoding: 7bit
 --BOUNDARY-1--
 
 --BOUNDARY-0
-Content-Type: application/pdf;␠
-	name="=?utf-8?Q?=C3=9Cbersicht_der_Quartalszahlen_f=C3=BCr_das_Gesch=C3=A4ftsjahr_2026_=E2=80=94_endg=C3=BCltige_Fassung.pdf?="
-Content-Disposition: attachment;␠
-	filename="=?utf-8?Q?=C3=9Cbersicht_der_Quartalszahlen_f=C3=BCr_das_Gesch=C3=A4ftsjahr_2026_=E2=80=94_endg=C3=BCltige_Fassung.pdf?="
+Content-Type: application/pdf;
+ name*0*=UTF-8''%C3%9Cbersicht%20der%20Quartalszahlen%20f%C3%BCr%20das%20Ge;
+ name*1*=sch%C3%A4ftsjahr%202026%20%E2%80%94%20endg%C3%BCltige%20Fassung.pd;
+ name*2*=f
+Content-Disposition: attachment;
+ filename*0*=UTF-8''%C3%9Cbersicht%20der%20Quartalszahlen%20f%C3%BCr%20das;
+ filename*1*=%20Gesch%C3%A4ftsjahr%202026%20%E2%80%94%20endg%C3%BCltige%20F;
+ filename*2*=assung.pdf
 Content-Transfer-Encoding: base64
 
 JVBERi0xLjQKJWJpbmFyeQD/Cg==

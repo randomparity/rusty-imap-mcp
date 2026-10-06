@@ -10,8 +10,8 @@ In-Reply-To: <orig-1@example.com>
 References: <root-0@example.com> <orig-1@example.com>
 Date: <DATE>
 MIME-Version: 1.0
-Content-Type: multipart/mixed;␠
-	boundary="BOUNDARY-0"
+Content-Type: multipart/mixed;
+ boundary="BOUNDARY-0"
 
 
 --BOUNDARY-0
