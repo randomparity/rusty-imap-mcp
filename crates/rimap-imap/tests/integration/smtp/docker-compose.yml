@@ -5,7 +5,7 @@ services:
     # the version in its PR title. Docker resolves by digest; the tag is for
     # tracking only. Update via Dependabot or manually, re-verifying
     # amd64+arm64 with `docker manifest inspect`.
-    image: docker.io/axllent/mailpit:v1.31.2@sha256:74d609a42ec279aa63c6b4622a6fa9b5408d1ad5b1d76a1c4be40a265ce0863d
+    image: docker.io/axllent/mailpit:v1.31.3@sha256:ed9b00c609e77e99c79b93f1178255ebc271868920f2c69a8d166bd5634ed10d
     container_name: ${COMPOSE_PROJECT_NAME:-rimap-it}-smtp
     # Attach to the default bridge instead of a per-project network. Each
     # compose project otherwise allocates a dedicated bridge subnet, and the
