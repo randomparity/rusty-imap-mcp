@@ -118,7 +118,7 @@ describe("wire conformance (raw harness)", () => {
     //   1. SDK's LATEST_PROTOCOL_VERSION constant
     //   2. PINNED_PROTOCOL_VERSION literal pinned in this test file
     //   3. negotiated value returned by the server on the wire
-    //   4. Phase 1's PINNED_PROTOCOL_VERSION + fixture dir + rmcp::ProtocolVersion::LATEST
+    //   4. Phase 1's PINNED_PROTOCOL_VERSION + fixture dir + the server's wire-advertised version
     // The wire read is direct — no optional/escape-hatch path. If the
     // server fails to echo the version, the test fails hard.
     expect(

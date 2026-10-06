@@ -793,6 +793,157 @@ async fn initialize_with_known_older_version_is_rejected() {
     }
 }
 
+/// rmcp 3.5 made 2026-07-28 its `ProtocolVersion::LATEST`. The server
+/// is pinned to 2025-11-25, so a peer asking for rmcp's LATEST gets the
+/// same -32602 rejection as any other unsupported version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialize_with_rmcp_latest_2026_07_28_is_rejected() {
+    let mut harness = Harness::spawn().await;
+
+    let _id = harness
+        .send_request_no_wait(
+            "initialize",
+            json!({
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "rusty-imap-mcp-phase4-test",
+                    "version": "0.0.0",
+                },
+            }),
+        )
+        .await;
+
+    let envelope = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected -32602 rejection for 2026-07-28, got {other:?}"),
+    };
+    assert_eq!(envelope["error"]["code"], json!(-32602), "got {envelope}");
+    assert_eq!(
+        envelope["error"]["data"]["supported_versions"],
+        json!([PINNED_PROTOCOL_VERSION]),
+        "got {envelope}",
+    );
+    assert_envelope_valid(&envelope);
+
+    match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::CleanClose => {}
+        other => panic!("expected clean close, got {other:?}"),
+    }
+}
+
+/// rmcp 3.5's serve loop dispatches a pre-initialize request carrying
+/// complete 2026-07-28 inline `_meta` (protocolVersion +
+/// clientCapabilities) without any initialize handshake. The ADR-0025
+/// pre-init interception must still answer it with -32002 so no tool
+/// runs before the version gate in `initialize`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_meta_request_before_initialize_returns_minus_32002() {
+    let mut harness = Harness::spawn().await;
+
+    let id = harness
+        .send_request_no_wait(
+            "tools/list",
+            json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "rusty-imap-mcp-phase4-test",
+                        "version": "0.0.0",
+                    },
+                },
+            }),
+        )
+        .await;
+
+    let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected one -32002 envelope, got {other:?}"),
+    };
+    assert_eq!(env["id"], json!(id), "got {env}");
+    assert_eq!(env["error"]["code"], json!(-32002), "got {env}");
+    assert_envelope_valid(&env);
+
+    match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::CleanClose => {}
+        other => panic!("expected clean close, got {other:?}"),
+    }
+}
+
+/// An `initialize` line that parses as an `InitializeRequest` but fails
+/// envelope validation (here: a stray `result` member) is rejected with
+/// -32600 and never reaches rmcp. It must not count as initialization:
+/// the next request, carrying complete inline `_meta` that rmcp would
+/// otherwise dispatch without a handshake, still gets -32002.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_initialize_line_does_not_lift_pre_init_interception() {
+    let mut harness = Harness::spawn().await;
+    let audit_path = harness.audit_path();
+
+    harness
+        .send_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","result":null,"params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"x","version":"0"}}}"#,
+        )
+        .await;
+    let rejected = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected -32600 for the malformed initialize, got {other:?}"),
+    };
+    assert_eq!(rejected["error"]["code"], json!(-32600), "got {rejected}");
+
+    harness
+        .send_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_accounts","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"x","version":"0"}}}}"#,
+        )
+        .await;
+    let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected -32002 for the pre-init tools/call, got {other:?}"),
+    };
+    assert_eq!(env["id"], json!(2), "got {env}");
+    assert_eq!(env["error"]["code"], json!(-32002), "got {env}");
+
+    match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::CleanClose => {}
+        other => panic!("expected clean close, got {other:?}"),
+    }
+    let audit = std::fs::read_to_string(&audit_path).unwrap_or_default();
+    assert!(
+        !audit.contains("\"tool_start\""),
+        "no tool may run before a successful initialize; audit: {audit}",
+    );
+}
+
+/// After a successful 2025-11-25 initialize, rmcp 3.5 validates a
+/// request's inline `_meta` protocolVersion against
+/// `supported_protocol_versions()`. A request claiming 2026-07-28 is
+/// refused by rmcp with -32022 before any tool handler runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_init_request_with_other_inline_version_is_rejected() {
+    let mut harness = Harness::spawn().await;
+    let _ = harness.initialize_handshake().await;
+    harness.send_initialized().await;
+
+    harness
+        .send_line(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_accounts","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"x","version":"0"}}}}"#,
+        )
+        .await;
+    let env = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected an error envelope, got {other:?}"),
+    };
+    assert_eq!(env["id"], json!(7), "got {env}");
+    assert_eq!(env["error"]["code"], json!(-32022), "got {env}");
+    assert_eq!(
+        env["error"]["data"]["supported"],
+        json!([PINNED_PROTOCOL_VERSION]),
+        "got {env}",
+    );
+    assert_envelope_valid(&env);
+}
+
 /// Edge case: `protocolVersion: ""` is valid JSON but a degenerate
 /// version string. Must be rejected with -32602. Pins the boundary
 /// against any future code that might special-case empty strings.

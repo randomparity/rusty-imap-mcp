@@ -229,15 +229,21 @@ lettre = { version = "0.11.21", default-features = false, features = ["tokio1-ru
 # and inert as a dependency (it only runs `git config core.hooksPath` inside
 # rmcp's own dev checkout, never present for a crates.io dep). Never enable
 # the optional `reqwest-native-tls` feature: rustls-only policy, and reqwest
-# is not in the graph. Re-audit on any bump — and specifically re-verify the
-# protocol-acceptance pin: server.rs gates on `ProtocolVersion::LATEST`, so an
-# rmcp bump that advances LATEST past 2025-11-25 would shift the accepted
-# protocol version with no code change (a security property distinct from the
-# version pin; the spec's stop-and-escalate rule applies). LATEST verified as
-# V_2025_11_25 in rmcp 3.1.4 model.rs:175 — 2026-07-28 exists but is not
-# advertised as LATEST, so the server remains locked to 2025-11-25 with no
-# code change.
-rmcp = { version = "3.0", features = ["server", "macros", "transport-io"] }
+# is not in the graph. Re-audit on any bump.
+#
+# Protocol pin: rmcp 3.5 advanced `ProtocolVersion::LATEST` (and therefore
+# `ProtocolVersion::default()`) to 2026-07-28, a revision without an
+# initialize handshake. server.rs no longer reads LATEST: it pins
+# `SUPPORTED_PROTOCOL_VERSION = V_2025_11_25` for the initialize gate, the
+# advertised `protocolVersion`, and `supported_protocol_versions()`. rmcp 3.5's
+# serve loop also dispatches pre-initialize requests that carry complete
+# inline `_meta` without a handshake; the ADR-0025 pre-init interception in the
+# wire validator answers those with -32002 before rmcp sees them, and lifts
+# only once rmcp has been forwarded an initialize. After initialize, rmcp
+# rejects a request whose inline `_meta` names another version with -32022.
+# Re-verify all three on every bump. Reviewed 3.5.1 on 2026-10-06 (SC-PROC-01): rmcp-macros
+# unchanged in role, no new crate names in the graph.
+rmcp = { version = "3.5", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 infer = "0.22"
 

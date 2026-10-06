@@ -6,6 +6,7 @@
 //! (posture-filtered union across accounts) and `call_tool` (account
 //! resolution + dispatch pipeline).
 
+use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -21,8 +22,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode as McpCode, ErrorData,
     Implementation, InitializeRequestParams, InitializeResult, ListResourcesResult,
     ListToolsResult, PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams,
-    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-    ServerInfo, Tool,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities, Tool,
 };
 use rmcp::service::RequestContext;
 
@@ -34,7 +34,14 @@ use crate::mcp::tool_name::{
     is_legacy_single_account, refine_tool_name, split_tool_name, validate_bare_tool_namespace,
 };
 
-/// MCP `ServerInfo.instructions` text used when exactly one account is
+/// The one MCP protocol version this server accepts and advertises.
+/// Pinned explicitly rather than read from `ProtocolVersion::LATEST`:
+/// rmcp 3.5 moved LATEST to 2026-07-28, a revision with no initialize
+/// handshake, and following it would lock every current client out. A
+/// change here is a protocol migration, not a dependency bump. (#276)
+const SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
+
+/// MCP `InitializeResult.instructions` text used when exactly one account is
 /// configured. No namespacing sentence; no `use_account` guidance.
 pub const SERVER_INSTRUCTIONS_SINGLE_ACCOUNT: &str = "\
 rusty-imap-mcp exposes IMAP email operations as MCP tools that operate \
@@ -53,7 +60,7 @@ MCP resource `rimap://docs/postures` for the full posture matrix and \
 `rimap://docs/workflows` for UIDVALIDITY pinning, attachment retrieval, \
 the draft lifecycle, and numeric limits.";
 
-/// MCP `ServerInfo.instructions` text used in every deployment shape
+/// MCP `InitializeResult.instructions` text used in every deployment shape
 /// where `is_legacy_single_account` is false — i.e. anything other
 /// than exactly one account named `default`. Account-scoped tools are
 /// advertised and invoked only in `<account>.<tool>` form; the bare
@@ -466,7 +473,7 @@ fn build_tool_catalog_for(
 }
 
 impl ServerHandler for ImapMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> InitializeResult {
         // Spec-strict MCP clients refuse to call `tools/list` unless the
         // server's `initialize` response advertises a `tools` capability.
         // `ServerCapabilities::default()` is all-`None`, so without this
@@ -485,7 +492,8 @@ impl ServerHandler for ImapMcpServer {
         } else {
             SERVER_INSTRUCTIONS_MULTI_ACCOUNT
         };
-        ServerInfo::new(capabilities)
+        InitializeResult::new(capabilities)
+            .with_protocol_version(SUPPORTED_PROTOCOL_VERSION)
             .with_server_info(Implementation::new(
                 "rusty-imap-mcp",
                 rimap_core::version::version(),
@@ -498,12 +506,12 @@ impl ServerHandler for ImapMcpServer {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
-        // LATEST-only acceptance per spec §"Why LATEST-only" (#276):
-        // rmcp 1.5 emits LATEST wire shapes regardless of negotiated
-        // version, so accepting older known versions would echo the
-        // peer's version string while serving 2025-11-25 capabilities.
-        // The exact-equality check is the only honest option.
-        if request.protocol_version != ProtocolVersion::LATEST {
+        // Single-version acceptance per spec §"Why LATEST-only" (#276):
+        // the server emits 2025-11-25 wire shapes, so accepting any other
+        // known version would echo the peer's version string while
+        // serving 2025-11-25 capabilities. The exact-equality check is
+        // the only honest option.
+        if request.protocol_version != SUPPORTED_PROTOCOL_VERSION {
             return Err(unsupported_protocol_version_error(
                 &request.protocol_version,
             ));
@@ -514,6 +522,13 @@ impl ServerHandler for ImapMcpServer {
             context.peer.set_peer_info(request);
         }
         Ok(self.get_info())
+    }
+
+    // rmcp's default is every version it knows; narrowing it keeps rmcp's
+    // own negotiation and per-request version checks in step with the
+    // gate in `initialize`.
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Owned(vec![SUPPORTED_PROTOCOL_VERSION])
     }
 
     async fn list_tools(
@@ -864,12 +879,12 @@ fn account_resource_metadata(account_name: &str, state: &AccountState) -> serde_
 
 /// Build the `ErrorData` payload returned by `ImapMcpServer::initialize`
 /// when the peer's `protocolVersion` is not exactly
-/// `ProtocolVersion::LATEST`. The envelope's `data` field carries
+/// `SUPPORTED_PROTOCOL_VERSION`. The envelope's `data` field carries
 /// `supported_versions` as a single-element array so clients have a
 /// machine-readable retry hint, and the message echoes the offending
 /// version in single quotes for log readability. (#276)
 fn unsupported_protocol_version_error(peer_version: &ProtocolVersion) -> ErrorData {
-    let supported = [ProtocolVersion::LATEST.as_str()];
+    let supported = [SUPPORTED_PROTOCOL_VERSION.as_str()];
     let message = format!(
         "Unsupported protocol version: '{}'. Server supports: {}.",
         peer_version.as_str(),
@@ -886,7 +901,7 @@ mod protocol_version_tests {
     use rmcp::model::{ErrorCode as McpCode, ProtocolVersion};
     use serde_json::json;
 
-    use super::unsupported_protocol_version_error;
+    use super::{SUPPORTED_PROTOCOL_VERSION, unsupported_protocol_version_error};
 
     /// Build a `ProtocolVersion` carrying an arbitrary version string.
     /// The rmcp deserializer accepts any string and produces a
@@ -922,12 +937,11 @@ mod protocol_version_tests {
     }
 
     #[test]
-    fn uses_runtime_latest() {
-        // Pins the contract that `supported_versions[0]` is built from
-        // `ProtocolVersion::LATEST.as_str()` at runtime, not a hard-
-        // coded literal. If a future rmcp bump shifts LATEST, this
-        // test stays green; the literal-pinning `shape_matches_spec`
-        // test will then surface the change visibly.
+    fn uses_pinned_constant() {
+        // `supported_versions[0]` comes from `SUPPORTED_PROTOCOL_VERSION`,
+        // never from rmcp's `LATEST`: rmcp 3.5 moved LATEST to a version
+        // without an initialize handshake, and following it silently
+        // locked every 2025-11-25 client out.
         let v = version_from_str("anything-goes");
         let err = unsupported_protocol_version_error(&v);
         let data = err.data.as_ref().expect("data field present");
@@ -937,7 +951,7 @@ mod protocol_version_tests {
         assert_eq!(arr.len(), 1, "single-element array");
         assert_eq!(
             arr[0].as_str().expect("string"),
-            ProtocolVersion::LATEST.as_str(),
+            SUPPORTED_PROTOCOL_VERSION.as_str(),
         );
     }
 
@@ -1015,6 +1029,28 @@ mod instructions_selection_tests {
             info.instructions.as_deref(),
             Some(SERVER_INSTRUCTIONS_MULTI_ACCOUNT),
         );
+    }
+
+    /// rmcp 3.5 moved `ProtocolVersion::default()` (= `LATEST`) to
+    /// 2026-07-28, so `InitializeResult::new` would advertise a version
+    /// this server does not speak unless `get_info` pins it.
+    #[test]
+    fn get_info_advertises_pinned_protocol_version() {
+        let (server, _t) = make_server(AccountRegistry::new(BTreeMap::new()));
+        assert_eq!(server.get_info().protocol_version.as_str(), "2025-11-25");
+    }
+
+    /// rmcp's default lists every version it knows, which would let its
+    /// negotiation, `discover`, and per-request checks admit 2026-07-28.
+    #[test]
+    fn supported_protocol_versions_is_pinned_only() {
+        let (server, _t) = make_server(AccountRegistry::new(BTreeMap::new()));
+        let versions = server.supported_protocol_versions();
+        let names: Vec<&str> = versions
+            .iter()
+            .map(rmcp::model::ProtocolVersion::as_str)
+            .collect();
+        assert_eq!(names, ["2025-11-25"]);
     }
 }
 
