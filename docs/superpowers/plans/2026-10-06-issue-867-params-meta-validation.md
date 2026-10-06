@@ -34,6 +34,7 @@ tests ~80, two corpus files, one ADR index row.
 | `crates/rimap-server/fuzz/corpus/validate/regression-867-original` | new: the CI unit, exact bytes |
 | `crates/rimap-server/fuzz/corpus/validate/params-meta-string` | new: the minimized unit |
 | `docs/ADR/README.md` | ADR-0031 index row |
+| `docs/superpowers/specs/test-strategy/mutation-baseline.md` | `unwrap_or(false)` → `unwrap_or_default()` in two rows |
 
 ## Task 1: reject malformed `params._meta`
 
@@ -55,8 +56,10 @@ tests ~80, two corpus files, one ADR index row.
 
 **Steps**
 
-1. Copy the CI unit's exact bytes (sha1 `79232b86fb09d5f22522a667fe334593c4f93807`, no trailing
-   newline) to `crates/rimap-server/fuzz/corpus/validate/regression-867-original`. Check it with
+1. Download the CI unit with `gh run download 37450028198 -R randomparity/rusty-imap-mcp -n
+   crashes-validate -D <scratch-dir>`. This is the issue #867 artifact; it expires 2027-01-04.
+   Copy `<scratch-dir>/address/crash-79232b86fb09d5f22522a667fe334593c4f93807` byte-for-byte
+   (sha1 `79232b86fb09d5f22522a667fe334593c4f93807`, no trailing newline) to `crates/rimap-server/fuzz/corpus/validate/regression-867-original`. Check it with
    `shasum <file>`; the hash must match. Then write the minimized unit with
    `printf '%s' '{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":"x"}}' >
    crates/rimap-server/fuzz/corpus/validate/params-meta-string`.
@@ -78,6 +81,14 @@ tests ~80, two corpus files, one ADR index row.
             (r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":1}}"#, false),
             (r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":[]}}"#, false),
             (r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":"x"}}"#, false),
+            (r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":1}}"#, false),
+            (r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":[]}}"#, false),
+            (r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":{},"_meta":{}}}"#, false),
+            (r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":null,"_meta":null}}"#, false),
+            (
+                r#"{"jsonrpc":"2.0","method":"initialize","id":0,"params":{"_meta":"x","protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"a","version":"1"}}}"#,
+                false,
+            ),
             (r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":{},"_meta":{}}}"#, false),
             (r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":null,"_meta":null}}"#, false),
             (r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":null}}"#, true),
@@ -239,8 +250,9 @@ struct DuplicateKeys {
 ```
 
 9. Rename `has_duplicate_keys_in_rmcp_strict_positions` to `scan_duplicate_keys` and change its
-   return type to `DuplicateKeys` (`.unwrap_or_default()`). Add `params._meta` to its "Positions
-   checked" doc list. In `validate`, change the duplicate guard and `params_ok` to:
+   return type to `DuplicateKeys` (`.unwrap_or_default()`). In its doc comment, add
+   "`_meta` directly inside `params` (request/notification only)" to "Positions checked", and
+   change `params` in "Positions NOT checked" to "other keys inside `params`". In `validate`, change the duplicate guard and `params_ok` to:
 
 ```rust
     let duplicates = scan_duplicate_keys(line);
@@ -254,14 +266,20 @@ struct DuplicateKeys {
 ```
 
    Update the names `DupCheckOneLevel` and `has_duplicate_keys_in_rmcp_strict_positions` in the
-   surrounding comments: `rg -n 'DupCheckOneLevel|has_duplicate_keys' crates/` must print
-   nothing.
+   surrounding comments, and replace `unwrap_or(false)` with `unwrap_or_default()` in the
+   envelope.rs cargo-mutants comments and the two `envelope.rs` rows of
+   `docs/superpowers/specs/test-strategy/mutation-baseline.md`. Check with
+   `rg -n 'DupCheckOneLevel|has_duplicate_keys|unwrap_or\(false\)' crates/rimap-server/src/mcp
+   docs/superpowers/specs/test-strategy/mutation-baseline.md`; it must print nothing.
 10. Re-run both focused commands from steps 3 and 5. Expect all four tests to pass. Then run
     `cargo nextest run -p rimap-server --lib -E 'test(wire_validator)'` and
     `cargo nextest run -p rimap-server --test mcp_wire_negative`. Expect all to pass, including
     `duplicate_keys_inside_params_still_forwards` and `duplicate_top_level_keys_reject`.
 11. Add the ADR-0031 row to `docs/ADR/README.md` after the 0030 row, with `Accepted` status.
-12. Run `just fmt-check` and `just lint` (exit 0). Commit:
+12. Run `just fmt-check` and `just lint` (exit 0). `crates/rimap-server/fuzz/.gitignore` ignores
+    `corpus`, so stage the two seeds with `git add -f
+    crates/rimap-server/fuzz/corpus/validate/{regression-867-original,params-meta-string}`, and
+    confirm both appear in `git ls-files crates/rimap-server/fuzz/corpus/validate`. Commit:
     `fix(mcp): reject params._meta shapes rmcp rejects (#867)`.
 
 **Acceptance:** spec Success 1–3 hold; no existing validator or wire test changed.
@@ -275,6 +293,9 @@ struct DuplicateKeys {
   smoke run (`just fuzz` targets the root `fuzz/` workspace, which has no `validate`). Then run
   `just check-fuzz-lock-parity`. Expect exit 0 for each. ClusterFuzzLite zips
   `corpus/validate/` into the seed corpus (`.clusterfuzzlite/build.sh`), so the new files reach
-  the nightly run.
+  the nightly run. The smoke run writes new inputs into `corpus/validate/`, which are ignored.
+  Delete them afterwards with `git clean -fX crates/rimap-server/fuzz/corpus/validate`, which
+  removes only the ignored files. Then check that `git status --short --ignored` lists nothing
+  under that path.
 - `just test` in the background; expect exit 0. Its result goes in the PR.
 - Rollback: revert the commit. There is no persisted state.

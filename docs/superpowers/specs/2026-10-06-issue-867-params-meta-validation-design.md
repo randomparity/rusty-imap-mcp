@@ -76,8 +76,8 @@ moves.
 
 ## Success
 
-1. `validate` rejects the original and minimized units and every rejecting row in the table
-   above, as requests and notifications. Each rejection is `-32600` and echoes the line's
+1. `validate` rejects the original and minimized units, every rejecting row in the table above,
+   and each `_meta` shape in those rows sent both as a request and as a notification. Each rejection is `-32600` and echoes the line's
    forwardable id (none for a notification).
 2. Every accepting row above, plus all existing validator unit tests, still returns `Forward`.
 3. The full wire, after `initialize`, answers the minimized unit with one schema-valid `-32600`

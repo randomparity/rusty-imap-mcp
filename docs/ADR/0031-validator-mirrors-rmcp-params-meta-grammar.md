@@ -30,15 +30,16 @@ response line. No other key inside `params` is newly checked.
 Clients that send a malformed `_meta` now get an error envelope instead of no response. The fuzz
 target's Forward oracle stays an independent differential check, so the next rmcp strictness gap
 still shows up as a fuzz crash rather than going unnoticed. Each such gap still needs its own
-rule.
+rule, and until fuzzing finds a gap, clients that hit it still get no response.
 
 ## Considered & rejected
 
-- **rmcp-acceptance backstop: after a Forward decision, require
-  `serde_json::from_str::<ClientJsonRpcMessage>` to succeed.** judgment: it closes the whole class
-  in one place, but the fuzz target's Forward oracle runs that same call, so the oracle becomes a
-  check of itself and stops finding validator/rmcp disagreements. The operator chose targeted
-  rules on 2026-10-06.
+- **rmcp-acceptance backstop inside `validate()`.** verified: the fuzz oracle
+  `check_rmcp_accepts` is the same `serde_json::from_str::<ClientJsonRpcMessage>` call
+  (`fuzz_oracle.rs`), so a Forward that already passed it could never fail the oracle.
+- **Backstop only in `inbound.rs`, outside `validate()`.** judgment: it keeps the oracle
+  meaningful, but it adds a second parse per forwarded line, and the Forward decision then lives
+  in two places. The operator chose targeted rules on 2026-10-06.
 - **Backstop plus explicit rules.** judgment: the oracle becomes a self-check in the same way,
   and a rule plus a backstop are two code paths for one decision.
 - **Do nothing (treat it as rmcp's bug).** verified: `ClientJsonRpcMessage` rejects
