@@ -135,6 +135,56 @@ async fn valid_json_invalid_envelope_returns_minus_32600() {
     }
 }
 
+/// Issue #867: rmcp rejects a non-object `params._meta`, so the validator must answer -32600
+/// itself with the id echoed; forwarding the line used to get rmcp's own id-less -32600.
+const META_STRING_REQUEST: &str = r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":"x"}}"#;
+
+fn expect_meta_string_rejection(outcome: CloseOrResponse) {
+    let envelope = match outcome {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected one -32600 envelope for a string params._meta, got {other:?}"),
+    };
+    assert_eq!(envelope["error"]["code"], json!(-32600), "got {envelope}");
+    assert_eq!(
+        envelope["id"],
+        json!(0),
+        "id must be echoed, got {envelope}"
+    );
+    assert_envelope_valid(&envelope);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn params_meta_string_returns_minus_32600() {
+    let mut harness = Harness::spawn().await;
+    harness.initialize_handshake().await;
+    harness.send_initialized().await;
+
+    harness.send_line(META_STRING_REQUEST).await;
+    expect_meta_string_rejection(harness.response_or_close(REQUEST_TIMEOUT).await);
+
+    let tools = harness.request("tools/list", json!({})).await;
+    assert!(
+        tools["result"]["tools"].is_array(),
+        "session must survive, got {tools}"
+    );
+}
+
+/// Initialization handling must not mask the case: the ADR-0025 interception parse fails on
+/// this line, so it reaches the validator, and the session can still initialize afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn params_meta_string_before_initialize_returns_minus_32600() {
+    let mut harness = Harness::spawn().await;
+
+    harness.send_line(META_STRING_REQUEST).await;
+    expect_meta_string_rejection(harness.response_or_close(REQUEST_TIMEOUT).await);
+
+    let init = harness.initialize_handshake().await;
+    assert!(
+        init["result"].is_object(),
+        "initialize must still succeed, got {init}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test 3: missing `method` field → -32600
 // ---------------------------------------------------------------------------

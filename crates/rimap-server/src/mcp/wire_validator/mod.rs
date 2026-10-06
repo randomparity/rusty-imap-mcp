@@ -212,6 +212,100 @@ mod tests {
         );
     }
 
+    /// Issue #867 probe table (rmcp 3.1.4): the validator forwards a line exactly when rmcp's
+    /// `ClientJsonRpcMessage` accepts it. The rmcp half pins the probe so a future rmcp
+    /// relaxation shows up here.
+    #[test]
+    fn params_meta_decisions_match_rmcp_acceptance() {
+        let original = include_str!("../../../fuzz/corpus/validate/regression-867-original");
+        let minimized = include_str!("../../../fuzz/corpus/validate/params-meta-string");
+        let original_meta_object = original.replace(r#""_meta":"x""#, r#""_meta":{}"#);
+        let cases = [
+            (original, false),
+            (minimized, false),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":1}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":[]}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":"x"}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":1}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":[]}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":{},"_meta":{}}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":null,"_meta":null}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"initialize","id":0,"params":{"_meta":"x","protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"a","version":"1"}}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":{},"_meta":{}}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":null,"_meta":null}}"#,
+                false,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":null}}"#,
+                true,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"_meta":{"a":1,"a":2}}}"#,
+                true,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"x","id":0,"params":{"a":{"_meta":"x"}}}"#,
+                true,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":{},"params":{"_meta":{},"_meta":{}}}"#,
+                true,
+            ),
+            (original_meta_object.as_str(), true),
+        ];
+        for (line, forwards) in cases {
+            let rmcp_accepts =
+                serde_json::from_str::<rmcp::model::ClientJsonRpcMessage>(line).is_ok();
+            assert_eq!(rmcp_accepts, forwards, "rmcp acceptance changed for {line}");
+            let forwarded = validate(line) == ValidationOutcome::Forward;
+            assert_eq!(forwarded, forwards, "validator decision for {line}");
+        }
+    }
+
+    #[test]
+    fn params_meta_rejections_echo_id() {
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":7,"params":{"_meta":"x"}}"#),
+            reject(-32600, json!(7))
+        );
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","id":"a","params":{"_meta":{},"_meta":{}}}"#),
+            reject(-32600, json!("a"))
+        );
+        assert_eq!(
+            validate(r#"{"jsonrpc":"2.0","method":"x","params":{"_meta":"x"}}"#),
+            reject(-32600, Value::Null)
+        );
+    }
+
     #[test]
     fn duplicate_keys_inside_error_data_still_forwards() {
         assert_eq!(
