@@ -1,0 +1,32 @@
+---
+source: crates/rimap-server/src/tools/compose/message_builder.rs
+expression: "normalize(&raw, true)"
+---
+From: <alice@example.com>
+To: "Bob" <bob@example.com>
+Subject: Fwd: hi
+Message-ID: <MESSAGE-ID>
+In-Reply-To: <orig-1@example.com>
+References: <root-0@example.com> <orig-1@example.com>
+Date: <DATE>
+MIME-Version: 1.0
+Content-Type: multipart/mixed;␠
+	boundary="BOUNDARY-0"
+
+
+--BOUNDARY-0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+FYI
+
+--BOUNDARY-0
+Content-Type: message/rfc822
+Content-Disposition: attachment; filename="forwarded.eml"
+Content-Transfer-Encoding: base64
+
+RnJvbTogbWFsbG9yeUBleGFtcGxlLmNvbQpTdWJqZWN0OiBoaQpNZXNzYWdlLUlEOiA8b3JpZy0x
+QGV4YW1wbGUuY29tPgpSZWZlcmVuY2VzOiA8cm9vdC0wQGV4YW1wbGUuY29tPgoKLS1mYWtlLWJv
+dW5kYXJ5CmJvZHkK
+
+--BOUNDARY-0--

@@ -1670,3 +1670,171 @@ mod tests {
         assert_eq!(reads[0].bytes, b"%PDF-1.4");
     }
 }
+
+/// Byte-level snapshots of outbound messages (SC-DEP-09). The insta corpus
+/// covers the inbound parser; these pin what `mail_builder` actually writes,
+/// so a mail-builder bump that changes folding, encoded words, parameter
+/// encoding, or MIME framing shows up as a reviewable snapshot diff.
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests")]
+mod outbound_bytes_snapshots {
+    use super::{
+        AddressInput, AttachmentRead, ComposeInput, assemble_message, build_forward_message,
+        build_message_headers,
+    };
+
+    /// Fixed `Date` so the snapshot pins date formatting as well.
+    const FIXED_DATE: i64 = 1_700_000_000;
+
+    fn addr(name: Option<&str>, address: &str) -> AddressInput {
+        AddressInput {
+            name: name.map(str::to_string),
+            address: address.to_string(),
+        }
+    }
+
+    fn input(to: Vec<AddressInput>, subject: &str, body_text: &str) -> ComposeInput {
+        ComposeInput {
+            to,
+            cc: None,
+            bcc: None,
+            subject: subject.to_string(),
+            body_text: body_text.to_string(),
+            body_html: None,
+            attachments: None,
+            in_reply_to_uid: None,
+            in_reply_to_folder: None,
+        }
+    }
+
+    /// Every line ends in CRLF; returns the message with CRLF shown as LF,
+    /// trailing spaces and tabs shown as `␠` / `␉` (they are real bytes,
+    /// and folding whitespace is one of the things a bump can change), the
+    /// generated Message-ID and MIME boundaries replaced by stable tokens,
+    /// and (when `mask_date`) the Date value masked.
+    fn normalize(raw: &[u8], mask_date: bool) -> String {
+        for (i, b) in raw.iter().enumerate() {
+            if *b == b'\n' {
+                assert!(i > 0 && raw[i - 1] == b'\r', "bare LF at byte {i}");
+            }
+        }
+        let mut text = String::from_utf8(raw.to_vec()).unwrap();
+        let mut boundaries = Vec::new();
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find("boundary=\"") {
+            let tail = &rest[start + "boundary=\"".len()..];
+            let end = tail.find('"').unwrap();
+            boundaries.push(tail[..end].to_string());
+            rest = &tail[end..];
+        }
+        for (n, boundary) in boundaries.iter().enumerate() {
+            text = text.replace(boundary.as_str(), &format!("BOUNDARY-{n}"));
+        }
+        let mut out = Vec::new();
+        for line in text.split("\r\n") {
+            if line.starts_with("Message-ID: ") {
+                out.push("Message-ID: <MESSAGE-ID>".to_string());
+            } else if mask_date && line.starts_with("Date: ") {
+                out.push("Date: <DATE>".to_string());
+            } else {
+                let body = line.trim_end_matches([' ', '\t']);
+                let mut shown = body.to_string();
+                for c in line[body.len()..].chars() {
+                    shown.push(if c == ' ' { '␠' } else { '␉' });
+                }
+                out.push(shown);
+            }
+        }
+        out.join("\n")
+    }
+
+    fn build(input: &ComposeInput, reads: Vec<AttachmentRead>) -> Vec<u8> {
+        let builder = build_message_headers("alice@example.com", input, false).date(FIXED_DATE);
+        let raw = assemble_message(builder, input, reads).unwrap().raw;
+        assert!(mail_parser::MessageParser::new().parse(&raw).is_some());
+        raw
+    }
+
+    #[test]
+    fn plain_ascii_text() {
+        let msg = input(
+            vec![addr(Some("Bob"), "bob@example.com")],
+            "Quarterly report",
+            "Hi Bob,\n\nNumbers attached next week.\n",
+        );
+        insta::assert_snapshot!(normalize(&build(&msg, Vec::new()), false));
+    }
+
+    #[test]
+    fn long_non_ascii_subject_and_names() {
+        let msg = input(
+            vec![
+                addr(Some("Zoë Ångström"), "zoe@example.com"),
+                addr(Some("田中 太郎"), "tanaka@example.jp"),
+            ],
+            "Résumé of the Übersicht meeting — naïve façade coöperation notes, \
+             with a deliberately long tail so the encoded words must fold 東京",
+            "Body.\n",
+        );
+        insta::assert_snapshot!(normalize(&build(&msg, Vec::new()), false));
+    }
+
+    #[test]
+    fn long_recipient_list_folds() {
+        let to = (0..8)
+            .map(|i| {
+                addr(
+                    Some("Recipient With A Long Name"),
+                    &format!("r{i}@example.com"),
+                )
+            })
+            .collect();
+        let msg = input(to, "Fan-out", "Body.\n");
+        insta::assert_snapshot!(normalize(&build(&msg, Vec::new()), false));
+    }
+
+    #[test]
+    fn html_and_attachments_with_non_ascii_filename() {
+        let mut msg = input(
+            vec![addr(None, "bob@example.com")],
+            "Files",
+            "See attached.\n",
+        );
+        msg.body_html = Some("<p>See <b>attached</b>.</p>".to_string());
+        let reads = vec![
+            AttachmentRead {
+                filename: "Übersicht der Quartalszahlen für das Geschäftsjahr 2026 — \
+                           endgültige Fassung.pdf"
+                    .to_string(),
+                content_type: "application/pdf".to_string(),
+                bytes: b"%PDF-1.4\n%binary\x00\xff\n".to_vec(),
+            },
+            AttachmentRead {
+                filename: "notes.txt".to_string(),
+                content_type: "text/plain".to_string(),
+                bytes: b"line one\nline two with caf\xc3\xa9\n".to_vec(),
+            },
+        ];
+        insta::assert_snapshot!(normalize(&build(&msg, reads), false));
+    }
+
+    #[test]
+    fn forward_wraps_original_as_base64() {
+        let original =
+            b"From: mallory@example.com\nSubject: hi\nMessage-ID: <orig-1@example.com>\n\
+                         References: <root-0@example.com>\n\n--fake-boundary\nbody\n";
+        let threading = rimap_content::extract_threading_headers(original);
+        let raw = build_forward_message(
+            "alice@example.com",
+            &[addr(Some("Bob"), "bob@example.com")],
+            None,
+            "Fwd: hi",
+            "FYI\n",
+            original,
+            &threading,
+        )
+        .unwrap();
+        assert!(mail_parser::MessageParser::new().parse(&raw).is_some());
+        insta::assert_snapshot!(normalize(&raw, true));
+    }
+}

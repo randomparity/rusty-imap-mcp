@@ -1,0 +1,48 @@
+---
+source: crates/rimap-server/src/tools/compose/message_builder.rs
+expression: "normalize(&build(&msg, reads), false)"
+---
+From: <alice@example.com>
+To: <bob@example.com>
+Subject: Files
+Message-ID: <MESSAGE-ID>
+Date: Tue, 14 Nov 2023 22:13:20 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed;␠
+	boundary="BOUNDARY-0"
+
+
+--BOUNDARY-0
+Content-Type: multipart/alternative;␠
+	boundary="BOUNDARY-1"
+
+
+--BOUNDARY-1
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+See attached.
+
+--BOUNDARY-1
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<p>See <b>attached</b>.</p>
+--BOUNDARY-1--
+
+--BOUNDARY-0
+Content-Type: application/pdf;␠
+	name="=?utf-8?Q?=C3=9Cbersicht_der_Quartalszahlen_f=C3=BCr_das_Gesch=C3=A4ftsjahr_2026_=E2=80=94_endg=C3=BCltige_Fassung.pdf?="
+Content-Disposition: attachment;␠
+	filename="=?utf-8?Q?=C3=9Cbersicht_der_Quartalszahlen_f=C3=BCr_das_Gesch=C3=A4ftsjahr_2026_=E2=80=94_endg=C3=BCltige_Fassung.pdf?="
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJWJpbmFyeQD/Cg==
+
+--BOUNDARY-0
+Content-Type: text/plain; name="notes.txt"
+Content-Disposition: attachment; filename="notes.txt"
+Content-Transfer-Encoding: quoted-printable
+
+line one=0Aline two with caf=C3=A9=0A
+--BOUNDARY-0--
