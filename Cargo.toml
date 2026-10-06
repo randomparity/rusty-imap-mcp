@@ -141,8 +141,19 @@ rand = "0.10"
 # model? The Sprint 4a adversarial corpus and insta snapshots are
 # the regression-detection mechanism — any snapshot diff on upgrade
 # requires a re-audit, not a cargo insta accept. (SC-DEP-09)
+# Re-audited 0.11.5 -> 0.11.9 on 2026-10-06: no build.rs, no new default
+# features (the new memchr dep is behind the off-by-default
+# `base64_slice`), unsafe count unchanged, hashify still 0.2. Semantic
+# changes are fixes: a panic on a folded trailing Received line (#155),
+# fabricated addresses from commented display names (#153), and quoted
+# name / encoded-word whitespace (#150).
 mail-builder = "0.5"
 mail-parser = "0.11"
+# encoding_rs 0.8.42 pulls multiversion_no_op 1.0.0 (proc-macro; Henri
+# Sivonen, the encoding_rs author; Apache-2.0 OR MIT). Reviewed 2026-10-06
+# (SC-PROC-01): a 43-line #![no_std] attribute that returns its input
+# unchanged, no build.rs, no dependencies. The same bump adds simdutf8
+# 0.1.5 (SIMD UTF-8 validation, MIT OR Apache-2.0, no build.rs).
 encoding_rs = "0.8"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.13"
@@ -155,7 +166,12 @@ unicode-properties = "0.1.4"
 # scraper is ISC-licensed (the only non-MIT/Apache crate in the Sprint 4b delta); ISC is already on deny.toml's allow list.
 scraper = { version = "0.27.0", default-features = false }
 # ammonia MSRV 1.80, MIT OR Apache-2.0
-ammonia = "4.1.2"
+# Held below 4.2: ammonia 4.2 moves to html5ever 0.40 / cssparser 0.38,
+# while scraper 0.27 (latest) stays on html5ever 0.39 / cssparser 0.37. Taking
+# 4.2 would put two HTML tokenizers in the sanitizer path and fail
+# cargo-deny's duplicate bans. Lift the hold when scraper moves to
+# html5ever 0.40 (the Dependabot ignore for ammonia >= 4.2 goes with it).
+ammonia = "~4.1.2"
 linkify = "0.11"
 # First url/idna entry in the workspace. idna 1.x replaced in-crate
 # Unicode tables with the ICU4X provider stack, pulling ~20 new
