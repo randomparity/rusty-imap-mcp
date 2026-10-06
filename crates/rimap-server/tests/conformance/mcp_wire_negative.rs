@@ -871,7 +871,7 @@ async fn inline_meta_request_before_initialize_returns_minus_32002() {
     }
 }
 
-/// An `initialize` line that parses as an InitializeRequest but fails
+/// An `initialize` line that parses as an `InitializeRequest` but fails
 /// envelope validation (here: a stray `result` member) is rejected with
 /// -32600 and never reaches rmcp. It must not count as initialization:
 /// the next request, carrying complete inline `_meta` that rmcp would
