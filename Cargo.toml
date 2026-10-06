@@ -155,7 +155,12 @@ unicode-properties = "0.1.4"
 # scraper is ISC-licensed (the only non-MIT/Apache crate in the Sprint 4b delta); ISC is already on deny.toml's allow list.
 scraper = { version = "0.27.0", default-features = false }
 # ammonia MSRV 1.80, MIT OR Apache-2.0
-ammonia = "4.1.2"
+# Held below 4.2: ammonia 4.2 moves to html5ever 0.40 / cssparser 0.38,
+# while scraper 0.27 (latest) stays on html5ever 0.39 / cssparser 0.37. Taking
+# 4.2 would put two HTML tokenizers in the sanitizer path and fail
+# cargo-deny's duplicate bans. Lift the hold when scraper moves to
+# html5ever 0.40 (the Dependabot ignore for ammonia >= 4.2 goes with it).
+ammonia = "~4.1.2"
 linkify = "0.11"
 # First url/idna entry in the workspace. idna 1.x replaced in-crate
 # Unicode tables with the ICU4X provider stack, pulling ~20 new

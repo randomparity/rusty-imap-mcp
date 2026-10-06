@@ -17,6 +17,11 @@ updates:
       cargo-major:
         update-types:
           - "major"
+    # ammonia >= 4.2 duplicates the HTML tokenizer stack scraper 0.27 uses;
+    # see the hold on the ammonia line in the root Cargo.toml.
+    ignore:
+      - dependency-name: "ammonia"
+        versions: [">= 4.2"]
     commit-message:
       prefix: "deps"
       include: "scope"
