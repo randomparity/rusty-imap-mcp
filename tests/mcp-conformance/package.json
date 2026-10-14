@@ -14,10 +14,10 @@
     "format:check": "oxfmt --check src/"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.31.0",
-    "@types/node": "26.6.3",
-    "oxfmt": "0.71.0",
-    "oxlint": "1.86.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@types/node": "26.6.4",
+    "oxfmt": "0.72.0",
+    "oxlint": "1.87.0",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
     "zod": "4.6.5"
