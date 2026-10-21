@@ -18,7 +18,7 @@ Do not substitute a local key list or require optional clientInfo. A pre-init pi
 non-negotiating. Legacy initialize keeps its existing behavior. Incomplete non-ping metadata
 retains the existing single -32002 write, flag-before-duplex-drop ordering and clean close.
 Envelope validation remains mandatory before an untrusted line can establish modern state;
-a rejected envelope must not disable legacy interception for a later request.
+a rejected modern candidate must not disable legacy interception for a later request.
 No dependency changes, new transport, or shutdown coordination changes are needed.
 
 ## Success
@@ -42,7 +42,7 @@ Do not modify accepted ADR-0025 or the campaign-owned ADR index.
 - Actors and deployments: local stdio MCP clients and CI wire harness on supported hosts;
   request bytes are untrusted even for a configured local client.
 - Invariants and assets at stake: valid modern sessions remain usable; legacy clients see
-  one -32002 and clean close; malformed envelopes do not change session state; stdout writes
+  one -32002 and clean close; malformed modern candidates do not establish session state; stdout writes
   stay serialized; broken stdout yields non-zero/Error/no SIGPIPE.
 - Accepted failure classes: none newly accepted. Existing unbounded line buffering remains
   unchanged; this change adds no new size policy.
