@@ -382,6 +382,104 @@ async fn initialize_after_already_initialized() {
     }
 }
 
+/// The modern lifecycle starts with per-request metadata, without initialize.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_complete_first_request_and_ongoing_session() {
+    let mut harness = Harness::spawn().await;
+    let params = json!({"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }});
+    // clientInfo is optional. Both first and steady-state requests must work.
+    for _ in 0..2 {
+        let response = harness.request("tools/list", params.clone()).await;
+        assert!(response["result"]["tools"].is_array(), "{response}");
+    }
+
+    // rmcp owns metadata errors after negotiation; the validator must not
+    // substitute a legacy error or close the established modern session.
+    let rejected = harness.request("tools/list", json!({})).await;
+    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    let recovered = harness.request("tools/list", params).await;
+    assert!(recovered["result"]["tools"].is_array(), "{recovered}");
+    let (status, _temp) = harness.shutdown_and_wait().await;
+    assert!(status.success(), "{status}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_init_ping_then_metadata_complete_request() {
+    let mut harness = Harness::spawn().await;
+    let ping = harness.request("ping", json!({})).await;
+    assert!(ping["result"].is_object(), "{ping}");
+    let response = harness
+        .request(
+            "tools/list",
+            json!({"_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }}),
+        )
+        .await;
+    assert!(response["result"]["tools"].is_array(), "{response}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incomplete_first_request_metadata_retains_legacy_close() {
+    let cases = [
+        json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28"}),
+        json!({"io.modelcontextprotocol/clientCapabilities": {}}),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": 20_260_728,
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": "invalid",
+        }),
+    ];
+    for meta in cases {
+        let mut harness = Harness::spawn().await;
+        let audit_path = harness.audit_path();
+        let response = harness.request("tools/list", json!({"_meta": meta})).await;
+        assert_eq!(response["error"]["code"], -32002, "{response}");
+        assert!(response["error"].get("data").is_none(), "{response}");
+        match harness.response_or_close(REQUEST_TIMEOUT).await {
+            CloseOrResponse::CleanClose => {}
+            other => panic!("expected exactly one legacy error then clean close, got {other:?}"),
+        }
+        assert_eq!(
+            read_process_end_reason(&audit_path),
+            rimap_audit::ProcessEndReason::Eof
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_modern_envelope_does_not_establish_session() {
+    let mut harness = Harness::spawn().await;
+    // Unknown duplicated envelope fields survive rmcp's typed parse but must
+    // be rejected by the stricter envelope validator before latching modern state.
+    let raw = concat!(
+        r#"{"jsonrpc":"2.0","id":40,"method":"tools/list","extra":1,"extra":2,"params":{"_meta":{"#,
+        r#""io.modelcontextprotocol/protocolVersion":"2026-07-28","#,
+        r#""io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+    );
+    assert!(serde_json::from_str::<rmcp::model::ClientJsonRpcMessage>(raw).is_ok());
+    harness.send_line(raw).await;
+    let rejected = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected invalid-envelope error, got {other:?}"),
+    };
+    assert_envelope_valid(&rejected);
+    assert_eq!(rejected["error"]["code"], -32600, "{rejected}");
+    let legacy = harness.request("tools/list", json!({})).await;
+    assert_eq!(legacy["error"]["code"], -32002, "{legacy}");
+    match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::CleanClose => {}
+        other => panic!("expected legacy clean close after invalid candidate, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test 7: `tools/list` before `initialize`
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ use crate::mcp::preinit::synthesize_pre_init_error_envelope;
 use rmcp::model::{
     ClientJsonRpcMessage,
     ClientRequest::{InitializeRequest, PingRequest},
+    GetMeta, ProtocolVersion,
 };
 use serde_json::from_str;
 
@@ -33,12 +34,13 @@ use serde_json::from_str;
 /// stronger guarantees become necessary; deferred per Task 2.3
 /// design.
 ///
-/// # Pre-init interception (ADR-0025)
+/// # Pre-init interception (ADR-0032)
 ///
 /// While `initialized` is false, a JSON-RPC REQUEST (has forwardable
-/// `id`) whose `method` is neither `"initialize"` nor `"ping"` is
-/// intercepted: the -32002 envelope is synthesized and written to
-/// stdout, the `pre_init_intercepted` flag is raised, and the rmcp
+/// `id`) whose `method` is neither `"initialize"` nor `"ping"` and whose
+/// metadata is incomplete for MCP 2026-07-28 is intercepted: the -32002
+/// envelope is synthesized and written to stdout, the `pre_init_intercepted`
+/// flag is raised, and the rmcp
 /// inbound duplex is closed (preventing rmcp from ever observing the
 /// request), so rmcp 3.x's pre-init `_meta` validation never emits its
 /// own -32602 envelope. The function then returns `Ok(())`; the binary's
@@ -105,9 +107,9 @@ where
             continue;
         };
 
-        // ADR-0025: Pre-init interception. While !initialized, intercept
-        // non-ping/non-initialize requests to prevent rmcp from emitting
-        // its own -32602 envelope. This restores the single-envelope contract.
+        // ADR-0032: rmcp owns modern metadata completeness; local interception
+        // retains the legacy single-envelope policy only until negotiation.
+        let mut modern_first_request = false;
         if !initialized.load(std::sync::atomic::Ordering::SeqCst) {
             // Attempt to parse the line as a JSON-RPC message to check
             // if it's a request with a method we need to intercept.
@@ -116,11 +118,17 @@ where
             if let Ok(ClientJsonRpcMessage::Request(req)) =
                 from_str::<ClientJsonRpcMessage>(line_for_validation)
             {
-                // Check if this is a pre-init violation: not initialize, not ping.
                 let is_initialize = matches!(req.request, InitializeRequest(_));
                 let is_ping = matches!(req.request, PingRequest(_));
 
-                if !is_initialize && !is_ping {
+                let complete_metadata = req
+                    .request
+                    .get_meta()
+                    .missing_required_keys(&ProtocolVersion::V_2026_07_28)
+                    .is_empty();
+                modern_first_request = !is_initialize && !is_ping && complete_metadata;
+
+                if !is_initialize && !is_ping && !complete_metadata {
                     // Synthesize and write the -32002 envelope. A
                     // write failure propagates via `?` BEFORE the
                     // flag is raised, so a broken pipe keeps the
@@ -176,6 +184,10 @@ where
 
         match validate(line_for_validation) {
             ValidationOutcome::Forward => {
+                // A rejected modern candidate cannot disable legacy interception.
+                if modern_first_request {
+                    initialized.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 // Valid envelope: forward to rmcp.
                 to_rmcp.write_all(&buf).await?;
                 to_rmcp.flush().await?;
