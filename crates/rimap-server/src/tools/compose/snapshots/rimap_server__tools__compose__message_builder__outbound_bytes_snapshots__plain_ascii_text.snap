@@ -1,0 +1,16 @@
+---
+source: crates/rimap-server/src/tools/compose/message_builder.rs
+expression: "normalize(&build(&msg, Vec::new()), false)"
+---
+From: <alice@example.com>
+To: "Bob" <bob@example.com>
+Subject: Quarterly report
+Message-ID: <MESSAGE-ID>
+Date: Tue, 14 Nov 2023 22:13:20 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hi Bob,
+
+Numbers attached next week.

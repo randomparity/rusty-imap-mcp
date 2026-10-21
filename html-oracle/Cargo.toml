@@ -18,7 +18,7 @@ lol_html = "3"
 # Same html5ever engine production uses — decodes character references
 # byte-identically (incl. legacy semicolon-less names + longest-prefix).
 # lol_html still does the tokenization; scraper only decodes isolated text.
-scraper = { version = "0.27", default-features = false }
+scraper = { version = "0.29", default-features = false }
 mail-parser = "0.11"
 url = "2"
 serde = { version = "1", features = ["derive"] }
