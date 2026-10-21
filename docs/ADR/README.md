@@ -52,3 +52,4 @@ compile it.
 | [0028](0028-advisory-codeowners-cover-ci-control-plane.md) | Advisory CODEOWNERS covers the CI control plane | Accepted |
 | [0030](0030-readme-is-the-pages-source.md) | README is the GitHub Pages source | Accepted |
 | [0031](0031-validator-mirrors-rmcp-params-meta-grammar.md) | The validator mirrors rmcp's `params._meta` grammar explicitly | Accepted |
+| [0032](0032-modern-first-request-and-legacy-interception.md) | Modern first requests and legacy pre-init interception | Accepted |
