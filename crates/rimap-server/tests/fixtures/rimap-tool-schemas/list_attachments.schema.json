@@ -4,7 +4,7 @@
       "description": "Metadata for a single attachment discovered in the MIME tree.",
       "properties": {
         "filename": {
-          "description": "Filename from MIME content-type `name` or `filename` parameter.",
+          "description": "Filename from the MIME content-type `name` (or `filename`)\nparameter, RFC 2231 / RFC 2047 decoded and sanitized.",
           "type": [
             "string",
             "null"

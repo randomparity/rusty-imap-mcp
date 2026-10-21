@@ -22,7 +22,10 @@ pub use output::{
     AttachmentMeta, Content, ContentMeta, MailingListInfo, SecurityWarning, SelectedHeader,
     Untrusted, WarningCode, WarningSeverity,
 };
-pub use parse::{RawPart, ThreadingHeaders, extract_threading_headers, walk_attachment_parts};
+pub use parse::{
+    RawPart, ThreadingHeaders, attachment_filename_from_params, extract_threading_headers,
+    walk_attachment_parts,
+};
 pub use parse::{parse_message, parse_message_with_headers};
 // Sanctioned text-sanitization surface. The `unicode` module is crate-private;
 // handlers reach these named entry points at the crate root rather than into

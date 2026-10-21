@@ -309,6 +309,9 @@ pub enum BodyStructure {
         mime_subtype: String,
         /// MIME content-type parameters.
         params: Vec<(String, String)>,
+        /// `Content-Disposition` parameters (e.g. `filename`), undecoded as
+        /// the server reports them; empty when the server sent none.
+        disposition_params: Vec<(String, String)>,
         /// Transfer encoding (`7bit`, `base64`, …).
         encoding: String,
         /// Octet count.

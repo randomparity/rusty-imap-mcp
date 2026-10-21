@@ -267,7 +267,13 @@ async fn assert_create_draft_with_attachment(
             "to": [{"address": "dest@example.com"}],
             "subject": subject,
             "body_text": "see attached",
-            "attachments": [{ "path": att_path.to_str().expect("utf8 path") }],
+            "attachments": [
+                { "path": att_path.to_str().expect("utf8 path") },
+                {
+                    "path": att_path.to_str().expect("utf8 path"),
+                    "filename": NON_ASCII_ATTACHMENT_NAME,
+                },
+            ],
         }),
     )
     .await;
@@ -276,7 +282,7 @@ async fn assert_create_draft_with_attachment(
     let meta_atts = draft["meta"]["attachments"]
         .as_array()
         .expect("meta.attachments array");
-    assert_eq!(meta_atts.len(), 1, "expected one attachment: {draft}");
+    assert_eq!(meta_atts.len(), 2, "expected two attachments: {draft}");
     assert_eq!(
         meta_atts[0]["filename"].as_str(),
         Some("e2e-wire-report.pdf"),
@@ -322,7 +328,20 @@ async fn assert_create_draft_with_attachment(
             .any(|a| a["filename"].as_str() == Some("e2e-wire-report.pdf")),
         "attachment not found on the appended draft: {listed}",
     );
+    // A non-ASCII name travels as an RFC 2047 encoded word or RFC 2231
+    // parameter (depending on the mail-builder version); list_attachments
+    // reads it from BODYSTRUCTURE and must hand back the decoded name.
+    assert!(
+        attachments
+            .iter()
+            .any(|a| a["filename"].as_str() == Some(NON_ASCII_ATTACHMENT_NAME)),
+        "non-ASCII attachment name not decoded on the appended draft: {listed}",
+    );
 }
+
+/// Long enough to force RFC 2231 continuations, non-ASCII throughout.
+const NON_ASCII_ATTACHMENT_NAME: &str =
+    "Übersicht der Quartalszahlen für das Geschäftsjahr — endgültige Fassung.pdf";
 
 /// The `create_draft.include_html` capability requires `full` posture, so a
 /// `body_html` on the draft-safe account must be denied at the wire — proving
