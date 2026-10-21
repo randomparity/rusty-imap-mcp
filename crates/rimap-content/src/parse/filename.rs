@@ -204,11 +204,23 @@ pub fn attachment_filename_from_params(
 ) -> Option<String> {
     let location = format!("attachment[{idx}]:filename");
     let mut dropped = false;
-    let mut header = String::from("Content-Type: application/octet-stream");
-    append_name_params(&mut header, content_type_params, &mut dropped);
-    header.push_str("\r\nContent-Disposition: attachment");
-    append_name_params(&mut header, disposition_params, &mut dropped);
-    header.push_str("\r\n\r\n");
+    let disposition = "\r\nContent-Disposition: attachment";
+    let mut header = String::with_capacity(MAX_HEADER_BYTES);
+    header.push_str("Content-Type: application/octet-stream");
+    let within_limit = append_name_params(
+        &mut header,
+        content_type_params,
+        &mut dropped,
+        MAX_HEADER_BYTES - disposition.len() - 4,
+    ) && {
+        header.push_str(disposition);
+        append_name_params(
+            &mut header,
+            disposition_params,
+            &mut dropped,
+            MAX_HEADER_BYTES - 4,
+        )
+    };
 
     if dropped {
         warnings.push(SecurityWarning::at(
@@ -217,18 +229,16 @@ pub fn attachment_filename_from_params(
             location.clone(),
         ));
     }
-    if header.len() > MAX_HEADER_BYTES {
+    if !within_limit {
         warnings.push(SecurityWarning::at(
             WarningCode::ParseAttachmentFilenameRewritten,
-            format!(
-                "reason=params_exceed_limit,bytes={},limit={MAX_HEADER_BYTES}",
-                header.len()
-            ),
+            format!("reason=params_exceed_limit,limit={MAX_HEADER_BYTES}"),
             location,
         ));
         return None;
     }
 
+    header.push_str("\r\n\r\n");
     let message = safe_parse(header.as_bytes()).ok().flatten()?;
     let name = message.attachment_name().filter(|name| !name.is_empty())?;
     Some(sanitize_attachment_filename(name, idx, warnings))
@@ -237,28 +247,49 @@ pub fn attachment_filename_from_params(
 /// Append the `name` / `filename` parameter family (plain and RFC 2231
 /// `*` forms) from `params` to `header`. Other parameters cannot affect
 /// the filename and are skipped. Sets `dropped` for a parameter that
-/// cannot be re-serialized safely.
-fn append_name_params(header: &mut String, params: &[(String, String)], dropped: &mut bool) {
+/// cannot be re-serialized safely. Returns false before an append would exceed
+/// `limit`; the caller reserves room for the remaining fixed header framing.
+fn append_name_params(
+    header: &mut String,
+    params: &[(String, String)],
+    dropped: &mut bool,
+    limit: usize,
+) -> bool {
     for (key, value) in params {
         let base = key.split('*').next().unwrap_or_default();
         if !(base.eq_ignore_ascii_case("name") || base.eq_ignore_ascii_case("filename")) {
             continue;
         }
-        if !key.bytes().all(is_token_byte) || value.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0))
+        if !key.bytes().all(is_token_byte)
+            || value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
         {
             *dropped = true;
             continue;
         }
+        // Check the complete serialized size before copying or escaping any input.
+        if key.len() > limit || value.len() > limit {
+            return false;
+        }
+        let token = key.ends_with('*') && !value.is_empty() && value.bytes().all(is_token_byte);
+        let escaping = if token {
+            0
+        } else {
+            2 + value.bytes().filter(|&b| b == b'"' || b == b'\\').count()
+        };
+        let bytes = 5 + key.len() + value.len() + escaping;
+        if bytes > limit.saturating_sub(header.len()) {
+            return false;
+        }
         header.push_str(";\r\n ");
         header.push_str(key);
         header.push('=');
-        if key.ends_with('*') && !value.is_empty() && value.bytes().all(is_token_byte) {
+        if token {
             // RFC 2231 extended value: a token, never a quoted string.
             header.push_str(value);
         } else {
             header.push('"');
             for c in value.chars() {
-                if matches!(c, '"' | '\\') {
+                if c == '"' || c == '\\' {
                     header.push('\\');
                 }
                 header.push(c);
@@ -266,6 +297,7 @@ fn append_name_params(header: &mut String, params: &[(String, String)], dropped:
             header.push('"');
         }
     }
+    true
 }
 
 /// RFC 2045 `token` byte: printable US-ASCII except space and tspecials.
@@ -403,22 +435,74 @@ mod params_tests {
     }
 
     #[test]
+    fn synthesized_header_growth_is_bounded_before_escaping() {
+        let mut header = String::from("Content-Type: application/octet-stream");
+        let params = owned(&[("name", &"\"".repeat(crate::parse::MAX_HEADER_BYTES))]);
+        let before = header.clone();
+        assert!(!super::append_name_params(
+            &mut header,
+            &params,
+            &mut false,
+            crate::parse::MAX_HEADER_BYTES,
+        ));
+        assert_eq!(header, before);
+        assert!(header.capacity() <= crate::parse::MAX_HEADER_BYTES);
+    }
+
+    #[test]
+    fn synthesized_header_budget_includes_framing_and_both_parameter_sets() {
+        let framing =
+            "Content-Type: application/octet-stream\r\nContent-Disposition: attachment\r\n\r\n";
+        let mut value = "a".repeat(crate::parse::MAX_HEADER_BYTES - framing.len() - 11);
+        assert!(decode(&[("name", &value)]).0.is_some());
+        value.push('a');
+        assert_eq!(decode(&[("name", &value)]).0, None);
+
+        let value = "a".repeat(crate::parse::MAX_HEADER_BYTES - framing.len() - 11 - 16);
+        assert!(
+            decode_both(&[("name", &value)], &[("filename", "b")])
+                .0
+                .is_some()
+        );
+        assert_eq!(
+            decode_both(&[("name", &value)], &[("filename", "bb")]).0,
+            None
+        );
+    }
+
+    #[test]
+    fn quoted_escaping_is_counted_at_the_budget_boundary() {
+        let mut header = String::from("prefix");
+        let params = owned(&[("name", "a\"b\\c")]);
+        assert!(super::append_name_params(
+            &mut header,
+            &params,
+            &mut false,
+            24
+        ));
+        assert_eq!(header, "prefix;\r\n name=\"a\\\"b\\\\c\"");
+        assert_eq!(header.len(), 24);
+        let before = header.clone();
+        assert!(!super::append_name_params(
+            &mut header,
+            &params,
+            &mut false,
+            24
+        ));
+        assert_eq!(header, before);
+    }
+
+    #[test]
     fn oversized_params_withhold_the_name() {
         let sections: Vec<(String, String)> = (0..100_000)
             .map(|i| (format!("name*{i}"), "aaaaaaaaaa".to_string()))
             .collect();
         let mut warnings = Vec::new();
-        let start = std::time::Instant::now();
         let name = attachment_filename_from_params(&sections, &[], 0, &mut warnings);
         assert_eq!(name, None);
         assert!(
             has(&warnings, WarningCode::ParseAttachmentFilenameRewritten),
             "{warnings:?}"
-        );
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(1),
-            "{:?}",
-            start.elapsed()
         );
     }
 
