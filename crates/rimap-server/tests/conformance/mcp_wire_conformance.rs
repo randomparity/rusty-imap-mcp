@@ -59,27 +59,12 @@ async fn wire_initialize_advertises_tools_capability() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_protocol_version_negotiation_matches_vendored_schema() {
-    // Three-way drift check (Codex adversarial review finding #1):
-    //
-    //   1. rmcp::ProtocolVersion::LATEST.as_str()
-    //   2. PINNED_PROTOCOL_VERSION (constant in tests/support/wire/harness.rs)
-    //   3. crates/rimap-server/tests/fixtures/mcp-spec/<version>/
-    //
-    // All three MUST agree. If any one drifts (rmcp bumps LATEST, the
-    // pinned constant goes stale, or someone deletes the fixture
-    // directory) this test fails first with a precise diagnostic
-    // before any fragment-validation test validates against an
-    // outdated schema.
-
-    let rmcp_latest = ProtocolVersion::LATEST.as_str();
-    assert_eq!(
-        rmcp_latest, PINNED_PROTOCOL_VERSION,
-        "rmcp::ProtocolVersion::LATEST ({rmcp_latest}) drifted from \
-         PINNED_PROTOCOL_VERSION ({PINNED_PROTOCOL_VERSION}). Run \
-         `scripts/refresh-mcp-spec.sh {rmcp_latest}` to vendor the new \
-         schema, update PINNED_PROTOCOL_VERSION + MCP_SCHEMA_JSON in \
-         tests/support/wire/harness.rs, and update the README under \
-         tests/fixtures/mcp-spec/.",
+    // Pin the legacy initialize path independently of the SDK's modern LATEST.
+    assert!(
+        ProtocolVersion::KNOWN_VERSIONS
+            .iter()
+            .any(|version| version.as_str() == PINNED_PROTOCOL_VERSION),
+        "SDK no longer knows the pinned legacy initialize version",
     );
 
     // The fixture directory must exist on disk under the pinned name.
@@ -93,14 +78,13 @@ async fn wire_protocol_version_negotiation_matches_vendored_schema() {
         fixture_dir.display(),
     );
 
-    // And rmcp must echo whatever the harness sends as the negotiated
-    // version, which the harness now derives from LATEST.
+    // The actual legacy response must agree with the pinned schema.
     let mut harness = Harness::spawn().await;
     let response = harness.initialize_handshake().await;
     assert_eq!(
         response["result"]["protocolVersion"],
-        json!(rmcp_latest),
-        "server must echo the rmcp LATEST version sent by the harness; \
+        json!(PINNED_PROTOCOL_VERSION),
+        "server must advertise the pinned legacy initialize version; \
          got {response}",
     );
 }
