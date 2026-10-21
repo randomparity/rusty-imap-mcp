@@ -301,7 +301,7 @@ async fn run_parked_dispatch_scenario() -> ScenarioRun {
         &json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {
-                "protocolVersion": ProtocolVersion::LATEST.as_str(),
+                "protocolVersion": ProtocolVersion::V_2025_11_25.as_str(),
                 "capabilities": {},
                 "clientInfo": { "name": "shutdown-ordering-test", "version": "0" },
             },

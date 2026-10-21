@@ -935,3 +935,42 @@ async fn initialize_with_empty_string_protocol_version() {
         other => panic!("expected clean close, got {other:?}"),
     }
 }
+
+/// rmcp 3.5 made 2026-07-28 its `ProtocolVersion::LATEST`. Legacy initialization
+/// is pinned to 2025-11-25, so a peer asking for rmcp's LATEST gets the
+/// same -32602 rejection as any other unsupported version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialize_with_rmcp_latest_2026_07_28_is_rejected() {
+    let mut harness = Harness::spawn().await;
+
+    let _id = harness
+        .send_request_no_wait(
+            "initialize",
+            json!({
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "rusty-imap-mcp-phase4-test",
+                    "version": "0.0.0",
+                },
+            }),
+        )
+        .await;
+
+    let envelope = match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::Response(line) => parse_response_line(&line),
+        other => panic!("expected -32602 rejection for 2026-07-28, got {other:?}"),
+    };
+    assert_eq!(envelope["error"]["code"], json!(-32602), "got {envelope}");
+    assert_eq!(
+        envelope["error"]["data"]["supported_versions"],
+        json!([PINNED_PROTOCOL_VERSION]),
+        "got {envelope}",
+    );
+    assert_envelope_valid(&envelope);
+
+    match harness.response_or_close(REQUEST_TIMEOUT).await {
+        CloseOrResponse::CleanClose => {}
+        other => panic!("expected clean close, got {other:?}"),
+    }
+}
