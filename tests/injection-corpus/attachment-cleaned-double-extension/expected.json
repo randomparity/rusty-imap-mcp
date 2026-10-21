@@ -1,0 +1,10 @@
+{
+  "description": "An executable double extension exposed by Unicode and trailing cleanup raises a spoof warning through the full-message path.",
+  "expect": "ok",
+  "must_contain": ["see attached"],
+  "warning_codes": ["lookalike_filename_extension_spoof"],
+  "meta": {
+    "attachment_count": 1,
+    "attachment_filename_must_not_contain": ["\u200b", "\u200d", "\t", " "]
+  }
+}

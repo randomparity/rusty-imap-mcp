@@ -51,16 +51,6 @@ pub(super) fn sanitize_attachment_filename(
             format!("attachment[{idx}]:filename"),
         ));
     }
-    if let Some((penult, final_ext)) = detect_double_extension(name) {
-        warnings.push(SecurityWarning::at(
-            WarningCode::LookalikeFilenameExtensionSpoof,
-            format!(
-                "reason=double_extension,visible=.{penult},\
-                 declared=.{penult}.{final_ext}"
-            ),
-            format!("attachment[{idx}]:filename"),
-        ));
-    }
     let (unicode_clean, mut ws) = unicode::sanitize(
         name.as_bytes(),
         Some("utf-8"),
@@ -73,6 +63,16 @@ pub(super) fn sanitize_attachment_filename(
         warnings.push(SecurityWarning::at(
             WarningCode::ParseAttachmentFilenameRewritten,
             format!("original={unicode_clean:?}"),
+            format!("attachment[{idx}]:filename"),
+        ));
+    }
+    if let Some((penult, final_ext)) = detect_double_extension(&safe) {
+        warnings.push(SecurityWarning::at(
+            WarningCode::LookalikeFilenameExtensionSpoof,
+            format!(
+                "raw={name:?},reason=double_extension,visible=.{penult},\
+                 declared=.{penult}.{final_ext}"
+            ),
             format!("attachment[{idx}]:filename"),
         ));
     }
@@ -212,6 +212,36 @@ mod filename_helper_tests {
                 .any(|w| w.code == WarningCode::LookalikeFilenameExtensionSpoof),
             "expected a spoof warning for double extension",
         );
+    }
+
+    #[test]
+    fn cleaned_double_extensions_raise_spoof_warning() {
+        for name in [
+            "invoice.pdf.exe ",
+            "invoice.pdf.exe\t",
+            "invoice.pdf.exe.",
+            "invoice.pdf\u{200b}.exe",
+            "invoice.pdf.\u{200d}exe",
+            "invoice.PDF.EXE ",
+            "invoice.PD\u{200d}F.EX\u{200b}E.\t ",
+        ] {
+            let (out, warnings) = sanitize(name);
+            assert_eq!(out.to_ascii_lowercase(), "invoice.pdf.exe", "{name:?}");
+            let spoof = warnings.iter().find(|w| {
+                w.code == WarningCode::LookalikeFilenameExtensionSpoof
+                    && w.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("reason=double_extension"))
+            });
+            assert!(spoof.is_some(), "missing spoof warning for {name:?}");
+            let Some(spoof) = spoof else {
+                continue;
+            };
+            let detail = spoof.detail.as_deref().unwrap_or("");
+            assert!(detail.contains(&format!("raw={name:?}")), "{spoof:?}");
+            assert!(detail.contains("visible=.pdf,declared=.pdf.exe"));
+            assert_eq!(spoof.location.as_deref(), Some("attachment[0]:filename"));
+        }
     }
 
     /// Sanitize the bare `sanitize_filename` helper without the
