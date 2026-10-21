@@ -17,13 +17,19 @@ stop_process_tree() {
     kill "$pid" 2>/dev/null || true
 }
 
+wait_gone() {
+    local pid="$1"
+    for _ in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.01
+    done
+    return 1
+}
+
 stop_known_child() {
     [ -n "$known_child_pid" ] || return 0
     kill "$known_child_pid" 2>/dev/null || true
-    for _ in $(seq 1 100); do
-        kill -0 "$known_child_pid" 2>/dev/null || return 0
-        sleep 0.01
-    done
+    wait_gone "$known_child_pid" && return 0
     echo "positive-control child $known_child_pid did not terminate" >&2
     return 1
 }
@@ -42,26 +48,57 @@ trap cleanup EXIT INT TERM
 
 # Prove trap-owned cleanup reaches a coordinator's descendant, not only the
 # background PID recorded by this shell.
-bash -c 'sleep 10 & wait' &
+cat >"$tmp_dir/delayed-exit.sh" <<'EOF'
+#!/usr/bin/env bash
+trap 'sleep 0.1; exit 0' TERM
+touch "$1"
+sleep 10 &
+wait
+EOF
+bash -c 'bash "$1" "$2" & wait' _ "$tmp_dir/delayed-exit.sh" "$tmp_dir/ready" &
 cleanup_control_pid=$!
 background_pids=("$cleanup_control_pid")
 cleanup_control_child=""
 for _ in $(seq 1 100); do
     cleanup_control_child="$(pgrep -P "$cleanup_control_pid" 2>/dev/null || true)"
-    [ -z "$cleanup_control_child" ] || break
+    if [ -n "$cleanup_control_child" ] && [ -f "$tmp_dir/ready" ]; then
+        break
+    fi
     sleep 0.01
 done
-if [ -z "$cleanup_control_child" ]; then
+if [ -z "$cleanup_control_child" ] || [ ! -f "$tmp_dir/ready" ]; then
     echo "cleanup control did not create a descendant" >&2
     exit 1
 fi
 stop_process_tree "$cleanup_control_pid"
 wait "$cleanup_control_pid" 2>/dev/null || true
 background_pids=()
-if kill -0 "$cleanup_control_pid" 2>/dev/null || kill -0 "$cleanup_control_child" 2>/dev/null; then
+if ! wait_gone "$cleanup_control_pid" || ! wait_gone "$cleanup_control_child"; then
     echo "process-tree cleanup left the control process alive" >&2
     exit 1
 fi
+
+# A live descendant that ignores TERM must still fail the bounded exit check.
+rm -f "$tmp_dir/ready"
+bash -c 'trap "" TERM; touch "$1"; exec sleep 10' _ "$tmp_dir/ready" &
+survivor_pid=$!
+background_pids=("$survivor_pid")
+for _ in $(seq 1 100); do
+    [ ! -f "$tmp_dir/ready" ] || break
+    sleep 0.01
+done
+if [ ! -f "$tmp_dir/ready" ]; then
+    echo "TERM-ignoring control did not become ready" >&2
+    exit 1
+fi
+stop_process_tree "$survivor_pid"
+if wait_gone "$survivor_pid"; then
+    echo "bounded exit check accepted a TERM-ignoring survivor" >&2
+    exit 1
+fi
+kill -KILL "$survivor_pid"
+wait "$survivor_pid" 2>/dev/null || true
+background_pids=()
 
 write_config() {
     local path="$1"
