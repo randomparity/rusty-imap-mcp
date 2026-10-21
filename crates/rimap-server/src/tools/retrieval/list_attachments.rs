@@ -29,8 +29,8 @@ pub struct AttachmentInfo {
     pub mime_type: String,
     /// Size of the part in bytes as reported by `BODYSTRUCTURE`.
     pub size_bytes: u32,
-    /// Filename from the MIME content-type `name` (or `filename`)
-    /// parameter, RFC 2231 / RFC 2047 decoded and sanitized.
+    /// Filename from Content-Disposition `filename`, falling back to Content-Type
+    /// `name`, RFC 2231 / RFC 2047 decoded and sanitized.
     pub filename: Option<String>,
 }
 
