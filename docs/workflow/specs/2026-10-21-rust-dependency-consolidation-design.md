@@ -33,7 +33,7 @@ PR #894 overlaps the oracle lock and must resolve against the resulting graph.
 
 Retain ADR-0032’s split lifecycle and its existing typed metadata completeness
 predicate and forward-only initialization latch. Replace deprecated ServerInfo
-with ServerConfig. Explicitly pin the initialize-only version to 2025-11-25 in
+with ServerConfig and require rmcp 3.6.0, matching the used API. Explicitly pin the initialize-only version to 2025-11-25 in
 the server configuration, gate, and error hint. Use the same explicit legacy
 version in handshake test clients; replace the obsolete SDK-LATEST assertion
 with an assertion that the SDK still knows the pinned legacy version plus the

@@ -164,7 +164,7 @@ unicode-properties = "0.1.4"
 # scraper pulls html5ever + selectors transitively — no direct html5ever dep.
 # scraper is ISC-licensed (the only non-MIT/Apache crate in the Sprint 4b delta); ISC is already on deny.toml's allow list.
 scraper = { version = "0.29.0", default-features = false }
-# ammonia MSRV 1.80, MIT OR Apache-2.0
+# ammonia MSRV 1.85, MIT OR Apache-2.0
 ammonia = "4.2.4"
 linkify = "0.11"
 # First url/idna entry in the workspace. idna 1.x replaced in-crate
@@ -222,7 +222,7 @@ lettre = { version = "0.11.21", default-features = false, features = ["tokio1-ru
 # reqwest-native-tls remains forbidden by our rustls-only policy. LATEST is now
 # 2026-07-28; legacy initialize is explicitly pinned to 2025-11-25 while
 # ADR-0032's metadata-complete modern lifecycle remains available. Re-audit any bump.
-rmcp = { version = "3.0", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 infer = "0.22"
 
