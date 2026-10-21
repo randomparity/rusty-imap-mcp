@@ -141,7 +141,11 @@ rand = "0.10"
 # model? The Sprint 4a adversarial corpus and insta snapshots are
 # the regression-detection mechanism — any snapshot diff on upgrade
 # requires a re-audit, not a cargo insta accept. (SC-DEP-09)
-mail-builder = "0.5"
+# mail-builder 0.5 -> 1.0 re-audited 2026-10-21 (SC-DEP-09): same optional
+# dependency (gethostname), no build.rs or proc-macros; unsafe forbidden.
+# Outbound byte snapshots pin folding, encoded words, and RFC 2231 parameters.
+# Requires Rust 1.88, matching the workspace MSRV.
+mail-builder = "1.0"
 # Re-audited 0.11.5 -> 0.11.9 on 2026-10-21 (SC-DEP-09): no build.rs or
 # added unsafe/fs/process/network source. Header-name mapping and address /
 # folded Received parsing changed; content corpus and snapshots verify output.
