@@ -1719,6 +1719,8 @@ mod outbound_bytes_snapshots {
         for (i, b) in raw.iter().enumerate() {
             if *b == b'\n' {
                 assert!(i > 0 && raw[i - 1] == b'\r', "bare LF at byte {i}");
+            } else if *b == b'\r' {
+                assert!(raw.get(i + 1) == Some(&b'\n'), "bare CR at byte {i}");
             }
         }
         let mut text = String::from_utf8(raw.to_vec()).unwrap();
@@ -1749,6 +1751,29 @@ mod outbound_bytes_snapshots {
             }
         }
         out.join("\n")
+    }
+
+    #[test]
+    #[should_panic(expected = "bare CR")]
+    fn normalizer_rejects_bare_cr() {
+        normalize(b"Subject: a\rb\r\n\r\n", false);
+    }
+
+    #[test]
+    #[should_panic(expected = "bare CR")]
+    fn normalizer_rejects_terminal_cr() {
+        normalize(b"Subject: a\r\n\r\nbody\r", false);
+    }
+
+    #[test]
+    #[should_panic(expected = "bare LF")]
+    fn normalizer_rejects_bare_lf() {
+        normalize(b"Subject: a\nb\r\n\r\n", false);
+    }
+
+    #[test]
+    fn normalizer_accepts_paired_crlf() {
+        assert_eq!(normalize(b"Subject: a\r\n\r\n", false), "Subject: a\n\n");
     }
 
     fn build(input: &ComposeInput, reads: Vec<AttachmentRead>) -> Vec<u8> {
