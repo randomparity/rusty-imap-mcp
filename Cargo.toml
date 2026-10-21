@@ -82,8 +82,8 @@ async-imap = { version = "0.11", default-features = false, features = ["runtime-
 async-channel = "2"
 futures-util = "0.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
-rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12", "ring"] }
-webpki-roots = "1"
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "ring"] }
+webpki-roots = "1.0.10"
 
 # Test-only: self-signed cert for the SMTP STARTTLS-failure e2e (rcgen),
 # and a blocking HTTP client for the Mailpit retrieval API (ureq, plaintext
@@ -155,7 +155,7 @@ unicode-properties = "0.1.4"
 # scraper is ISC-licensed (the only non-MIT/Apache crate in the Sprint 4b delta); ISC is already on deny.toml's allow list.
 scraper = { version = "0.27.0", default-features = false }
 # ammonia MSRV 1.80, MIT OR Apache-2.0
-ammonia = "4.1.2"
+ammonia = "4.1.8"
 linkify = "0.11"
 # First url/idna entry in the workspace. idna 1.x replaced in-crate
 # Unicode tables with the ICU4X provider stack, pulling ~20 new
