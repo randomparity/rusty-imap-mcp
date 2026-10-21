@@ -150,7 +150,8 @@ mail-parser = "0.11"
 # emits rustversion-selected SIMD workaround cfgs; no fs/network/process use.
 # multiversion_no_op 1.0.0 (MIT OR Apache-2.0, same author) is a no_std
 # pass-through attribute with no dependencies/build.rs. simdutf8 0.1.5 adds
-# architecture-gated UTF-8 validation; x86 also uses core_detect/multiversion.
+# architecture-gated UTF-8 validation; x86 also uses core_detect. Optional
+# multiversion remains disabled (encoding_rs std feature is not enabled).
 # Unsafe SIMD dispatch changed: arm64 is tested locally; other targets need CI.
 encoding_rs = "0.8"
 unicode-normalization = "0.1"
