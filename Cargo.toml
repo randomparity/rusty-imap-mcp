@@ -78,7 +78,7 @@ arc-swap = "1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 
 # IMAP / TLS (Sprint 3)
-async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 async-channel = "2"
 futures-util = "0.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
