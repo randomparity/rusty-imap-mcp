@@ -78,7 +78,7 @@ jobs:
             echo "::error::test-support subcommand manpages were generated" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: rusty-imap-mcp-manpages
           path: man/man1/*.1
@@ -112,7 +112,7 @@ jobs:
           # Container ran as root; host-side packaging runs as the runner user.
           sudo chown -R "$(id -u):$(id -g)" target
       - name: Download manpages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: rusty-imap-mcp-manpages
           path: man/man1
@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2.87.29
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -147,7 +147,7 @@ jobs:
           docker run --rm -v "$PWD:/pkg" -w /pkg \
             fedora@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898 bash -c \
             'dnf install -y ./*.rpm && rusty-imap-mcp --version'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-x86_64-unknown-linux-gnu
           path: |
@@ -188,7 +188,7 @@ jobs:
           # packaging (cargo-deb/cargo-generate-rpm) runs as the runner user.
           sudo chown -R "$(id -u):$(id -g)" target
       - name: Download manpages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: rusty-imap-mcp-manpages
           path: man/man1
@@ -208,12 +208,12 @@ jobs:
       # Packages are built host-side (x86_64 runner) via --target; cargo-deb maps
       # the triple to the arm64 Debian/RPM Architecture. No emulated install-test
       # for arm64 (structural + content assertion only — ADR-0006).
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2.87.29
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
         run: scripts/build-verify-packages.sh aarch64-unknown-linux-gnu
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-unknown-linux-gnu
           path: |
@@ -239,7 +239,7 @@ jobs:
         run: cargo install cargo-auditable --locked --version 0.7.4
       - run: cargo auditable build --release --locked
       - name: Download manpages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: rusty-imap-mcp-manpages
           path: man/man1
@@ -256,7 +256,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-apple-darwin
           path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
@@ -286,7 +286,7 @@ jobs:
       # Not vendored: ppc64le has no Homebrew bottle path; this tarball retains
       # a dynamic libdbus link (documented in README as needing libdbus-1-3).
       - name: Download manpages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: rusty-imap-mcp-manpages
           path: man/man1
@@ -303,7 +303,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-powerpc64le-unknown-linux-gnu
           path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-powerpc64le-unknown-linux-gnu.tar.gz
@@ -333,7 +333,7 @@ jobs:
       # Not vendored: s390x has no Homebrew bottle path; this tarball retains a
       # dynamic libdbus link (documented in README as needing libdbus-1-3).
       - name: Download manpages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: rusty-imap-mcp-manpages
           path: man/man1
@@ -350,7 +350,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-s390x-unknown-linux-gnu
           path: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-s390x-unknown-linux-gnu.tar.gz
@@ -375,7 +375,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: artifacts
           # Per-target artifacts only (tarballs + .deb + .rpm). Excludes the
@@ -486,7 +486,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2.87.29
         with:
           tool: just,cargo-semver-checks@0.48.0
       # Last gate before an irreversible action: a crates.io version cannot be
@@ -623,7 +623,7 @@ jobs:
       # floating HEAD (this job holds contents: write). macOS runners ship brew.
       - name: Set up Homebrew (Linux)
         if: runner.os == 'Linux'
-        uses: Homebrew/actions/setup-homebrew@e99025eb970cfa124b8284a35463d87426917478  # master 2026-06
+        uses: Homebrew/actions/setup-homebrew@4790763c0a3ba4036f72634dc079c4a7dfcd4878  # master 2026-06
         with:
           stable: true
       - name: Build, bottle, and upload
@@ -649,7 +649,7 @@ jobs:
           gh release upload "$TAG" "$sd_file" --repo randomparity/rusty-imap-mcp --clobber
           mkdir -p "$GITHUB_WORKSPACE/bottle-json"
           cp ./*.json "$GITHUB_WORKSPACE/bottle-json/"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: bottle-json-${{ matrix.os }}
           path: bottle-json/*.json
@@ -680,7 +680,7 @@ jobs:
       - name: Set up Homebrew on PATH
         run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
       - name: Download bottle JSONs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: bottle-json-*
           path: bottle-json
@@ -733,7 +733,7 @@ jobs:
           toolchain: stable
       # `just` drives the fuzz-lockfile realign and the parity gate the bump
       # would otherwise leave red (ADR-0011); cargo-edit provides set-version.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2.87.29
         with:
           tool: just@1.58.0
       - name: Install cargo-edit
