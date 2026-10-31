@@ -32,7 +32,9 @@ name: Dependabot fuzz-lock realign
 # `pull_request_target`, so every inline `run:` block below is trusted code.
 
 on:
-  # zizmor: ignore[dangerous-triggers]
+  # The dangerous-triggers suppression sits on the `pull_request_target:` line
+  # itself: zizmor >= 1.31 narrows that finding's span to the trigger key, so
+  # a comment above it is no longer inside the span and is not honoured.
   # `pull_request` is not usable: the `GITHUB_TOKEN` issued to a run on a
   # Dependabot-authored PR is read-only, so it cannot push the fix. Pushing
   # with `GITHUB_TOKEN` would not work either — pushes made with it do not
@@ -42,7 +44,7 @@ on:
   # exempt from that suppression, which is why the push below uses one. See
   # the header above for why the elevated-token-on-untrusted-head hazard does
   # not apply.
-  pull_request_target:
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
     branches: [main]
     types: [opened, synchronize, reopened]
     paths:
