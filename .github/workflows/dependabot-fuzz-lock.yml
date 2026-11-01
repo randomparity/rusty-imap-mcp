@@ -32,7 +32,9 @@ name: Dependabot fuzz-lock realign
 # `pull_request_target`, so every inline `run:` block below is trusted code.
 
 on:
-  # zizmor: ignore[dangerous-triggers]
+  # The dangerous-triggers suppression sits on the `pull_request_target:` line
+  # itself: zizmor >= 1.31 narrows that finding's span to the trigger key, so
+  # a comment above it is no longer inside the span and is not honoured.
   # `pull_request` is not usable: the `GITHUB_TOKEN` issued to a run on a
   # Dependabot-authored PR is read-only, so it cannot push the fix. Pushing
   # with `GITHUB_TOKEN` would not work either — pushes made with it do not
@@ -42,7 +44,7 @@ on:
   # exempt from that suppression, which is why the push below uses one. See
   # the header above for why the elevated-token-on-untrusted-head hazard does
   # not apply.
-  pull_request_target:
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
     branches: [main]
     types: [opened, synchronize, reopened]
     paths:
@@ -373,11 +375,11 @@ jobs:
             'Cargo.toml' 'Cargo.lock' '*/Cargo.toml' '*/Cargo.lock'
           git reset --quiet
 
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         if: steps.scope.outputs.in_scope == 'true'
         with:
           toolchain: 1.94.0
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2.87.29
         if: steps.scope.outputs.in_scope == 'true'
         with:
           tool: just
@@ -462,7 +464,7 @@ jobs:
       - name: Mint the realign push token
         id: app-token
         if: steps.scope.outputs.in_scope == 'true' && steps.apply.outputs.changed == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
         with:
           # `app-id` is deprecated upstream in favour of `client-id`, and
           # still supported. It is used here because the stored secret holds
