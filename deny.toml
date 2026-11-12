@@ -13,7 +13,13 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # pin-utils 0.1.0 is a macro-only crate (`pin_mut!`, `unsafe_pinned!`,
+    # `unsafe_unpinned!`) flagged unmaintained, not vulnerable.
+    # It reaches us only through async-imap, whose 0.12.0 still depends on it,
+    # so no upgrade removes it. Drop this entry when async-imap does.
+    { id = "RUSTSEC-2026-0441", reason = "unmaintained, no vulnerability; async-imap has no release without pin-utils" },
+]
 
 [licenses]
 version = 2
