@@ -10,6 +10,10 @@
   `pull_request_target` trigger, the no-head-file-is-executed invariant, the
   overlay and its symlink defences, the actor/author gate — is unchanged and
   still governs.
+- **Superseded-by (in part):** [ADR-0033](0033-dependabot-realign-covers-probe-fixture-locks.md)
+  widens the write-back set below ("writes back only the two realigned
+  lockfiles") to include the two compiler-probe fixture lockfiles. Nothing
+  else here changes.
 
 **Relates to:** [ADR-0011](0011-fuzz-lockfile-workspace-parity.md) — this
 records how the cost ADR-0011 accepted is paid. ADR-0011's decision is
