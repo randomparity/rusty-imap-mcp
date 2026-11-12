@@ -178,10 +178,15 @@ expect_rejected ci-override "$ci_override"
 
 fixture="$tmp_dir/fixture"
 mkdir -p "$fixture/src" "$fixture/.config" "$fixture/pids"
+# The clean phase runs under the repository's leak policy records, held to the
+# same checker as .config/nextest.toml: a no-descendant test must pass at the
+# windows the workspace uses. A sub-second window here measures scheduler noise,
+# not leaks (#630, #921). Only the positive control below gets a short
+# fixture-local window. The repository file itself cannot be copied: its
+# binary() filters name workspace binaries this fixture lacks.
 write_config "$fixture/.config/nextest.toml" \
-    'platform = { host = '\''cfg(target_os = "macos")'\'' }' \
-    'leak-timeout = { period = "100ms", result = "fail" }' \
-    'leak-timeout = { period = "100ms", result = "fail" }'
+    'platform = { host = '\''cfg(target_os = "macos")'\'' }'
+"$checker" "$fixture/.config/nextest.toml"
 
 cat >"$fixture/Cargo.toml" <<'EOF'
 [package]
@@ -283,6 +288,12 @@ else
 fi
 
 rm -f "$fixture/pids/edge"
+# The positive control needs a window shorter than its child's lifetime, so the
+# inherited pipe is still open when the window expires.
+write_config "$fixture/.config/nextest.toml" \
+    'platform = { host = '\''cfg(target_os = "macos")'\'' }' \
+    'leak-timeout = { period = "100ms", result = "fail" }' \
+    'leak-timeout = { period = "100ms", result = "fail" }'
 set +e
 LEAK_POLICY_PID_DIR="$fixture/pids" "$nextest_bin" nextest run \
     --manifest-path "$fixture/Cargo.toml" -E 'test(inherited_pipe_child)' \
