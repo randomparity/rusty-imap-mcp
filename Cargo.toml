@@ -75,7 +75,7 @@ arc-swap = "1"
 # (SC-PROC-01).
 
 # Async runtime
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 
 # IMAP / TLS (Sprint 3)
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
@@ -218,15 +218,18 @@ phf_codegen = "0.14.0"
 lettre = { version = "0.11.21", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
 # MCP server (Sprint 5)
-# rmcp 3.6.0 / rmcp-macros 3.6.0 re-audited 2026-10-21 (SC-PROC-01):
-# ModelContextProtocol org, Apache-2.0; proc-macro2/quote/syn/darling codegen,
-# no new macro build.rs or fs/network/process/unsafe source. rmcp's build.rs
-# is unchanged from 3.1.4 and inert in the registry layout (git hook setup is
-# conditional on its own workspace .git/.githooks). Default features unchanged;
+# rmcp 3.9.0 / rmcp-macros 3.9.0 re-audited 2026-11-11 (SC-PROC-01), taken
+# for RUSTSEC-2026-0457/0462 (client-side transports we do not enable):
+# ModelContextProtocol org, Apache-2.0; rmcp-macros src and manifest unchanged
+# from 3.6.0 apart from the version, so no new macro build.rs or
+# fs/network/process/unsafe source. rmcp makes sha2 non-optional (0.11, already
+# in-tree) and widens libc to cfg(unix). rmcp's build.rs is unchanged from
+# 3.1.4 and inert in the registry layout (git hook setup is conditional
+# on its own workspace .git/.githooks). Default features unchanged;
 # reqwest-native-tls remains forbidden by our rustls-only policy. LATEST is now
 # 2026-07-28; legacy initialize is explicitly pinned to 2025-11-25 while
 # ADR-0032's metadata-complete modern lifecycle remains available. Re-audit any bump.
-rmcp = { version = "3.6.0", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.9.0", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 infer = "0.22"
 
