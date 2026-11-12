@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Require tokio 1.54.1, which fixes the `Interval` use-after-free in the yanked
+  1.54.0 (RUSTSEC-2026-0384).
+- Bump rmcp to 3.9.0 for RUSTSEC-2026-0457 and RUSTSEC-2026-0462. Both affect
+  rmcp's client transports, which this server does not enable.
+- `cargo deny` ignores RUSTSEC-2026-0441 (pin-utils unmaintained, reached only
+  through async-imap) until async-imap drops the dependency.
+
 ### Changed
 
 - Public named-field data records in `rimap-core`, `rimap-authz`, `rimap-config`,
