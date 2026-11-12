@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
           components: rustfmt
@@ -71,7 +71,7 @@ jobs:
           persist-credentials: false
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
           components: clippy
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
@@ -135,7 +135,7 @@ jobs:
           persist-credentials: false
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
@@ -208,7 +208,7 @@ jobs:
           persist-credentials: false
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.88.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.88.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.88.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
@@ -231,7 +231,7 @@ jobs:
           persist-credentials: false
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
@@ -261,7 +261,7 @@ jobs:
           persist-credentials: false
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
@@ -293,7 +293,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2  # v2.90.0
@@ -370,7 +370,7 @@ jobs:
       # time, and the baseline build needs it just as the branch build does.
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
@@ -472,7 +472,7 @@ jobs:
       # Pinned like every other job here, and matching the crate's
       # `rust-version`. The nightly floats on `stable`; a required gate should
       # not go red because a new stable landed.
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
           components: clippy, rustfmt
@@ -631,7 +631,7 @@ jobs:
           persist-credentials: false
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
           components: llvm-tools-preview
@@ -831,7 +831,7 @@ jobs:
       - name: Install libdbus-1-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
 
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: 1.94.0) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
