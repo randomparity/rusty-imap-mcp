@@ -53,3 +53,4 @@ compile it.
 | [0030](0030-readme-is-the-pages-source.md) | README is the GitHub Pages source | Accepted |
 | [0031](0031-validator-mirrors-rmcp-params-meta-grammar.md) | The validator mirrors rmcp's `params._meta` grammar explicitly | Accepted |
 | [0032](0032-modern-first-request-and-legacy-interception.md) | Modern first requests and legacy pre-init interception | Accepted |
+| [0033](0033-dependabot-realign-covers-probe-fixture-locks.md) | The Dependabot realign also writes the compiler-probe fixture lockfiles | Accepted |
