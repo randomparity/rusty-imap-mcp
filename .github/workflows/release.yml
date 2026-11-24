@@ -129,7 +129,7 @@ jobs:
           mkdir -p "$stage/share/man/man1"
           cp man/man1/*.1 "$stage/share/man/man1/"
           tar czf "${stage}.tar.gz" "$stage"
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2  # v2.90.0
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519  # v2.90.5
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -208,7 +208,7 @@ jobs:
       # Packages are built host-side (x86_64 runner) via --target; cargo-deb maps
       # the triple to the arm64 Debian/RPM Architecture. No emulated install-test
       # for arm64 (structural + content assertion only — ADR-0006).
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2  # v2.90.0
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519  # v2.90.5
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
       - name: Build + verify packages
@@ -486,7 +486,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1 (toolchain: stable) # zizmor: ignore[superfluous-actions]
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2  # v2.90.0
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519  # v2.90.5
         with:
           tool: just,cargo-semver-checks@0.48.0
       # Last gate before an irreversible action: a crates.io version cannot be
@@ -623,7 +623,7 @@ jobs:
       # floating HEAD (this job holds contents: write). macOS runners ship brew.
       - name: Set up Homebrew (Linux)
         if: runner.os == 'Linux'
-        uses: Homebrew/actions/setup-homebrew@c262868c096d909fc278daa87ed9772967331ea3  # master 2026-06
+        uses: Homebrew/actions/setup-homebrew@ceec4e8419bb3c97ce96e9dda7738499ed5f869d  # master 2026-06
         with:
           stable: true
       - name: Build, bottle, and upload
@@ -733,7 +733,7 @@ jobs:
           toolchain: stable
       # `just` drives the fuzz-lockfile realign and the parity gate the bump
       # would otherwise leave red (ADR-0011); cargo-edit provides set-version.
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2  # v2.90.0
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519  # v2.90.5
         with:
           tool: just@1.58.0
       - name: Install cargo-edit
@@ -747,7 +747,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: ./scripts/post-release-bump.sh "$TAG"
-      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+      - uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1  # v8.1.3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: main
